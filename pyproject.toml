@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fx-pro-bot"
+version = "0.1.0"
+description = "Советник по рынку: простые формулировки, календарь событий, статистика точности (без сделок и без логина к брокеру)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+quotes = ["yfinance>=0.2.40"]
+
+[project.scripts]
+fx-pro-bot = "fx_pro_bot.app.main:main"
+fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fx_pro_bot"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

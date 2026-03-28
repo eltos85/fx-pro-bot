@@ -1,0 +1,14 @@
+services:
+  advisor:
+    build: .
+    image: fx-pro-bot:local
+    environment:
+      DATA_DIR: /data
+      DATA_SOURCE: ${DATA_SOURCE:-stub}
+      YFINANCE_SYMBOL: ${YFINANCE_SYMBOL:-EURUSD=X}
+      DISPLAY_NAME: ${DISPLAY_NAME:-EUR/USD}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/data
+    # Раскомментируйте для расписания (cron на хосте или отдельный scheduler)
+    # restart: unless-stopped

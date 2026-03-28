@@ -1,0 +1,12 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# Локальная статистика и секреты (пример календаря в data/ — в репозитории)
+/data/*.sqlite
+/data/*.sqlite3
