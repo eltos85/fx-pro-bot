@@ -4,16 +4,17 @@ from __future__ import annotations
 
 from datetime import UTC
 
+import yfinance as yf
+
 from fx_pro_bot.market_data.models import Bar, InstrumentId
 
 
 def bars_from_yfinance(
     yahoo_symbol: str,
     *,
-    period: str = "1mo",
-    interval: str = "1h",
+    period: str = "5d",
+    interval: str = "5m",
 ) -> list[Bar]:
-    import yfinance as yf  # noqa: PLC0415 — опциональная зависимость
 
     ticker = yf.Ticker(yahoo_symbol)
     df = ticker.history(period=period, interval=interval, auto_adjust=False)

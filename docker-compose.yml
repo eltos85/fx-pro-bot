@@ -2,14 +2,15 @@ services:
   advisor:
     build: .
     image: fx-pro-bot:local
+    restart: unless-stopped
     environment:
       DATA_DIR: /data
-      DATA_SOURCE: ${DATA_SOURCE:-stub}
-      YFINANCE_SYMBOL: ${YFINANCE_SYMBOL:-EURUSD=X}
-      DISPLAY_NAME: ${DISPLAY_NAME:-EUR/USD}
+      SCAN_SYMBOLS: ${SCAN_SYMBOLS:-EURUSD=X,GBPUSD=X,USDJPY=X,AUDUSD=X,USDCAD=X,EURGBP=X,GC=F,SI=F,CL=F,BZ=F}
+      YFINANCE_INTERVAL: ${YFINANCE_INTERVAL:-5m}
+      YFINANCE_PERIOD: ${YFINANCE_PERIOD:-5d}
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-300}
+      VERIFY_HORIZONS: ${VERIFY_HORIZONS:-15,30,60}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    # Именованный том: статистика и календарь не зависят от пересборки образа (docker compose build).
-    # Не используйте `docker compose down -v`, если нужно сохранить данные — эта опция удаляет тома.
     volumes:
       - advisor_data:/data
 
