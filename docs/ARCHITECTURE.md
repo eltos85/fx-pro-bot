@@ -49,4 +49,4 @@ flowchart LR
 
 ## Docker
 
-Образ ставит пакет с extra `[quotes]`, том `/data` для базы и календаря. См. `Dockerfile` и `docker-compose.yml`.
+Образ ставит пакет с extra `[quotes]`. Статистика и календарь лежат в **именованном томе** `advisor_data` → `/data` (не в слоях образа), поэтому пересборка `docker compose build` их не затирает. См. `Dockerfile`, `docker/entrypoint.sh`, `docker-compose.yml`.

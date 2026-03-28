@@ -51,7 +51,25 @@ docker compose build
 docker compose run --rm advisor
 ```
 
-Каталог `./data` монтируется в контейнер как `/data` (база и календарь сохраняются на хосте).
+### Где хранится статистика в Docker
+
+База **`advisor_stats.sqlite`** пишется в **именованный том** `advisor_data`, смонтированный в `/data`. Он **не входит в слои образа** и **не стирается** при `docker compose build` или при пересборке образа. Данные теряются только если явно удалить том, например `docker compose down -v`.
+
+При первом запуске пустого тома `entrypoint` копирует в `/data` шаблон `events_calendar.yaml` из образа; дальше вы правите календарь внутри тома или подключаете свой файл.
+
+CLI статистики с тем же томом:
+
+```bash
+docker compose run --rm advisor python -m fx_pro_bot.app.stats_cli report
+```
+
+Локально без тома (папка `data/` на машине): задайте вручную `docker compose run --rm -v "$(pwd)/data:/data" advisor` или создайте `docker-compose.override.yml` (не коммитьте) с `volumes: ["./data:/data"]` вместо именованного тома.
+
+## Автодеплой на VPS (push в `main`)
+
+После push в ветку `main` GitHub Actions подключается к серверу по SSH и выполняет `scripts/deploy-on-vps.sh` (обновление кода из Git и `docker compose build && up -d`).
+
+Нужны секреты репозитория: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_DEPLOY_PATH`. Пошаговая настройка: [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md).
 
 ## Git
 

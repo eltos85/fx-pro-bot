@@ -8,7 +8,10 @@ services:
       YFINANCE_SYMBOL: ${YFINANCE_SYMBOL:-EURUSD=X}
       DISPLAY_NAME: ${DISPLAY_NAME:-EUR/USD}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # Именованный том: статистика и календарь не зависят от пересборки образа (docker compose build).
+    # Не используйте `docker compose down -v`, если нужно сохранить данные — эта опция удаляет тома.
     volumes:
-      - ./data:/data
-    # Раскомментируйте для расписания (cron на хосте или отдельный scheduler)
-    # restart: unless-stopped
+      - advisor_data:/data
+
+volumes:
+  advisor_data:
