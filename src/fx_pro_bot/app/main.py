@@ -9,11 +9,14 @@ from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection
 from fx_pro_bot.config.settings import Settings, display_name
+from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strategies
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.stats.verifier import run_verification
 
 log = logging.getLogger(__name__)
+
+CTRADER_POLL_CYCLES = 12
 
 
 def _log_stats(store: StatsStore, horizons: tuple[int, ...]) -> None:
@@ -54,9 +57,12 @@ def run_advisor() -> None:
     store = StatsStore(settings.stats_db_path)
     events = load_events(settings.events_calendar_path)
     last_directions: dict[str, TrendDirection] = {}
+    ctrader_client = CTraderCopyClient()
+    cycle_count = 0
 
     log.info(
-        "Запуск сканера: %d инструментов, интервал %s, проверка через %s мин, цикл %d сек",
+        "Запуск сканера v0.3: ансамбль 5 стратегий, %d инструментов, "
+        "интервал %s, проверка через %s мин, цикл %d сек",
         len(settings.scan_symbols),
         settings.yfinance_interval,
         ",".join(str(h) for h in settings.verify_horizons),
@@ -65,7 +71,8 @@ def run_advisor() -> None:
 
     while True:
         try:
-            _run_cycle(settings, store, events, last_directions)
+            _run_cycle(settings, store, events, last_directions, ctrader_client, cycle_count)
+            cycle_count += 1
         except KeyboardInterrupt:
             log.info("Остановка по Ctrl+C")
             break
@@ -80,8 +87,10 @@ def _run_cycle(
     store: StatsStore,
     events: tuple,
     last_directions: dict[str, TrendDirection],
+    ctrader_client: CTraderCopyClient,
+    cycle_count: int,
 ) -> None:
-    log.info("── Сканирование ──")
+    log.info("── Сканирование (ансамбль 5 стратегий) ──")
 
     results = scan_instruments(
         settings.scan_symbols,
@@ -92,7 +101,7 @@ def _run_cycle(
     active = active_signals(results)
 
     if not active:
-        log.info("Активных сигналов нет, все инструменты нейтральны")
+        log.info("Активных сигналов нет, стратегии не пришли к согласию")
     else:
         for r in active:
             prev = last_directions.get(r.symbol)
@@ -107,7 +116,12 @@ def _run_cycle(
                 last_price=r.last_price,
                 nearby_events=ev_now,
             )
-            log.info("— сигнал %s %s @ %.5f —\n%s", r.display_name, r.signal.direction.value.upper(), r.last_price, text)
+            strategies = ", ".join(r for r in r.signal.reasons if not r[0].isdigit() and "/" not in r)
+            log.info(
+                "— %s %s @ %.5f (сила %s, стратегии: %s) —\n%s",
+                r.display_name, r.signal.direction.value.upper(),
+                r.last_price, f"{r.signal.strength:.0%}", strategies, text,
+            )
 
             store.record_suggestion(
                 instrument=r.symbol,
@@ -132,6 +146,18 @@ def _run_cycle(
 
     log.info("── Статистика ──")
     _log_stats(store, settings.verify_horizons)
+
+    if cycle_count % CTRADER_POLL_CYCLES == 0:
+        _log_ctrader_top(ctrader_client)
+
+
+def _log_ctrader_top(client: CTraderCopyClient) -> None:
+    try:
+        strategies = client.top_strategies(limit=5)
+        text = format_top_strategies(strategies, limit=5)
+        log.info("── %s", text)
+    except Exception:
+        log.debug("cTrader Copy: не удалось получить топ-стратегии")
 
 
 def main() -> None:

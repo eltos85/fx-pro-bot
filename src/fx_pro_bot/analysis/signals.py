@@ -21,25 +21,32 @@ class Signal:
     trend: TrendDirection | None = None
 
 
-# ── Индикаторы ───────────────────────────────────────────────
+# ── Базовые индикаторы ───────────────────────────────────────
 
 
 def _sma(values: list[float], period: int) -> float:
     return sum(values[-period:]) / period
 
 
+def _ema(values: list[float], period: int) -> list[float]:
+    """Exponential Moving Average — возвращает массив значений."""
+    if len(values) < period:
+        return values[:]
+    k = 2.0 / (period + 1)
+    result = [_sma(values[:period], period)]
+    for v in values[period:]:
+        result.append(v * k + result[-1] * (1 - k))
+    return result
+
+
 def _rsi(closes: list[float], period: int = 14) -> float:
-    """Relative Strength Index (Wilder)."""
     if len(closes) < period + 1:
         return 50.0
-
     deltas = [closes[i] - closes[i - 1] for i in range(len(closes) - period, len(closes))]
     gains = [d if d > 0 else 0.0 for d in deltas]
     losses = [-d if d < 0 else 0.0 for d in deltas]
-
     avg_gain = sum(gains) / period
     avg_loss = sum(losses) / period
-
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -47,10 +54,8 @@ def _rsi(closes: list[float], period: int = 14) -> float:
 
 
 def _atr(bars: list[Bar], period: int = 14) -> float:
-    """Average True Range."""
     if len(bars) < period + 1:
         return 0.0
-
     trs: list[float] = []
     for i in range(len(bars) - period, len(bars)):
         high = bars[i].high
@@ -58,15 +63,153 @@ def _atr(bars: list[Bar], period: int = 14) -> float:
         prev_close = bars[i - 1].close
         tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
         trs.append(tr)
-
     return sum(trs) / len(trs) if trs else 0.0
 
 
-# ── Стратегия ────────────────────────────────────────────────
+# ── MACD ─────────────────────────────────────────────────────
+
+
+def _macd(
+    closes: list[float], fast: int = 12, slow: int = 26, signal_period: int = 9
+) -> TrendDirection:
+    """MACD crossover: MACD-линия vs сигнальная линия."""
+    if len(closes) < slow + signal_period:
+        return TrendDirection.FLAT
+
+    ema_fast = _ema(closes, fast)
+    ema_slow = _ema(closes, slow)
+    min_len = min(len(ema_fast), len(ema_slow))
+    macd_line = [ema_fast[-(min_len - i)] - ema_slow[-(min_len - i)] for i in range(min_len)]
+
+    if len(macd_line) < signal_period:
+        return TrendDirection.FLAT
+
+    signal_line = _ema(macd_line, signal_period)
+    if len(signal_line) < 2:
+        return TrendDirection.FLAT
+
+    cur_macd = macd_line[-1]
+    cur_signal = signal_line[-1]
+    prev_macd = macd_line[-2]
+    prev_signal = signal_line[-2] if len(signal_line) >= 2 else cur_signal
+
+    if prev_macd <= prev_signal and cur_macd > cur_signal:
+        return TrendDirection.LONG
+    if prev_macd >= prev_signal and cur_macd < cur_signal:
+        return TrendDirection.SHORT
+    return TrendDirection.FLAT
+
+
+# ── Stochastic ───────────────────────────────────────────────
+
+
+def _stochastic(
+    bars: list[Bar], k_period: int = 14, d_period: int = 3, slowing: int = 3
+) -> TrendDirection:
+    """Stochastic: перекупленность/перепроданность + пересечение %K/%D."""
+    needed = k_period + d_period + slowing
+    if len(bars) < needed:
+        return TrendDirection.FLAT
+
+    raw_k: list[float] = []
+    for i in range(k_period, len(bars) + 1):
+        window = bars[i - k_period : i]
+        high = max(b.high for b in window)
+        low = min(b.low for b in window)
+        close = window[-1].close
+        if high == low:
+            raw_k.append(50.0)
+        else:
+            raw_k.append(100.0 * (close - low) / (high - low))
+
+    if len(raw_k) < slowing:
+        return TrendDirection.FLAT
+    smooth_k: list[float] = []
+    for i in range(slowing - 1, len(raw_k)):
+        smooth_k.append(sum(raw_k[i - slowing + 1 : i + 1]) / slowing)
+
+    if len(smooth_k) < d_period:
+        return TrendDirection.FLAT
+    d_line: list[float] = []
+    for i in range(d_period - 1, len(smooth_k)):
+        d_line.append(sum(smooth_k[i - d_period + 1 : i + 1]) / d_period)
+
+    if len(d_line) < 2 or len(smooth_k) < 2:
+        return TrendDirection.FLAT
+
+    cur_k = smooth_k[-1]
+    prev_k = smooth_k[-2]
+    cur_d = d_line[-1]
+    prev_d = d_line[-2]
+
+    if cur_k < 25 and prev_k <= prev_d and cur_k > cur_d:
+        return TrendDirection.LONG
+    if cur_k > 75 and prev_k >= prev_d and cur_k < cur_d:
+        return TrendDirection.SHORT
+    return TrendDirection.FLAT
+
+
+# ── Bollinger Bands ──────────────────────────────────────────
+
+
+def _bollinger(closes: list[float], period: int = 20, num_std: float = 2.0) -> TrendDirection:
+    """Отскок от границ Bollinger Bands."""
+    if len(closes) < period + 1:
+        return TrendDirection.FLAT
+
+    mid = _sma(closes, period)
+    variance = sum((c - mid) ** 2 for c in closes[-period:]) / period
+    std = variance**0.5
+
+    upper = mid + num_std * std
+    lower = mid - num_std * std
+
+    cur = closes[-1]
+    prev = closes[-2]
+
+    if prev <= lower and cur > lower:
+        return TrendDirection.LONG
+    if prev >= upper and cur < upper:
+        return TrendDirection.SHORT
+    return TrendDirection.FLAT
+
+
+# ── EMA Bounce ───────────────────────────────────────────────
+
+
+def _ema_bounce(bars: list[Bar], period: int = 20) -> TrendDirection:
+    """Отскок цены от EMA как от поддержки/сопротивления."""
+    if len(bars) < period + 2:
+        return TrendDirection.FLAT
+
+    closes = [b.close for b in bars]
+    ema_vals = _ema(closes, period)
+    if len(ema_vals) < 3:
+        return TrendDirection.FLAT
+
+    cur_close = closes[-1]
+    prev_close = closes[-2]
+    prev2_close = closes[-3]
+    cur_ema = ema_vals[-1]
+    prev_ema = ema_vals[-2]
+
+    touched_from_above = prev_close <= prev_ema * 1.001 and prev2_close > prev_ema
+    bounced_up = cur_close > cur_ema
+    if touched_from_above and bounced_up:
+        return TrendDirection.LONG
+
+    touched_from_below = prev_close >= prev_ema * 0.999 and prev2_close < prev_ema
+    bounced_down = cur_close < cur_ema
+    if touched_from_below and bounced_down:
+        return TrendDirection.SHORT
+
+    return TrendDirection.FLAT
+
+
+# ── Стратегия MA+RSI (оригинальная) ─────────────────────────
 
 
 def simple_ma_crossover(bars: list[Bar], fast: int = 10, slow: int = 30) -> Signal:
-    """Обратная совместимость: вызывает улучшенную стратегию."""
     return ma_rsi_strategy(bars, fast=fast, slow=slow)
 
 
@@ -78,22 +221,11 @@ def ma_rsi_strategy(
     trend_period: int = 50,
     rsi_period: int = 14,
 ) -> Signal:
-    """
-    MA-кроссовер + RSI-фильтр + трендовый фильтр + динамическая сила.
-
-    Сигнал LONG только если:
-      1) Быстрая MA пересекла медленную снизу вверх
-      2) RSI > 45 (подтверждение бычьего импульса)
-      3) Цена выше трендовой MA (не против основного тренда)
-
-    Сигнал SHORT — зеркально.
-    """
     min_bars = max(slow, trend_period) + 1
     if len(bars) < min_bars:
         return Signal(direction=TrendDirection.FLAT, strength=0.0, reasons=("insufficient_bars",))
 
     closes = [b.close for b in bars]
-
     ma_f = _sma(closes, fast)
     ma_s = _sma(closes, slow)
     prev_closes = closes[:-1]
@@ -105,9 +237,7 @@ def ma_rsi_strategy(
 
     if not crossed_up and not crossed_down:
         return Signal(
-            direction=TrendDirection.FLAT,
-            strength=0.1,
-            reasons=("no_cross",),
+            direction=TrendDirection.FLAT, strength=0.1, reasons=("no_cross",),
             rsi=round(_rsi(closes, rsi_period), 1),
             trend=_trend_direction(closes, trend_period),
         )
@@ -115,45 +245,32 @@ def ma_rsi_strategy(
     rsi_val = _rsi(closes, rsi_period)
     trend_dir = _trend_direction(closes, trend_period)
     atr_val = _atr(bars)
-
     reasons: list[str] = []
     reject_reasons: list[str] = []
 
     if crossed_up:
         raw_dir = TrendDirection.LONG
         reasons.append("ma_cross_up")
-
-        rsi_ok = rsi_val > 45
-        trend_ok = trend_dir != TrendDirection.SHORT
-
-        if not rsi_ok:
+        if rsi_val <= 45:
             reject_reasons.append("rsi_too_low")
-        if not trend_ok:
+        if trend_dir == TrendDirection.SHORT:
             reject_reasons.append("against_trend")
-
     else:
         raw_dir = TrendDirection.SHORT
         reasons.append("ma_cross_down")
-
-        rsi_ok = rsi_val < 55
-        trend_ok = trend_dir != TrendDirection.LONG
-
-        if not rsi_ok:
+        if rsi_val >= 55:
             reject_reasons.append("rsi_too_high")
-        if not trend_ok:
+        if trend_dir == TrendDirection.LONG:
             reject_reasons.append("against_trend")
 
     if reject_reasons:
         return Signal(
-            direction=TrendDirection.FLAT,
-            strength=0.15,
+            direction=TrendDirection.FLAT, strength=0.15,
             reasons=tuple(reasons + ["filtered"] + reject_reasons),
-            rsi=round(rsi_val, 1),
-            trend=trend_dir,
+            rsi=round(rsi_val, 1), trend=trend_dir,
         )
 
     strength = _calc_strength(ma_f, ma_s, rsi_val, raw_dir, trend_dir, atr_val)
-
     if raw_dir == TrendDirection.LONG:
         if rsi_val > 55:
             reasons.append("rsi_confirms")
@@ -165,13 +282,8 @@ def ma_rsi_strategy(
         if trend_dir == TrendDirection.SHORT:
             reasons.append("trend_aligned")
 
-    return Signal(
-        direction=raw_dir,
-        strength=round(strength, 2),
-        reasons=tuple(reasons),
-        rsi=round(rsi_val, 1),
-        trend=trend_dir,
-    )
+    return Signal(direction=raw_dir, strength=round(strength, 2),
+                  reasons=tuple(reasons), rsi=round(rsi_val, 1), trend=trend_dir)
 
 
 def _trend_direction(closes: list[float], period: int) -> TrendDirection:
@@ -187,30 +299,18 @@ def _trend_direction(closes: list[float], period: int) -> TrendDirection:
 
 
 def _calc_strength(
-    ma_fast: float,
-    ma_slow: float,
-    rsi: float,
-    direction: TrendDirection,
-    trend: TrendDirection,
-    atr: float,
+    ma_fast: float, ma_slow: float, rsi: float,
+    direction: TrendDirection, trend: TrendDirection, atr: float,
 ) -> float:
-    """0.0 .. 1.0 — чем больше подтверждений, тем сильнее."""
-    score = 0.3  # базовый балл за пересечение
-
-    # RSI: чем дальше от 50 в нужную сторону, тем лучше (до +0.3)
+    score = 0.3
     if direction == TrendDirection.LONG:
         rsi_bonus = min((rsi - 50) / 50, 0.3) if rsi > 50 else 0.0
     else:
         rsi_bonus = min((50 - rsi) / 50, 0.3) if rsi < 50 else 0.0
     score += rsi_bonus
-
-    # MA-разрыв нормализованный по ATR (до +0.2)
     if atr > 0:
         ma_gap = abs(ma_fast - ma_slow) / atr
         score += min(ma_gap * 0.1, 0.2)
-
-    # Совпадение с трендом (+0.2)
     if trend == direction:
         score += 0.2
-
     return min(score, 1.0)

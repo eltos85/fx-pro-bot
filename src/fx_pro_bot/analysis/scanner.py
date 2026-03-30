@@ -1,18 +1,19 @@
-"""Сканер: перебирает список инструментов, для каждого считает сигнал, возвращает отсортированные по силе."""
+"""Сканер: перебирает список инструментов, для каждого запускает ансамбль стратегий."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 
-from fx_pro_bot.analysis.signals import Signal, TrendDirection, ma_rsi_strategy
+from fx_pro_bot.analysis.ensemble import STRATEGY_NAMES, ensemble_signal
+from fx_pro_bot.analysis.signals import Signal, TrendDirection
 from fx_pro_bot.config.settings import display_name
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.market_data.yfinance_feed import bars_from_yfinance
 
 log = logging.getLogger(__name__)
 
-MIN_STRENGTH = 0.35
+MIN_STRENGTH = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +46,12 @@ def scan_instruments(
             log.debug("%s: мало баров (%d), нужно 51+", symbol, len(bars))
             continue
 
-        signal = ma_rsi_strategy(bars, fast=fast, slow=slow)
+        signal = ensemble_signal(bars, fast=fast, slow=slow)
+        log.debug(
+            "%s: %s (сила %.0f%%) reasons=%s",
+            display_name(symbol), signal.direction.value.upper(),
+            signal.strength * 100, ", ".join(signal.reasons),
+        )
         results.append(
             ScanResult(
                 symbol=symbol,
@@ -61,7 +67,7 @@ def scan_instruments(
 
 
 def active_signals(scan: list[ScanResult]) -> list[ScanResult]:
-    """Только ненейтральные (LONG / SHORT) с силой выше порога."""
+    """Только сигналы с согласием 3+ стратегий."""
     return [
         r for r in scan
         if r.signal.direction != TrendDirection.FLAT and r.signal.strength >= MIN_STRENGTH

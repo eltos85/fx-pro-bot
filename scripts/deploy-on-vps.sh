@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
-# Запуск на VPS из корня клонированного репозитория (вызывается из GitHub Actions по SSH).
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
 
-REMOTE="${DEPLOY_REMOTE:-origin}"
-BRANCH="${DEPLOY_BRANCH:-main}"
+DEPLOY_PATH="${1:-/root/fx-pro-bot}"
 
-git fetch "$REMOTE"
-git reset --hard "$REMOTE/$BRANCH"
+cd "$DEPLOY_PATH"
 
-docker compose build
+echo ">>> git pull"
+git fetch origin main
+git reset --hard origin/main
+
+echo ">>> docker compose build"
+docker compose build --no-cache
+
+echo ">>> docker compose up -d"
 docker compose up -d
 
-echo "Deploy OK: $(git rev-parse --short HEAD)"
+echo ">>> Waiting for container to start..."
+sleep 5
+
+echo ">>> Container status:"
+docker compose ps
+
+echo ">>> Last 10 log lines:"
+docker logs fx-pro-bot-advisor-1 --tail 10
+
+echo ">>> Deploy complete"

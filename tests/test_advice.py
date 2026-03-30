@@ -8,8 +8,8 @@ from fx_pro_bot.events.models import CalendarEvent
 def test_advice_contains_plain_language() -> None:
     sig = Signal(
         direction=TrendDirection.LONG,
-        strength=0.5,
-        reasons=("ma_cross_up", "rsi_confirms"),
+        strength=0.6,
+        reasons=("ma_rsi", "macd", "stochastic", "3/5"),
         rsi=62.0,
         trend=TrendDirection.LONG,
     )
@@ -30,14 +30,15 @@ def test_advice_contains_plain_language() -> None:
     assert "вверх" in text.lower() or "покупк" in text.lower()
     assert "Тестовое событие" in text
     assert "RSI" in text
-    assert "50%" in text
+    assert "60%" in text
+    assert "подтвердили" in text.lower()
 
 
 def test_advice_shows_strength() -> None:
     sig = Signal(
         direction=TrendDirection.SHORT,
-        strength=0.7,
-        reasons=("ma_cross_down", "trend_aligned"),
+        strength=0.8,
+        reasons=("ma_rsi", "macd", "stochastic", "bollinger", "4/5"),
         rsi=35.0,
         trend=TrendDirection.SHORT,
     )
@@ -48,5 +49,23 @@ def test_advice_shows_strength() -> None:
         nearby_events=(),
     )
     assert "сильный" in text.lower()
-    assert "70%" in text
+    assert "80%" in text
     assert "вниз" in text.lower() or "продаж" in text.lower()
+
+
+def test_advice_flat_no_consensus() -> None:
+    sig = Signal(
+        direction=TrendDirection.FLAT,
+        strength=0.1,
+        reasons=("no_consensus", "ma_rsi=flat", "macd=long", "stochastic=flat", "bollinger=flat", "ema_bounce=flat"),
+        rsi=50.0,
+        trend=TrendDirection.FLAT,
+    )
+    text = advice_for_signal(
+        display_name="USD/JPY",
+        signal=sig,
+        last_price=150.0,
+        nearby_events=(),
+    )
+    assert "нейтральный" in text.lower()
+    assert "согласию" in text.lower() or "consensus" in text.lower()

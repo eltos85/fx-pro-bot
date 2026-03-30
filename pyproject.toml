@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fx-pro-bot"
-version = "0.2.0"
-description = "Сканер-советник: анализ валют, металлов и нефти с автопроверкой точности (без сделок и логина к брокеру)"
+version = "0.3.0"
+description = "Сканер-советник: ансамбль из 5 стратегий, мультиинструментный анализ с автопроверкой точности"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
   "pydantic-settings>=2.0",
   "pyyaml>=6.0",
   "yfinance>=0.2.40",
+  "requests>=2.31",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,37 @@
+---
+description: Деплой на VPS через git push — не использовать rsync/scp
+alwaysApply: true
+---
+
+# Деплой на VPS
+
+Выкатка на VPS происходит **только через git**. Никогда не использовать rsync/scp для деплоя.
+
+## Процесс
+
+1. Закоммитить и запушить изменения в `main`:
+   ```bash
+   git add . && git commit -m "описание" && git push origin main
+   ```
+
+2. GitHub Actions workflow (`.github/workflows/deploy-vps.yml`) автоматически:
+   - Подключается к VPS по SSH
+   - Запускает `scripts/deploy-on-vps.sh`
+   - Скрипт делает `git fetch` + `git reset --hard origin/main`
+   - Перестраивает и перезапускает Docker
+
+3. **После пуша обязательно проверить**, что Docker перезапустился:
+   ```bash
+   ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-advisor-1 --tail 20"
+   ```
+
+## VPS
+
+- Хост: `204.168.149.140`, пользователь `root`
+- Путь: `/root/fx-pro-bot`
+- Репозиторий на VPS — git clone с `origin git@github.com:eltos85/fx-pro-bot.git`
+- Docker volume `advisor_data` хранит SQLite — не удалять
+
+## Секреты GitHub Actions
+
+Нужны в Settings → Secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_DEPLOY_PATH`

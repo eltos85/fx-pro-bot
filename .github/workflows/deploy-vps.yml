@@ -1,30 +1,21 @@
-# После push в main: SSH на VPS, git pull, docker compose build && up -d
-# Нужны секреты репозитория: VPS_HOST, VPS_USER, VPS_SSH_KEY, VPS_DEPLOY_PATH
-# Ручной запуск: Actions → Deploy to VPS → Run workflow
-
 name: Deploy to VPS
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-
-concurrency:
-  group: deploy-vps
-  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: SSH deploy
-        uses: appleboy/ssh-action@v1.2.0
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script_stop: true
           script: |
-            set -e
-            cd "${{ secrets.VPS_DEPLOY_PATH }}"
-            bash scripts/deploy-on-vps.sh
+            cd /root/fx-pro-bot
+            git pull origin main
+            docker compose up -d --build --force-recreate
+            docker image prune -f

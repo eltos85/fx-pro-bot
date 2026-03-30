@@ -11,6 +11,11 @@ services:
       POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-300}
       VERIFY_HORIZONS: ${VERIFY_HORIZONS:-15,30,60}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FXPRO_ENABLED: ${FXPRO_ENABLED:-false}
+      FXPRO_CLIENT_ID: ${FXPRO_CLIENT_ID:-}
+      FXPRO_CLIENT_SECRET: ${FXPRO_CLIENT_SECRET:-}
+      FXPRO_ACCOUNT_ID: ${FXPRO_ACCOUNT_ID:-}
+      FXPRO_API_URL: ${FXPRO_API_URL:-https://connect.fxpro.com/api/v1}
     volumes:
       - advisor_data:/data
 

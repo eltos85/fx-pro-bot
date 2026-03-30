@@ -85,6 +85,15 @@ class Settings(BaseSettings):
         validation_alias="VERIFY_HORIZONS",
     )
 
+    fxpro_enabled: bool = Field(default=False, validation_alias="FXPRO_ENABLED")
+    fxpro_client_id: str = Field(default="", validation_alias="FXPRO_CLIENT_ID")
+    fxpro_client_secret: str = Field(default="", validation_alias="FXPRO_CLIENT_SECRET")
+    fxpro_account_id: str = Field(default="", validation_alias="FXPRO_ACCOUNT_ID")
+    fxpro_api_url: str = Field(
+        default="https://connect.fxpro.com/api/v1",
+        validation_alias="FXPRO_API_URL",
+    )
+
     @property
     def scan_symbols(self) -> tuple[str, ...]:
         return _parse_symbols(self.scan_symbols_raw)
