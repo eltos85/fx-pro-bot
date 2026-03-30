@@ -5,6 +5,26 @@ from __future__ import annotations
 from fx_pro_bot.analysis.signals import Signal, TrendDirection
 from fx_pro_bot.events.models import CalendarEvent
 
+_STRENGTH_LABELS = {
+    (0.0, 0.35): "слабый",
+    (0.35, 0.55): "средний",
+    (0.55, 0.75): "сильный",
+    (0.75, 1.01): "очень сильный",
+}
+
+_TREND_LABELS = {
+    TrendDirection.LONG: "восходящий",
+    TrendDirection.SHORT: "нисходящий",
+    TrendDirection.FLAT: "боковой",
+}
+
+
+def _strength_label(strength: float) -> str:
+    for (lo, hi), label in _STRENGTH_LABELS.items():
+        if lo <= strength < hi:
+            return label
+    return "неопределённый"
+
 
 def advice_for_signal(
     *,
@@ -16,32 +36,34 @@ def advice_for_signal(
     """Один связный текст: что видит бот, осторожность, контекст событий."""
     parts: list[str] = []
 
+    strength_text = _strength_label(signal.strength)
+
     if signal.direction == TrendDirection.LONG:
         parts.append(
-            f"По {display_name} сейчас робот видит признаки, которые часто связывают с возможным "
-            "движением цены вверх (в сторону покупки). Это не гарантия — рынок может развернуться."
+            f"По {display_name} робот видит признаки возможного движения вверх (покупка). "
+            f"Сигнал {strength_text} ({signal.strength:.0%}). Это не гарантия — рынок может развернуться."
         )
     elif signal.direction == TrendDirection.SHORT:
         parts.append(
-            f"По {display_name} сейчас робот видит признаки, которые часто связывают с возможным "
-            "движением цены вниз (в сторону продажи). Это не гарантия — рынок может развернуться."
+            f"По {display_name} робот видит признаки возможного движения вниз (продажа). "
+            f"Сигнал {strength_text} ({signal.strength:.0%}). Это не гарантия — рынок может развернуться."
         )
     else:
         parts.append(
-            f"По {display_name} явного направления сейчас нет — сигнал нейтральный. "
-            "Так бывает, когда картина смешанная; поспешные ставки обычно рискованнее."
+            f"По {display_name} явного направления нет — сигнал нейтральный. "
+            "Поспешные ставки обычно рискованнее."
         )
 
     if last_price is not None:
-        parts.append(f"Ориентир цены (последнее значение в данных): {last_price:.5f}.")
+        parts.append(f"Цена: {last_price:.5f}")
 
-    parts.append(_reasons_plain(signal))
+    parts.append(_indicators_plain(signal))
 
     if nearby_events:
         ev_lines = [f"• {e.title} ({e.at.strftime('%d.%m %H:%M')} UTC)" for e in nearby_events[:5]]
         parts.append(
-            "Рядом по времени есть важные события из вашего календаря — перед ними волатильность "
-            "часто выше:\n" + "\n".join(ev_lines)
+            "Рядом по времени есть важные события — перед ними волатильность часто выше:\n"
+            + "\n".join(ev_lines)
         )
 
     parts.append(
@@ -50,12 +72,30 @@ def advice_for_signal(
     return "\n\n".join(parts)
 
 
-def _reasons_plain(signal: Signal) -> str:
-    mapping = {
-        "ma_cross_up": "Короткая средняя цена пересекла длинную снизу вверх — часто смотрят как на бычий намёк.",
-        "ma_cross_down": "Короткая средняя пересекла длинную сверху вниз — часто смотрят как на медвежий намёк.",
-        "no_cross": "Пересечения средних пока не было — тренд по этому правилу не выделен.",
-        "insufficient_bars": "Истории цен мало, чтобы уверенно считать средние — лучше подождать больше данных.",
+def _indicators_plain(signal: Signal) -> str:
+    lines: list[str] = []
+
+    reason_map = {
+        "ma_cross_up": "Быстрая средняя пересекла медленную снизу вверх (бычий сигнал)",
+        "ma_cross_down": "Быстрая средняя пересекла медленную сверху вниз (медвежий сигнал)",
+        "rsi_confirms": "RSI подтверждает направление",
+        "trend_aligned": "Направление совпадает с основным трендом",
+        "no_cross": "Пересечения средних не было",
+        "filtered": "Сигнал отфильтрован (недостаточно подтверждений)",
+        "rsi_too_low": "RSI слишком низкий для покупки",
+        "rsi_too_high": "RSI слишком высокий для продажи",
+        "against_trend": "Сигнал против основного тренда",
+        "insufficient_bars": "Мало данных для анализа",
     }
-    lines = [mapping.get(r, f"Техническая отметка: {r}.") for r in signal.reasons]
-    return "Детали (простыми словами):\n" + "\n".join(f"• {line}" for line in lines)
+
+    for r in signal.reasons:
+        text = reason_map.get(r, f"Техническая отметка: {r}")
+        lines.append(f"• {text}")
+
+    if signal.rsi is not None:
+        lines.append(f"• RSI: {signal.rsi:.0f}")
+
+    if signal.trend is not None:
+        lines.append(f"• Тренд: {_TREND_LABELS.get(signal.trend, '?')}")
+
+    return "Индикаторы:\n" + "\n".join(lines)
