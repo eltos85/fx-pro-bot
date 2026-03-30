@@ -8,7 +8,7 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection
-from fx_pro_bot.config.settings import Settings, display_name
+from fx_pro_bot.config.settings import Settings, display_name, pip_value_usd
 from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strategies
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
 from fx_pro_bot.stats.store import StatsStore
@@ -19,32 +19,39 @@ log = logging.getLogger(__name__)
 CTRADER_POLL_CYCLES = 12
 
 
-def _log_stats(store: StatsStore, horizons: tuple[int, ...]) -> None:
+def _log_stats(store: StatsStore, horizons: tuple[int, ...], settings: Settings) -> None:
+    lot = settings.lot_size
+    balance = settings.account_balance
+
     for h in horizons:
         vs = store.verification_summary(h)
         if vs["total"] == 0:
             continue
         log.info(
-            "  Горизонт %dм: %d проверок, win-rate %.0f%%, средний профит %+.1f пунктов, "
+            "  Горизонт %dм: %d проверок, win-rate %.0f%%, средний %+.1f пунктов, "
             "сумма %+.1f пунктов",
-            h,
-            vs["total"],
-            vs["win_rate"] * 100,
-            vs["avg_profit"],
-            vs["total_profit"],
+            h, vs["total"], vs["win_rate"] * 100, vs["avg_profit"], vs["total_profit"],
         )
 
     by_instr = store.verification_summary_by_instrument()
+    total_usd = 0.0
     if by_instr:
-        log.info("  По инструментам:")
+        log.info("  По инструментам (лот %.2f):", lot)
         for row in by_instr:
+            pips = float(row["total_profit"])
+            symbol = str(row["instrument"])
+            usd = pips * pip_value_usd(symbol, lot)
+            total_usd += usd
             log.info(
-                "    %s: %d проверок, win-rate %.0f%%, %+.1f пунктов",
-                row["instrument"],
-                row["total"],
-                row["win_rate"] * 100,  # type: ignore[arg-type]
-                row["total_profit"],
+                "    %s: %d проверок, win-rate %.0f%%, %+.1f пунктов → $%+.2f",
+                display_name(symbol), row["total"],
+                row["win_rate"] * 100, pips, usd,  # type: ignore[arg-type]
             )
+
+    log.info(
+        "  💰 Счёт $%.0f, лот %.2f → итого %+.2f$ (%+.1f%%)",
+        balance, lot, total_usd, (total_usd / balance * 100) if balance else 0,
+    )
 
 
 def run_advisor() -> None:
@@ -145,7 +152,7 @@ def _run_cycle(
         log.info("Нет созревших сигналов для проверки")
 
     log.info("── Статистика ──")
-    _log_stats(store, settings.verify_horizons)
+    _log_stats(store, settings.verify_horizons, settings)
 
     if cycle_count % CTRADER_POLL_CYCLES == 0:
         _log_ctrader_top(ctrader_client)

@@ -45,6 +45,26 @@ PIP_SIZES: dict[str, float] = {
 }
 
 
+PIP_VALUES_USD: dict[str, float] = {
+    "EURUSD=X": 0.10,
+    "GBPUSD=X": 0.10,
+    "USDJPY=X": 0.07,
+    "AUDUSD=X": 0.10,
+    "USDCAD=X": 0.07,
+    "EURGBP=X": 0.13,
+    "GC=F": 0.10,
+    "SI=F": 0.50,
+    "CL=F": 0.10,
+    "BZ=F": 0.10,
+}
+
+
+def pip_value_usd(symbol: str, lot_size: float = 0.01) -> float:
+    """Стоимость 1 пипса в USD для заданного лота (по умолчанию 0.01 = микролот)."""
+    base = PIP_VALUES_USD.get(symbol, 0.10)
+    return base * (lot_size / 0.01)
+
+
 def _parse_symbols(raw: str) -> tuple[str, ...]:
     return tuple(s.strip() for s in raw.split(",") if s.strip())
 
@@ -84,6 +104,9 @@ class Settings(BaseSettings):
         default="15,30,60",
         validation_alias="VERIFY_HORIZONS",
     )
+
+    account_balance: float = Field(default=250.0, validation_alias="ACCOUNT_BALANCE")
+    lot_size: float = Field(default=0.01, validation_alias="LOT_SIZE")
 
     fxpro_enabled: bool = Field(default=False, validation_alias="FXPRO_ENABLED")
     fxpro_client_id: str = Field(default="", validation_alias="FXPRO_CLIENT_ID")
