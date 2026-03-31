@@ -8,7 +8,7 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection
-from fx_pro_bot.config.settings import Settings, display_name, pip_value_usd
+from fx_pro_bot.config.settings import Settings, display_name, pip_value_usd, spread_cost_pips
 from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strategies
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
 from fx_pro_bot.stats.store import StatsStore
@@ -34,23 +34,33 @@ def _log_stats(store: StatsStore, horizons: tuple[int, ...], settings: Settings)
         )
 
     by_instr = store.verification_summary_by_instrument()
-    total_usd = 0.0
+    gross_usd = 0.0
+    spread_usd = 0.0
     if by_instr:
         log.info("  По инструментам (лот %.2f):", lot)
         for row in by_instr:
             pips = float(row["total_profit"])
             symbol = str(row["instrument"])
-            usd = pips * pip_value_usd(symbol, lot)
-            total_usd += usd
+            num_trades = int(row["total"]) // len(horizons) if horizons else int(row["total"])
+            pv = pip_value_usd(symbol, lot)
+            instr_gross = pips * pv
+            instr_spread = spread_cost_pips(symbol) * pv * num_trades
+            instr_net = instr_gross - instr_spread
+            gross_usd += instr_gross
+            spread_usd += instr_spread
             log.info(
-                "    %s: %d проверок, win-rate %.0f%%, %+.1f пунктов → $%+.2f",
+                "    %s: %d проверок, win-rate %.0f%%, %+.1f пунктов → "
+                "брутто $%+.2f, спред -$%.2f, чистыми $%+.2f",
                 display_name(symbol), row["total"],
-                row["win_rate"] * 100, pips, usd,  # type: ignore[arg-type]
+                row["win_rate"] * 100, pips,  # type: ignore[arg-type]
+                instr_gross, instr_spread, instr_net,
             )
 
+    net_usd = gross_usd - spread_usd
     log.info(
-        "  💰 Счёт $%.0f, лот %.2f → итого %+.2f$ (%+.1f%%)",
-        balance, lot, total_usd, (total_usd / balance * 100) if balance else 0,
+        "  💰 Счёт $%.0f, лот %.2f → брутто $%+.2f, комиссии -$%.2f, чистыми $%+.2f (%+.1f%%)",
+        balance, lot, gross_usd, spread_usd, net_usd,
+        (net_usd / balance * 100) if balance else 0,
     )
 
 

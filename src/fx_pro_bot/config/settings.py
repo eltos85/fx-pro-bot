@@ -58,11 +58,27 @@ PIP_VALUES_USD: dict[str, float] = {
     "BZ=F": 0.10,
 }
 
+SPREAD_PIPS: dict[str, float] = {
+    "EURUSD=X": 1.5,
+    "GBPUSD=X": 1.8,
+    "USDJPY=X": 1.5,
+    "AUDUSD=X": 1.8,
+    "USDCAD=X": 2.2,
+    "EURGBP=X": 1.8,
+    "GC=F": 3.5,
+    "SI=F": 3.5,
+    "CL=F": 4.0,
+    "BZ=F": 4.0,
+}
+
 
 def pip_value_usd(symbol: str, lot_size: float = 0.01) -> float:
-    """Стоимость 1 пипса в USD для заданного лота (по умолчанию 0.01 = микролот)."""
     base = PIP_VALUES_USD.get(symbol, 0.10)
     return base * (lot_size / 0.01)
+
+
+def spread_cost_pips(symbol: str) -> float:
+    return SPREAD_PIPS.get(symbol, 2.0)
 
 
 def _parse_symbols(raw: str) -> tuple[str, ...]:
