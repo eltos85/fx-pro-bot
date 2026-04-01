@@ -1,16 +1,18 @@
-"""SQLite: учёт советов, автоматическая верификация и статистика точности."""
+"""SQLite: учёт советов, позиций, paper-стратегий и статистика точности."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 Verdict = Literal["pending", "right", "wrong"]
+PositionStatus = Literal["open", "closed"]
+ExitStrategy = Literal["progressive", "grid", "hold90", "scalp"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +40,45 @@ class VerificationRow:
     profit_pips: float
     verdict: str
     checked_at: datetime
+
+
+@dataclass(slots=True)
+class PositionRow:
+    id: str
+    created_at: str
+    strategy: str
+    source: str
+    instrument: str
+    direction: str
+    entry_price: float
+    current_price: float
+    peak_price: float
+    trough_price: float
+    stop_loss_price: float
+    trail_price: float
+    trail_activated: bool
+    profit_pips: float
+    profit_pct: float
+    status: str
+    exit_reason: str
+    closed_at: str | None
+
+
+@dataclass(slots=True)
+class PaperPositionRow:
+    id: str
+    position_id: str
+    exit_strategy: str
+    status: str
+    entry_price: float
+    current_price: float
+    peak_price: float
+    profit_pips: float
+    profit_pct: float
+    exit_reason: str
+    levels_hit: list[str] = field(default_factory=list)
+    created_at: str = ""
+    closed_at: str | None = None
 
 
 class StatsStore:
@@ -83,6 +124,64 @@ class StatsStore:
                     verdict TEXT NOT NULL CHECK (verdict IN ('right','wrong')),
                     checked_at TEXT NOT NULL,
                     UNIQUE(suggestion_id, horizon_minutes)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS positions (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    strategy TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    instrument TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    current_price REAL NOT NULL,
+                    peak_price REAL NOT NULL,
+                    trough_price REAL NOT NULL,
+                    stop_loss_price REAL NOT NULL DEFAULT 0,
+                    trail_price REAL NOT NULL DEFAULT 0,
+                    trail_activated INTEGER NOT NULL DEFAULT 0,
+                    profit_pips REAL NOT NULL DEFAULT 0,
+                    profit_pct REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    exit_reason TEXT NOT NULL DEFAULT '',
+                    closed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_positions (
+                    id TEXT PRIMARY KEY,
+                    position_id TEXT NOT NULL REFERENCES positions(id),
+                    exit_strategy TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    entry_price REAL NOT NULL,
+                    current_price REAL NOT NULL,
+                    peak_price REAL NOT NULL,
+                    profit_pips REAL NOT NULL DEFAULT 0,
+                    profit_pct REAL NOT NULL DEFAULT 0,
+                    exit_reason TEXT NOT NULL DEFAULT '',
+                    levels_hit TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shadow_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    position_id TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    profit_pips REAL NOT NULL,
+                    profit_pct REAL NOT NULL,
+                    peak_profit_pips REAL NOT NULL,
+                    peak_profit_pct REAL NOT NULL,
+                    max_drawdown_pips REAL NOT NULL
                 )
                 """
             )
@@ -310,6 +409,266 @@ class StatsStore:
             })
         return out
 
+    # ── Positions ─────────────────────────────────────────────
+
+    def open_position(
+        self,
+        *,
+        strategy: str,
+        source: str,
+        instrument: str,
+        direction: str,
+        entry_price: float,
+        stop_loss_price: float = 0.0,
+        trail_price: float = 0.0,
+    ) -> str:
+        pid = str(uuid.uuid4())
+        now = datetime.now(tz=UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    id, created_at, strategy, source, instrument, direction,
+                    entry_price, current_price, peak_price, trough_price,
+                    stop_loss_price, trail_price, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+                """,
+                (
+                    pid, now, strategy, source, instrument, direction,
+                    entry_price, entry_price, entry_price, entry_price,
+                    stop_loss_price, trail_price,
+                ),
+            )
+            conn.commit()
+        return pid
+
+    def close_position(self, position_id: str, exit_reason: str) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE positions SET status='closed', exit_reason=?, closed_at=? WHERE id=?",
+                (exit_reason, now, position_id),
+            )
+            conn.commit()
+
+    def update_position_price(
+        self,
+        position_id: str,
+        current_price: float,
+        profit_pips: float,
+        profit_pct: float,
+        peak_price: float,
+        trough_price: float,
+        trail_price: float = 0.0,
+        trail_activated: bool = False,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE positions SET
+                    current_price=?, profit_pips=?, profit_pct=?,
+                    peak_price=?, trough_price=?,
+                    trail_price=?, trail_activated=?
+                WHERE id=?
+                """,
+                (
+                    current_price, profit_pips, profit_pct,
+                    peak_price, trough_price,
+                    trail_price, int(trail_activated),
+                    position_id,
+                ),
+            )
+            conn.commit()
+
+    def get_open_positions(self, strategy: str | None = None) -> list[PositionRow]:
+        where = "WHERE status='open'"
+        params: list[object] = []
+        if strategy:
+            where += " AND strategy=?"
+            params.append(strategy)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM positions {where} ORDER BY created_at", params
+            ).fetchall()
+        return [_row_to_position(r) for r in rows]
+
+    def count_open_positions(self, strategy: str | None = None, instrument: str | None = None) -> int:
+        where = "WHERE status='open'"
+        params: list[object] = []
+        if strategy:
+            where += " AND strategy=?"
+            params.append(strategy)
+        if instrument:
+            where += " AND instrument=?"
+            params.append(instrument)
+        with self._connect() as conn:
+            row = conn.execute(f"SELECT COUNT(*) AS c FROM positions {where}", params).fetchone()
+        return int(row["c"])
+
+    def position_summary_by_strategy(self) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT strategy,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_cnt,
+                    SUM(CASE WHEN status='closed' AND profit_pips > 0 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) AS closed_cnt,
+                    ROUND(SUM(profit_pips), 2) AS total_pips,
+                    ROUND(AVG(CASE WHEN status='closed' THEN profit_pips END), 2) AS avg_pips
+                FROM positions GROUP BY strategy
+                """
+            ).fetchall()
+        out: list[dict[str, object]] = []
+        for r in rows:
+            closed = int(r["closed_cnt"]) if r["closed_cnt"] else 0
+            wins = int(r["wins"]) if r["wins"] else 0
+            out.append({
+                "strategy": str(r["strategy"]),
+                "total": int(r["total"]),
+                "open": int(r["open_cnt"]) if r["open_cnt"] else 0,
+                "closed": closed,
+                "wins": wins,
+                "win_rate": round(wins / closed, 4) if closed else 0.0,
+                "total_pips": float(r["total_pips"]) if r["total_pips"] is not None else 0.0,
+                "avg_pips": float(r["avg_pips"]) if r["avg_pips"] is not None else 0.0,
+            })
+        return out
+
+    # ── Paper Positions ──────────────────────────────────────
+
+    def open_paper_position(
+        self, *, position_id: str, exit_strategy: str, entry_price: float,
+    ) -> str:
+        ppid = str(uuid.uuid4())
+        now = datetime.now(tz=UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO paper_positions (
+                    id, position_id, exit_strategy, status,
+                    entry_price, current_price, peak_price, created_at
+                ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?)
+                """,
+                (ppid, position_id, exit_strategy, entry_price, entry_price, entry_price, now),
+            )
+            conn.commit()
+        return ppid
+
+    def close_paper_position(self, paper_id: str, exit_reason: str) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE paper_positions SET status='closed', exit_reason=?, closed_at=? WHERE id=?",
+                (exit_reason, now, paper_id),
+            )
+            conn.commit()
+
+    def update_paper_position(
+        self, paper_id: str, current_price: float,
+        profit_pips: float, profit_pct: float, peak_price: float,
+        levels_hit: list[str] | None = None,
+    ) -> None:
+        lh = json.dumps(levels_hit or [], ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE paper_positions SET
+                    current_price=?, profit_pips=?, profit_pct=?, peak_price=?, levels_hit=?
+                WHERE id=?
+                """,
+                (current_price, profit_pips, profit_pct, peak_price, lh, paper_id),
+            )
+            conn.commit()
+
+    def get_open_paper_positions(self, position_id: str | None = None) -> list[PaperPositionRow]:
+        where = "WHERE status='open'"
+        params: list[object] = []
+        if position_id:
+            where += " AND position_id=?"
+            params.append(position_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM paper_positions {where} ORDER BY exit_strategy", params
+            ).fetchall()
+        return [_row_to_paper(r) for r in rows]
+
+    def paper_summary_by_exit_strategy(self) -> list[dict[str, object]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT exit_strategy,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status='closed' AND profit_pips > 0 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) AS closed_cnt,
+                    ROUND(SUM(profit_pips), 2) AS total_pips,
+                    ROUND(AVG(CASE WHEN status='closed' THEN profit_pips END), 2) AS avg_pips
+                FROM paper_positions GROUP BY exit_strategy
+                """
+            ).fetchall()
+        out: list[dict[str, object]] = []
+        for r in rows:
+            closed = int(r["closed_cnt"]) if r["closed_cnt"] else 0
+            wins = int(r["wins"]) if r["wins"] else 0
+            out.append({
+                "exit_strategy": str(r["exit_strategy"]),
+                "total": int(r["total"]),
+                "closed": closed,
+                "wins": wins,
+                "win_rate": round(wins / closed, 4) if closed else 0.0,
+                "total_pips": float(r["total_pips"]) if r["total_pips"] is not None else 0.0,
+                "avg_pips": float(r["avg_pips"]) if r["avg_pips"] is not None else 0.0,
+            })
+        return out
+
+    # ── Shadow Log ───────────────────────────────────────────
+
+    def record_shadow(
+        self, *, position_id: str, price: float,
+        profit_pips: float, profit_pct: float,
+        peak_profit_pips: float, peak_profit_pct: float,
+        max_drawdown_pips: float,
+    ) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO shadow_log (
+                    position_id, ts, price, profit_pips, profit_pct,
+                    peak_profit_pips, peak_profit_pct, max_drawdown_pips
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (position_id, now, price, profit_pips, profit_pct,
+                 peak_profit_pips, peak_profit_pct, max_drawdown_pips),
+            )
+            conn.commit()
+
+    def shadow_summary(self) -> list[dict[str, object]]:
+        """Лучшие пики и просадки по стратегиям."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT p.strategy,
+                    MAX(s.peak_profit_pips) AS best_peak,
+                    MIN(s.max_drawdown_pips) AS worst_dd,
+                    ROUND(AVG(s.peak_profit_pips), 2) AS avg_peak,
+                    COUNT(DISTINCT s.position_id) AS positions_tracked
+                FROM shadow_log s
+                JOIN positions p ON p.id = s.position_id
+                GROUP BY p.strategy
+                """
+            ).fetchall()
+        return [
+            {
+                "strategy": str(r["strategy"]),
+                "best_peak": float(r["best_peak"]) if r["best_peak"] is not None else 0.0,
+                "worst_dd": float(r["worst_dd"]) if r["worst_dd"] is not None else 0.0,
+                "avg_peak": float(r["avg_peak"]) if r["avg_peak"] is not None else 0.0,
+                "positions_tracked": int(r["positions_tracked"]),
+            }
+            for r in rows
+        ]
+
     def verification_summary_by_source(self) -> list[dict[str, object]]:
         """Статистика по автопроверкам с разбивкой по source (ensemble / whale_cot / ...)."""
         with self._connect() as conn:
@@ -375,4 +734,45 @@ def _row_to_verification(r: sqlite3.Row) -> VerificationRow:
         profit_pips=float(r["profit_pips"]),
         verdict=str(r["verdict"]),
         checked_at=datetime.fromisoformat(r["checked_at"]),
+    )
+
+
+def _row_to_position(r: sqlite3.Row) -> PositionRow:
+    return PositionRow(
+        id=r["id"],
+        created_at=r["created_at"],
+        strategy=r["strategy"],
+        source=r["source"],
+        instrument=r["instrument"],
+        direction=r["direction"],
+        entry_price=float(r["entry_price"]),
+        current_price=float(r["current_price"]),
+        peak_price=float(r["peak_price"]),
+        trough_price=float(r["trough_price"]),
+        stop_loss_price=float(r["stop_loss_price"]),
+        trail_price=float(r["trail_price"]),
+        trail_activated=bool(r["trail_activated"]),
+        profit_pips=float(r["profit_pips"]),
+        profit_pct=float(r["profit_pct"]),
+        status=r["status"],
+        exit_reason=r["exit_reason"] or "",
+        closed_at=r["closed_at"],
+    )
+
+
+def _row_to_paper(r: sqlite3.Row) -> PaperPositionRow:
+    return PaperPositionRow(
+        id=r["id"],
+        position_id=r["position_id"],
+        exit_strategy=r["exit_strategy"],
+        status=r["status"],
+        entry_price=float(r["entry_price"]),
+        current_price=float(r["current_price"]),
+        peak_price=float(r["peak_price"]),
+        profit_pips=float(r["profit_pips"]),
+        profit_pct=float(r["profit_pct"]),
+        exit_reason=r["exit_reason"] or "",
+        levels_hit=json.loads(r["levels_hit"]) if r["levels_hit"] else [],
+        created_at=r["created_at"],
+        closed_at=r["closed_at"],
     )

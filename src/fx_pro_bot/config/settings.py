@@ -138,6 +138,18 @@ class Settings(BaseSettings):
     myfxbook_email: str = Field(default="", validation_alias="MYFXBOOK_EMAIL")
     myfxbook_password: str = Field(default="", validation_alias="MYFXBOOK_PASSWORD")
 
+    leaders_enabled: bool = Field(default=True, validation_alias="LEADERS_ENABLED")
+    leaders_max_positions: int = Field(default=20, validation_alias="LEADERS_MAX_POSITIONS")
+    leaders_capital_pct: float = Field(default=0.67, validation_alias="LEADERS_CAPITAL_PCT")
+    leaders_sl_atr: float = Field(default=2.0, validation_alias="LEADERS_SL_ATR")
+    leaders_trail_atr: float = Field(default=0.7, validation_alias="LEADERS_TRAIL_ATR")
+
+    outsiders_enabled: bool = Field(default=True, validation_alias="OUTSIDERS_ENABLED")
+    outsiders_max_positions: int = Field(default=50, validation_alias="OUTSIDERS_MAX_POSITIONS")
+    outsiders_capital_pct: float = Field(default=0.33, validation_alias="OUTSIDERS_CAPITAL_PCT")
+
+    shadow_enabled: bool = Field(default=True, validation_alias="SHADOW_ENABLED")
+
     @property
     def scan_symbols(self) -> tuple[str, ...]:
         return _parse_symbols(self.scan_symbols_raw)

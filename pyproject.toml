@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fx-pro-bot"
-version = "0.4.0"
-description = "Сканер-советник: ансамбль 5 стратегий + whale-трекер (COT/Sentiment)"
+version = "0.5.0"
+description = "Сканер-советник: ансамбль + Leaders copy-trading + Outsiders extreme + Shadow analytics"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
