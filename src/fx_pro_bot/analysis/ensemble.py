@@ -28,7 +28,7 @@ STRATEGY_NAMES = {
     "ema_bounce": "EMA Bounce",
 }
 
-MIN_VOTES = 2
+MIN_VOTES = 4
 
 
 @dataclass(frozen=True, slots=True)
