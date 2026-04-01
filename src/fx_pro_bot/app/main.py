@@ -13,10 +13,12 @@ from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strateg
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.stats.verifier import run_verification
+from fx_pro_bot.whales.tracker import WhaleTracker
 
 log = logging.getLogger(__name__)
 
 CTRADER_POLL_CYCLES = 12
+WHALE_POLL_CYCLES = 6
 
 
 def _log_stats(store: StatsStore, horizons: tuple[int, ...], settings: Settings) -> None:
@@ -75,10 +77,11 @@ def run_advisor() -> None:
     events = load_events(settings.events_calendar_path)
     last_directions: dict[str, TrendDirection] = {}
     ctrader_client = CTraderCopyClient()
+    whale_tracker = WhaleTracker(store, settings)
     cycle_count = 0
 
     log.info(
-        "Запуск сканера v0.3: ансамбль 5 стратегий, %d инструментов, "
+        "Запуск сканера v0.4: ансамбль 5 стратегий + whale-трекер, %d инструментов, "
         "интервал %s, проверка через %s мин, цикл %d сек",
         len(settings.scan_symbols),
         settings.yfinance_interval,
@@ -88,7 +91,10 @@ def run_advisor() -> None:
 
     while True:
         try:
-            _run_cycle(settings, store, events, last_directions, ctrader_client, cycle_count)
+            _run_cycle(
+                settings, store, events, last_directions,
+                ctrader_client, whale_tracker, cycle_count,
+            )
             cycle_count += 1
         except KeyboardInterrupt:
             log.info("Остановка по Ctrl+C")
@@ -105,6 +111,7 @@ def _run_cycle(
     events: tuple,
     last_directions: dict[str, TrendDirection],
     ctrader_client: CTraderCopyClient,
+    whale_tracker: WhaleTracker,
     cycle_count: int,
 ) -> None:
     log.info("── Сканирование (ансамбль 5 стратегий) ──")
@@ -161,8 +168,15 @@ def _run_cycle(
     else:
         log.info("Нет созревших сигналов для проверки")
 
+    if cycle_count % WHALE_POLL_CYCLES == 0:
+        try:
+            whale_tracker.run()
+        except Exception:
+            log.exception("Ошибка whale-трекера")
+
     log.info("── Статистика ──")
     _log_stats(store, settings.verify_horizons, settings)
+    whale_tracker.log_whale_stats()
 
     if cycle_count % CTRADER_POLL_CYCLES == 0:
         _log_ctrader_top(ctrader_client)

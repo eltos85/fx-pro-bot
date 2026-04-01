@@ -133,6 +133,11 @@ class Settings(BaseSettings):
         validation_alias="FXPRO_API_URL",
     )
 
+    whale_cot_enabled: bool = Field(default=True, validation_alias="WHALE_COT_ENABLED")
+    whale_sentiment_enabled: bool = Field(default=False, validation_alias="WHALE_SENTIMENT_ENABLED")
+    myfxbook_email: str = Field(default="", validation_alias="MYFXBOOK_EMAIL")
+    myfxbook_password: str = Field(default="", validation_alias="MYFXBOOK_PASSWORD")
+
     @property
     def scan_symbols(self) -> tuple[str, ...]:
         return _parse_symbols(self.scan_symbols_raw)

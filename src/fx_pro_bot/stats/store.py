@@ -26,6 +26,7 @@ class SuggestionRow:
     verdict: Verdict
     verdict_at: datetime | None
     notes: str | None
+    source: str = "ensemble"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +67,8 @@ class StatsStore:
                     verdict TEXT NOT NULL DEFAULT 'pending'
                         CHECK (verdict IN ('pending','right','wrong')),
                     verdict_at TEXT,
-                    notes TEXT
+                    notes TEXT,
+                    source TEXT NOT NULL DEFAULT 'ensemble'
                 )
                 """
             )
@@ -84,7 +86,17 @@ class StatsStore:
                 )
                 """
             )
+            self._migrate_add_source(conn)
             conn.commit()
+
+    def _migrate_add_source(self, conn: sqlite3.Connection) -> None:
+        """Добавить колонку source если её нет (миграция старых БД)."""
+        cur = conn.execute("PRAGMA table_info(suggestions)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "source" not in columns:
+            conn.execute(
+                "ALTER TABLE suggestions ADD COLUMN source TEXT NOT NULL DEFAULT 'ensemble'"
+            )
 
     # ── Suggestions ──────────────────────────────────────────────
 
@@ -97,6 +109,7 @@ class StatsStore:
         reasons: tuple[str, ...],
         price_at_signal: float | None,
         events_context: str | None,
+        source: str = "ensemble",
     ) -> str:
         sid = str(uuid.uuid4())
         now = datetime.now(tz=UTC).isoformat()
@@ -105,8 +118,8 @@ class StatsStore:
                 """
                 INSERT INTO suggestions (
                     id, created_at, instrument, direction, advice_text,
-                    reasons_json, price_at_signal, events_context, verdict
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    reasons_json, price_at_signal, events_context, verdict, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
                     sid,
@@ -117,6 +130,7 @@ class StatsStore:
                     json.dumps(list(reasons), ensure_ascii=False),
                     price_at_signal,
                     events_context,
+                    source,
                 ),
             )
             conn.commit()
@@ -296,10 +310,46 @@ class StatsStore:
             })
         return out
 
+    def verification_summary_by_source(self) -> list[dict[str, object]]:
+        """Статистика по автопроверкам с разбивкой по source (ensemble / whale_cot / ...)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    COALESCE(s.source, 'ensemble') AS source,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN v.verdict = 'right' THEN 1 ELSE 0 END) AS right_cnt,
+                    ROUND(SUM(v.profit_pips), 2) AS total_profit,
+                    ROUND(AVG(v.profit_pips), 2) AS avg_profit
+                FROM verifications v
+                JOIN suggestions s ON s.id = v.suggestion_id
+                GROUP BY COALESCE(s.source, 'ensemble')
+                ORDER BY total_profit DESC
+                """,
+            ).fetchall()
+
+        out: list[dict[str, object]] = []
+        for r in rows:
+            total = int(r["total"])
+            right_cnt = int(r["right_cnt"])
+            out.append({
+                "source": str(r["source"]),
+                "total": total,
+                "right": right_cnt,
+                "win_rate": round(right_cnt / total, 4) if total else 0.0,
+                "total_profit": float(r["total_profit"]) if r["total_profit"] is not None else 0.0,
+                "avg_profit": float(r["avg_profit"]) if r["avg_profit"] is not None else 0.0,
+            })
+        return out
+
 
 def _row_to_suggestion(r: sqlite3.Row) -> SuggestionRow:
     reasons = tuple(json.loads(r["reasons_json"]))
     va = r["verdict_at"]
+    try:
+        source = r["source"]
+    except (IndexError, KeyError):
+        source = "ensemble"
     return SuggestionRow(
         id=r["id"],
         created_at=datetime.fromisoformat(r["created_at"]),
@@ -312,6 +362,7 @@ def _row_to_suggestion(r: sqlite3.Row) -> SuggestionRow:
         verdict=r["verdict"],  # type: ignore[arg-type]
         verdict_at=datetime.fromisoformat(va) if va else None,
         notes=r["notes"],
+        source=source or "ensemble",
     )
 
 
