@@ -20,10 +20,10 @@ from fx_pro_bot.strategies.exits import create_paper_positions
 
 log = logging.getLogger(__name__)
 
-RSI_OVERSOLD = 15
-RSI_OVERBOUGHT = 85
+RSI_OVERSOLD = 10
+RSI_OVERBOUGHT = 90
 BB_SIGMA = 3.0
-ATR_SPIKE_MULT = 2.5
+ATR_SPIKE_MULT = 4.0
 NEWS_HOURS = 4.0
 
 
