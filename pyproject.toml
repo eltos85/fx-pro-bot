@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fx-pro-bot"
-version = "0.5.0"
-description = "Сканер-советник: ансамбль + Leaders copy-trading + Outsiders extreme + Shadow analytics"
+version = "0.7.0"
+description = "Сканер-советник: ансамбль + Leaders + Outsiders + Shadow + Scalping + cTrader auto-trading"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
   "requests>=2.31",
   "cot-reports>=0.1",
   "beautifulsoup4>=4.12",
+  "ctrader-open-api>=0.9.2",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ dev = ["pytest>=8.0", "ruff>=0.4"]
 [project.scripts]
 fx-pro-bot = "fx_pro_bot.app.main:main"
 fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
+fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fx_pro_bot"]

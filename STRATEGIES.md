@@ -1,14 +1,15 @@
-# FX Pro Bot v0.5 — Стратегии
+# FX Pro Bot v0.7 — Стратегии
 
 ## Обзор архитектуры
 
-Бот работает в непрерывном цикле (каждые 300 сек) и применяет три уровня стратегий:
+Бот работает в непрерывном цикле (каждые 300 сек) и применяет стратегии:
 
 ```
 Цикл 300 сек
   1. Ансамбль (5 индикаторов) → советы по входу
   2. Leaders (copy-trading) → paper-позиции на основе whale-данных
   3. Outsiders (extreme setups) → paper-позиции + 4 exit-стратегии
+  3b. Скальпинг (3 стратегии) → VWAP / Stat-Arb / ORB
   4. Monitor → проверка SL / trail / time-stops всех позиций
   5. Shadow → ROI-снимки для аналитики
   6. Верификация → проверка старых сигналов ансамбля (15/30/60 мин)
@@ -109,6 +110,81 @@ OUTSIDERS_CAPITAL_PCT=0.33
 
 ---
 
+## 3b. Скальпинг — 3 высокочастотные стратегии
+
+### VWAP Mean-Reversion Micro-Scalper
+
+**Файл:** `strategies/scalping/vwap_reversion.py`
+**Идея:** цена стремится вернуться к VWAP (~70-75% времени). Вход при отклонении > 1 ATR + RSI-подтверждение.
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| DEVIATION_THRESHOLD | **1.0 ATR** | Минимальное отклонение от VWAP для входа |
+| RSI_CONFIRM | **< 35** (LONG), **> 65** (SHORT) | RSI-фильтр подтверждения |
+| EMA Slope | EMA(50) | Не торговать против основного тренда |
+| Stop-Loss | **1.5 ATR** | |
+| Take-Profit | **Возврат к VWAP** (~1.0 ATR) | |
+| Макс позиций | **30** | |
+| Макс на инструмент | **3** | |
+
+### Stat-Arb Cross-Pair Spread Scalping
+
+**Файл:** `strategies/scalping/stat_arb.py`
+**Идея:** market-neutral арбитраж на коинтегрированных парах. Spread Z-score > 2σ — вход, < 0.5σ — выход.
+
+**Пары:**
+- EUR/USD + GBP/USD (через EUR/GBP)
+- AUD/USD + NZD/USD (commodity block, корреляция ~0.92)
+- USD/JPY + USD/CAD (USD-based)
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| Z_ENTRY | **2.0** | Порог входа (стандартных отклонений) |
+| Z_EXIT | **0.5** | Порог выхода |
+| LOOKBACK | **100** баров | Окно OLS-регрессии для hedge ratio |
+| ZSCORE_WINDOW | **50** баров | Окно для z-score |
+| Stop-Loss | **2.0 ATR** на каждую ногу | |
+| Макс позиций | **20** (10 пар) | |
+
+**Механика:** при z > 2.0 → SHORT пару A + LONG пару B; при z < -2.0 → наоборот. Позиции связаны через общий `source` id и закрываются парой.
+
+### Session Opening Range Breakout + News Fade
+
+**Файл:** `strategies/scalping/session_orb.py`
+**Идея:** пробой Opening Range (первые 15 мин сессии) + fade новостных спайков.
+
+**ORB логика:**
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| Сессии | **London** (08:00 UTC), **NY** (14:30 UTC) | |
+| ORB_BARS | **3** бара (15 мин на M5) | Формирование "коробки" |
+| BREAKOUT_FILTER | **0.3 ATR** | Фильтр ложных пробоев |
+| Volume | **> 1.3x** среднего за 20 баров | Подтверждение объёмом |
+| EMA(50) | В направлении тренда | Фильтр направления |
+| SL | **2.0 ATR** | |
+| TP | **2.0x** высоты коробки (R:R = 1:2) | |
+
+**News Fade логика:**
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| NEWS_SPIKE_ATR | **2.0** | Минимальный спайк за 3 бара |
+| Условие | Спайк против EMA(50) | Вход против спайка на откат |
+| TP | **50%** отката спайка | |
+| SL | **За экстремумом** спайка | |
+
+### Скальпинг: настройки (.env)
+
+```
+SCALPING_VWAP_ENABLED=true
+SCALPING_STATARB_ENABLED=true
+SCALPING_ORB_ENABLED=true
+SCALPING_MAX_POSITIONS=50
+```
+
+---
+
 ## 4. Paper Exit-Стратегии (4 параллельных)
 
 **Файл:** `strategies/exits.py`
@@ -204,6 +280,7 @@ SHADOW_ENABLED=true
 | AUDUSD=X | AUD/USD | 0.0001 | $0.10 | 1.8 |
 | USDCAD=X | USD/CAD | 0.0001 | $0.07 | 2.2 |
 | EURGBP=X | EUR/GBP | 0.0001 | $0.13 | 1.8 |
+| NZDUSD=X | NZD/USD | 0.0001 | $0.10 | 2.0 |
 | GC=F | Золото (XAU) | 0.10 | $0.10 | 3.5 |
 | SI=F | Серебро (XAG) | 0.01 | $0.50 | 3.5 |
 | CL=F | Нефть WTI | 0.01 | $0.10 | 4.0 |
@@ -264,6 +341,11 @@ src/fx_pro_bot/
     monitor.py         # Мониторинг SL/trail/time-stops
     shadow.py          # ROI-аналитика
     filters.py         # Защитные фильтры входа
+    scalping/
+      indicators.py    # VWAP, z-score, OLS hedge, session range
+      vwap_reversion.py # VWAP mean-reversion micro-scalper
+      stat_arb.py      # Stat-arb cross-pair spread
+      session_orb.py   # Opening Range Breakout + News Fade
   whales/
     cot.py             # CFTC COT reports
     sentiment.py       # Myfxbook sentiment

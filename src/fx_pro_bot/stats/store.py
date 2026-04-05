@@ -62,6 +62,7 @@ class PositionRow:
     status: str
     exit_reason: str
     closed_at: str | None
+    broker_position_id: int = 0
 
 
 @dataclass(slots=True)
@@ -186,6 +187,7 @@ class StatsStore:
                 """
             )
             self._migrate_add_source(conn)
+            self._migrate_add_broker_position_id(conn)
             conn.commit()
 
     def _migrate_add_source(self, conn: sqlite3.Connection) -> None:
@@ -195,6 +197,15 @@ class StatsStore:
         if "source" not in columns:
             conn.execute(
                 "ALTER TABLE suggestions ADD COLUMN source TEXT NOT NULL DEFAULT 'ensemble'"
+            )
+
+    def _migrate_add_broker_position_id(self, conn: sqlite3.Connection) -> None:
+        """Добавить broker_position_id в positions (миграция для cTrader)."""
+        cur = conn.execute("PRAGMA table_info(positions)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "broker_position_id" not in columns:
+            conn.execute(
+                "ALTER TABLE positions ADD COLUMN broker_position_id INTEGER NOT NULL DEFAULT 0"
             )
 
     # ── Suggestions ──────────────────────────────────────────────
@@ -441,6 +452,22 @@ class StatsStore:
             )
             conn.commit()
         return pid
+
+    def set_broker_position_id(self, position_id: str, broker_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE positions SET broker_position_id=? WHERE id=?",
+                (broker_id, position_id),
+            )
+            conn.commit()
+
+    def get_position_by_broker_id(self, broker_id: int) -> PositionRow | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM positions WHERE broker_position_id=? AND status='open'",
+                (broker_id,),
+            ).fetchone()
+            return _row_to_position(row) if row else None
 
     def close_position(self, position_id: str, exit_reason: str) -> None:
         now = datetime.now(tz=UTC).isoformat()
@@ -757,6 +784,7 @@ def _row_to_position(r: sqlite3.Row) -> PositionRow:
         status=r["status"],
         exit_reason=r["exit_reason"] or "",
         closed_at=r["closed_at"],
+        broker_position_id=int(r["broker_position_id"]) if "broker_position_id" in r.keys() else 0,
     )
 
 

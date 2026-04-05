@@ -3,6 +3,11 @@ services:
     build: .
     image: fx-pro-bot:local
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       DATA_DIR: /data
       SCAN_SYMBOLS: ${SCAN_SYMBOLS:-EURUSD=X,GBPUSD=X,USDJPY=X,AUDUSD=X,USDCAD=X,EURGBP=X,GC=F,SI=F,CL=F,BZ=F}
@@ -16,6 +21,20 @@ services:
       FXPRO_CLIENT_SECRET: ${FXPRO_CLIENT_SECRET:-}
       FXPRO_ACCOUNT_ID: ${FXPRO_ACCOUNT_ID:-}
       FXPRO_API_URL: ${FXPRO_API_URL:-https://connect.fxpro.com/api/v1}
+      CTRADER_TRADING_ENABLED: ${CTRADER_TRADING_ENABLED:-false}
+      CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
+      CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-https://openapi.ctrader.com/apps/token}
+      SCALPING_VWAP_ENABLED: ${SCALPING_VWAP_ENABLED:-true}
+      SCALPING_STATARB_ENABLED: ${SCALPING_STATARB_ENABLED:-true}
+      SCALPING_ORB_ENABLED: ${SCALPING_ORB_ENABLED:-true}
+      SCALPING_MAX_POSITIONS: ${SCALPING_MAX_POSITIONS:-50}
+      KILLSWITCH_MAX_DAILY_LOSS: ${KILLSWITCH_MAX_DAILY_LOSS:-50.0}
+      KILLSWITCH_MAX_DRAWDOWN_PCT: ${KILLSWITCH_MAX_DRAWDOWN_PCT:-20.0}
+      KILLSWITCH_MAX_POSITIONS: ${KILLSWITCH_MAX_POSITIONS:-10}
+      KILLSWITCH_MAX_LOSS_PER_TRADE: ${KILLSWITCH_MAX_LOSS_PER_TRADE:-25.0}
     volumes:
       - advisor_data:/data
 

@@ -18,6 +18,8 @@ DEFAULT_SYMBOLS = (
     "BZ=F",
 )
 
+SCALPING_EXTRA_SYMBOLS = ("NZDUSD=X",)
+
 DISPLAY_NAMES: dict[str, str] = {
     "EURUSD=X": "EUR/USD",
     "GBPUSD=X": "GBP/USD",
@@ -25,6 +27,7 @@ DISPLAY_NAMES: dict[str, str] = {
     "AUDUSD=X": "AUD/USD",
     "USDCAD=X": "USD/CAD",
     "EURGBP=X": "EUR/GBP",
+    "NZDUSD=X": "NZD/USD",
     "GC=F": "Золото (XAU)",
     "SI=F": "Серебро (XAG)",
     "CL=F": "Нефть WTI",
@@ -38,6 +41,7 @@ PIP_SIZES: dict[str, float] = {
     "AUDUSD=X": 0.0001,
     "USDCAD=X": 0.0001,
     "EURGBP=X": 0.0001,
+    "NZDUSD=X": 0.0001,
     "GC=F": 0.10,
     "SI=F": 0.01,
     "CL=F": 0.01,
@@ -52,6 +56,7 @@ PIP_VALUES_USD: dict[str, float] = {
     "AUDUSD=X": 0.10,
     "USDCAD=X": 0.07,
     "EURGBP=X": 0.13,
+    "NZDUSD=X": 0.10,
     "GC=F": 0.10,
     "SI=F": 0.50,
     "CL=F": 0.10,
@@ -65,6 +70,7 @@ SPREAD_PIPS: dict[str, float] = {
     "AUDUSD=X": 1.8,
     "USDCAD=X": 2.2,
     "EURGBP=X": 1.8,
+    "NZDUSD=X": 2.0,
     "GC=F": 3.5,
     "SI=F": 3.5,
     "CL=F": 4.0,
@@ -149,6 +155,43 @@ class Settings(BaseSettings):
     outsiders_capital_pct: float = Field(default=0.33, validation_alias="OUTSIDERS_CAPITAL_PCT")
 
     shadow_enabled: bool = Field(default=True, validation_alias="SHADOW_ENABLED")
+
+    # Скальпинг-стратегии
+    scalping_vwap_enabled: bool = Field(default=True, validation_alias="SCALPING_VWAP_ENABLED")
+    scalping_statarb_enabled: bool = Field(default=True, validation_alias="SCALPING_STATARB_ENABLED")
+    scalping_orb_enabled: bool = Field(default=True, validation_alias="SCALPING_ORB_ENABLED")
+    scalping_max_positions: int = Field(default=50, validation_alias="SCALPING_MAX_POSITIONS")
+
+    # cTrader Open API (автоторговля)
+    ctrader_trading_enabled: bool = Field(
+        default=False, validation_alias="CTRADER_TRADING_ENABLED",
+    )
+    ctrader_host_type: str = Field(default="demo", validation_alias="CTRADER_HOST_TYPE")
+    ctrader_client_id: str = Field(default="", validation_alias="CTRADER_CLIENT_ID")
+    ctrader_client_secret: str = Field(default="", validation_alias="CTRADER_CLIENT_SECRET")
+    ctrader_account_id: int = Field(default=0, validation_alias="CTRADER_ACCOUNT_ID")
+    ctrader_redirect_uri: str = Field(
+        default="https://openapi.ctrader.com/apps/token",
+        validation_alias="CTRADER_REDIRECT_URI",
+    )
+
+    # Kill Switch (защита от потерь)
+    killswitch_max_daily_loss: float = Field(
+        default=50.0, validation_alias="KILLSWITCH_MAX_DAILY_LOSS",
+    )
+    killswitch_max_drawdown_pct: float = Field(
+        default=20.0, validation_alias="KILLSWITCH_MAX_DRAWDOWN_PCT",
+    )
+    killswitch_max_positions: int = Field(
+        default=10, validation_alias="KILLSWITCH_MAX_POSITIONS",
+    )
+    killswitch_max_loss_per_trade: float = Field(
+        default=25.0, validation_alias="KILLSWITCH_MAX_LOSS_PER_TRADE",
+    )
+
+    @property
+    def ctrader_token_path(self) -> Path:
+        return self.data_dir / "ctrader_tokens.json"
 
     @property
     def scan_symbols(self) -> tuple[str, ...]:

@@ -1,3 +1,3 @@
-"""Сканер-советник: ансамбль + Leaders + Outsiders + Shadow analytics."""
+"""Сканер-советник: ансамбль + Leaders + Outsiders + Shadow + Scalping + cTrader auto-trading."""
 
-__version__ = "0.5.0"
+__version__ = "0.7.0"

@@ -1,4 +1,4 @@
-"""Сканер-советник v0.5: ансамбль + Leaders + Outsiders + Shadow analytics."""
+"""Сканер-советник v0.7: ансамбль + Leaders + Outsiders + Shadow + Scalping + cTrader auto-trading."""
 
 from __future__ import annotations
 
@@ -8,15 +8,22 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
-from fx_pro_bot.config.settings import Settings, display_name, pip_size, pip_value_usd, spread_cost_pips
+from fx_pro_bot.config.settings import SCALPING_EXTRA_SYMBOLS, Settings, display_name, pip_size, pip_value_usd, spread_cost_pips
 from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strategies
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
+from fx_pro_bot.stats.cleanup import cleanup_shadow_log, db_size_mb, vacuum_if_needed
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.stats.verifier import run_verification
 from fx_pro_bot.strategies.leaders import LeadersStrategy, aggregate_leader_signals
 from fx_pro_bot.strategies.monitor import PositionMonitor
 from fx_pro_bot.strategies.outsiders import OutsidersStrategy, detect_extreme_setups
 from fx_pro_bot.strategies.shadow import ShadowTracker
+from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
+from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
+from fx_pro_bot.trading.symbols import SymbolCache
+from fx_pro_bot.strategies.scalping.session_orb import SessionOrbStrategy
+from fx_pro_bot.strategies.scalping.stat_arb import StatArbStrategy
+from fx_pro_bot.strategies.scalping.vwap_reversion import VwapReversionStrategy
 from fx_pro_bot.whales.cot import fetch_cot_signals
 from fx_pro_bot.whales.sentiment import fetch_sentiment_signals
 from fx_pro_bot.whales.tracker import WhaleTracker
@@ -25,6 +32,7 @@ log = logging.getLogger(__name__)
 
 CTRADER_POLL_CYCLES = 12
 WHALE_POLL_CYCLES = 6
+CLEANUP_POLL_CYCLES = 288
 
 
 def _log_stats(store: StatsStore, horizons: tuple[int, ...], settings: Settings) -> None:
@@ -107,6 +115,97 @@ def _log_strategy_stats(store: StatsStore, settings: Settings) -> None:
             )
 
 
+def _log_scalping_stats(store: StatsStore, settings: Settings) -> None:
+    """Статистика по скальпинг-стратегиям (VWAP / Stat-Arb / ORB)."""
+    strats = ("vwap_reversion", "stat_arb", "session_orb")
+    any_data = False
+    for name in strats:
+        positions = store.get_open_positions(strategy=name)
+        total_open = len(positions)
+        all_positions = store.position_summary_by_strategy()
+        row = next((r for r in all_positions if r["strategy"] == name), None)
+        if row is None and total_open == 0:
+            continue
+        if not any_data:
+            log.info("── Скальпинг-стратегии ──")
+            any_data = True
+        if row:
+            pv = pip_value_usd("EURUSD=X", settings.lot_size)
+            net_usd = float(row["total_pips"]) * pv
+            log.info(
+                "  %s: %d всего (%d откр, %d закр), win-rate %.0f%%, "
+                "%+.1f пипсов, ~$%+.2f",
+                name.replace("_", "-"),
+                row["total"], row["open"], row["closed"],
+                float(row["win_rate"]) * 100,
+                row["total_pips"], net_usd,
+            )
+        else:
+            log.info("  %s: %d открыто, нет закрытых", name.replace("_", "-"), total_open)
+
+
+def _init_trading(settings: Settings, store: StatsStore):
+    """Инициализация модуля автоторговли (cTrader). Возвращает (executor, killswitch) или (None, None)."""
+    from fx_pro_bot.trading.client import CTraderClient
+    from fx_pro_bot.trading.executor import TradeExecutor
+
+    if not settings.ctrader_trading_enabled:
+        log.info("cTrader автоторговля: ВЫКЛЮЧЕНА")
+        return None, None
+
+    if not settings.ctrader_client_id or not settings.ctrader_client_secret:
+        log.warning("cTrader: CTRADER_CLIENT_ID/SECRET не заданы, торговля отключена")
+        return None, None
+
+    token_store = TokenStore(settings.ctrader_token_path)
+    try:
+        token_data = ensure_valid_token(
+            token_store, settings.ctrader_client_id, settings.ctrader_client_secret,
+        )
+    except Exception as exc:
+        log.warning("cTrader: токены недоступны (%s), торговля отключена", exc)
+        return None, None
+
+    try:
+        client = CTraderClient(
+            client_id=settings.ctrader_client_id,
+            client_secret=settings.ctrader_client_secret,
+            access_token=token_data.access_token,
+            account_id=settings.ctrader_account_id,
+            host_type=settings.ctrader_host_type,
+        )
+        client.start(timeout=30)
+    except Exception as exc:
+        log.error("cTrader: не удалось подключиться (%s), торговля отключена", exc)
+        return None, None
+
+    symbol_cache = SymbolCache()
+    executor = TradeExecutor(client, symbol_cache, lot_size=settings.lot_size)
+
+    try:
+        count = executor.load_symbols()
+        log.info("cTrader: загружено %d символов", count)
+    except Exception as exc:
+        log.warning("cTrader: не удалось загрузить символы (%s)", exc)
+
+    ks_config = KillSwitchConfig(
+        max_daily_loss_usd=settings.killswitch_max_daily_loss,
+        max_drawdown_pct=settings.killswitch_max_drawdown_pct,
+        max_positions=settings.killswitch_max_positions,
+        max_loss_per_trade_usd=settings.killswitch_max_loss_per_trade,
+    )
+    account = executor.get_account_info()
+    killswitch = KillSwitch(ks_config, initial_equity=account.balance)
+
+    log.info(
+        "cTrader автоторговля: ВКЛЮЧЕНА (%s), баланс $%.2f, kill switch: "
+        "макс убыток/день $%.0f, макс просадка %.0f%%, макс позиций %d",
+        settings.ctrader_host_type.upper(), account.balance,
+        ks_config.max_daily_loss_usd, ks_config.max_drawdown_pct, ks_config.max_positions,
+    )
+    return executor, killswitch
+
+
 def run_advisor() -> None:
     settings = Settings()
     logging.basicConfig(
@@ -132,11 +231,30 @@ def run_advisor() -> None:
     )
     monitor = PositionMonitor(store)
     shadow = ShadowTracker(store)
+
+    vwap_strat = (
+        VwapReversionStrategy(store, max_positions=settings.scalping_max_positions)
+        if settings.scalping_vwap_enabled else None
+    )
+    statarb_strat = (
+        StatArbStrategy(store, max_positions=settings.scalping_max_positions)
+        if settings.scalping_statarb_enabled else None
+    )
+    orb_strat = (
+        SessionOrbStrategy(store, max_positions=settings.scalping_max_positions)
+        if settings.scalping_orb_enabled else None
+    )
+
     cycle_count = 0
 
+    executor, killswitch = _init_trading(settings, store)
+
+    scalp_names = [n for n, s in [("VWAP", vwap_strat), ("StatArb", statarb_strat), ("ORB", orb_strat)] if s]
     log.info(
-        "Запуск v0.5: ансамбль + Leaders + Outsiders + Shadow, "
+        "Запуск v0.7: ансамбль + Leaders + Outsiders + Shadow + Scalping(%s)%s, "
         "%d инструментов, цикл %d сек",
+        "+".join(scalp_names) if scalp_names else "OFF",
+        " + cTrader LIVE" if executor else "",
         len(settings.scan_symbols),
         settings.poll_interval_sec,
     )
@@ -147,7 +265,10 @@ def run_advisor() -> None:
                 settings, store, events, last_directions,
                 ctrader_client, whale_tracker,
                 leaders_strat, outsiders_strat, monitor, shadow,
-                cycle_count,
+                cycle_count, executor, killswitch,
+                vwap_strat=vwap_strat,
+                statarb_strat=statarb_strat,
+                orb_strat=orb_strat,
             )
             cycle_count += 1
         except KeyboardInterrupt:
@@ -171,6 +292,12 @@ def _run_cycle(
     monitor: PositionMonitor,
     shadow: ShadowTracker,
     cycle_count: int,
+    executor=None,
+    killswitch=None,
+    *,
+    vwap_strat: VwapReversionStrategy | None = None,
+    statarb_strat: StatArbStrategy | None = None,
+    orb_strat: SessionOrbStrategy | None = None,
 ) -> None:
     # 1. Сканирование ансамблем
     log.info("── Сканирование (ансамбль 5 стратегий) ──")
@@ -261,8 +388,48 @@ def _run_cycle(
         except Exception:
             log.exception("Ошибка Outsiders")
 
+    # 3b. Scalping strategies (отдельный bars_map, чтобы не затрагивать основные стратегии)
+    if vwap_strat or statarb_strat or orb_strat:
+        log.info("── Скальпинг ──")
+        try:
+            scalping_bars = dict(bars_map)
+            scalping_prices = dict(prices)
+
+            extra = set(SCALPING_EXTRA_SYMBOLS) - set(settings.scan_symbols)
+            if extra:
+                extra_results = scan_instruments(
+                    tuple(extra),
+                    period=settings.yfinance_period,
+                    interval=settings.yfinance_interval,
+                )
+                for r in extra_results:
+                    scalping_bars[r.symbol] = r.bars
+                    scalping_prices[r.symbol] = r.last_price
+                    prices[r.symbol] = r.last_price
+                    if len(r.bars) > 14:
+                        atrs[r.symbol] = _atr(r.bars)
+
+            if vwap_strat:
+                v_sigs = vwap_strat.scan(scalping_bars, scalping_prices)
+                v_opened = vwap_strat.process_signals(v_sigs, scalping_prices) if v_sigs else 0
+                log.info("  VWAP: %d сигналов, %d открыто", len(v_sigs), v_opened)
+
+            if statarb_strat:
+                sa_sigs = statarb_strat.scan(scalping_bars)
+                sa_opened = statarb_strat.process_signals(sa_sigs, scalping_prices) if sa_sigs else 0
+                sa_closed = statarb_strat.check_exits(scalping_bars)
+                log.info("  Stat-Arb: %d сигналов, %d открыто, %d закрыто", len(sa_sigs), sa_opened, sa_closed)
+
+            if orb_strat:
+                o_sigs = orb_strat.scan(scalping_bars, scalping_prices, events)
+                o_opened = orb_strat.process_signals(o_sigs, scalping_prices) if o_sigs else 0
+                log.info("  ORB: %d сигналов, %d открыто", len(o_sigs), o_opened)
+        except Exception:
+            log.exception("Ошибка скальпинг-стратегий")
+
     # 4. Monitor all positions
     log.info("── Мониторинг позиций ──")
+    positions_before_close = {p.id: p for p in store.get_open_positions()}
     mon_stats = monitor.run(prices, atrs)
     open_total = store.count_open_positions()
     log.info(
@@ -271,6 +438,10 @@ def _run_cycle(
         mon_stats["closed_sl"], mon_stats["closed_trail"],
         mon_stats["closed_tp"], mon_stats["closed_time"],
     )
+
+    # 4b. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
+    if executor and killswitch:
+        _sync_broker_closes(store, executor, killswitch, positions_before_close, prices, settings)
 
     # 5. Shadow
     if settings.shadow_enabled:
@@ -289,10 +460,101 @@ def _run_cycle(
     log.info("── Статистика ансамбля ──")
     _log_stats(store, settings.verify_horizons, settings)
     _log_strategy_stats(store, settings)
+    _log_scalping_stats(store, settings)
     whale_tracker.log_whale_stats()
 
     if cycle_count % CTRADER_POLL_CYCLES == 0:
         _log_ctrader_top(ctrader_client)
+
+    # 8. Cleanup (раз в ~24 часа: 288 циклов × 300 сек)
+    if cycle_count > 0 and cycle_count % CLEANUP_POLL_CYCLES == 0:
+        try:
+            deleted = cleanup_shadow_log(settings.stats_db_path)
+            size = db_size_mb(settings.stats_db_path)
+            log.info("── Обслуживание БД: shadow_log -%d строк, размер %.1f MB ──", deleted, size)
+            vacuum_if_needed(settings.stats_db_path, threshold_mb=100.0)
+        except Exception:
+            log.exception("Ошибка cleanup")
+
+
+def _try_broker_open(
+    store: StatsStore,
+    executor,
+    killswitch,
+    position_id: str,
+    yf_symbol: str,
+    direction: str,
+    sl_price: float,
+    settings: Settings,
+    prices: dict[str, float],
+) -> None:
+    """Попытаться открыть реальную позицию через cTrader."""
+    if not executor or not killswitch:
+        return
+
+    account = executor.get_account_info()
+    open_count = len(executor.get_open_positions())
+    if not killswitch.check_allowed(open_count, account.balance):
+        log.warning("KillSwitch: торговля заблокирована, пропускаем реальный ордер")
+        return
+
+    result = executor.open_position(
+        yf_symbol=yf_symbol,
+        direction=direction,
+        sl_price=sl_price if sl_price > 0 else None,
+        lot_size=settings.lot_size,
+        comment=f"fx-pro-bot {position_id[:8]}",
+    )
+
+    if result.success and result.broker_position_id:
+        store.set_broker_position_id(position_id, result.broker_position_id)
+        log.info(
+            "  cTrader OPEN: %s %s → broker pos #%d @ %.5f",
+            yf_symbol, direction, result.broker_position_id, result.fill_price,
+        )
+    elif not result.success:
+        log.warning("  cTrader OPEN FAILED: %s — %s", yf_symbol, result.error)
+
+
+def _sync_broker_closes(
+    store: StatsStore,
+    executor,
+    killswitch,
+    positions_before: dict,
+    prices: dict[str, float],
+    settings: Settings,
+) -> None:
+    """Закрыть реальные позиции, если бот закрыл виртуальные."""
+    from fx_pro_bot.trading.symbols import lots_to_volume
+
+    current_open = {p.id for p in store.get_open_positions()}
+    closed_ids = set(positions_before.keys()) - current_open
+
+    for pid in closed_ids:
+        pos = positions_before.get(pid)
+        if not pos or pos.broker_position_id == 0:
+            continue
+
+        volume = lots_to_volume(settings.lot_size)
+        result = executor.close_position(pos.broker_position_id, volume)
+
+        if result.success:
+            pnl = pos.profit_pips * pip_value_usd(pos.instrument, settings.lot_size)
+            killswitch.record_trade_close(pnl)
+            log.info(
+                "  cTrader CLOSE: broker pos #%d (%s), P&L $%.2f",
+                pos.broker_position_id, pos.instrument, pnl,
+            )
+        else:
+            log.error(
+                "  cTrader CLOSE FAILED: broker pos #%d — %s",
+                pos.broker_position_id, result.error,
+            )
+
+    if killswitch.is_tripped:
+        log.critical("KILL SWITCH: аварийное закрытие ВСЕХ позиций!")
+        closed = executor.close_all_positions()
+        log.critical("KILL SWITCH: закрыто %d позиций у брокера", closed)
 
 
 def _log_ctrader_top(client: CTraderCopyClient) -> None:
