@@ -63,6 +63,7 @@ class PositionRow:
     exit_reason: str
     closed_at: str | None
     broker_position_id: int = 0
+    estimated_cost_pips: float = 0.0
 
 
 @dataclass(slots=True)
@@ -188,6 +189,7 @@ class StatsStore:
             )
             self._migrate_add_source(conn)
             self._migrate_add_broker_position_id(conn)
+            self._migrate_add_estimated_cost_pips(conn)
             conn.commit()
 
     def _migrate_add_source(self, conn: sqlite3.Connection) -> None:
@@ -206,6 +208,15 @@ class StatsStore:
         if "broker_position_id" not in columns:
             conn.execute(
                 "ALTER TABLE positions ADD COLUMN broker_position_id INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def _migrate_add_estimated_cost_pips(self, conn: sqlite3.Connection) -> None:
+        """Добавить estimated_cost_pips в positions (модель реалистичных издержек)."""
+        cur = conn.execute("PRAGMA table_info(positions)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "estimated_cost_pips" not in columns:
+            conn.execute(
+                "ALTER TABLE positions ADD COLUMN estimated_cost_pips REAL NOT NULL DEFAULT 0"
             )
 
     # ── Suggestions ──────────────────────────────────────────────
@@ -453,6 +464,14 @@ class StatsStore:
             conn.commit()
         return pid
 
+    def set_estimated_cost(self, position_id: str, cost_pips: float) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE positions SET estimated_cost_pips=? WHERE id=?",
+                (cost_pips, position_id),
+            )
+            conn.commit()
+
     def set_broker_position_id(self, position_id: str, broker_id: int) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -542,7 +561,8 @@ class StatsStore:
                     SUM(CASE WHEN status='closed' AND profit_pips > 0 THEN 1 ELSE 0 END) AS wins,
                     SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) AS closed_cnt,
                     ROUND(SUM(profit_pips), 2) AS total_pips,
-                    ROUND(AVG(CASE WHEN status='closed' THEN profit_pips END), 2) AS avg_pips
+                    ROUND(AVG(CASE WHEN status='closed' THEN profit_pips END), 2) AS avg_pips,
+                    ROUND(SUM(CASE WHEN status='closed' THEN estimated_cost_pips ELSE 0 END), 2) AS total_cost_pips
                 FROM positions GROUP BY strategy
                 """
             ).fetchall()
@@ -550,6 +570,8 @@ class StatsStore:
         for r in rows:
             closed = int(r["closed_cnt"]) if r["closed_cnt"] else 0
             wins = int(r["wins"]) if r["wins"] else 0
+            total_pips = float(r["total_pips"]) if r["total_pips"] is not None else 0.0
+            total_cost = float(r["total_cost_pips"]) if r["total_cost_pips"] is not None else 0.0
             out.append({
                 "strategy": str(r["strategy"]),
                 "total": int(r["total"]),
@@ -557,8 +579,10 @@ class StatsStore:
                 "closed": closed,
                 "wins": wins,
                 "win_rate": round(wins / closed, 4) if closed else 0.0,
-                "total_pips": float(r["total_pips"]) if r["total_pips"] is not None else 0.0,
+                "total_pips": total_pips,
                 "avg_pips": float(r["avg_pips"]) if r["avg_pips"] is not None else 0.0,
+                "total_cost_pips": total_cost,
+                "net_pips": round(total_pips - total_cost, 2),
             })
         return out
 
@@ -785,6 +809,7 @@ def _row_to_position(r: sqlite3.Row) -> PositionRow:
         exit_reason=r["exit_reason"] or "",
         closed_at=r["closed_at"],
         broker_position_id=int(r["broker_position_id"]) if "broker_position_id" in r.keys() else 0,
+        estimated_cost_pips=float(r["estimated_cost_pips"]) if "estimated_cost_pips" in r.keys() else 0.0,
     )
 
 

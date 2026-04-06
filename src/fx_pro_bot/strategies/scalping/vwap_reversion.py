@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema, _rsi
 from fx_pro_bot.config.settings import display_name, pip_size
 from fx_pro_bot.market_data.models import Bar
+from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.strategies.scalping.indicators import ema_slope, vwap
 
@@ -131,7 +132,7 @@ class VwapReversionStrategy:
             else:
                 sl = price + SL_ATR_MULT * sig.atr
 
-            self._store.open_position(
+            pid = self._store.open_position(
                 strategy="vwap_reversion",
                 source="vwap_deviation",
                 instrument=sig.instrument,
@@ -141,6 +142,9 @@ class VwapReversionStrategy:
             )
 
             ps = pip_size(sig.instrument)
+            cost = estimate_entry_cost(sig.instrument, "vwap_deviation", sig.atr, ps)
+            self._store.set_estimated_cost(pid, cost.round_trip_pips)
+
             log.info(
                 "  VWAP OPEN: %s %s @ %.5f (VWAP=%.5f, dev=%.1f ATR, RSI=%.0f, SL=%.5f)",
                 display_name(sig.instrument),

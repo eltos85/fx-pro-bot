@@ -16,6 +16,7 @@ from datetime import datetime, time, timezone
 from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema
 from fx_pro_bot.config.settings import display_name, pip_size
 from fx_pro_bot.market_data.models import Bar
+from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.strategies.scalping.indicators import avg_volume, ema_slope, session_range
 
@@ -120,7 +121,7 @@ class SessionOrbStrategy:
             else:
                 sl = price + SL_ATR_MULT * sig.atr
 
-            self._store.open_position(
+            pid = self._store.open_position(
                 strategy="session_orb",
                 source=sig.source,
                 instrument=sig.instrument,
@@ -128,6 +129,10 @@ class SessionOrbStrategy:
                 entry_price=price,
                 stop_loss_price=sl,
             )
+
+            ps = pip_size(sig.instrument)
+            cost = estimate_entry_cost(sig.instrument, sig.source, sig.atr, ps)
+            self._store.set_estimated_cost(pid, cost.round_trip_pips)
 
             log.info(
                 "  ORB OPEN: %s %s @ %.5f (%s, box=[%.5f..%.5f], SL=%.5f)",

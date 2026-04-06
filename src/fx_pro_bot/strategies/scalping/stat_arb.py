@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
 from fx_pro_bot.config.settings import display_name, pip_size
 from fx_pro_bot.market_data.models import Bar
+from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.strategies.scalping.indicators import (
     ols_hedge_ratio,
@@ -149,7 +150,7 @@ class StatArbStrategy:
                 else price_b + SL_ATR_MULT * sig.atr_b
             )
 
-            self._store.open_position(
+            pid_a = self._store.open_position(
                 strategy="stat_arb",
                 source=pair_tag,
                 instrument=sig.symbol_a,
@@ -157,7 +158,11 @@ class StatArbStrategy:
                 entry_price=price_a,
                 stop_loss_price=sl_a,
             )
-            self._store.open_position(
+            ps_a = pip_size(sig.symbol_a)
+            cost_a = estimate_entry_cost(sig.symbol_a, "stat_arb", sig.atr_a, ps_a)
+            self._store.set_estimated_cost(pid_a, cost_a.round_trip_pips)
+
+            pid_b = self._store.open_position(
                 strategy="stat_arb",
                 source=pair_tag,
                 instrument=sig.symbol_b,
@@ -165,6 +170,9 @@ class StatArbStrategy:
                 entry_price=price_b,
                 stop_loss_price=sl_b,
             )
+            ps_b = pip_size(sig.symbol_b)
+            cost_b = estimate_entry_cost(sig.symbol_b, "stat_arb", sig.atr_b, ps_b)
+            self._store.set_estimated_cost(pid_b, cost_b.round_trip_pips)
 
             log.info(
                 "  STAT-ARB OPEN: %s %s + %s %s (z=%.2f, β=%.4f, pair=%s)",

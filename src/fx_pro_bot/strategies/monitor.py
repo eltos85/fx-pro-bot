@@ -12,6 +12,7 @@ from fx_pro_bot.strategies.exits import update_paper_positions
 log = logging.getLogger(__name__)
 
 LEADERS_HARD_STOP_HOURS = 168.0
+
 OUTSIDERS_TIME_STOPS = [
     (1.0, -90.0),
     (2.0, -60.0),
@@ -21,14 +22,26 @@ OUTSIDERS_TIME_STOPS = [
 OUTSIDERS_HARD_STOP_HOURS = 24.0
 OUTSIDERS_HARD_STOP_MIN_PROFIT = 50.0
 OUTSIDERS_AGGRESSIVE_TP = 30.0
+
+OUTSIDERS_CONFIRMED_TIME_STOPS = [
+    (2.0, -60.0),
+    (4.0, -40.0),
+    (8.0, -20.0),
+    (16.0, -10.0),
+]
+OUTSIDERS_CONFIRMED_HARD_STOP_HOURS = 36.0
+OUTSIDERS_CONFIRMED_HARD_STOP_MIN_PROFIT = 40.0
+OUTSIDERS_CONFIRMED_AGGRESSIVE_TP = 30.0
+
 DEAD_ATR_MULT = 1.5
 
 
 class PositionMonitor:
     """Мониторинг всех открытых позиций каждый цикл."""
 
-    def __init__(self, store: StatsStore) -> None:
+    def __init__(self, store: StatsStore, *, outsiders_mode: str = "classic") -> None:
         self._store = store
+        self._outsiders_mode = outsiders_mode
 
     def run(self, prices: dict[str, float], atrs: dict[str, float]) -> dict[str, int]:
         """Обновить все позиции, проверить стопы. Возвращает статистику действий."""
@@ -107,15 +120,22 @@ class PositionMonitor:
         age_hours = self._position_age_hours(pos)
 
         if pos.strategy == "outsiders":
-            if pips >= OUTSIDERS_AGGRESSIVE_TP:
-                return "aggressive_tp"
-
-            for hours_limit, pips_limit in OUTSIDERS_TIME_STOPS:
-                if age_hours >= hours_limit and pips <= pips_limit:
-                    return f"time_stop_{hours_limit:.0f}h"
-
-            if age_hours >= OUTSIDERS_HARD_STOP_HOURS and pips < OUTSIDERS_HARD_STOP_MIN_PROFIT:
-                return "hard_stop_24h"
+            if self._outsiders_mode == "confirmed":
+                if pips >= OUTSIDERS_CONFIRMED_AGGRESSIVE_TP:
+                    return "aggressive_tp"
+                for hours_limit, pips_limit in OUTSIDERS_CONFIRMED_TIME_STOPS:
+                    if age_hours >= hours_limit and pips <= pips_limit:
+                        return f"time_stop_{hours_limit:.0f}h"
+                if age_hours >= OUTSIDERS_CONFIRMED_HARD_STOP_HOURS and pips < OUTSIDERS_CONFIRMED_HARD_STOP_MIN_PROFIT:
+                    return "hard_stop_36h"
+            else:
+                if pips >= OUTSIDERS_AGGRESSIVE_TP:
+                    return "aggressive_tp"
+                for hours_limit, pips_limit in OUTSIDERS_TIME_STOPS:
+                    if age_hours >= hours_limit and pips <= pips_limit:
+                        return f"time_stop_{hours_limit:.0f}h"
+                if age_hours >= OUTSIDERS_HARD_STOP_HOURS and pips < OUTSIDERS_HARD_STOP_MIN_PROFIT:
+                    return "hard_stop_24h"
 
         if pos.strategy == "leaders" and age_hours >= LEADERS_HARD_STOP_HOURS:
             return "leaders_time_7d"

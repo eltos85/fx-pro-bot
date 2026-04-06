@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
 from fx_pro_bot.config.settings import display_name, pip_size
 from fx_pro_bot.market_data.models import Bar
+from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.whales.cot import CotSignal
 from fx_pro_bot.whales.sentiment import SentimentSignal
@@ -129,7 +130,7 @@ class LeadersStrategy:
 
             trail = self._trail_atr * atr
 
-            self._store.open_position(
+            pid = self._store.open_position(
                 strategy="leaders",
                 source=",".join(sig.sources),
                 instrument=sig.instrument,
@@ -138,6 +139,9 @@ class LeadersStrategy:
                 stop_loss_price=sl,
                 trail_price=trail,
             )
+
+            cost = estimate_entry_cost(sig.instrument, ",".join(sig.sources), atr, ps)
+            self._store.set_estimated_cost(pid, cost.round_trip_pips)
 
             log.info(
                 "  LEADERS OPEN: %s %s @ %.5f (SL=%.5f, trail=%.1f пипсов, src=%s)",

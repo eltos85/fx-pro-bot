@@ -89,14 +89,17 @@ def _log_strategy_stats(store: StatsStore, settings: Settings) -> None:
     log.info("── Позиции по стратегиям ──")
     for row in by_strat:
         pv = pip_value_usd("EURUSD=X", settings.lot_size)
-        net_usd = float(row["total_pips"]) * pv
+        gross_pips = float(row["total_pips"])
+        cost_pips = float(row["total_cost_pips"])
+        net_pips = float(row["net_pips"])
+        net_usd = net_pips * pv
         log.info(
-            "  %s: %d всего (%d открыто, %d закрыто), win-rate %.0f%%, "
-            "%+.1f пипсов, ~$%+.2f",
+            "  %s: %d всего (%d откр, %d закр), win-rate %.0f%%, "
+            "%+.1f gross, -%0.1f издержки, %+.1f net пипсов, ~$%+.2f",
             str(row["strategy"]).capitalize(),
             row["total"], row["open"], row["closed"],
             float(row["win_rate"]) * 100,
-            row["total_pips"], net_usd,
+            gross_pips, cost_pips, net_pips, net_usd,
         )
 
     by_exit = store.paper_summary_by_exit_strategy()
@@ -228,8 +231,9 @@ def run_advisor() -> None:
     outsiders_strat = OutsidersStrategy(
         store,
         max_positions=settings.outsiders_max_positions,
+        mode=settings.outsiders_mode,
     )
-    monitor = PositionMonitor(store)
+    monitor = PositionMonitor(store, outsiders_mode=settings.outsiders_mode)
     shadow = ShadowTracker(store)
 
     vwap_strat = (
@@ -251,8 +255,9 @@ def run_advisor() -> None:
 
     scalp_names = [n for n, s in [("VWAP", vwap_strat), ("StatArb", statarb_strat), ("ORB", orb_strat)] if s]
     log.info(
-        "Запуск v0.7: ансамбль + Leaders + Outsiders + Shadow + Scalping(%s)%s, "
+        "Запуск v0.8: ансамбль + Leaders + Outsiders(%s) + Shadow + Scalping(%s)%s, "
         "%d инструментов, цикл %d сек",
+        settings.outsiders_mode.upper(),
         "+".join(scalp_names) if scalp_names else "OFF",
         " + cTrader LIVE" if executor else "",
         len(settings.scan_symbols),
@@ -379,6 +384,7 @@ def _run_cycle(
             outsider_sigs = detect_extreme_setups(
                 settings.scan_symbols, bars_map, events,
                 now=results[0].bars[-1].ts if results and results[0].bars else None,
+                mode=settings.outsiders_mode,
             )
             if outsider_sigs:
                 opened = outsiders_strat.process_signals(outsider_sigs, prices)

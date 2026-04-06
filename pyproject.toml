@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fx-pro-bot"
-version = "0.7.0"
-description = "Сканер-советник: ансамбль + Leaders + Outsiders + Shadow + Scalping + cTrader auto-trading"
+version = "0.8.0"
+description = "Сканер-советник: ансамбль + Leaders + Outsiders(confirmed) + Shadow + Scalping + cTrader auto-trading"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
