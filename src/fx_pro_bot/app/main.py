@@ -508,9 +508,11 @@ def _sync_unlinked_positions(
         log.info("cTrader sync: все позиции уже привязаны к брокеру")
         return
 
-    log.info("cTrader sync: %d позиций без broker_id, открываю ордера...", len(unlinked))
+    available = [p for p in unlinked
+                 if executor._symbols.resolve_yfinance(p.instrument) is not None]
+    log.info("cTrader sync: %d без broker_id, %d доступны на бирже", len(unlinked), len(available))
     opened = 0
-    for pos in unlinked:
+    for pos in available:
         try:
             account = executor.get_account_info()
             open_count = len(executor.get_open_positions())
@@ -540,7 +542,7 @@ def _sync_unlinked_positions(
         except Exception:
             log.exception("  cTrader SYNC error: %s", pos.instrument)
 
-    log.info("cTrader sync: открыто %d/%d ордеров", opened, len(unlinked))
+    log.info("cTrader sync: открыто %d/%d ордеров", opened, len(available))
 
 
 def _open_broker_for_new(
