@@ -21,7 +21,7 @@ OUTSIDERS_TIME_STOPS = [
 ]
 OUTSIDERS_HARD_STOP_HOURS = 24.0
 OUTSIDERS_HARD_STOP_MIN_PROFIT = 50.0
-OUTSIDERS_AGGRESSIVE_TP = 30.0
+OUTSIDERS_AGGRESSIVE_TP = 10.0
 
 OUTSIDERS_CONFIRMED_TIME_STOPS = [
     (2.0, -60.0),
@@ -31,9 +31,12 @@ OUTSIDERS_CONFIRMED_TIME_STOPS = [
 ]
 OUTSIDERS_CONFIRMED_HARD_STOP_HOURS = 36.0
 OUTSIDERS_CONFIRMED_HARD_STOP_MIN_PROFIT = 40.0
-OUTSIDERS_CONFIRMED_AGGRESSIVE_TP = 30.0
+OUTSIDERS_CONFIRMED_AGGRESSIVE_TP = 10.0
 
 SCALPING_HARD_STOP_HOURS = 12.0
+SCALPING_TP_PIPS = 8.0
+SCALPING_TRAIL_TRIGGER_PIPS = 5.0
+SCALPING_TRAIL_DISTANCE_PIPS = 3.0
 
 GLOBAL_HARD_STOP_HOURS = 72.0
 
@@ -125,17 +128,17 @@ class PositionMonitor:
         age_hours = self._position_age_hours(pos)
 
         if pos.strategy == "outsiders":
+            if pips >= OUTSIDERS_CONFIRMED_AGGRESSIVE_TP:
+                return "aggressive_tp"
+            if peak_pips >= 5.0 and (peak_pips - pips) >= 3.0:
+                return "outsiders_trail"
             if self._outsiders_mode == "confirmed":
-                if pips >= OUTSIDERS_CONFIRMED_AGGRESSIVE_TP:
-                    return "aggressive_tp"
                 for hours_limit, pips_limit in OUTSIDERS_CONFIRMED_TIME_STOPS:
                     if age_hours >= hours_limit and pips <= pips_limit:
                         return f"time_stop_{hours_limit:.0f}h"
                 if age_hours >= OUTSIDERS_CONFIRMED_HARD_STOP_HOURS and pips < OUTSIDERS_CONFIRMED_HARD_STOP_MIN_PROFIT:
                     return "hard_stop_36h"
             else:
-                if pips >= OUTSIDERS_AGGRESSIVE_TP:
-                    return "aggressive_tp"
                 for hours_limit, pips_limit in OUTSIDERS_TIME_STOPS:
                     if age_hours >= hours_limit and pips <= pips_limit:
                         return f"time_stop_{hours_limit:.0f}h"
@@ -146,8 +149,13 @@ class PositionMonitor:
             return "leaders_time_7d"
 
         scalping = ("vwap_reversion", "stat_arb", "session_orb")
-        if pos.strategy in scalping and age_hours >= SCALPING_HARD_STOP_HOURS:
-            return "scalp_time_12h"
+        if pos.strategy in scalping:
+            if pips >= SCALPING_TP_PIPS:
+                return "scalp_tp"
+            if peak_pips >= SCALPING_TRAIL_TRIGGER_PIPS and (peak_pips - pips) >= SCALPING_TRAIL_DISTANCE_PIPS:
+                return "scalp_trail"
+            if age_hours >= SCALPING_HARD_STOP_HOURS:
+                return "scalp_time_12h"
 
         if age_hours >= GLOBAL_HARD_STOP_HOURS:
             return "global_time_72h"
