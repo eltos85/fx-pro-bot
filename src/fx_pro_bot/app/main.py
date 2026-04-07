@@ -265,6 +265,7 @@ def run_advisor() -> None:
     )
 
     if executor and killswitch:
+        _reconcile_broker_positions(store, executor, settings)
         _sync_unlinked_positions(store, executor, killswitch, settings)
 
     while True:
@@ -494,6 +495,54 @@ def _run_cycle(
             vacuum_if_needed(settings.stats_db_path, threshold_mb=100.0)
         except Exception:
             log.exception("Ошибка cleanup")
+
+
+def _reconcile_broker_positions(
+    store: StatsStore,
+    executor,
+    settings: Settings,
+) -> None:
+    """Сверка DB с реальными cTrader-позициями при старте.
+
+    1. DB open + broker_id → cTrader closed? → закрыть в DB.
+    2. cTrader open → нет в DB? → orphan, закрыть на брокере.
+    """
+    from fx_pro_bot.trading.symbols import lots_to_volume
+
+    broker_positions = {bp.positionId: bp for bp in executor.get_open_positions()}
+    db_with_broker = [
+        p for p in store.get_open_positions() if p.broker_position_id
+    ]
+
+    db_broker_ids = set()
+    closed_in_broker = 0
+    for pos in db_with_broker:
+        db_broker_ids.add(pos.broker_position_id)
+        if pos.broker_position_id not in broker_positions:
+            store.close_position(pos.id, "broker_closed")
+            closed_in_broker += 1
+            log.info(
+                "  RECONCILE: %s %s broker #%d закрыта на стороне брокера",
+                pos.instrument, pos.direction, pos.broker_position_id,
+            )
+
+    orphans = set(broker_positions.keys()) - db_broker_ids
+    closed_orphans = 0
+    for bp_id in orphans:
+        bp = broker_positions[bp_id]
+        try:
+            executor.close_position(bp_id, bp.volume)
+            closed_orphans += 1
+            log.warning("  RECONCILE: orphan broker #%d закрыт", bp_id)
+        except Exception as exc:
+            log.error("  RECONCILE: не удалось закрыть orphan #%d: %s", bp_id, exc)
+
+    log.info(
+        "cTrader reconcile: %d в DB, %d на брокере, "
+        "закрыто в DB=%d, orphans=%d",
+        len(db_with_broker), len(broker_positions),
+        closed_in_broker, closed_orphans,
+    )
 
 
 def _sync_unlinked_positions(

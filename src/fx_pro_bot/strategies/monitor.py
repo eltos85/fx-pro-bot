@@ -33,6 +33,10 @@ OUTSIDERS_CONFIRMED_HARD_STOP_HOURS = 36.0
 OUTSIDERS_CONFIRMED_HARD_STOP_MIN_PROFIT = 40.0
 OUTSIDERS_CONFIRMED_AGGRESSIVE_TP = 30.0
 
+SCALPING_HARD_STOP_HOURS = 12.0
+
+GLOBAL_HARD_STOP_HOURS = 72.0
+
 DEAD_ATR_MULT = 1.5
 
 
@@ -139,6 +143,13 @@ class PositionMonitor:
 
         if pos.strategy == "leaders" and age_hours >= LEADERS_HARD_STOP_HOURS:
             return "leaders_time_7d"
+
+        scalping = ("vwap_reversion", "stat_arb", "session_orb")
+        if pos.strategy in scalping and age_hours >= SCALPING_HARD_STOP_HOURS:
+            return "scalp_time_12h"
+
+        if age_hours >= GLOBAL_HARD_STOP_HOURS:
+            return "global_time_72h"
 
         atr_pips = atr / ps if ps > 0 else 0
         if atr_pips > 0 and pips < -DEAD_ATR_MULT * atr_pips:
