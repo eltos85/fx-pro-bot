@@ -393,8 +393,10 @@ def _run_cycle(
                 mode=settings.outsiders_mode,
             )
             if outsider_sigs:
+                before_ids = {p.id for p in store.get_open_positions()}
                 opened = outsiders_strat.process_signals(outsider_sigs, prices)
-                log.info("  Outsiders: %d extreme-сигналов, %d открыто (paper only)", len(outsider_sigs), opened)
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
+                log.info("  Outsiders: %d extreme-сигналов, %d открыто", len(outsider_sigs), opened)
             else:
                 log.info("  Outsiders: нет extreme-ситуаций")
         except Exception:
