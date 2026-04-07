@@ -365,7 +365,10 @@ class CTraderClient:
 
     def _on_message(self, client: Any, message: Any) -> None:
         from ctrader_open_api import Protobuf
-        from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
+        from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import (
+            ProtoErrorRes,
+            ProtoHeartbeatEvent,
+        )
         from ctrader_open_api.messages.OpenApiMessages_pb2 import (
             ProtoOAErrorRes,
             ProtoOAOrderErrorEvent,
@@ -377,13 +380,16 @@ class CTraderClient:
         extracted = Protobuf.extract(message)
         payload_type = message.payloadType
 
-        error_type = ProtoOAErrorRes().payloadType
-        order_error_type = ProtoOAOrderErrorEvent().payloadType
+        error_types = (
+            ProtoErrorRes().payloadType,
+            ProtoOAErrorRes().payloadType,
+            ProtoOAOrderErrorEvent().payloadType,
+        )
 
-        if payload_type in (error_type, order_error_type):
+        if payload_type in error_types:
             err_code = getattr(extracted, "errorCode", "?")
             err_desc = getattr(extracted, "description", "")
-            log.error("cTrader API error: %s — %s", err_code, err_desc)
+            log.error("cTrader error (type=%d): %s — %s", payload_type, err_code, err_desc)
             with self._lock:
                 for waiters in self._waiters.values():
                     if waiters:
