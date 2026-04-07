@@ -81,70 +81,43 @@ def _log_stats(store: StatsStore, horizons: tuple[int, ...], settings: Settings)
 
 
 def _log_strategy_stats(store: StatsStore, settings: Settings) -> None:
-    """Статистика по Leaders / Outsiders позициям."""
-    by_strat = store.position_summary_by_strategy()
-    if not by_strat:
+    """Статистика по стратегиям с P&L в долларах."""
+    usd_stats = store.pnl_usd_by_strategy(settings.lot_size)
+    if not usd_stats:
         return
 
-    log.info("── Позиции по стратегиям ──")
-    for row in by_strat:
-        pv = pip_value_usd("EURUSD=X", settings.lot_size)
-        gross_pips = float(row["total_pips"])
-        cost_pips = float(row["total_cost_pips"])
-        net_pips = float(row["net_pips"])
-        net_usd = net_pips * pv
+    log.info("── P&L по стратегиям (cTrader) ──")
+    total_pnl = 0.0
+    total_realized = 0.0
+    for strat, s in sorted(usd_stats.items(), key=lambda x: -x[1]["pnl_usd"]):
+        wr = (s["wins"] / s["closed"] * 100) if s["closed"] else 0
+        total_pnl += s["pnl_usd"]
+        total_realized += s["realized_usd"]
         log.info(
-            "  %s: %d всего (%d откр, %d закр), win-rate %.0f%%, "
-            "%+.1f gross, -%0.1f издержки, %+.1f net пипсов, ~$%+.2f",
-            str(row["strategy"]).capitalize(),
-            row["total"], row["open"], row["closed"],
-            float(row["win_rate"]) * 100,
-            gross_pips, cost_pips, net_pips, net_usd,
+            "  %s: %d сделок (%d закр), wr=%.0f%%, реализовано $%+.2f, всего $%+.2f",
+            strat, s["total"], s["closed"], wr, s["realized_usd"], s["pnl_usd"],
         )
+    log.info(
+        "  ИТОГО: реализовано $%+.2f, с открытыми $%+.2f",
+        total_realized, total_pnl,
+    )
 
     by_exit = store.paper_summary_by_exit_strategy()
     if by_exit:
-        log.info("── Paper exit-стратегии ──")
+        log.info("── Paper exit-стратегии (бумага) ──")
         for row in by_exit:
-            pv = pip_value_usd("EURUSD=X", settings.lot_size)
-            net_usd = float(row["total_pips"]) * pv
             log.info(
-                "  %s: %d всего, %d закрыто, win-rate %.0f%%, "
-                "%+.1f пипсов, ~$%+.2f",
+                "  %s: %d всего, %d закрыто, win-rate %.0f%%, %+.1f pips",
                 row["exit_strategy"],
                 row["total"], row["closed"],
                 float(row["win_rate"]) * 100,
-                row["total_pips"], net_usd,
+                row["total_pips"],
             )
 
 
 def _log_scalping_stats(store: StatsStore, settings: Settings) -> None:
-    """Статистика по скальпинг-стратегиям (VWAP / Stat-Arb / ORB)."""
-    strats = ("vwap_reversion", "stat_arb", "session_orb")
-    any_data = False
-    for name in strats:
-        positions = store.get_open_positions(strategy=name)
-        total_open = len(positions)
-        all_positions = store.position_summary_by_strategy()
-        row = next((r for r in all_positions if r["strategy"] == name), None)
-        if row is None and total_open == 0:
-            continue
-        if not any_data:
-            log.info("── Скальпинг-стратегии ──")
-            any_data = True
-        if row:
-            pv = pip_value_usd("EURUSD=X", settings.lot_size)
-            net_usd = float(row["total_pips"]) * pv
-            log.info(
-                "  %s: %d всего (%d откр, %d закр), win-rate %.0f%%, "
-                "%+.1f пипсов, ~$%+.2f",
-                name.replace("_", "-"),
-                row["total"], row["open"], row["closed"],
-                float(row["win_rate"]) * 100,
-                row["total_pips"], net_usd,
-            )
-        else:
-            log.info("  %s: %d открыто, нет закрытых", name.replace("_", "-"), total_open)
+    """Статистика по скальпинг-стратегиям — объединена с основной _log_strategy_stats."""
+    pass
 
 
 def _init_trading(settings: Settings, store: StatsStore):
@@ -233,7 +206,7 @@ def run_advisor() -> None:
         max_positions=settings.outsiders_max_positions,
         mode=settings.outsiders_mode,
     )
-    monitor = PositionMonitor(store, outsiders_mode=settings.outsiders_mode)
+    monitor = PositionMonitor(store, outsiders_mode=settings.outsiders_mode, lot_size=settings.lot_size)
     shadow = ShadowTracker(store)
 
     vwap_strat = (

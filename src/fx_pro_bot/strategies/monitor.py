@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from fx_pro_bot.config.settings import display_name, pip_size
+from fx_pro_bot.config.settings import display_name, pip_size, pip_value_usd
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
 
@@ -43,9 +43,10 @@ DEAD_ATR_MULT = 1.5
 class PositionMonitor:
     """Мониторинг всех открытых позиций каждый цикл."""
 
-    def __init__(self, store: StatsStore, *, outsiders_mode: str = "classic") -> None:
+    def __init__(self, store: StatsStore, *, outsiders_mode: str = "classic", lot_size: float = 0.01) -> None:
         self._store = store
         self._outsiders_mode = outsiders_mode
+        self._lot_size = lot_size
 
     def run(self, prices: dict[str, float], atrs: dict[str, float]) -> dict[str, int]:
         """Обновить все позиции, проверить стопы. Возвращает статистику действий."""
@@ -93,10 +94,12 @@ class PositionMonitor:
                     )
                 )
                 stats[category] = stats.get(category, 0) + 1
+                pv = pip_value_usd(pos.instrument, self._lot_size)
+                pnl_usd = pips * pv
                 log.info(
-                    "  CLOSE %s: %s %s → %+.1f пипсов (%s)",
+                    "  CLOSE %s: %s %s → $%+.2f / %+.1f pips (%s)",
                     pos.strategy.upper(), display_name(pos.instrument),
-                    pos.direction.upper(), pips, exit_reason,
+                    pos.direction.upper(), pnl_usd, pips, exit_reason,
                 )
             else:
                 update_paper_positions(

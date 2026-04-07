@@ -586,6 +586,33 @@ class StatsStore:
             })
         return out
 
+    def pnl_usd_by_strategy(self, lot_size: float = 0.01) -> dict[str, dict]:
+        """P&L в долларах по стратегиям, с учётом pip_value каждого инструмента."""
+        from fx_pro_bot.config.settings import pip_value_usd
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT strategy, instrument, profit_pips, status
+                   FROM positions WHERE broker_position_id > 0"""
+            ).fetchall()
+
+        out: dict[str, dict] = {}
+        for r in rows:
+            strat = str(r["strategy"])
+            pv = pip_value_usd(str(r["instrument"]), lot_size)
+            pnl = float(r["profit_pips"]) * pv if r["profit_pips"] else 0.0
+            if strat not in out:
+                out[strat] = {"total": 0, "closed": 0, "wins": 0,
+                              "pnl_usd": 0.0, "realized_usd": 0.0}
+            out[strat]["total"] += 1
+            out[strat]["pnl_usd"] += pnl
+            if r["status"] == "closed":
+                out[strat]["closed"] += 1
+                out[strat]["realized_usd"] += pnl
+                if float(r["profit_pips"] or 0) > 0:
+                    out[strat]["wins"] += 1
+        return out
+
     # ── Paper Positions ──────────────────────────────────────
 
     def open_paper_position(
