@@ -108,14 +108,26 @@ class CTraderClient:
             raise TimeoutError("cTrader: таймаут подключения")
         log.info("cTrader: подключено к %s", host)
 
-        app_auth = ProtoOAApplicationAuthReq()
-        app_auth.clientId = self._client_id
-        app_auth.clientSecret = self._client_secret
-        self._send_and_wait(
-            app_auth,
-            ProtoOAApplicationAuthRes().payloadType,
-            timeout=timeout,
-        )
+        import time as _time
+        _time.sleep(3)
+
+        for attempt in range(3):
+            try:
+                app_auth = ProtoOAApplicationAuthReq()
+                app_auth.clientId = self._client_id
+                app_auth.clientSecret = self._client_secret
+                self._send_and_wait(
+                    app_auth,
+                    ProtoOAApplicationAuthRes().payloadType,
+                    timeout=timeout,
+                )
+                break
+            except (RuntimeError, TimeoutError) as exc:
+                if attempt < 2:
+                    log.warning("cTrader: app auth попытка %d/3 не удалась (%s), повтор...", attempt + 1, exc)
+                    _time.sleep(3)
+                else:
+                    raise
         log.info("cTrader: приложение авторизовано")
 
         account_id = self._account_id
