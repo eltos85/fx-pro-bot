@@ -20,7 +20,6 @@ YFINANCE_TO_CTRADER: dict[str, str] = {
     "GBPJPY=X": "GBPJPY",
     # Spot commodities (exact match)
     "GC=F": "XAUUSD",
-    "SI=F": "XAGUSD",
     "HG=F": "COPPER",
     "PL=F": "XPTUSD",
 }

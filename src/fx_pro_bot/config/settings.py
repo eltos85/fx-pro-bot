@@ -18,7 +18,6 @@ DEFAULT_SYMBOLS = (
     "GBPJPY=X",
     # Commodities
     "GC=F",
-    "SI=F",
     "CL=F",
     "BZ=F",
     "NG=F",
