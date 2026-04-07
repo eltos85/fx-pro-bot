@@ -18,10 +18,6 @@ YFINANCE_TO_CTRADER: dict[str, str] = {
     "USDCHF=X": "USDCHF",
     "EURJPY=X": "EURJPY",
     "GBPJPY=X": "GBPJPY",
-    # Spot commodities (exact match)
-    "GC=F": "XAUUSD",
-    "HG=F": "COPPER",
-    "PL=F": "XPTUSD",
 }
 
 _YFINANCE_PREFIX_MAP: dict[str, str] = {

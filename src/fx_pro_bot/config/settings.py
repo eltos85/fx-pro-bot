@@ -16,13 +16,10 @@ DEFAULT_SYMBOLS = (
     "USDCHF=X",
     "EURJPY=X",
     "GBPJPY=X",
-    # Commodities
-    "GC=F",
+    # Commodities (без металлов — спреды съедают прибыль на малых объёмах)
     "CL=F",
     "BZ=F",
     "NG=F",
-    "HG=F",
-    "PL=F",
     # Indices
     "ES=F",
     "NQ=F",
