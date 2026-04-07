@@ -75,12 +75,25 @@ class TradeExecutor:
             )
         self._symbols.populate(infos)
 
+        missing_search = {"OIL", "WTI", "BRENT", "CRUDE", "GAS", "NAT",
+                          "500", "SP5", "SPX", "NDX", "NAS", "TEC",
+                          "BTC", "ETH", "CRYPTO", "COIN"}
+        not_found_ct = set()
+
         for yf, ct in YFINANCE_TO_CTRADER.items():
             sym = self._symbols.get_by_name(ct)
             if sym:
                 log.info("  ✓ %s → %s (id=%d)", yf, ct, sym.symbol_id)
             else:
+                not_found_ct.add(ct)
                 log.warning("  ✗ %s → %s NOT FOUND in cTrader", yf, ct)
+
+        if not_found_ct:
+            all_names = sorted(self._symbols._by_name.keys())
+            matches = [n for n in all_names
+                       if any(q in n.upper() for q in missing_search)]
+            if matches:
+                log.info("  Возможные совпадения: %s", ", ".join(matches[:30]))
 
         return len(infos)
 
