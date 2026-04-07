@@ -78,6 +78,8 @@ class CTraderClient:
             ProtoOAAccountAuthRes,
             ProtoOAApplicationAuthReq,
             ProtoOAApplicationAuthRes,
+            ProtoOAGetAccountListByAccessTokenReq,
+            ProtoOAGetAccountListByAccessTokenRes,
         )
         from twisted.internet import reactor
 
@@ -115,6 +117,35 @@ class CTraderClient:
             timeout=timeout,
         )
         log.info("cTrader: приложение авторизовано")
+
+        account_id = self._account_id
+        acct_list_req = ProtoOAGetAccountListByAccessTokenReq()
+        acct_list_req.accessToken = self._access_token
+        acct_list_res = self._send_and_wait(
+            acct_list_req,
+            ProtoOAGetAccountListByAccessTokenRes().payloadType,
+            timeout=timeout,
+        )
+        accounts = getattr(acct_list_res, "ctidTraderAccount", [])
+        if accounts:
+            is_live = self._host_type == "live"
+            for acct in accounts:
+                log.info(
+                    "cTrader: найден аккаунт ctid=%d, isLive=%s, login=%s",
+                    acct.ctidTraderAccountId, acct.isLive,
+                    getattr(acct, "traderLogin", "?"),
+                )
+                if acct.isLive == is_live:
+                    account_id = acct.ctidTraderAccountId
+                    break
+            else:
+                account_id = accounts[0].ctidTraderAccountId
+            if account_id != self._account_id:
+                log.info(
+                    "cTrader: используем ctidTraderAccountId=%d (настройка была %d)",
+                    account_id, self._account_id,
+                )
+                self._account_id = account_id
 
         acc_auth = ProtoOAAccountAuthReq()
         acc_auth.ctidTraderAccountId = self._account_id
