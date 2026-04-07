@@ -28,6 +28,10 @@ DEFAULT_PAIRS: list[tuple[str, str]] = [
     ("EURUSD=X", "GBPUSD=X"),
     ("AUDUSD=X", "NZDUSD=X"),
     ("USDJPY=X", "USDCAD=X"),
+    ("EURJPY=X", "GBPJPY=X"),
+    ("GC=F", "SI=F"),
+    ("ES=F", "NQ=F"),
+    ("BTC-USD", "ETH-USD"),
 ]
 
 Z_ENTRY = 2.0

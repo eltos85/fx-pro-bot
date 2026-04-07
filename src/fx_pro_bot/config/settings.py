@@ -6,16 +6,32 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SYMBOLS = (
+    # Forex
     "EURUSD=X",
     "GBPUSD=X",
     "USDJPY=X",
     "AUDUSD=X",
     "USDCAD=X",
     "EURGBP=X",
+    "USDCHF=X",
+    "EURJPY=X",
+    "GBPJPY=X",
+    # Commodities
     "GC=F",
     "SI=F",
     "CL=F",
     "BZ=F",
+    "NG=F",
+    "HG=F",
+    "PL=F",
+    # Indices
+    "ES=F",
+    "NQ=F",
+    # Crypto
+    "BTC-USD",
+    "ETH-USD",
+    # Bonds
+    "ZN=F",
 )
 
 SCALPING_EXTRA_SYMBOLS = ("NZDUSD=X",)
@@ -27,11 +43,22 @@ DISPLAY_NAMES: dict[str, str] = {
     "AUDUSD=X": "AUD/USD",
     "USDCAD=X": "USD/CAD",
     "EURGBP=X": "EUR/GBP",
+    "USDCHF=X": "USD/CHF",
+    "EURJPY=X": "EUR/JPY",
+    "GBPJPY=X": "GBP/JPY",
     "NZDUSD=X": "NZD/USD",
     "GC=F": "Золото (XAU)",
     "SI=F": "Серебро (XAG)",
     "CL=F": "Нефть WTI",
     "BZ=F": "Нефть Brent",
+    "NG=F": "Газ (NG)",
+    "HG=F": "Медь (HG)",
+    "PL=F": "Платина (PL)",
+    "ES=F": "S&P 500",
+    "NQ=F": "Nasdaq 100",
+    "BTC-USD": "Bitcoin",
+    "ETH-USD": "Ethereum",
+    "ZN=F": "US 10Y Bond",
 }
 
 PIP_SIZES: dict[str, float] = {
@@ -41,11 +68,22 @@ PIP_SIZES: dict[str, float] = {
     "AUDUSD=X": 0.0001,
     "USDCAD=X": 0.0001,
     "EURGBP=X": 0.0001,
+    "USDCHF=X": 0.0001,
+    "EURJPY=X": 0.01,
+    "GBPJPY=X": 0.01,
     "NZDUSD=X": 0.0001,
     "GC=F": 0.10,
     "SI=F": 0.01,
     "CL=F": 0.01,
     "BZ=F": 0.01,
+    "NG=F": 0.001,
+    "HG=F": 0.0005,
+    "PL=F": 0.10,
+    "ES=F": 0.25,
+    "NQ=F": 0.25,
+    "BTC-USD": 1.0,
+    "ETH-USD": 0.10,
+    "ZN=F": 0.01,
 }
 
 
@@ -56,11 +94,22 @@ PIP_VALUES_USD: dict[str, float] = {
     "AUDUSD=X": 0.10,
     "USDCAD=X": 0.07,
     "EURGBP=X": 0.13,
+    "USDCHF=X": 0.10,
+    "EURJPY=X": 0.07,
+    "GBPJPY=X": 0.07,
     "NZDUSD=X": 0.10,
     "GC=F": 0.10,
     "SI=F": 0.50,
     "CL=F": 0.10,
     "BZ=F": 0.10,
+    "NG=F": 0.10,
+    "HG=F": 0.10,
+    "PL=F": 0.10,
+    "ES=F": 0.125,
+    "NQ=F": 0.05,
+    "BTC-USD": 0.01,
+    "ETH-USD": 0.01,
+    "ZN=F": 0.10,
 }
 
 SPREAD_PIPS: dict[str, float] = {
@@ -70,11 +119,22 @@ SPREAD_PIPS: dict[str, float] = {
     "AUDUSD=X": 1.8,
     "USDCAD=X": 2.2,
     "EURGBP=X": 1.8,
+    "USDCHF=X": 1.8,
+    "EURJPY=X": 2.0,
+    "GBPJPY=X": 2.5,
     "NZDUSD=X": 2.0,
     "GC=F": 3.5,
     "SI=F": 3.5,
     "CL=F": 4.0,
     "BZ=F": 4.0,
+    "NG=F": 5.0,
+    "HG=F": 3.0,
+    "PL=F": 4.0,
+    "ES=F": 2.0,
+    "NQ=F": 3.0,
+    "BTC-USD": 30.0,
+    "ETH-USD": 15.0,
+    "ZN=F": 1.5,
 }
 
 
