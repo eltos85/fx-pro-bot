@@ -599,8 +599,7 @@ class StatsStore:
 
     def pnl_usd_by_strategy(self, lot_size: float = 0.01) -> dict[str, dict]:
         """P&L в долларах по стратегиям, с учётом реального broker_volume."""
-        from fx_pro_bot.config.settings import pip_value_usd
-        from fx_pro_bot.trading.symbols import volume_to_lots
+        from fx_pro_bot.config.settings import pip_value_from_volume, pip_value_usd
 
         with self._connect() as conn:
             rows = conn.execute(
@@ -612,8 +611,10 @@ class StatsStore:
         for r in rows:
             strat = str(r["strategy"])
             bv = int(r["broker_volume"] or 0)
-            lots = volume_to_lots(bv) if bv > 0 else lot_size
-            pv = pip_value_usd(str(r["instrument"]), lots)
+            if bv > 0:
+                pv = pip_value_from_volume(str(r["instrument"]), bv)
+            else:
+                pv = pip_value_usd(str(r["instrument"]), lot_size)
             pnl = float(r["profit_pips"]) * pv if r["profit_pips"] else 0.0
             if strat not in out:
                 out[strat] = {"total": 0, "closed": 0, "wins": 0,

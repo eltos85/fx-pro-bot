@@ -143,6 +143,36 @@ def pip_value_usd(symbol: str, lot_size: float = 0.01) -> float:
     return base * (lot_size / 0.01)
 
 
+_QUOTE_TO_USD: dict[str, float] = {
+    "JPY": 1 / 150.0,
+    "CAD": 1 / 1.37,
+    "CHF": 1 / 0.88,
+    "GBP": 1.27,
+}
+
+_USD_QUOTED = {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAGUSD", "XAUUSD"}
+_COMMODITY_USD = {"GC=F", "SI=F", "CL=F", "BZ=F", "NG=F", "HG=F", "PL=F",
+                  "BTC-USD", "ETH-USD", "ES=F", "NQ=F", "ZN=F"}
+
+
+def pip_value_from_volume(symbol: str, broker_volume: int) -> float:
+    """Pip value в USD по фактическому cTrader volume (units×100)."""
+    units = broker_volume / 100.0
+    ps = pip_size(symbol)
+    raw = units * ps
+
+    sym_upper = symbol.replace("=X", "").replace("=F", "").replace("-", "")
+
+    if symbol in _COMMODITY_USD or any(sym_upper.endswith(q) for q in ("USD",)):
+        return raw
+
+    for ccy, rate in _QUOTE_TO_USD.items():
+        if ccy in sym_upper[3:]:
+            return raw * rate
+
+    return raw
+
+
 def spread_cost_pips(symbol: str) -> float:
     return SPREAD_PIPS.get(symbol, 2.0)
 

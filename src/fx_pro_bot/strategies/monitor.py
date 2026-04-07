@@ -5,9 +5,8 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from fx_pro_bot.config.settings import display_name, pip_size, pip_value_usd
+from fx_pro_bot.config.settings import display_name, pip_size, pip_value_from_volume, pip_value_usd
 from fx_pro_bot.stats.store import PositionRow, StatsStore
-from fx_pro_bot.trading.symbols import volume_to_lots
 from fx_pro_bot.strategies.exits import update_paper_positions
 
 log = logging.getLogger(__name__)
@@ -95,8 +94,10 @@ class PositionMonitor:
                     )
                 )
                 stats[category] = stats.get(category, 0) + 1
-                lots = volume_to_lots(pos.broker_volume) if pos.broker_volume > 0 else self._lot_size
-                pv = pip_value_usd(pos.instrument, lots)
+                if pos.broker_volume > 0:
+                    pv = pip_value_from_volume(pos.instrument, pos.broker_volume)
+                else:
+                    pv = pip_value_usd(pos.instrument, self._lot_size)
                 pnl_usd = pips * pv
                 log.info(
                     "  CLOSE %s: %s %s → $%+.2f / %+.1f pips (%s)",

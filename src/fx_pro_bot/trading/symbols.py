@@ -46,6 +46,7 @@ class SymbolInfo:
     max_volume: int
     step_volume: int
     digits: int
+    contract_size: int = 100_000
 
 
 class SymbolCache:

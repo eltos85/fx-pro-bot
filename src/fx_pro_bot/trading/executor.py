@@ -92,6 +92,7 @@ class TradeExecutor:
                     max_volume=getattr(det, "maxVolume", 10_000_000) if det else 10_000_000,
                     step_volume=getattr(det, "stepVolume", 1000) if det else 1000,
                     digits=getattr(det, "digits", 5) if det else 5,
+                    contract_size=getattr(det, "lotSize", 100_000) if det else 100_000,
                 )
             )
         self._symbols.populate(infos)
@@ -100,7 +101,7 @@ class TradeExecutor:
         for yf in all_yf:
             sym = self._symbols.resolve_yfinance(yf)
             if sym:
-                log.info("  ✓ %s → %s (id=%d, digits=%d)", yf, sym.name, sym.symbol_id, sym.digits)
+                log.info("  ✓ %s → %s (id=%d, digits=%d, lot=%d)", yf, sym.name, sym.symbol_id, sym.digits, sym.contract_size)
             else:
                 log.warning("  ✗ %s — не найден в cTrader", yf)
 
