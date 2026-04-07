@@ -207,10 +207,6 @@ class CTraderClient:
         req.orderType = ProtoOAOrderType.MARKET
         req.tradeSide = ProtoOATradeSide.BUY if trade_side.upper() == "BUY" else ProtoOATradeSide.SELL
         req.volume = volume
-        if stop_loss is not None:
-            req.stopLoss = stop_loss
-        if take_profit is not None:
-            req.takeProfit = take_profit
         if comment:
             req.comment = comment[:512]
         if label:
@@ -252,8 +248,8 @@ class CTraderClient:
         log.info("cTrader: позиция %d закрыта", position_id)
         return result
 
-    def get_symbols(self) -> list:
-        """Получить список доступных символов."""
+    def get_symbols(self) -> Any:
+        """Получить список light-символов (symbolId + symbolName)."""
         from ctrader_open_api.messages.OpenApiMessages_pb2 import (
             ProtoOASymbolsListReq,
             ProtoOASymbolsListRes,
@@ -262,6 +258,19 @@ class CTraderClient:
         req = ProtoOASymbolsListReq()
         req.ctidTraderAccountId = self._account_id
         return self._send_and_wait(req, ProtoOASymbolsListRes().payloadType, timeout=30)
+
+    def get_symbol_details(self, symbol_ids: list[int]) -> Any:
+        """Получить полные данные символов (digits, minVolume, ...) через ProtoOASymbolByIdReq."""
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOASymbolByIdReq,
+            ProtoOASymbolByIdRes,
+        )
+
+        req = ProtoOASymbolByIdReq()
+        req.ctidTraderAccountId = self._account_id
+        for sid in symbol_ids:
+            req.symbolId.append(sid)
+        return self._send_and_wait(req, ProtoOASymbolByIdRes().payloadType, timeout=30)
 
     def get_trader_info(self) -> Any:
         """Получить информацию о трейдере (баланс, equity и т.д.)."""

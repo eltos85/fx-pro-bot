@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from fx_pro_bot.trading.client import CTraderClient
 from fx_pro_bot.trading.symbols import (
@@ -62,16 +63,35 @@ class TradeExecutor:
     def load_symbols(self) -> int:
         """Загрузить и закешировать символы с cTrader. Вернуть количество."""
         resp = self._client.get_symbols()
-        infos = []
+
+        light: dict[int, str] = {}
         for s in resp.symbol:
+            name = s.symbolName if hasattr(s, "symbolName") else str(s.symbolId)
+            light[s.symbolId] = name
+
+        details: dict[int, Any] = {}
+        batch_size = 50
+        id_list = list(light.keys())
+        for i in range(0, len(id_list), batch_size):
+            chunk = id_list[i : i + batch_size]
+            try:
+                det_resp = self._client.get_symbol_details(chunk)
+                for sym_det in det_resp.symbol:
+                    details[sym_det.symbolId] = sym_det
+            except Exception as exc:
+                log.warning("get_symbol_details batch %d failed: %s", i, exc)
+
+        infos = []
+        for sid, name in light.items():
+            det = details.get(sid)
             infos.append(
                 SymbolInfo(
-                    symbol_id=s.symbolId,
-                    name=s.symbolName if hasattr(s, "symbolName") else str(s.symbolId),
-                    min_volume=getattr(s, "minVolume", 1000),
-                    max_volume=getattr(s, "maxVolume", 10_000_000),
-                    step_volume=getattr(s, "stepVolume", 1000),
-                    digits=getattr(s, "digits", 5),
+                    symbol_id=sid,
+                    name=name,
+                    min_volume=getattr(det, "minVolume", 1000) if det else 1000,
+                    max_volume=getattr(det, "maxVolume", 10_000_000) if det else 10_000_000,
+                    step_volume=getattr(det, "stepVolume", 1000) if det else 1000,
+                    digits=getattr(det, "digits", 5) if det else 5,
                 )
             )
         self._symbols.populate(infos)
@@ -80,7 +100,7 @@ class TradeExecutor:
         for yf in all_yf:
             sym = self._symbols.resolve_yfinance(yf)
             if sym:
-                log.info("  ✓ %s → %s (id=%d)", yf, sym.name, sym.symbol_id)
+                log.info("  ✓ %s → %s (id=%d, digits=%d)", yf, sym.name, sym.symbol_id, sym.digits)
             else:
                 log.warning("  ✗ %s — не найден в cTrader", yf)
 
@@ -115,23 +135,29 @@ class TradeExecutor:
 
         trade_side = "BUY" if direction.lower() == "long" else "SELL"
 
-        sl_rounded = round(sl_price, sym.digits) if sl_price is not None else None
-        tp_rounded = round(tp_price, sym.digits) if tp_price is not None else None
-
         try:
             result = self._client.send_new_order(
                 symbol_id=sym.symbol_id,
                 trade_side=trade_side,
                 volume=volume,
-                stop_loss=sl_rounded,
-                take_profit=tp_rounded,
                 comment=comment or f"fx-pro-bot {yf_symbol} {direction}",
             )
 
             pos = result.position if hasattr(result, "position") else None
+            pos_id = pos.positionId if pos else 0
+
+            if pos_id and (sl_price is not None or tp_price is not None):
+                sl_r = round(sl_price, sym.digits) if sl_price is not None else None
+                tp_r = round(tp_price, sym.digits) if tp_price is not None else None
+                try:
+                    self._client.amend_position_sl_tp(pos_id, sl_r, tp_r)
+                    log.info("cTrader: SL/TP установлен для positionId=%d", pos_id)
+                except Exception as exc:
+                    log.warning("cTrader: SL/TP amend failed positionId=%d: %s", pos_id, exc)
+
             return OrderResult(
                 success=True,
-                broker_position_id=pos.positionId if pos else 0,
+                broker_position_id=pos_id,
                 fill_price=pos.price if pos and hasattr(pos, "price") else 0.0,
                 volume=volume,
             )
