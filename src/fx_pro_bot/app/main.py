@@ -368,7 +368,9 @@ def _run_cycle(
                 settings.myfxbook_email, settings.myfxbook_password,
             )
             leader_sigs = aggregate_leader_signals(cot_signals, sentiment_signals, bars_map)
+            before_ids = {p.id for p in store.get_open_positions()}
             opened = leaders_strat.process_signals(leader_sigs, prices)
+            _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
             closed = leaders_strat.check_source_reversals(cot_signals, sentiment_signals)
             if opened or closed:
                 log.info("  Leaders: +%d открыто, -%d закрыто по развороту", opened, closed)
@@ -387,7 +389,9 @@ def _run_cycle(
                 mode=settings.outsiders_mode,
             )
             if outsider_sigs:
+                before_ids = {p.id for p in store.get_open_positions()}
                 opened = outsiders_strat.process_signals(outsider_sigs, prices)
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
                 log.info("  Outsiders: %d extreme-сигналов, %d открыто", len(outsider_sigs), opened)
             else:
                 log.info("  Outsiders: нет extreme-ситуаций")
@@ -417,18 +421,24 @@ def _run_cycle(
 
             if vwap_strat:
                 v_sigs = vwap_strat.scan(scalping_bars, scalping_prices)
+                before_ids = {p.id for p in store.get_open_positions()}
                 v_opened = vwap_strat.process_signals(v_sigs, scalping_prices) if v_sigs else 0
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
                 log.info("  VWAP: %d сигналов, %d открыто", len(v_sigs), v_opened)
 
             if statarb_strat:
                 sa_sigs = statarb_strat.scan(scalping_bars)
+                before_ids = {p.id for p in store.get_open_positions()}
                 sa_opened = statarb_strat.process_signals(sa_sigs, scalping_prices) if sa_sigs else 0
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
                 sa_closed = statarb_strat.check_exits(scalping_bars)
                 log.info("  Stat-Arb: %d сигналов, %d открыто, %d закрыто", len(sa_sigs), sa_opened, sa_closed)
 
             if orb_strat:
                 o_sigs = orb_strat.scan(scalping_bars, scalping_prices, events)
+                before_ids = {p.id for p in store.get_open_positions()}
                 o_opened = orb_strat.process_signals(o_sigs, scalping_prices) if o_sigs else 0
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
                 log.info("  ORB: %d сигналов, %d открыто", len(o_sigs), o_opened)
         except Exception:
             log.exception("Ошибка скальпинг-стратегий")
@@ -483,43 +493,51 @@ def _run_cycle(
             log.exception("Ошибка cleanup")
 
 
-def _try_broker_open(
+def _open_broker_for_new(
     store: StatsStore,
     executor,
     killswitch,
-    position_id: str,
-    yf_symbol: str,
-    direction: str,
-    sl_price: float,
-    settings: Settings,
+    before_ids: set[str],
     prices: dict[str, float],
+    settings: Settings,
 ) -> None:
-    """Попытаться открыть реальную позицию через cTrader."""
+    """Открыть cTrader-ордера для позиций, появившихся после before_ids snapshot."""
     if not executor or not killswitch:
         return
 
-    account = executor.get_account_info()
-    open_count = len(executor.get_open_positions())
-    if not killswitch.check_allowed(open_count, account.balance):
-        log.warning("KillSwitch: торговля заблокирована, пропускаем реальный ордер")
+    new_positions = [p for p in store.get_open_positions() if p.id not in before_ids]
+    if not new_positions:
         return
 
-    result = executor.open_position(
-        yf_symbol=yf_symbol,
-        direction=direction,
-        sl_price=sl_price if sl_price > 0 else None,
-        lot_size=settings.lot_size,
-        comment=f"fx-pro-bot {position_id[:8]}",
-    )
+    for pos in new_positions:
+        if pos.broker_position_id:
+            continue
+        try:
+            account = executor.get_account_info()
+            open_count = len(executor.get_open_positions())
+            if not killswitch.check_allowed(open_count, account.balance):
+                log.warning("KillSwitch: заблокировано, пропускаем %s", pos.instrument)
+                break
 
-    if result.success and result.broker_position_id:
-        store.set_broker_position_id(position_id, result.broker_position_id)
-        log.info(
-            "  cTrader OPEN: %s %s → broker pos #%d @ %.5f",
-            yf_symbol, direction, result.broker_position_id, result.fill_price,
-        )
-    elif not result.success:
-        log.warning("  cTrader OPEN FAILED: %s — %s", yf_symbol, result.error)
+            result = executor.open_position(
+                yf_symbol=pos.instrument,
+                direction=pos.direction,
+                sl_price=pos.sl if pos.sl and pos.sl > 0 else None,
+                lot_size=settings.lot_size,
+                comment=f"fx-pro-bot {pos.id[:8]}",
+            )
+
+            if result.success and result.broker_position_id:
+                store.set_broker_position_id(pos.id, result.broker_position_id)
+                log.info(
+                    "  cTrader OPEN: %s %s → broker #%d @ %.5f",
+                    pos.instrument, pos.direction,
+                    result.broker_position_id, result.fill_price,
+                )
+            elif not result.success:
+                log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
+        except Exception:
+            log.exception("  cTrader OPEN error: %s", pos.instrument)
 
 
 def _sync_broker_closes(
