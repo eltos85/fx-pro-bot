@@ -517,13 +517,12 @@ def _sync_unlinked_positions(
             account = executor.get_account_info()
             open_count = len(executor.get_open_positions())
             if not killswitch.check_allowed(open_count, account.balance):
-                log.warning("KillSwitch: лимит достигнут, остановка sync (%d/%d)", opened, len(unlinked))
+                log.warning("KillSwitch: лимит достигнут, остановка sync (%d/%d)", opened, len(available))
                 break
 
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
-                sl_price=pos.stop_loss_price if pos.stop_loss_price > 0 else None,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot sync {pos.id[:8]}",
             )
@@ -537,6 +536,9 @@ def _sync_unlinked_positions(
                 )
                 opened += 1
             elif not result.success:
+                if "NOT_ENOUGH_MONEY" in result.error:
+                    log.warning("cTrader sync: недостаточно средств, стоп")
+                    break
                 if "не найден" not in result.error:
                     log.warning("  cTrader SYNC FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
@@ -571,10 +573,19 @@ def _open_broker_for_new(
                 log.warning("KillSwitch: заблокировано, пропускаем %s", pos.instrument)
                 break
 
+            sl = pos.stop_loss_price if pos.stop_loss_price > 0 else None
+            cur_price = prices.get(pos.instrument)
+            if sl and cur_price:
+                is_buy = pos.direction.lower() == "long"
+                if (is_buy and sl >= cur_price) or (not is_buy and sl <= cur_price):
+                    log.warning("SL %.5f невалиден для %s %s (price=%.5f), пропускаем SL",
+                                sl, pos.direction, pos.instrument, cur_price)
+                    sl = None
+
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
-                sl_price=pos.stop_loss_price if pos.stop_loss_price > 0 else None,
+                sl_price=sl,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot {pos.id[:8]}",
             )
@@ -587,6 +598,9 @@ def _open_broker_for_new(
                     result.broker_position_id, result.fill_price,
                 )
             elif not result.success:
+                if "NOT_ENOUGH_MONEY" in result.error:
+                    log.warning("cTrader: недостаточно средств, стоп")
+                    break
                 log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
             log.exception("  cTrader OPEN error: %s", pos.instrument)
