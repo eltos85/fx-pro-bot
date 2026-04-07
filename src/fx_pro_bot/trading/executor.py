@@ -14,6 +14,7 @@ from fx_pro_bot.trading.symbols import (
     SymbolCache,
     SymbolInfo,
     YFINANCE_TO_CTRADER,
+    _YFINANCE_PREFIX_MAP,
     lots_to_volume,
     volume_to_lots,
 )
@@ -75,25 +76,13 @@ class TradeExecutor:
             )
         self._symbols.populate(infos)
 
-        missing_search = {"OIL", "WTI", "BRENT", "CRUDE", "GAS", "NAT",
-                          "500", "SP5", "SPX", "NDX", "NAS", "TEC",
-                          "BTC", "ETH", "CRYPTO", "COIN"}
-        not_found_ct = set()
-
-        for yf, ct in YFINANCE_TO_CTRADER.items():
-            sym = self._symbols.get_by_name(ct)
+        all_yf = {**YFINANCE_TO_CTRADER, **_YFINANCE_PREFIX_MAP}
+        for yf in all_yf:
+            sym = self._symbols.resolve_yfinance(yf)
             if sym:
-                log.info("  ✓ %s → %s (id=%d)", yf, ct, sym.symbol_id)
+                log.info("  ✓ %s → %s (id=%d)", yf, sym.name, sym.symbol_id)
             else:
-                not_found_ct.add(ct)
-                log.warning("  ✗ %s → %s NOT FOUND in cTrader", yf, ct)
-
-        if not_found_ct:
-            all_names = sorted(self._symbols._by_name.keys())
-            matches = [n for n in all_names
-                       if any(q in n.upper() for q in missing_search)]
-            if matches:
-                log.info("  Возможные совпадения: %s", ", ".join(matches[:30]))
+                log.warning("  ✗ %s — не найден в cTrader", yf)
 
         return len(infos)
 
@@ -118,8 +107,7 @@ class TradeExecutor:
         """
         sym = self._symbols.resolve_yfinance(yf_symbol)
         if sym is None:
-            ctrader_name = YFINANCE_TO_CTRADER.get(yf_symbol, yf_symbol)
-            return OrderResult(success=False, error=f"Символ {ctrader_name} не найден в кеше")
+            return OrderResult(success=False, error=f"Символ {yf_symbol} не найден в кеше cTrader")
 
         lots = lot_size if lot_size is not None else self._lot_size
         volume = lots_to_volume(lots)

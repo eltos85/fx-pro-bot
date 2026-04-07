@@ -30,7 +30,8 @@ class TestSymbolMapping:
     def test_yfinance_to_ctrader_complete(self):
         assert YFINANCE_TO_CTRADER["EURUSD=X"] == "EURUSD"
         assert YFINANCE_TO_CTRADER["GC=F"] == "XAUUSD"
-        assert YFINANCE_TO_CTRADER["CL=F"] == "XTIUSD"
+        from fx_pro_bot.trading.symbols import _YFINANCE_PREFIX_MAP
+        assert _YFINANCE_PREFIX_MAP["CL=F"] == "#USOIL"
 
     def test_reverse_mapping(self):
         assert CTRADER_TO_YFINANCE["EURUSD"] == "EURUSD=X"

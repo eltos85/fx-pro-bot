@@ -8,7 +8,7 @@ from dataclasses import dataclass
 log = logging.getLogger(__name__)
 
 YFINANCE_TO_CTRADER: dict[str, str] = {
-    # Forex
+    # Forex (exact match)
     "EURUSD=X": "EURUSD",
     "GBPUSD=X": "GBPUSD",
     "USDJPY=X": "USDJPY",
@@ -18,18 +18,19 @@ YFINANCE_TO_CTRADER: dict[str, str] = {
     "USDCHF=X": "USDCHF",
     "EURJPY=X": "EURJPY",
     "GBPJPY=X": "GBPJPY",
-    # Commodities
+    # Spot commodities (exact match)
     "GC=F": "XAUUSD",
     "SI=F": "XAGUSD",
-    "CL=F": "XTIUSD",
-    "BZ=F": "XBRUSD",
-    "NG=F": "XNGUSD",
     "HG=F": "COPPER",
     "PL=F": "XPTUSD",
-    # Indices
-    "ES=F": "US500",
-    "NQ=F": "USTEC",
-    # Crypto
+}
+
+_YFINANCE_PREFIX_MAP: dict[str, str] = {
+    "CL=F": "#USOIL",
+    "BZ=F": "#UKOIL",
+    "NG=F": "#NGAS",
+    "ES=F": "#US500",
+    "NQ=F": "#USTEC",
     "BTC-USD": "BTCUSD",
     "ETH-USD": "ETHUSD",
 }
@@ -68,9 +69,26 @@ class SymbolCache:
 
     def resolve_yfinance(self, yf_symbol: str) -> SymbolInfo | None:
         ctrader_name = YFINANCE_TO_CTRADER.get(yf_symbol)
-        if ctrader_name is None:
+        if ctrader_name is not None:
+            return self.get_by_name(ctrader_name)
+
+        prefix = _YFINANCE_PREFIX_MAP.get(yf_symbol)
+        if prefix is None:
             return None
-        return self.get_by_name(ctrader_name)
+
+        exact = self.get_by_name(prefix)
+        if exact:
+            return exact
+
+        candidates = sorted(
+            (name for name in self._by_name if name.startswith(prefix.upper() + "_")),
+        )
+        if candidates:
+            sym = self._by_name[candidates[0]]
+            log.info("Prefix match: %s → %s (id=%d)", yf_symbol, sym.name, sym.symbol_id)
+            return sym
+
+        return None
 
     @property
     def loaded(self) -> bool:
