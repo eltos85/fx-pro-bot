@@ -285,6 +285,31 @@ class CTraderClient:
         req.ctidTraderAccountId = self._account_id
         return self._send_and_wait(req, ProtoOAReconcileRes().payloadType, timeout=30)
 
+    def get_unrealized_pnl(self) -> Any:
+        """P&L открытых позиций — рассчитанный бэкендом cTrader (точный)."""
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOAGetPositionUnrealizedPnLReq,
+            ProtoOAGetPositionUnrealizedPnLRes,
+        )
+
+        req = ProtoOAGetPositionUnrealizedPnLReq()
+        req.ctidTraderAccountId = self._account_id
+        return self._send_and_wait(req, ProtoOAGetPositionUnrealizedPnLRes().payloadType, timeout=30)
+
+    def get_deal_list(self, from_ts: int, to_ts: int, max_rows: int = 1000) -> Any:
+        """Список сделок (deals) за период. Содержит closePositionDetail.grossProfit."""
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOADealListReq,
+            ProtoOADealListRes,
+        )
+
+        req = ProtoOADealListReq()
+        req.ctidTraderAccountId = self._account_id
+        req.fromTimestamp = from_ts
+        req.toTimestamp = to_ts
+        req.maxRows = max_rows
+        return self._send_and_wait(req, ProtoOADealListRes().payloadType, timeout=30)
+
     def amend_position_sl_tp(
         self,
         position_id: int,

@@ -96,17 +96,18 @@ class SymbolCache:
         return len(self._by_name) > 0
 
 
-def lots_to_volume(lots: float) -> int:
-    """Конвертация лотов → cTrader volume (единицы * 100).
+def lots_to_volume(lots: float, contract_size: int = 10_000_000) -> int:
+    """Конвертация лотов → cTrader volume.
 
-    cTrader volume представлен в 0.01 от единицы (1000 = 10.00 units).
-    Для Forex: 1 лот = 100000 units → volume = 10_000_000.
+    cTrader lotSize = contract_size (уже в volume-единицах, т.е. units×100).
+    Для Forex: lotSize=10_000_000 → 1 лот = 100k units.
+    Для Silver: lotSize=500_000 → 1 лот = 5000 oz.
     """
-    return int(round(lots * 100_000 * 100))
+    return int(round(lots * contract_size))
 
 
-def volume_to_lots(volume: int) -> float:
-    return volume / 10_000_000
+def volume_to_lots(volume: int, contract_size: int = 10_000_000) -> float:
+    return volume / contract_size
 
 
 def price_to_relative(price_diff: float) -> int:

@@ -131,7 +131,7 @@ class TradeExecutor:
             return OrderResult(success=False, error=f"Символ {yf_symbol} не найден в кеше cTrader")
 
         lots = lot_size if lot_size is not None else self._lot_size
-        requested_volume = lots_to_volume(lots)
+        requested_volume = lots_to_volume(lots, sym.contract_size)
         volume = self._clamp_volume(requested_volume, sym)
 
         if volume > requested_volume * 3:
@@ -258,6 +258,52 @@ class TradeExecutor:
             except Exception as exc:
                 log.error("Не удалось закрыть позицию %d: %s", pos.positionId, exc)
         return closed
+
+    def get_unrealized_pnl(self) -> dict[int, tuple[float, float]]:
+        """P&L открытых позиций от бэкенда cTrader → {positionId: (gross_usd, net_usd)}."""
+        try:
+            resp = self._client.get_unrealized_pnl()
+            digits = int(getattr(resp, "moneyDigits", 2))
+            divisor = 10 ** digits
+            out = {}
+            for p in resp.positionUnrealizedPnL:
+                out[p.positionId] = (
+                    p.grossUnrealizedPnL / divisor,
+                    p.netUnrealizedPnL / divisor,
+                )
+            return out
+        except Exception as exc:
+            log.error("get_unrealized_pnl failed: %s", exc)
+            return {}
+
+    def get_deal_list(self, from_ts: int, to_ts: int) -> list[dict]:
+        """Закрытые сделки с grossProfit от cTrader → список dict."""
+        try:
+            resp = self._client.get_deal_list(from_ts, to_ts)
+            deals = []
+            for d in resp.deal:
+                cpd = d.closePositionDetail if d.HasField("closePositionDetail") else None
+                if cpd is None:
+                    continue
+                md = int(cpd.moneyDigits) if cpd.moneyDigits else 2
+                divisor = 10 ** md
+                deals.append({
+                    "dealId": d.dealId,
+                    "positionId": d.positionId,
+                    "symbolId": d.symbolId,
+                    "volume": d.filledVolume,
+                    "grossProfit": cpd.grossProfit / divisor,
+                    "swap": cpd.swap / divisor,
+                    "commission": cpd.commission / divisor,
+                    "balance": cpd.balance / divisor,
+                    "pnlFee": getattr(cpd, "pnlConversionFee", 0) / divisor,
+                    "executionPrice": getattr(d, "executionPrice", 0),
+                    "timestamp": d.executionTimestamp,
+                })
+            return deals
+        except Exception as exc:
+            log.error("get_deal_list failed: %s", exc)
+            return []
 
     @staticmethod
     def _clamp_volume(volume: int, sym: SymbolInfo) -> int:

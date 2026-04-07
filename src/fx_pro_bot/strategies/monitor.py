@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from fx_pro_bot.config.settings import display_name, pip_size, pip_value_from_volume, pip_value_usd
+from fx_pro_bot.config.settings import display_name, pip_size
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
 
@@ -94,15 +94,10 @@ class PositionMonitor:
                     )
                 )
                 stats[category] = stats.get(category, 0) + 1
-                if pos.broker_volume > 0:
-                    pv = pip_value_from_volume(pos.instrument, pos.broker_volume)
-                else:
-                    pv = pip_value_usd(pos.instrument, self._lot_size)
-                pnl_usd = pips * pv
                 log.info(
-                    "  CLOSE %s: %s %s → $%+.2f / %+.1f pips (%s)",
+                    "  CLOSE %s: %s %s → %+.1f pips (%s)",
                     pos.strategy.upper(), display_name(pos.instrument),
-                    pos.direction.upper(), pnl_usd, pips, exit_reason,
+                    pos.direction.upper(), pips, exit_reason,
                 )
             else:
                 update_paper_positions(

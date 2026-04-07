@@ -80,27 +80,52 @@ def _log_stats(store: StatsStore, horizons: tuple[int, ...], settings: Settings)
     )
 
 
-def _log_strategy_stats(store: StatsStore, settings: Settings) -> None:
-    """Статистика по стратегиям с P&L в долларах."""
-    usd_stats = store.pnl_usd_by_strategy(settings.lot_size)
-    if not usd_stats:
+def _get_closed_broker_positions(store: StatsStore) -> list:
+    """Закрытые позиции которые были на cTrader."""
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE status='closed' AND broker_position_id > 0"
+        ).fetchall()
+    from fx_pro_bot.stats.store import _row_to_position
+    return [_row_to_position(r) for r in rows]
+
+
+def _log_strategy_stats(store: StatsStore, settings: Settings, executor=None) -> None:
+    """Статистика по стратегиям. Unrealized P&L берём с cTrader (точный)."""
+    broker_pnl: dict[int, tuple[float, float]] = {}
+    if executor:
+        try:
+            broker_pnl = executor.get_unrealized_pnl()
+        except Exception as exc:
+            log.debug("get_unrealized_pnl failed: %s", exc)
+
+    positions = [p for p in store.get_open_positions() if p.broker_position_id]
+    positions += [p for p in _get_closed_broker_positions(store)]
+
+    strats: dict[str, dict] = {}
+    for pos in positions:
+        s = pos.strategy
+        if s not in strats:
+            strats[s] = {"total": 0, "closed": 0, "wins": 0,
+                         "realized": 0.0, "unrealized_net": 0.0}
+        strats[s]["total"] += 1
+        if pos.status == "closed":
+            strats[s]["closed"] += 1
+        if pos.status == "open" and pos.broker_position_id in broker_pnl:
+            _, net = broker_pnl[pos.broker_position_id]
+            strats[s]["unrealized_net"] += net
+
+    if not strats:
         return
 
     log.info("── P&L по стратегиям (cTrader) ──")
-    total_pnl = 0.0
-    total_realized = 0.0
-    for strat, s in sorted(usd_stats.items(), key=lambda x: -x[1]["pnl_usd"]):
-        wr = (s["wins"] / s["closed"] * 100) if s["closed"] else 0
-        total_pnl += s["pnl_usd"]
-        total_realized += s["realized_usd"]
+    total_unrealized = sum(s["unrealized_net"] for s in strats.values())
+    for name, s in sorted(strats.items()):
         log.info(
-            "  %s: %d сделок (%d закр), wr=%.0f%%, реализовано $%+.2f, всего $%+.2f",
-            strat, s["total"], s["closed"], wr, s["realized_usd"], s["pnl_usd"],
+            "  %s: %d сделок (%d закр), нереализ $%+.2f",
+            name, s["total"], s["closed"], s["unrealized_net"],
         )
-    log.info(
-        "  ИТОГО: реализовано $%+.2f, с открытыми $%+.2f",
-        total_realized, total_pnl,
-    )
+    log.info("  ИТОГО нереализованный: $%+.2f", total_unrealized)
 
     by_exit = store.paper_summary_by_exit_strategy()
     if by_exit:
@@ -452,7 +477,7 @@ def _run_cycle(
     # 7. Statistics
     log.info("── Статистика ансамбля ──")
     _log_stats(store, settings.verify_horizons, settings)
-    _log_strategy_stats(store, settings)
+    _log_strategy_stats(store, settings, executor)
     _log_scalping_stats(store, settings)
     whale_tracker.log_whale_stats()
 
