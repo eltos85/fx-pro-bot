@@ -74,6 +74,14 @@ class TradeExecutor:
                 )
             )
         self._symbols.populate(infos)
+
+        for yf, ct in YFINANCE_TO_CTRADER.items():
+            sym = self._symbols.get_by_name(ct)
+            if sym:
+                log.info("  ✓ %s → %s (id=%d)", yf, ct, sym.symbol_id)
+            else:
+                log.warning("  ✗ %s → %s NOT FOUND in cTrader", yf, ct)
+
         return len(infos)
 
     def open_position(

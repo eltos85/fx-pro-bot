@@ -8,16 +8,30 @@ from dataclasses import dataclass
 log = logging.getLogger(__name__)
 
 YFINANCE_TO_CTRADER: dict[str, str] = {
+    # Forex
     "EURUSD=X": "EURUSD",
     "GBPUSD=X": "GBPUSD",
     "USDJPY=X": "USDJPY",
     "AUDUSD=X": "AUDUSD",
     "USDCAD=X": "USDCAD",
     "EURGBP=X": "EURGBP",
+    "USDCHF=X": "USDCHF",
+    "EURJPY=X": "EURJPY",
+    "GBPJPY=X": "GBPJPY",
+    # Commodities
     "GC=F": "XAUUSD",
     "SI=F": "XAGUSD",
     "CL=F": "XTIUSD",
     "BZ=F": "XBRUSD",
+    "NG=F": "XNGUSD",
+    "HG=F": "COPPER",
+    "PL=F": "XPTUSD",
+    # Indices
+    "ES=F": "US500",
+    "NQ=F": "USTEC",
+    # Crypto
+    "BTC-USD": "BTCUSD",
+    "ETH-USD": "ETHUSD",
 }
 
 CTRADER_TO_YFINANCE: dict[str, str] = {v: k for k, v in YFINANCE_TO_CTRADER.items()}
