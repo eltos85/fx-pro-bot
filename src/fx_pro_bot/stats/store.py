@@ -63,6 +63,7 @@ class PositionRow:
     exit_reason: str
     closed_at: str | None
     broker_position_id: int = 0
+    broker_volume: int = 0
     estimated_cost_pips: float = 0.0
 
 
@@ -190,6 +191,7 @@ class StatsStore:
             self._migrate_add_source(conn)
             self._migrate_add_broker_position_id(conn)
             self._migrate_add_estimated_cost_pips(conn)
+            self._migrate_add_broker_volume(conn)
             conn.commit()
 
     def _migrate_add_source(self, conn: sqlite3.Connection) -> None:
@@ -217,6 +219,15 @@ class StatsStore:
         if "estimated_cost_pips" not in columns:
             conn.execute(
                 "ALTER TABLE positions ADD COLUMN estimated_cost_pips REAL NOT NULL DEFAULT 0"
+            )
+
+    def _migrate_add_broker_volume(self, conn: sqlite3.Connection) -> None:
+        """Добавить broker_volume — фактический объём позиции на cTrader."""
+        cur = conn.execute("PRAGMA table_info(positions)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "broker_volume" not in columns:
+            conn.execute(
+                "ALTER TABLE positions ADD COLUMN broker_volume INTEGER NOT NULL DEFAULT 0"
             )
 
     # ── Suggestions ──────────────────────────────────────────────
@@ -472,11 +483,11 @@ class StatsStore:
             )
             conn.commit()
 
-    def set_broker_position_id(self, position_id: str, broker_id: int) -> None:
+    def set_broker_position_id(self, position_id: str, broker_id: int, broker_volume: int = 0) -> None:
         with self._connect() as conn:
             conn.execute(
-                "UPDATE positions SET broker_position_id=? WHERE id=?",
-                (broker_id, position_id),
+                "UPDATE positions SET broker_position_id=?, broker_volume=? WHERE id=?",
+                (broker_id, broker_volume, position_id),
             )
             conn.commit()
 
@@ -587,19 +598,22 @@ class StatsStore:
         return out
 
     def pnl_usd_by_strategy(self, lot_size: float = 0.01) -> dict[str, dict]:
-        """P&L в долларах по стратегиям, с учётом pip_value каждого инструмента."""
+        """P&L в долларах по стратегиям, с учётом реального broker_volume."""
         from fx_pro_bot.config.settings import pip_value_usd
+        from fx_pro_bot.trading.symbols import volume_to_lots
 
         with self._connect() as conn:
             rows = conn.execute(
-                """SELECT strategy, instrument, profit_pips, status
+                """SELECT strategy, instrument, profit_pips, status, broker_volume
                    FROM positions WHERE broker_position_id > 0"""
             ).fetchall()
 
         out: dict[str, dict] = {}
         for r in rows:
             strat = str(r["strategy"])
-            pv = pip_value_usd(str(r["instrument"]), lot_size)
+            bv = int(r["broker_volume"] or 0)
+            lots = volume_to_lots(bv) if bv > 0 else lot_size
+            pv = pip_value_usd(str(r["instrument"]), lots)
             pnl = float(r["profit_pips"]) * pv if r["profit_pips"] else 0.0
             if strat not in out:
                 out[strat] = {"total": 0, "closed": 0, "wins": 0,
@@ -836,6 +850,7 @@ def _row_to_position(r: sqlite3.Row) -> PositionRow:
         exit_reason=r["exit_reason"] or "",
         closed_at=r["closed_at"],
         broker_position_id=int(r["broker_position_id"]) if "broker_position_id" in r.keys() else 0,
+        broker_volume=int(r["broker_volume"]) if "broker_volume" in r.keys() else 0,
         estimated_cost_pips=float(r["estimated_cost_pips"]) if "estimated_cost_pips" in r.keys() else 0.0,
     )
 

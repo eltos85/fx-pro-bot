@@ -489,6 +489,7 @@ def _reconcile_broker_positions(
 
     db_broker_ids = set()
     closed_in_broker = 0
+    backfilled = 0
     for pos in db_with_broker:
         db_broker_ids.add(pos.broker_position_id)
         if pos.broker_position_id not in broker_positions:
@@ -498,6 +499,12 @@ def _reconcile_broker_positions(
                 "  RECONCILE: %s %s broker #%d закрыта на стороне брокера",
                 pos.instrument, pos.direction, pos.broker_position_id,
             )
+        elif pos.broker_volume == 0:
+            bp = broker_positions[pos.broker_position_id]
+            vol = bp.tradeData.volume if hasattr(bp, "tradeData") else 0
+            if vol:
+                store.set_broker_position_id(pos.id, pos.broker_position_id, vol)
+                backfilled += 1
 
     orphans = set(broker_positions.keys()) - db_broker_ids
     closed_orphans = 0
@@ -516,9 +523,9 @@ def _reconcile_broker_positions(
 
     log.info(
         "cTrader reconcile: %d в DB, %d на брокере, "
-        "закрыто в DB=%d, orphans=%d",
+        "закрыто в DB=%d, orphans=%d, backfill volume=%d",
         len(db_with_broker), len(broker_positions),
-        closed_in_broker, closed_orphans,
+        closed_in_broker, closed_orphans, backfilled,
     )
 
 
@@ -554,11 +561,11 @@ def _sync_unlinked_positions(
             )
 
             if result.success and result.broker_position_id:
-                store.set_broker_position_id(pos.id, result.broker_position_id)
+                store.set_broker_position_id(pos.id, result.broker_position_id, result.volume)
                 log.info(
-                    "  cTrader SYNC: %s %s → broker #%d @ %.5f",
+                    "  cTrader SYNC: %s %s → broker #%d @ %.5f (vol=%d)",
                     pos.instrument, pos.direction,
-                    result.broker_position_id, result.fill_price,
+                    result.broker_position_id, result.fill_price, result.volume,
                 )
                 opened += 1
             elif not result.success:
@@ -617,11 +624,11 @@ def _open_broker_for_new(
             )
 
             if result.success and result.broker_position_id:
-                store.set_broker_position_id(pos.id, result.broker_position_id)
+                store.set_broker_position_id(pos.id, result.broker_position_id, result.volume)
                 log.info(
-                    "  cTrader OPEN: %s %s → broker #%d @ %.5f",
+                    "  cTrader OPEN: %s %s → broker #%d @ %.5f (vol=%d)",
                     pos.instrument, pos.direction,
-                    result.broker_position_id, result.fill_price,
+                    result.broker_position_id, result.fill_price, result.volume,
                 )
             elif not result.success:
                 if "NOT_ENOUGH_MONEY" in result.error:
