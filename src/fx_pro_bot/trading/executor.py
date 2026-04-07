@@ -115,13 +115,16 @@ class TradeExecutor:
 
         trade_side = "BUY" if direction.lower() == "long" else "SELL"
 
+        sl_rounded = round(sl_price, sym.digits) if sl_price is not None else None
+        tp_rounded = round(tp_price, sym.digits) if tp_price is not None else None
+
         try:
             result = self._client.send_new_order(
                 symbol_id=sym.symbol_id,
                 trade_side=trade_side,
                 volume=volume,
-                stop_loss=sl_price,
-                take_profit=tp_price,
+                stop_loss=sl_rounded,
+                take_profit=tp_rounded,
                 comment=comment or f"fx-pro-bot {yf_symbol} {direction}",
             )
 
@@ -162,10 +165,18 @@ class TradeExecutor:
         broker_position_id: int,
         sl_price: float | None = None,
         tp_price: float | None = None,
+        yf_symbol: str | None = None,
     ) -> bool:
         """Изменить SL/TP позиции."""
         try:
-            self._client.amend_position_sl_tp(broker_position_id, sl_price, tp_price)
+            digits = 5
+            if yf_symbol:
+                sym = self._symbols.resolve_yfinance(yf_symbol)
+                if sym:
+                    digits = sym.digits
+            sl_r = round(sl_price, digits) if sl_price is not None else None
+            tp_r = round(tp_price, digits) if tp_price is not None else None
+            self._client.amend_position_sl_tp(broker_position_id, sl_r, tp_r)
             return True
         except Exception as exc:
             log.error("Ошибка изменения SL/TP позиции %d: %s", broker_position_id, exc)
