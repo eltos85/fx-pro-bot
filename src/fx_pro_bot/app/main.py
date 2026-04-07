@@ -264,6 +264,9 @@ def run_advisor() -> None:
         settings.poll_interval_sec,
     )
 
+    if executor and killswitch:
+        _sync_unlinked_positions(store, executor, killswitch, settings)
+
     while True:
         try:
             _run_cycle(
@@ -491,6 +494,53 @@ def _run_cycle(
             vacuum_if_needed(settings.stats_db_path, threshold_mb=100.0)
         except Exception:
             log.exception("Ошибка cleanup")
+
+
+def _sync_unlinked_positions(
+    store: StatsStore,
+    executor,
+    killswitch,
+    settings: Settings,
+) -> None:
+    """Открыть cTrader-ордера для бумажных позиций без broker_position_id."""
+    unlinked = [p for p in store.get_open_positions() if not p.broker_position_id]
+    if not unlinked:
+        log.info("cTrader sync: все позиции уже привязаны к брокеру")
+        return
+
+    log.info("cTrader sync: %d позиций без broker_id, открываю ордера...", len(unlinked))
+    opened = 0
+    for pos in unlinked:
+        try:
+            account = executor.get_account_info()
+            open_count = len(executor.get_open_positions())
+            if not killswitch.check_allowed(open_count, account.balance):
+                log.warning("KillSwitch: лимит достигнут, остановка sync (%d/%d)", opened, len(unlinked))
+                break
+
+            result = executor.open_position(
+                yf_symbol=pos.instrument,
+                direction=pos.direction,
+                sl_price=pos.stop_loss_price if pos.stop_loss_price > 0 else None,
+                lot_size=settings.lot_size,
+                comment=f"fx-pro-bot sync {pos.id[:8]}",
+            )
+
+            if result.success and result.broker_position_id:
+                store.set_broker_position_id(pos.id, result.broker_position_id)
+                log.info(
+                    "  cTrader SYNC: %s %s → broker #%d @ %.5f",
+                    pos.instrument, pos.direction,
+                    result.broker_position_id, result.fill_price,
+                )
+                opened += 1
+            elif not result.success:
+                if "не найден" not in result.error:
+                    log.warning("  cTrader SYNC FAILED: %s — %s", pos.instrument, result.error)
+        except Exception:
+            log.exception("  cTrader SYNC error: %s", pos.instrument)
+
+    log.info("cTrader sync: открыто %d/%d ордеров", opened, len(unlinked))
 
 
 def _open_broker_for_new(
