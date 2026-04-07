@@ -522,7 +522,7 @@ def _open_broker_for_new(
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
-                sl_price=pos.sl if pos.sl and pos.sl > 0 else None,
+                sl_price=pos.stop_loss_price if pos.stop_loss_price > 0 else None,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot {pos.id[:8]}",
             )
