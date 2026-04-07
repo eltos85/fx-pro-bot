@@ -109,25 +109,16 @@ class CTraderClient:
         log.info("cTrader: подключено к %s", host)
 
         import time as _time
-        _time.sleep(3)
+        _time.sleep(5)
 
-        for attempt in range(3):
-            try:
-                app_auth = ProtoOAApplicationAuthReq()
-                app_auth.clientId = self._client_id
-                app_auth.clientSecret = self._client_secret
-                self._send_and_wait(
-                    app_auth,
-                    ProtoOAApplicationAuthRes().payloadType,
-                    timeout=timeout,
-                )
-                break
-            except (RuntimeError, TimeoutError) as exc:
-                if attempt < 2:
-                    log.warning("cTrader: app auth попытка %d/3 не удалась (%s), повтор...", attempt + 1, exc)
-                    _time.sleep(3)
-                else:
-                    raise
+        app_auth = ProtoOAApplicationAuthReq()
+        app_auth.clientId = self._client_id
+        app_auth.clientSecret = self._client_secret
+        self._send_and_wait(
+            app_auth,
+            ProtoOAApplicationAuthRes().payloadType,
+            timeout=timeout,
+        )
         log.info("cTrader: приложение авторизовано")
 
         account_id = self._account_id
@@ -334,14 +325,10 @@ class CTraderClient:
         def _do_send():
             try:
                 d = self._client.send(message)
-                d.addErrback(lambda f: _on_send_error(f))
+                d.addErrback(lambda f: log.debug("cTrader deferred errback: %s", f))
             except Exception as exc:
                 result[1] = exc
                 event.set()
-
-        def _on_send_error(failure):
-            result[1] = RuntimeError(f"Send failed: {failure}")
-            event.set()
 
         reactor.callFromThread(_do_send)
 
