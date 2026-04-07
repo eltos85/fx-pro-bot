@@ -130,8 +130,15 @@ class TradeExecutor:
             return OrderResult(success=False, error=f"Символ {yf_symbol} не найден в кеше cTrader")
 
         lots = lot_size if lot_size is not None else self._lot_size
-        volume = lots_to_volume(lots)
-        volume = self._clamp_volume(volume, sym)
+        requested_volume = lots_to_volume(lots)
+        volume = self._clamp_volume(requested_volume, sym)
+
+        if volume > requested_volume * 3:
+            return OrderResult(
+                success=False,
+                error=f"min_volume слишком большой: запрос {requested_volume}, "
+                      f"минимум {sym.min_volume} ({sym.name}), пропускаем",
+            )
 
         trade_side = "BUY" if direction.lower() == "long" else "SELL"
 
@@ -241,7 +248,10 @@ class TradeExecutor:
         closed = 0
         for pos in positions:
             try:
-                self._client.close_position(pos.positionId, pos.volume)
+                vol = pos.tradeData.volume if hasattr(pos, "tradeData") else 0
+                if not vol:
+                    continue
+                self._client.close_position(pos.positionId, vol)
                 closed += 1
                 log.warning("EMERGENCY CLOSE: positionId=%d", pos.positionId)
             except Exception as exc:
