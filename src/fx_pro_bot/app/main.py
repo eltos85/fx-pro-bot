@@ -615,18 +615,25 @@ def _sync_broker_closes(
     settings: Settings,
 ) -> None:
     """Закрыть реальные позиции, если бот закрыл виртуальные."""
-    from fx_pro_bot.trading.symbols import lots_to_volume
-
     current_open = {p.id for p in store.get_open_positions()}
     closed_ids = set(positions_before.keys()) - current_open
 
-    for pid in closed_ids:
-        pos = positions_before.get(pid)
-        if not pos or pos.broker_position_id == 0:
+    to_close = [positions_before[pid] for pid in closed_ids
+                if positions_before[pid].broker_position_id]
+    if not to_close:
+        return
+
+    broker_positions = {bp.positionId: bp for bp in executor.get_open_positions()}
+
+    for pos in to_close:
+        bp = broker_positions.get(pos.broker_position_id)
+        if bp is None:
+            log.info("  cTrader CLOSE: broker pos #%d уже закрыта", pos.broker_position_id)
+            pnl = pos.profit_pips * pip_value_usd(pos.instrument, settings.lot_size)
+            killswitch.record_trade_close(pnl)
             continue
 
-        volume = lots_to_volume(settings.lot_size)
-        result = executor.close_position(pos.broker_position_id, volume)
+        result = executor.close_position(pos.broker_position_id, bp.volume)
 
         if result.success:
             pnl = pos.profit_pips * pip_value_usd(pos.instrument, settings.lot_size)
