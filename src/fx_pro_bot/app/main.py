@@ -530,8 +530,12 @@ def _reconcile_broker_positions(
     closed_orphans = 0
     for bp_id in orphans:
         bp = broker_positions[bp_id]
+        vol = bp.tradeData.volume if hasattr(bp, "tradeData") else 0
+        if not vol:
+            log.warning("  RECONCILE: orphan #%d — не удалось определить volume", bp_id)
+            continue
         try:
-            executor.close_position(bp_id, bp.volume)
+            executor.close_position(bp_id, vol)
             closed_orphans += 1
             log.warning("  RECONCILE: orphan broker #%d закрыт", bp_id)
         except Exception as exc:
@@ -682,7 +686,12 @@ def _sync_broker_closes(
             killswitch.record_trade_close(pnl)
             continue
 
-        result = executor.close_position(pos.broker_position_id, bp.volume)
+        vol = bp.tradeData.volume if hasattr(bp, "tradeData") else 0
+        if not vol:
+            log.warning("  cTrader CLOSE: не удалось определить volume для #%d", pos.broker_position_id)
+            continue
+
+        result = executor.close_position(pos.broker_position_id, vol)
 
         if result.success:
             pnl = pos.profit_pips * pip_value_usd(pos.instrument, settings.lot_size)
