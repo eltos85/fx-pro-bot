@@ -9,7 +9,12 @@ from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
 from fx_pro_bot.config.settings import SCALPING_EXTRA_SYMBOLS, Settings, display_name, pip_size, pip_value_usd, spread_cost_pips
-from fx_pro_bot.strategies.monitor import SCALPING_TP_PIPS, OUTSIDERS_CONFIRMED_AGGRESSIVE_TP
+from fx_pro_bot.strategies.monitor import (
+    SCALPING_TP_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
+    OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
+)
+
+LEADERS_TP_PIPS = 50.0
 from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strategies
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
 from fx_pro_bot.stats.cleanup import cleanup_shadow_log, db_size_mb, vacuum_if_needed
@@ -462,7 +467,11 @@ def _run_cycle(
         mon_stats["closed_tp"], mon_stats["closed_time"],
     )
 
-    # 4c. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
+    # 4c. cTrader: двинуть trailing SL на брокере
+    if executor:
+        _update_broker_trailing_sl(store, executor, atrs)
+
+    # 4d. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
     if executor and killswitch:
         _sync_broker_closes(store, executor, killswitch, positions_before_close, prices, settings)
 
@@ -623,6 +632,8 @@ def _calc_tp_price(strategy: str, direction: str, entry_price: float, ps: float)
         tp_pips = SCALPING_TP_PIPS
     elif strategy == "outsiders":
         tp_pips = OUTSIDERS_CONFIRMED_AGGRESSIVE_TP
+    elif strategy == "leaders":
+        tp_pips = LEADERS_TP_PIPS
     else:
         return None
     if direction == "long":
@@ -691,6 +702,57 @@ def _open_broker_for_new(
                 log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
             log.exception("  cTrader OPEN error: %s", pos.instrument)
+
+
+def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, float]) -> None:
+    """Двигать SL на cTrader вслед за trailing stop.
+
+    Каждый цикл пересчитываем trailing SL и если он лучше текущего — обновляем на брокере.
+    Так cTrader сам закроет при откате, не дожидаясь 5-минутного цикла.
+    """
+    for pos in store.get_open_positions():
+        if not pos.broker_position_id:
+            continue
+
+        ps = pip_size(pos.instrument)
+        if ps == 0:
+            continue
+
+        peak_pips = (
+            (pos.peak_price - pos.entry_price) / ps if pos.direction == "long"
+            else (pos.entry_price - pos.peak_price) / ps
+        )
+
+        scalping = ("vwap_reversion", "stat_arb", "session_orb")
+        if pos.strategy in scalping and peak_pips >= SCALPING_TRAIL_TRIGGER_PIPS:
+            trail_dist = SCALPING_TRAIL_DISTANCE_PIPS * ps
+        elif pos.strategy == "outsiders" and peak_pips >= 5.0:
+            trail_dist = 3.0 * ps
+        elif pos.strategy == "leaders" and peak_pips > 0:
+            atr = atrs.get(pos.instrument, pos.entry_price * 0.005)
+            trail_dist = 0.7 * atr
+        else:
+            continue
+
+        if pos.direction == "long":
+            new_sl = pos.peak_price - trail_dist
+            if new_sl <= pos.stop_loss_price:
+                continue
+        else:
+            new_sl = pos.peak_price + trail_dist
+            if pos.stop_loss_price > 0 and new_sl >= pos.stop_loss_price:
+                continue
+
+        ok = executor.amend_sl_tp(
+            pos.broker_position_id, sl_price=new_sl, yf_symbol=pos.instrument,
+        )
+        if ok:
+            store.update_stop_loss(pos.id, new_sl)
+            log.info(
+                "  TRAIL SL: %s %s → SL %.5f (peak=%.5f, dist=%.5f)",
+                display_name(pos.instrument), pos.direction.upper(),
+                new_sl, pos.peak_price, trail_dist,
+            )
 
 
 def _detect_broker_closures(store: StatsStore, executor) -> int:

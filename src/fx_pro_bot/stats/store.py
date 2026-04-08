@@ -537,6 +537,14 @@ class StatsStore:
             )
             conn.commit()
 
+    def update_stop_loss(self, position_id: str, new_sl: float) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE positions SET stop_loss_price=? WHERE id=?",
+                (new_sl, position_id),
+            )
+            conn.commit()
+
     def get_open_positions(self, strategy: str | None = None) -> list[PositionRow]:
         where = "WHERE status='open'"
         params: list[object] = []
