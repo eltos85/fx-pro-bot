@@ -10,7 +10,7 @@ from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
 from fx_pro_bot.config.settings import SCALPING_EXTRA_SYMBOLS, Settings, display_name, pip_size, pip_value_usd, spread_cost_pips
 from fx_pro_bot.strategies.monitor import (
-    SCALPING_TP_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
+    SCALPING_TP_PIPS, SCALPING_TRAIL_TRIGGER_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
     OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
 )
 
