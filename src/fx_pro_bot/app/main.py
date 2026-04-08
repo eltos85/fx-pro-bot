@@ -9,6 +9,7 @@ from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
 from fx_pro_bot.config.settings import SCALPING_EXTRA_SYMBOLS, Settings, display_name, pip_size, pip_value_usd, spread_cost_pips
+from fx_pro_bot.strategies.monitor import SCALPING_TP_PIPS, OUTSIDERS_CONFIRMED_AGGRESSIVE_TP
 from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strategies
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
 from fx_pro_bot.stats.cleanup import cleanup_shadow_log, db_size_mb, vacuum_if_needed
@@ -445,7 +446,11 @@ def _run_cycle(
         except Exception:
             log.exception("Ошибка скальпинг-стратегий")
 
-    # 4. Monitor all positions
+    # 4. Detect broker-side closures (server-side TP/SL hit by cTrader)
+    if executor:
+        _detect_broker_closures(store, executor)
+
+    # 4b. Monitor all positions
     log.info("── Мониторинг позиций ──")
     positions_before_close = {p.id: p for p in store.get_open_positions()}
     mon_stats = monitor.run(prices, atrs)
@@ -457,7 +462,7 @@ def _run_cycle(
         mon_stats["closed_tp"], mon_stats["closed_time"],
     )
 
-    # 4b. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
+    # 4c. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
     if executor and killswitch:
         _sync_broker_closes(store, executor, killswitch, positions_before_close, prices, settings)
 
@@ -578,9 +583,13 @@ def _sync_unlinked_positions(
                 log.warning("KillSwitch: лимит достигнут, остановка sync (%d/%d)", opened, len(available))
                 break
 
+            ps = pip_size(pos.instrument)
+            tp = _calc_tp_price(pos.strategy, pos.direction, pos.entry_price, ps)
+
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
+                tp_price=tp,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot sync {pos.id[:8]}",
             )
@@ -603,6 +612,20 @@ def _sync_unlinked_positions(
             log.exception("  cTrader SYNC error: %s", pos.instrument)
 
     log.info("cTrader sync: открыто %d/%d ордеров", opened, len(available))
+
+
+def _calc_tp_price(strategy: str, direction: str, entry_price: float, ps: float) -> float | None:
+    """Серверный TP для cTrader — брокер сам закроет при достижении."""
+    scalping = ("vwap_reversion", "stat_arb", "session_orb")
+    if strategy in scalping:
+        tp_pips = SCALPING_TP_PIPS
+    elif strategy == "outsiders":
+        tp_pips = OUTSIDERS_CONFIRMED_AGGRESSIVE_TP
+    else:
+        return None
+    if direction == "long":
+        return entry_price + tp_pips * ps
+    return entry_price - tp_pips * ps
 
 
 def _open_broker_for_new(
@@ -640,10 +663,14 @@ def _open_broker_for_new(
                                 sl, pos.direction, pos.instrument, cur_price)
                     sl = None
 
+            ps = pip_size(pos.instrument)
+            tp = _calc_tp_price(pos.strategy, pos.direction, pos.entry_price, ps)
+
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
                 sl_price=sl,
+                tp_price=tp,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot {pos.id[:8]}",
             )
@@ -662,6 +689,32 @@ def _open_broker_for_new(
                 log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
             log.exception("  cTrader OPEN error: %s", pos.instrument)
+
+
+def _detect_broker_closures(store: StatsStore, executor) -> int:
+    """Обнаружить позиции, закрытые брокером (серверный TP/SL).
+
+    Каждый цикл сверяем DB-позиции с broker_id против реально открытых на cTrader.
+    Если позиции нет у брокера — значит cTrader закрыл по TP/SL.
+    """
+    try:
+        broker_ids = {bp.positionId for bp in executor.get_open_positions()}
+    except Exception as exc:
+        log.debug("_detect_broker_closures: get_open_positions failed: %s", exc)
+        return 0
+
+    db_open = [p for p in store.get_open_positions() if p.broker_position_id]
+    closed = 0
+    for pos in db_open:
+        if pos.broker_position_id not in broker_ids:
+            store.close_position(pos.id, "broker_tp_sl")
+            closed += 1
+            log.info(
+                "  BROKER TP/SL: %s %s %s → broker #%d закрыт сервером (%+.1f pips)",
+                pos.strategy.upper(), display_name(pos.instrument),
+                pos.direction.upper(), pos.broker_position_id, pos.profit_pips,
+            )
+    return closed
 
 
 def _sync_broker_closes(
