@@ -329,16 +329,16 @@ def _run_cycle(
         for r in active:
             prev = last_directions.get(r.symbol)
             if r.signal.direction == prev:
-                continue
+            continue
             last_directions[r.symbol] = r.signal.direction
 
             ev_now = events_near(events, now=r.bars[-1].ts, within_hours=48.0, min_importance="medium")
-            text = advice_for_signal(
+        text = advice_for_signal(
                 display_name=r.display_name,
                 signal=r.signal,
                 last_price=r.last_price,
-                nearby_events=ev_now,
-            )
+            nearby_events=ev_now,
+        )
             strategies = ", ".join(
                 reason for reason in r.signal.reasons
                 if not reason[0].isdigit() and "/" not in reason
@@ -348,14 +348,14 @@ def _run_cycle(
                 r.display_name, r.signal.direction.value.upper(),
                 r.last_price, f"{r.signal.strength:.0%}", strategies, text,
             )
-            store.record_suggestion(
+        store.record_suggestion(
                 instrument=r.symbol,
                 direction=r.signal.direction.value,
-                advice_text=text,
+            advice_text=text,
                 reasons=r.signal.reasons,
                 price_at_signal=r.last_price,
-                events_context=events_to_json_blob(ev_now) if ev_now else None,
-            )
+            events_context=events_to_json_blob(ev_now) if ev_now else None,
+        )
 
     for r in results:
         if r.signal.direction == TrendDirection.FLAT:
@@ -585,10 +585,12 @@ def _sync_unlinked_positions(
 
             ps = pip_size(pos.instrument)
             tp = _calc_tp_price(pos.strategy, pos.direction, pos.entry_price, ps)
+            sl = pos.stop_loss_price if pos.stop_loss_price > 0 else None
 
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
+                sl_price=sl,
                 tp_price=tp,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot sync {pos.id[:8]}",
