@@ -111,6 +111,20 @@ class CTraderClient:
         import time as _time
         _time.sleep(5)
 
+        self._do_auth(timeout)
+        self._running = True
+
+    def _do_auth(self, timeout: float = 30) -> None:
+        """Авторизация приложения и аккаунта (вызывается из start и reconnect)."""
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOAAccountAuthReq,
+            ProtoOAAccountAuthRes,
+            ProtoOAApplicationAuthReq,
+            ProtoOAApplicationAuthRes,
+            ProtoOAGetAccountListByAccessTokenReq,
+            ProtoOAGetAccountListByAccessTokenRes,
+        )
+
         app_auth = ProtoOAApplicationAuthReq()
         app_auth.clientId = self._client_id
         app_auth.clientSecret = self._client_secret
@@ -159,7 +173,6 @@ class CTraderClient:
             timeout=timeout,
         )
         self._account_auth_done.set()
-        self._running = True
         log.info("cTrader: аккаунт %d авторизован, готов к торговле", self._account_id)
 
     def stop(self) -> None:
@@ -383,6 +396,41 @@ class CTraderClient:
                     res[1] = ConnectionError(f"Disconnected: {reason}")
                     ev.set()
             self._waiters.clear()
+
+        if self._running:
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self, delay: float = 5.0) -> None:
+        """Переподключение через delay секунд."""
+        from twisted.internet import reactor
+
+        def _do_reconnect():
+            log.info("cTrader: попытка переподключения...")
+            try:
+                self._client.stopService()
+            except Exception:
+                pass
+            try:
+                self._client.startService()
+            except Exception as exc:
+                log.error("cTrader: reconnect failed: %s, retry in 30s", exc)
+                reactor.callLater(30.0, _do_reconnect)
+                return
+
+            ok = self._connected.wait(15)
+            if not ok:
+                log.error("cTrader: reconnect timeout, retry in 30s")
+                reactor.callLater(30.0, _do_reconnect)
+                return
+
+            try:
+                self._do_auth()
+                log.info("cTrader: переподключение успешно")
+            except Exception as exc:
+                log.error("cTrader: reconnect auth failed: %s, retry in 30s", exc)
+                reactor.callLater(30.0, _do_reconnect)
+
+        reactor.callLater(delay, lambda: threading.Thread(target=_do_reconnect, daemon=True).start())
 
     def _on_message(self, client: Any, message: Any) -> None:
         from ctrader_open_api import Protobuf
