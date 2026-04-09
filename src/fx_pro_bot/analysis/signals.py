@@ -66,6 +66,62 @@ def _atr(bars: list[Bar], period: int = 14) -> float:
     return sum(trs) / len(trs) if trs else 0.0
 
 
+def compute_adx(bars: list[Bar], period: int = 14) -> float:
+    """Average Directional Index — сила тренда (0-100).
+
+    ADX < 20  → слабый/нет тренда (хорошо для mean reversion)
+    ADX > 25  → сильный тренд (опасно для mean reversion)
+    """
+    n = len(bars)
+    if n < period * 2 + 1:
+        return 0.0
+
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    tr_list: list[float] = []
+
+    for i in range(1, n):
+        high_diff = bars[i].high - bars[i - 1].high
+        low_diff = bars[i - 1].low - bars[i].low
+        plus_dm.append(high_diff if high_diff > low_diff and high_diff > 0 else 0.0)
+        minus_dm.append(low_diff if low_diff > high_diff and low_diff > 0 else 0.0)
+        tr = max(
+            bars[i].high - bars[i].low,
+            abs(bars[i].high - bars[i - 1].close),
+            abs(bars[i].low - bars[i - 1].close),
+        )
+        tr_list.append(tr)
+
+    def _smooth(values: list[float], p: int) -> list[float]:
+        result = [sum(values[:p])]
+        for v in values[p:]:
+            result.append(result[-1] - result[-1] / p + v)
+        return result
+
+    sm_tr = _smooth(tr_list, period)
+    sm_plus = _smooth(plus_dm, period)
+    sm_minus = _smooth(minus_dm, period)
+
+    dx_values: list[float] = []
+    for i in range(len(sm_tr)):
+        if sm_tr[i] == 0:
+            continue
+        plus_di = 100 * sm_plus[i] / sm_tr[i]
+        minus_di = 100 * sm_minus[i] / sm_tr[i]
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            continue
+        dx_values.append(100 * abs(plus_di - minus_di) / di_sum)
+
+    if len(dx_values) < period:
+        return sum(dx_values) / len(dx_values) if dx_values else 0.0
+
+    adx = sum(dx_values[:period]) / period
+    for dx in dx_values[period:]:
+        adx = (adx * (period - 1) + dx) / period
+    return adx
+
+
 # ── MACD ─────────────────────────────────────────────────────
 
 

@@ -26,7 +26,7 @@ from fx_pro_bot.stats.verifier import run_verification
 from fx_pro_bot.strategies.leaders import LeadersStrategy, aggregate_leader_signals
 from fx_pro_bot.strategies.monitor import PositionMonitor
 from fx_pro_bot.strategies.exits import create_paper_positions
-from fx_pro_bot.strategies.outsiders import CONFIRMED_SL_ATR, OUTSIDERS_EXCLUDE_SYMBOLS, OutsidersStrategy, detect_extreme_setups
+from fx_pro_bot.strategies.outsiders import ADX_MAX_FOR_MEAN_REVERSION, CONFIRMED_SL_ATR, OUTSIDERS_EXCLUDE_SYMBOLS, OutsidersStrategy, detect_extreme_setups
 from fx_pro_bot.strategies.shadow import ShadowTracker
 from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
@@ -414,6 +414,12 @@ def _run_cycle(
                 sl = price + CONFIRMED_SL_ATR * atr
 
             if r.symbol in OUTSIDERS_EXCLUDE_SYMBOLS:
+                continue
+
+            from fx_pro_bot.analysis.signals import compute_adx
+            sym_bars = bars_map.get(r.symbol, [])
+            if sym_bars and compute_adx(sym_bars) > ADX_MAX_FOR_MEAN_REVERSION:
+                log.info("  %s: ADX > %.0f — пропуск (сильный тренд)", r.display_name, ADX_MAX_FOR_MEAN_REVERSION)
                 continue
 
             ens_count = store.count_open_positions(strategy="ensemble", instrument=r.symbol)

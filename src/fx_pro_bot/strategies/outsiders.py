@@ -15,7 +15,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from fx_pro_bot.analysis.signals import TrendDirection, _atr, _rsi, _sma
+from fx_pro_bot.analysis.signals import TrendDirection, _atr, _rsi, _sma, compute_adx
 from fx_pro_bot.config.settings import display_name, pip_size
 from fx_pro_bot.events.models import CalendarEvent
 from fx_pro_bot.market_data.models import Bar
@@ -36,6 +36,8 @@ CONFIRMED_SL_ATR = 1.5
 CLASSIC_SL_ATR = 3.0
 
 OUTSIDERS_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({"GC=F", "EURJPY=X"})
+
+ADX_MAX_FOR_MEAN_REVERSION = 25.0
 
 LONDON_START = time(7, 0)
 LONDON_END = time(16, 0)
@@ -75,6 +77,10 @@ def detect_extreme_setups(
         closes = [b.close for b in bars]
         atr = _atr(bars)
         if atr <= 0:
+            continue
+
+        adx = compute_adx(bars)
+        if adx > ADX_MAX_FOR_MEAN_REVERSION:
             continue
 
         if mode == "confirmed":

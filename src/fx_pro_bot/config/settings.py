@@ -9,6 +9,7 @@ DEFAULT_SYMBOLS = (
     # Forex
     "EURUSD=X",
     "GBPUSD=X",
+    "USDJPY=X",
     "AUDUSD=X",
     "USDCAD=X",
     "EURJPY=X",
