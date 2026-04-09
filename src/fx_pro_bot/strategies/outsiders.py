@@ -35,7 +35,7 @@ CONFIRMED_RSI_RECOVERY = 5
 CONFIRMED_SL_ATR = 1.5
 CLASSIC_SL_ATR = 3.0
 
-OUTSIDERS_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({"GC=F"})
+OUTSIDERS_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({"GC=F", "EURJPY=X"})
 
 LONDON_START = time(7, 0)
 LONDON_END = time(16, 0)

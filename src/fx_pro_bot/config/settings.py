@@ -22,7 +22,6 @@ DEFAULT_SYMBOLS = (
     "NQ=F",
     # Crypto
     "BTC-USD",
-    "ETH-USD",
     # Bonds
     "ZN=F",
 )
