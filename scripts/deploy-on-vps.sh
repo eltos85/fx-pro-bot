@@ -9,6 +9,12 @@ echo ">>> git pull"
 git fetch origin main
 git reset --hard origin/main
 
+echo ">>> Stopping ALL bot containers (old and new naming)"
+docker compose down 2>/dev/null || true
+docker ps -a --filter "ancestor=fx-pro-bot:local" -q | xargs -r docker rm -f 2>/dev/null || true
+docker ps -a --filter "name=fx.pro.bot" -q | xargs -r docker rm -f 2>/dev/null || true
+docker container prune -f 2>/dev/null || true
+
 echo ">>> docker compose build"
 docker compose build --no-cache
 
