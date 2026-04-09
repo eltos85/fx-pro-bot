@@ -167,10 +167,19 @@ class TradeExecutor:
             )
 
             if pos_id and tp_distance:
+                import time as _time
+                _time.sleep(0.5)
+
                 price_for_tp = fill_price
-                broker_sl = 0.0
                 if not price_for_tp:
-                    price_for_tp, broker_sl = self._get_position_from_reconcile(pos_id)
+                    try:
+                        resp = self._client.reconcile()
+                        for p in resp.position:
+                            if p.positionId == pos_id:
+                                price_for_tp = p.price if hasattr(p, "price") and p.price else 0.0
+                                break
+                    except Exception:
+                        pass
                 if not price_for_tp:
                     price_for_tp = entry_price_hint
 
@@ -180,22 +189,16 @@ class TradeExecutor:
                         else price_for_tp - tp_distance
                     )
                     tp_rounded = round(tp_price, sym.digits)
-                    if not broker_sl:
-                        _, broker_sl = self._get_position_from_reconcile(pos_id)
-                    try:
-                        self._client.amend_position_sl_tp(
-                            pos_id,
-                            stop_loss=broker_sl if broker_sl else None,
-                            take_profit=tp_rounded,
-                        )
+                    ok = self.amend_sl_tp(
+                        pos_id,
+                        tp_price=tp_rounded,
+                        yf_symbol=yf_symbol,
+                    )
+                    if ok:
                         log.info(
-                            "cTrader TP amend OK: pos %d, TP=%.5f SL=%s (base=%.5f ±%.5f)",
-                            pos_id, tp_rounded,
-                            f"{broker_sl:.5f}" if broker_sl else "none",
-                            price_for_tp, tp_distance,
+                            "cTrader TP amend OK: pos %d, TP=%.5f (base=%.5f ±%.5f)",
+                            pos_id, tp_rounded, price_for_tp, tp_distance,
                         )
-                    except Exception as tp_exc:
-                        log.warning("cTrader amend TP failed pos %d: %s", pos_id, tp_exc)
                 else:
                     log.warning("cTrader: no price for TP amend on pos %d", pos_id)
 
@@ -208,25 +211,6 @@ class TradeExecutor:
         except Exception as exc:
             log.error("Ошибка открытия позиции %s %s: %s", yf_symbol, direction, exc)
             return OrderResult(success=False, error=str(exc))
-
-    def _get_position_from_reconcile(self, position_id: int) -> tuple[float, float]:
-        """Получить (price, stopLoss) позиции из reconcile.
-
-        Нужен для: 1) fallback fill_price при ORDER_ACCEPTED,
-        2) текущий SL для безопасного amend (чтобы не затереть SL).
-        """
-        import time as _time
-        _time.sleep(0.5)
-        try:
-            resp = self._client.reconcile()
-            for p in resp.position:
-                if p.positionId == position_id:
-                    price = p.price if hasattr(p, "price") and p.price else 0.0
-                    sl = p.stopLoss if hasattr(p, "stopLoss") and p.HasField("stopLoss") else 0.0
-                    return price, sl
-        except Exception as exc:
-            log.debug("reconcile for pos %d failed: %s", position_id, exc)
-        return 0.0, 0.0
 
     def close_position(
         self,
@@ -256,20 +240,48 @@ class TradeExecutor:
         tp_price: float | None = None,
         yf_symbol: str | None = None,
     ) -> bool:
-        """Изменить SL/TP позиции."""
+        """Изменить SL/TP позиции — БЕЗОПАСНО, не затирает неуказанные поля.
+
+        cTrader AmendPositionSLTPReq: если поле не задано, protobuf шлёт 0.0,
+        что cTrader интерпретирует как «удалить». Поэтому перед amend всегда
+        подтягиваем текущие SL/TP из reconcile и мержим с новыми значениями.
+        """
         try:
+            cur_sl, cur_tp = self._get_broker_sl_tp(broker_position_id)
+
+            final_sl = sl_price if sl_price is not None else (cur_sl if cur_sl else None)
+            final_tp = tp_price if tp_price is not None else (cur_tp if cur_tp else None)
+
+            if final_sl is None and final_tp is None:
+                return True
+
             digits = 5
             if yf_symbol:
                 sym = self._symbols.resolve_yfinance(yf_symbol)
                 if sym:
                     digits = sym.digits
-            sl_r = round(sl_price, digits) if sl_price is not None else None
-            tp_r = round(tp_price, digits) if tp_price is not None else None
+
+            sl_r = round(final_sl, digits) if final_sl is not None else None
+            tp_r = round(final_tp, digits) if final_tp is not None else None
+
             self._client.amend_position_sl_tp(broker_position_id, sl_r, tp_r)
             return True
         except Exception as exc:
             log.error("Ошибка изменения SL/TP позиции %d: %s", broker_position_id, exc)
             return False
+
+    def _get_broker_sl_tp(self, position_id: int) -> tuple[float, float]:
+        """Получить текущие (SL, TP) позиции из cTrader reconcile."""
+        try:
+            resp = self._client.reconcile()
+            for p in resp.position:
+                if p.positionId == position_id:
+                    sl = p.stopLoss if hasattr(p, "stopLoss") and p.HasField("stopLoss") else 0.0
+                    tp = p.takeProfit if hasattr(p, "takeProfit") and p.HasField("takeProfit") else 0.0
+                    return sl, tp
+        except Exception as exc:
+            log.debug("_get_broker_sl_tp pos %d failed: %s", position_id, exc)
+        return 0.0, 0.0
 
     def get_account_info(self) -> AccountInfo:
         """Получить информацию о счёте."""
