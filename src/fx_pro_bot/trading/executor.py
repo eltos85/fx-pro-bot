@@ -168,8 +168,9 @@ class TradeExecutor:
 
             if pos_id and tp_distance:
                 price_for_tp = fill_price
+                broker_sl = 0.0
                 if not price_for_tp:
-                    price_for_tp = self._get_fill_price_from_reconcile(pos_id)
+                    price_for_tp, broker_sl = self._get_position_from_reconcile(pos_id)
                 if not price_for_tp:
                     price_for_tp = entry_price_hint
 
@@ -179,14 +180,19 @@ class TradeExecutor:
                         else price_for_tp - tp_distance
                     )
                     tp_rounded = round(tp_price, sym.digits)
+                    if not broker_sl:
+                        _, broker_sl = self._get_position_from_reconcile(pos_id)
                     try:
                         self._client.amend_position_sl_tp(
                             pos_id,
+                            stop_loss=broker_sl if broker_sl else None,
                             take_profit=tp_rounded,
                         )
                         log.info(
-                            "cTrader TP amend OK: pos %d, TP=%.5f (base=%.5f ±%.5f)",
-                            pos_id, tp_rounded, price_for_tp, tp_distance,
+                            "cTrader TP amend OK: pos %d, TP=%.5f SL=%s (base=%.5f ±%.5f)",
+                            pos_id, tp_rounded,
+                            f"{broker_sl:.5f}" if broker_sl else "none",
+                            price_for_tp, tp_distance,
                         )
                     except Exception as tp_exc:
                         log.warning("cTrader amend TP failed pos %d: %s", pos_id, tp_exc)
@@ -203,18 +209,24 @@ class TradeExecutor:
             log.error("Ошибка открытия позиции %s %s: %s", yf_symbol, direction, exc)
             return OrderResult(success=False, error=str(exc))
 
-    def _get_fill_price_from_reconcile(self, position_id: int) -> float:
-        """Получить VWAP price позиции из reconcile (fallback при fill_price=0)."""
+    def _get_position_from_reconcile(self, position_id: int) -> tuple[float, float]:
+        """Получить (price, stopLoss) позиции из reconcile.
+
+        Нужен для: 1) fallback fill_price при ORDER_ACCEPTED,
+        2) текущий SL для безопасного amend (чтобы не затереть SL).
+        """
         import time as _time
         _time.sleep(0.5)
         try:
             resp = self._client.reconcile()
             for p in resp.position:
                 if p.positionId == position_id:
-                    return p.price if hasattr(p, "price") and p.price else 0.0
+                    price = p.price if hasattr(p, "price") and p.price else 0.0
+                    sl = p.stopLoss if hasattr(p, "stopLoss") and p.HasField("stopLoss") else 0.0
+                    return price, sl
         except Exception as exc:
-            log.debug("reconcile fallback for pos %d failed: %s", position_id, exc)
-        return 0.0
+            log.debug("reconcile for pos %d failed: %s", position_id, exc)
+        return 0.0, 0.0
 
     def close_position(
         self,
