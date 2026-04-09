@@ -31,12 +31,13 @@ YFINANCE_TO_CTRADER: dict[str, str] = {
     # Crypto
     "BTC-USD": "BITCOIN",
     "ETH-USD": "ETHEREUM",
+    # Spot energy CFDs (futures contracts на FxPro часто отключены)
+    "NG=F": "NAT.GAS",
+    "BZ=F": "BRENT",
 }
 
 _YFINANCE_PREFIX_MAP: dict[str, str] = {
     "CL=F": "#USOIL",
-    "BZ=F": "#UKOIL",
-    "NG=F": "#NGAS",
     "ES=F": "#US500",
     "NQ=F": "#USTEC",
 }
