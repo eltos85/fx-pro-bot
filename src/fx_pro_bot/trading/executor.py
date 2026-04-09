@@ -305,6 +305,7 @@ class TradeExecutor:
                     "balance": cpd.balance / divisor,
                     "pnlFee": getattr(cpd, "pnlConversionFee", 0) / divisor,
                     "executionPrice": getattr(d, "executionPrice", 0),
+                    "entryPrice": cpd.entryPrice,
                     "timestamp": d.executionTimestamp,
                 })
             return deals

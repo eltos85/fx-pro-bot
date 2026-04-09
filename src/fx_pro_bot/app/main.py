@@ -902,20 +902,42 @@ def _update_broker_pnl(
 
         ps = pip_size(instrument)
         exec_price = deal.get("executionPrice", 0)
-        if exec_price and entry_price and ps > 0:
-            if direction == "long":
-                pnl_pips = (exec_price - entry_price) / ps
+        cpd_entry = deal.get("entryPrice", 0)
+        actual_entry = cpd_entry if cpd_entry else entry_price
+
+        pnl_pips: float | None = None
+
+        if exec_price and actual_entry and ps > 0:
+            price_diff = abs(exec_price - actual_entry)
+            if price_diff < actual_entry * 0.05:
+                if direction == "long":
+                    pnl_pips = (exec_price - actual_entry) / ps
+                else:
+                    pnl_pips = (actual_entry - exec_price) / ps
             else:
-                pnl_pips = (entry_price - exec_price) / ps
-            pnl_pct = pnl_pips * ps / entry_price * 100 if entry_price else 0.0
+                log.warning(
+                    "  BROKER PNL: broker #%d exec=%.5f слишком далеко от entry=%.5f, "
+                    "используем grossProfit", broker_id, exec_price, actual_entry,
+                )
+
+        if pnl_pips is None:
+            gross = deal.get("grossProfit", 0)
+            if gross and ps > 0:
+                pv = pip_value_usd(instrument)
+                pnl_pips = gross / pv if pv > 0 else 0.0
+                log.info(
+                    "  BROKER PNL: broker #%d → %+.1f pips (from grossProfit $%.2f)",
+                    broker_id, pnl_pips, gross,
+                )
+
+        if pnl_pips is not None:
+            pnl_pct = pnl_pips * ps / actual_entry * 100 if actual_entry else 0.0
             store.update_closed_pnl(pos_id, round(pnl_pips, 2), round(pnl_pct, 4))
-            log.info(
-                "  BROKER PNL: broker #%d → %+.1f pips (exec=%.5f, entry=%.5f)",
-                broker_id, pnl_pips, exec_price, entry_price,
-            )
-        elif deal.get("grossProfit") is not None:
-            gross = deal["grossProfit"]
-            log.info("  BROKER PNL (USD): broker #%d → $%.2f (no pip calc)", broker_id, gross)
+            if exec_price and abs(exec_price - actual_entry) < actual_entry * 0.05:
+                log.info(
+                    "  BROKER PNL: broker #%d → %+.1f pips (exec=%.5f, entry=%.5f)",
+                    broker_id, pnl_pips, exec_price, actual_entry,
+                )
 
 
 def _sync_broker_closes(
