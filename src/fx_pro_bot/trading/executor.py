@@ -179,18 +179,14 @@ class TradeExecutor:
                         else price_for_tp - tp_distance
                     )
                     tp_rounded = round(tp_price, sym.digits)
-                    existing_sl = getattr(pos, "stopLoss", 0) if pos else 0
                     try:
                         self._client.amend_position_sl_tp(
                             pos_id,
-                            stop_loss=existing_sl if existing_sl else None,
                             take_profit=tp_rounded,
                         )
                         log.info(
-                            "cTrader TP amend OK: pos %d, TP=%.5f SL=%s (base=%.5f ±%.5f)",
-                            pos_id, tp_rounded,
-                            f"{existing_sl:.5f}" if existing_sl else "kept",
-                            price_for_tp, tp_distance,
+                            "cTrader TP amend OK: pos %d, TP=%.5f (base=%.5f ±%.5f)",
+                            pos_id, tp_rounded, price_for_tp, tp_distance,
                         )
                     except Exception as tp_exc:
                         log.warning("cTrader amend TP failed pos %d: %s", pos_id, tp_exc)
