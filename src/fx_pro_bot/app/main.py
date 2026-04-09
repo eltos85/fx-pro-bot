@@ -545,11 +545,15 @@ def _run_cycle(
         mon_stats["closed_tp"], mon_stats["closed_time"],
     )
 
-    # 4c. cTrader: двинуть trailing SL на брокере
+    # 4c. cTrader: гарантировать SL+TP на всех позициях
+    if executor:
+        _ensure_broker_sl_tp(store, executor, atrs)
+
+    # 4d. cTrader: двинуть trailing SL на брокере
     if executor:
         _update_broker_trailing_sl(store, executor, atrs)
 
-    # 4d. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
+    # 4e. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
     if executor and killswitch:
         _sync_broker_closes(store, executor, killswitch, positions_before_close, prices, settings)
 
@@ -784,6 +788,107 @@ def _open_broker_for_new(
                 log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
             log.exception("  cTrader OPEN error: %s", pos.instrument)
+
+
+def _ensure_broker_sl_tp(
+    store: StatsStore, executor, atrs: dict[str, float],
+) -> None:
+    """Каждый цикл проверяем все позиции на брокере — если SL/TP отсутствует, доставляем.
+
+    Защита от сбоев: если amend при открытии упал (таймаут, сеть),
+    следующий цикл подхватит и доставит недостающие уровни.
+    """
+    log.info("── Аудит SL/TP на брокере ──")
+
+    try:
+        broker_positions = executor.get_open_positions()
+    except Exception:
+        log.warning("  Аудит SL/TP: не удалось получить позиции с брокера")
+        return
+
+    if not broker_positions:
+        log.info("  Нет открытых позиций на брокере")
+        return
+
+    db_map: dict[int, Any] = {}
+    for p in store.get_open_positions():
+        if p.broker_position_id:
+            db_map[p.broker_position_id] = p
+
+    ok_count = 0
+    no_sl = 0
+    no_tp = 0
+    fixed = 0
+
+    for bp in broker_positions:
+        pos_id = bp.positionId
+        has_sl = hasattr(bp, "stopLoss") and bp.HasField("stopLoss")
+        has_tp = hasattr(bp, "takeProfit") and bp.HasField("takeProfit")
+
+        if has_sl and has_tp:
+            ok_count += 1
+            continue
+
+        if not has_sl:
+            no_sl += 1
+        if not has_tp:
+            no_tp += 1
+
+        db_pos = db_map.get(pos_id)
+        if not db_pos:
+            log.warning("  #%d — нет в DB, пропускаем (SL=%s TP=%s)",
+                        pos_id, "ok" if has_sl else "MISSING", "ok" if has_tp else "MISSING")
+            continue
+
+        ps = pip_size(db_pos.instrument)
+        if ps == 0:
+            continue
+
+        entry = bp.price if hasattr(bp, "price") and bp.price else db_pos.entry_price
+        if not entry:
+            continue
+
+        td = bp.tradeData if hasattr(bp, "tradeData") else None
+        is_buy = td.tradeSide == 1 if td else (db_pos.direction == "long")
+
+        new_sl: float | None = None
+        new_tp: float | None = None
+
+        if not has_sl:
+            pos_atr = atrs.get(db_pos.instrument, 0.0)
+            sl_dist = pos_atr * 2 if pos_atr > 0 else 10 * ps
+            new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
+
+        if not has_tp:
+            pos_atr = atrs.get(db_pos.instrument, 0.0)
+            tp_dist = _calc_tp_distance(db_pos.strategy, ps, pos_atr)
+            if tp_dist:
+                new_tp = (entry + tp_dist) if is_buy else (entry - tp_dist)
+            else:
+                new_tp = (entry + 10 * ps) if is_buy else (entry - 10 * ps)
+
+        ok = executor.amend_sl_tp(
+            pos_id,
+            sl_price=new_sl,
+            tp_price=new_tp,
+            yf_symbol=db_pos.instrument,
+        )
+        if ok:
+            fixed += 1
+            log.info(
+                "  FIX: %s %s #%d → %s%s",
+                display_name(db_pos.instrument), db_pos.direction.upper(), pos_id,
+                f"SL={new_sl:.5f} " if new_sl else "",
+                f"TP={new_tp:.5f}" if new_tp else "",
+            )
+
+    if no_sl == 0 and no_tp == 0:
+        log.info("  Все %d позиций с SL и TP ✓", ok_count)
+    else:
+        log.info(
+            "  Итого: %d ок, %d без SL, %d без TP → исправлено %d",
+            ok_count, no_sl, no_tp, fixed,
+        )
 
 
 def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, float]) -> None:
