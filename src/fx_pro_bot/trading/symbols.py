@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date
 
 log = logging.getLogger(__name__)
+
+_FUTURES_MONTH_CODES: dict[str, int] = {
+    "F": 1, "G": 2, "H": 3, "J": 4, "K": 5, "M": 6,
+    "N": 7, "Q": 8, "U": 9, "V": 10, "X": 11, "Z": 12,
+}
 
 YFINANCE_TO_CTRADER: dict[str, str] = {
     # Forex
@@ -81,11 +87,16 @@ class SymbolCache:
         if exact:
             return exact
 
-        candidates = sorted(
-            (name for name in self._by_name if name.startswith(prefix.upper() + "_")),
-        )
-        if candidates:
-            sym = self._by_name[candidates[0]]
+        candidates = [
+            name for name in self._by_name
+            if name.startswith(prefix.upper() + "_")
+        ]
+        if not candidates:
+            return None
+
+        best = _pick_front_month(candidates)
+        if best:
+            sym = self._by_name[best]
             log.info("Prefix match: %s → %s (id=%d)", yf_symbol, sym.name, sym.symbol_id)
             return sym
 
@@ -94,6 +105,39 @@ class SymbolCache:
     @property
     def loaded(self) -> bool:
         return len(self._by_name) > 0
+
+
+def _pick_front_month(names: list[str]) -> str | None:
+    """Выбрать ближайший активный фьючерсный контракт из списка имён.
+
+    Формат суффикса: _X26 где X — код месяца (F..Z), 26 — год.
+    Возвращает контракт с ближайшей датой >= текущего месяца.
+    """
+    today = date.today()
+    current = (today.year % 100, today.month)
+
+    parsed: list[tuple[int, int, str]] = []
+    for name in names:
+        parts = name.rsplit("_", 1)
+        if len(parts) != 2 or len(parts[1]) < 2:
+            continue
+        month_code = parts[1][0].upper()
+        year_str = parts[1][1:]
+        month = _FUTURES_MONTH_CODES.get(month_code)
+        if month is None:
+            continue
+        try:
+            year = int(year_str)
+        except ValueError:
+            continue
+        if (year, month) >= current:
+            parsed.append((year, month, name))
+
+    if not parsed:
+        return names[0] if names else None
+
+    parsed.sort()
+    return parsed[0][2]
 
 
 def lots_to_volume(lots: float, contract_size: int = 10_000_000) -> int:
