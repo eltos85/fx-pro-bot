@@ -116,10 +116,11 @@ class TradeExecutor:
         lot_size: float | None = None,
         comment: str = "",
     ) -> OrderResult:
-        """Открыть рыночную позицию с относительным SL/TP.
+        """Открыть рыночную позицию с SL/TP.
 
-        cTrader сам рассчитает абсолютные SL/TP от реальной цены заливки
-        (ProtoOANewOrderReq.relativeStopLoss / relativeTakeProfit).
+        cTrader API: relativeTakeProfit на MARKET ордерах ненадёжен
+        (известная проблема, подтверждена на форуме cTrader).
+        Поэтому: relativeStopLoss в ордере, TP — amend после fill.
 
         Args:
             yf_symbol: символ yfinance (EURUSD=X, GC=F, ...)
@@ -148,7 +149,6 @@ class TradeExecutor:
 
         step = 10 ** (5 - sym.digits)
         rel_sl = self._to_relative(sl_distance, step) if sl_distance else None
-        rel_tp = self._to_relative(tp_distance, step) if tp_distance else None
 
         try:
             result = self._client.send_new_order(
@@ -156,7 +156,7 @@ class TradeExecutor:
                 trade_side=trade_side,
                 volume=volume,
                 relative_stop_loss=rel_sl,
-                relative_take_profit=rel_tp,
+                relative_take_profit=None,
                 comment=comment or f"fx-pro-bot {yf_symbol} {direction}",
             )
 
@@ -169,6 +169,26 @@ class TradeExecutor:
                 pos.price if pos and hasattr(pos, "price") else
                 0.0
             )
+
+            if pos_id and tp_distance and fill_price:
+                tp_price = (
+                    fill_price + tp_distance if direction.lower() == "long"
+                    else fill_price - tp_distance
+                )
+                tp_rounded = round(tp_price, sym.digits)
+                existing_sl = getattr(pos, "stopLoss", None) if pos else None
+                try:
+                    self._client.amend_position_sl_tp(
+                        pos_id,
+                        stop_loss=existing_sl if existing_sl else None,
+                        take_profit=tp_rounded,
+                    )
+                    log.info(
+                        "cTrader: TP set via amend → pos %d, TP=%.5f SL=%.5f (fill=%.5f ±%.5f)",
+                        pos_id, tp_rounded, existing_sl or 0, fill_price, tp_distance,
+                    )
+                except Exception as tp_exc:
+                    log.warning("cTrader: amend TP failed for pos %d: %s", pos_id, tp_exc)
 
             return OrderResult(
                 success=True,

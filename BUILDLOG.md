@@ -6,6 +6,17 @@
 
 ## 2026-04-09
 
+### fix: TP через amend после fill (cTrader API workaround)
+`tbd`
+
+cTrader API игнорирует `relativeTakeProfit` на MARKET ордерах — известная
+проблема, подтверждена на форуме cTrader (март 2025). SL через
+`relativeStopLoss` работает, а TP — нет. Решение по рекомендации
+cTrader team: ордер с `relativeStopLoss`, затем `ProtoOAAmendPositionSLTPReq`
+для установки абсолютного TP на основе реальной цены заливки.
+
+**Файлы:** `executor.py`
+
 ### fix: broker PNL — sanity check executionPrice + grossProfit fallback
 `301c540`
 
