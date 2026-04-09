@@ -8,7 +8,7 @@ from dataclasses import dataclass
 log = logging.getLogger(__name__)
 
 YFINANCE_TO_CTRADER: dict[str, str] = {
-    # Forex (exact match)
+    # Forex
     "EURUSD=X": "EURUSD",
     "GBPUSD=X": "GBPUSD",
     "USDJPY=X": "USDJPY",
@@ -22,6 +22,9 @@ YFINANCE_TO_CTRADER: dict[str, str] = {
     "GC=F": "XAUUSD",
     "HG=F": "COPPER",
     "PL=F": "XPTUSD",
+    # Crypto
+    "BTC-USD": "BITCOIN",
+    "ETH-USD": "ETHEREUM",
 }
 
 _YFINANCE_PREFIX_MAP: dict[str, str] = {
@@ -30,8 +33,6 @@ _YFINANCE_PREFIX_MAP: dict[str, str] = {
     "NG=F": "#NGAS",
     "ES=F": "#US500",
     "NQ=F": "#USTEC",
-    "BTC-USD": "BTCUSD",
-    "ETH-USD": "ETHUSD",
 }
 
 CTRADER_TO_YFINANCE: dict[str, str] = {v: k for k, v in YFINANCE_TO_CTRADER.items()}

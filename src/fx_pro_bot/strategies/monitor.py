@@ -33,10 +33,17 @@ OUTSIDERS_CONFIRMED_HARD_STOP_HOURS = 36.0
 OUTSIDERS_CONFIRMED_HARD_STOP_MIN_PROFIT = 40.0
 OUTSIDERS_CONFIRMED_AGGRESSIVE_TP = 10.0
 
+OUTSIDERS_TP_ATR_MULT = 0.5
+OUTSIDERS_TRAIL_TRIGGER_ATR_MULT = 0.3
+OUTSIDERS_TRAIL_DISTANCE_ATR_MULT = 0.15
+
 SCALPING_HARD_STOP_HOURS = 12.0
 SCALPING_TP_PIPS = 5.0
+SCALPING_TP_ATR_MULT = 0.3
 SCALPING_TRAIL_TRIGGER_PIPS = 3.0
+SCALPING_TRAIL_TRIGGER_ATR_MULT = 0.2
 SCALPING_TRAIL_DISTANCE_PIPS = 2.0
+SCALPING_TRAIL_DISTANCE_ATR_MULT = 0.1
 
 GLOBAL_HARD_STOP_HOURS = 72.0
 
@@ -127,10 +134,14 @@ class PositionMonitor:
 
         age_hours = self._position_age_hours(pos)
 
-        if pos.strategy == "outsiders":
-            if pips >= OUTSIDERS_CONFIRMED_AGGRESSIVE_TP:
+        if pos.strategy in ("outsiders", "ensemble"):
+            atr_pips_out = atr / ps if ps > 0 else 0
+            tp_pips = max(OUTSIDERS_TP_ATR_MULT * atr_pips_out, OUTSIDERS_CONFIRMED_AGGRESSIVE_TP)
+            if pips >= tp_pips:
                 return "aggressive_tp"
-            if peak_pips >= 5.0 and (peak_pips - pips) >= 3.0:
+            trail_trigger = max(OUTSIDERS_TRAIL_TRIGGER_ATR_MULT * atr_pips_out, 5.0)
+            trail_dist = max(OUTSIDERS_TRAIL_DISTANCE_ATR_MULT * atr_pips_out, 3.0)
+            if peak_pips >= trail_trigger and (peak_pips - pips) >= trail_dist:
                 return "outsiders_trail"
             if self._outsiders_mode == "confirmed":
                 for hours_limit, pips_limit in OUTSIDERS_CONFIRMED_TIME_STOPS:
@@ -150,9 +161,13 @@ class PositionMonitor:
 
         scalping = ("vwap_reversion", "stat_arb", "session_orb")
         if pos.strategy in scalping:
-            if pips >= SCALPING_TP_PIPS:
+            atr_pips_sc = atr / ps if ps > 0 else 0
+            scalp_tp = max(SCALPING_TP_ATR_MULT * atr_pips_sc, SCALPING_TP_PIPS)
+            if pips >= scalp_tp:
                 return "scalp_tp"
-            if peak_pips >= SCALPING_TRAIL_TRIGGER_PIPS and (peak_pips - pips) >= SCALPING_TRAIL_DISTANCE_PIPS:
+            scalp_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_TRIGGER_PIPS)
+            scalp_trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_DISTANCE_PIPS)
+            if peak_pips >= scalp_trigger and (peak_pips - pips) >= scalp_trail_d:
                 return "scalp_trail"
             if age_hours >= SCALPING_HARD_STOP_HOURS:
                 return "scalp_time_12h"

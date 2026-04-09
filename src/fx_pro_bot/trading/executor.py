@@ -111,18 +111,21 @@ class TradeExecutor:
         self,
         yf_symbol: str,
         direction: str,
-        sl_price: float | None = None,
-        tp_price: float | None = None,
+        sl_distance: float | None = None,
+        tp_distance: float | None = None,
         lot_size: float | None = None,
         comment: str = "",
     ) -> OrderResult:
-        """Открыть рыночную позицию.
+        """Открыть рыночную позицию с относительным SL/TP.
+
+        cTrader сам рассчитает абсолютные SL/TP от реальной цены заливки
+        (ProtoOANewOrderReq.relativeStopLoss / relativeTakeProfit).
 
         Args:
             yf_symbol: символ yfinance (EURUSD=X, GC=F, ...)
             direction: "long" или "short"
-            sl_price: абсолютная цена Stop Loss
-            tp_price: абсолютная цена Take Profit
+            sl_distance: расстояние SL от entry в единицах цены (всегда > 0)
+            tp_distance: расстояние TP от entry в единицах цены (всегда > 0)
             lot_size: размер лота (по умолчанию self._lot_size)
             comment: комментарий к ордеру
         """
@@ -143,30 +146,34 @@ class TradeExecutor:
 
         trade_side = "BUY" if direction.lower() == "long" else "SELL"
 
+        step = 10 ** (5 - sym.digits)
+        rel_sl = self._to_relative(sl_distance, step) if sl_distance else None
+        rel_tp = self._to_relative(tp_distance, step) if tp_distance else None
+
         try:
             result = self._client.send_new_order(
                 symbol_id=sym.symbol_id,
                 trade_side=trade_side,
                 volume=volume,
+                relative_stop_loss=rel_sl,
+                relative_take_profit=rel_tp,
                 comment=comment or f"fx-pro-bot {yf_symbol} {direction}",
             )
 
             pos = result.position if hasattr(result, "position") else None
             pos_id = pos.positionId if pos else 0
 
-            if pos_id and (sl_price is not None or tp_price is not None):
-                sl_r = round(sl_price, sym.digits) if sl_price is not None else None
-                tp_r = round(tp_price, sym.digits) if tp_price is not None else None
-                try:
-                    self._client.amend_position_sl_tp(pos_id, sl_r, tp_r)
-                    log.info("cTrader: SL/TP установлен для positionId=%d", pos_id)
-                except Exception as exc:
-                    log.warning("cTrader: SL/TP amend failed positionId=%d: %s", pos_id, exc)
+            deal = result.deal if hasattr(result, "deal") else None
+            fill_price = (
+                deal.executionPrice if deal and hasattr(deal, "executionPrice") else
+                pos.price if pos and hasattr(pos, "price") else
+                0.0
+            )
 
             return OrderResult(
                 success=True,
                 broker_position_id=pos_id,
-                fill_price=pos.price if pos and hasattr(pos, "price") else 0.0,
+                fill_price=fill_price,
                 volume=volume,
             )
         except Exception as exc:
@@ -304,6 +311,19 @@ class TradeExecutor:
         except Exception as exc:
             log.error("get_deal_list failed: %s", exc)
             return []
+
+    @staticmethod
+    def _to_relative(distance: float, step: int) -> int:
+        """Перевести ценовую дельту в формат cTrader (1/100000) с правильной точностью.
+
+        step = 10^(5 - digits) — минимальный шаг для символа.
+        Гарантирует результат >= step (хотя бы 1 минимальное движение цены).
+        """
+        raw = int(round(distance * 100_000))
+        if step > 1:
+            aligned = (raw // step) * step
+            return max(aligned, step)
+        return max(raw, 1)
 
     @staticmethod
     def _clamp_volume(volume: int, sym: SymbolInfo) -> int:

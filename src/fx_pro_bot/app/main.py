@@ -8,21 +8,24 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
-from fx_pro_bot.config.settings import SCALPING_EXTRA_SYMBOLS, Settings, display_name, pip_size, pip_value_usd, spread_cost_pips
+from fx_pro_bot.config.settings import SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, display_name, pip_size, pip_value_usd, spread_cost_pips
 from fx_pro_bot.strategies.monitor import (
     SCALPING_TP_PIPS, SCALPING_TRAIL_TRIGGER_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
     OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
+    OUTSIDERS_TP_ATR_MULT, SCALPING_TP_ATR_MULT,
 )
 
 LEADERS_TP_PIPS = 50.0
 from fx_pro_bot.copytrading.ctrader import CTraderCopyClient, format_top_strategies
 from fx_pro_bot.events import events_near, events_to_json_blob, load_events
 from fx_pro_bot.stats.cleanup import cleanup_shadow_log, db_size_mb, vacuum_if_needed
+from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.stats.verifier import run_verification
 from fx_pro_bot.strategies.leaders import LeadersStrategy, aggregate_leader_signals
 from fx_pro_bot.strategies.monitor import PositionMonitor
-from fx_pro_bot.strategies.outsiders import OutsidersStrategy, detect_extreme_setups
+from fx_pro_bot.strategies.exits import create_paper_positions
+from fx_pro_bot.strategies.outsiders import CONFIRMED_SL_ATR, OutsidersStrategy, detect_extreme_setups
 from fx_pro_bot.strategies.shadow import ShadowTracker
 from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
@@ -58,31 +61,40 @@ def _log_stats(store: StatsStore, horizons: tuple[int, ...], settings: Settings)
     by_instr = store.verification_summary_by_instrument()
     gross_usd = 0.0
     spread_usd = 0.0
+    comm_usd = 0.0
+    comm_per = broker_commission_usd(lot)
+    total_trades = 0
     if by_instr:
         log.info("  По инструментам (лот %.2f):", lot)
         for row in by_instr:
             pips = float(row["total_profit"])
             symbol = str(row["instrument"])
             num_trades = int(row["total"]) // len(horizons) if horizons else int(row["total"])
+            total_trades += num_trades
             pv = pip_value_usd(symbol, lot)
             instr_gross = pips * pv
             instr_spread = spread_cost_pips(symbol) * pv * num_trades
-            instr_net = instr_gross - instr_spread
+            instr_comm = comm_per * num_trades
+            instr_net = instr_gross - instr_spread - instr_comm
             gross_usd += instr_gross
             spread_usd += instr_spread
+            comm_usd += instr_comm
             log.info(
                 "    %s: %d проверок, win-rate %.0f%%, %+.1f пунктов → "
-                "брутто $%+.2f, спред -$%.2f, чистыми $%+.2f",
+                "брутто $%+.2f, спред -$%.2f, комис -$%.2f, чист $%+.2f",
                 display_name(symbol), row["total"],
                 row["win_rate"] * 100, pips,  # type: ignore[arg-type]
-                instr_gross, instr_spread, instr_net,
+                instr_gross, instr_spread, instr_comm, instr_net,
             )
 
-    net_usd = gross_usd - spread_usd
+    total_costs = spread_usd + comm_usd
+    net_usd = gross_usd - total_costs
     log.info(
-        "  Счёт $%.0f, лот %.2f → брутто $%+.2f, комиссии -$%.2f, чистыми $%+.2f (%+.1f%%)",
-        balance, lot, gross_usd, spread_usd, net_usd,
-        (net_usd / balance * 100) if balance else 0,
+        "  Счёт $%.0f, лот %.2f → брутто $%+.2f, спред -$%.2f, "
+        "комиссия FxPro -$%.2f (%d×$%.2f), чистыми $%+.2f (%+.1f%%)",
+        balance, lot, gross_usd, spread_usd,
+        comm_usd, total_trades, comm_per,
+        net_usd, (net_usd / balance * 100) if balance else 0,
     )
 
 
@@ -124,14 +136,25 @@ def _log_strategy_stats(store: StatsStore, settings: Settings, executor=None) ->
     if not strats:
         return
 
-    log.info("── P&L по стратегиям (cTrader) ──")
-    total_unrealized = sum(s["unrealized_net"] for s in strats.values())
+    comm_per_trade = broker_commission_usd(settings.lot_size)
+    log.info("── P&L по стратегиям (cTrader, комиссия $%.2f/сделка) ──", comm_per_trade)
+    total_unrealized = 0.0
+    total_trades = 0
+    total_closed = 0
     for name, s in sorted(strats.items()):
+        total_unrealized += s["unrealized_net"]
+        total_trades += s["total"]
+        total_closed += s["closed"]
+        est_comm = s["total"] * comm_per_trade
         log.info(
-            "  %s: %d сделок (%d закр), нереализ $%+.2f",
-            name, s["total"], s["closed"], s["unrealized_net"],
+            "  %s: %d сделок (%d закр), нереализ $%+.2f, комиссия ~$%.2f",
+            name, s["total"], s["closed"], s["unrealized_net"], est_comm,
         )
-    log.info("  ИТОГО нереализованный: $%+.2f", total_unrealized)
+    total_comm = total_trades * comm_per_trade
+    log.info(
+        "  ИТОГО: нереализ $%+.2f, комиссия ~$%.2f (%d сделок × $%.2f)",
+        total_unrealized, total_comm, total_trades, comm_per_trade,
+    )
 
     by_exit = store.paper_summary_by_exit_strategy()
     if by_exit:
@@ -173,6 +196,20 @@ def _init_trading(settings: Settings, store: StatsStore):
         log.warning("cTrader: токены недоступны (%s), торговля отключена", exc)
         return None, None
 
+    def _on_token_refreshed(new_access: str, new_refresh: str) -> None:
+        from fx_pro_bot.trading.auth import TokenData
+        import time as _time
+
+        updated = TokenData(
+            access_token=new_access,
+            refresh_token=new_refresh,
+            expires_at=_time.time() + 2_628_000,
+        )
+        try:
+            token_store.save(updated)
+        except Exception as exc:
+            log.warning("cTrader: не удалось сохранить обновлённые токены: %s", exc)
+
     try:
         client = CTraderClient(
             client_id=settings.ctrader_client_id,
@@ -180,6 +217,8 @@ def _init_trading(settings: Settings, store: StatsStore):
             access_token=token_data.access_token,
             account_id=settings.ctrader_account_id,
             host_type=settings.ctrader_host_type,
+            refresh_token=token_data.refresh_token,
+            on_token_refreshed=_on_token_refreshed,
         )
         client.start(timeout=30)
     except Exception as exc:
@@ -331,6 +370,8 @@ def _run_cycle(
     if not active:
         log.info("Ансамбль: нет согласия")
     else:
+        ensemble_before_ids = {p.id for p in store.get_open_positions()}
+        ensemble_opened = 0
         for r in active:
             prev = last_directions.get(r.symbol)
             if r.signal.direction == prev:
@@ -362,6 +403,42 @@ def _run_cycle(
                 events_context=events_to_json_blob(ev_now) if ev_now else None,
             )
 
+            price = r.last_price
+            atr = atrs.get(r.symbol, price * 0.005)
+            ps = pip_size(r.symbol)
+
+            if r.signal.direction == TrendDirection.LONG:
+                sl = price - CONFIRMED_SL_ATR * atr
+            else:
+                sl = price + CONFIRMED_SL_ATR * atr
+
+            ens_count = store.count_open_positions(strategy="ensemble", instrument=r.symbol)
+            if ens_count >= 2:
+                continue
+
+            pid = store.open_position(
+                strategy="ensemble",
+                source="ensemble_vote",
+                instrument=r.symbol,
+                direction=r.signal.direction.value,
+                entry_price=price,
+                stop_loss_price=sl,
+            )
+            cost = estimate_entry_cost(r.symbol, "cot", atr, ps)
+            store.set_estimated_cost(pid, cost.round_trip_pips)
+            create_paper_positions(store, pid, price, r.signal.direction, atr, ps)
+
+            log.info(
+                "  ENSEMBLE OPEN: %s %s @ %.5f (SL=%.5f, ATR=%.5f)",
+                display_name(r.symbol), r.signal.direction.value.upper(),
+                price, sl, atr,
+            )
+            ensemble_opened += 1
+
+        _open_broker_for_new(store, executor, killswitch, ensemble_before_ids, prices, settings, atrs)
+        if ensemble_opened:
+            log.info("  Ансамбль: %d позиций открыто", ensemble_opened)
+
     for r in results:
         if r.signal.direction == TrendDirection.FLAT:
             if last_directions.get(r.symbol) != TrendDirection.FLAT:
@@ -378,7 +455,7 @@ def _run_cycle(
             leader_sigs = aggregate_leader_signals(cot_signals, sentiment_signals, bars_map)
             before_ids = {p.id for p in store.get_open_positions()}
             opened = leaders_strat.process_signals(leader_sigs, prices)
-            _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
+            _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
             closed = leaders_strat.check_source_reversals(cot_signals, sentiment_signals)
             if opened or closed:
                 log.info("  Leaders: +%d открыто, -%d закрыто по развороту", opened, closed)
@@ -399,7 +476,7 @@ def _run_cycle(
             if outsider_sigs:
                 before_ids = {p.id for p in store.get_open_positions()}
                 opened = outsiders_strat.process_signals(outsider_sigs, prices)
-                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
                 log.info("  Outsiders: %d extreme-сигналов, %d открыто", len(outsider_sigs), opened)
             else:
                 log.info("  Outsiders: нет extreme-ситуаций")
@@ -431,14 +508,14 @@ def _run_cycle(
                 v_sigs = vwap_strat.scan(scalping_bars, scalping_prices)
                 before_ids = {p.id for p in store.get_open_positions()}
                 v_opened = vwap_strat.process_signals(v_sigs, scalping_prices) if v_sigs else 0
-                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
                 log.info("  VWAP: %d сигналов, %d открыто", len(v_sigs), v_opened)
 
             if statarb_strat:
                 sa_sigs = statarb_strat.scan(scalping_bars)
                 before_ids = {p.id for p in store.get_open_positions()}
                 sa_opened = statarb_strat.process_signals(sa_sigs, scalping_prices) if sa_sigs else 0
-                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
                 sa_closed = statarb_strat.check_exits(scalping_bars)
                 log.info("  Stat-Arb: %d сигналов, %d открыто, %d закрыто", len(sa_sigs), sa_opened, sa_closed)
 
@@ -446,7 +523,7 @@ def _run_cycle(
                 o_sigs = orb_strat.scan(scalping_bars, scalping_prices, events)
                 before_ids = {p.id for p in store.get_open_positions()}
                 o_opened = orb_strat.process_signals(o_sigs, scalping_prices) if o_sigs else 0
-                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings)
+                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
                 log.info("  ORB: %d сигналов, %d открыто", len(o_sigs), o_opened)
         except Exception:
             log.exception("Ошибка скальпинг-стратегий")
@@ -573,6 +650,7 @@ def _sync_unlinked_positions(
     executor,
     killswitch,
     settings: Settings,
+    atrs: dict[str, float] | None = None,
 ) -> None:
     """Открыть cTrader-ордера для бумажных позиций без broker_position_id."""
     unlinked = [p for p in store.get_open_positions() if not p.broker_position_id]
@@ -593,14 +671,17 @@ def _sync_unlinked_positions(
                 break
 
             ps = pip_size(pos.instrument)
-            tp = _calc_tp_price(pos.strategy, pos.direction, pos.entry_price, ps)
-            sl = pos.stop_loss_price if pos.stop_loss_price > 0 else None
+            pos_atr = (atrs or {}).get(pos.instrument, 0.0)
+            tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr)
+            sl_dist: float | None = None
+            if pos.stop_loss_price > 0 and pos.entry_price > 0:
+                sl_dist = abs(pos.entry_price - pos.stop_loss_price)
 
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
-                sl_price=sl,
-                tp_price=tp,
+                sl_distance=sl_dist,
+                tp_distance=tp_dist,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot sync {pos.id[:8]}",
             )
@@ -625,20 +706,20 @@ def _sync_unlinked_positions(
     log.info("cTrader sync: открыто %d/%d ордеров", opened, len(available))
 
 
-def _calc_tp_price(strategy: str, direction: str, entry_price: float, ps: float) -> float | None:
-    """Серверный TP для cTrader — брокер сам закроет при достижении."""
+def _calc_tp_distance(strategy: str, ps: float, atr: float = 0.0) -> float | None:
+    """Расстояние TP от entry в единицах цены. cTrader сам применит к fill price."""
     scalping = ("vwap_reversion", "stat_arb", "session_orb")
     if strategy in scalping:
-        tp_pips = SCALPING_TP_PIPS
-    elif strategy == "outsiders":
-        tp_pips = OUTSIDERS_CONFIRMED_AGGRESSIVE_TP
-    elif strategy == "leaders":
-        tp_pips = LEADERS_TP_PIPS
-    else:
-        return None
-    if direction == "long":
-        return entry_price + tp_pips * ps
-    return entry_price - tp_pips * ps
+        atr_tp = SCALPING_TP_ATR_MULT * atr if atr > 0 else 0.0
+        fixed_tp = SCALPING_TP_PIPS * ps
+        return max(atr_tp, fixed_tp)
+    if strategy in ("outsiders", "ensemble"):
+        atr_tp = OUTSIDERS_TP_ATR_MULT * atr if atr > 0 else 0.0
+        fixed_tp = OUTSIDERS_CONFIRMED_AGGRESSIVE_TP * ps
+        return max(atr_tp, fixed_tp)
+    if strategy == "leaders":
+        return LEADERS_TP_PIPS * ps
+    return None
 
 
 def _open_broker_for_new(
@@ -648,6 +729,7 @@ def _open_broker_for_new(
     before_ids: set[str],
     prices: dict[str, float],
     settings: Settings,
+    atrs: dict[str, float] | None = None,
 ) -> None:
     """Открыть cTrader-ордера для позиций, появившихся после before_ids snapshot."""
     if not executor or not killswitch:
@@ -667,23 +749,19 @@ def _open_broker_for_new(
                 log.warning("KillSwitch: заблокировано, пропускаем %s", pos.instrument)
                 break
 
-            sl = pos.stop_loss_price if pos.stop_loss_price > 0 else None
-            cur_price = prices.get(pos.instrument)
-            if sl and cur_price:
-                is_buy = pos.direction.lower() == "long"
-                if (is_buy and sl >= cur_price) or (not is_buy and sl <= cur_price):
-                    log.warning("SL %.5f невалиден для %s %s (price=%.5f), пропускаем SL",
-                                sl, pos.direction, pos.instrument, cur_price)
-                    sl = None
-
             ps = pip_size(pos.instrument)
-            tp = _calc_tp_price(pos.strategy, pos.direction, pos.entry_price, ps)
+            sl_dist: float | None = None
+            if pos.stop_loss_price > 0 and pos.entry_price > 0:
+                sl_dist = abs(pos.entry_price - pos.stop_loss_price)
+
+            pos_atr = (atrs or {}).get(pos.instrument, 0.0)
+            tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr)
 
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
-                sl_price=sl,
-                tp_price=tp,
+                sl_distance=sl_dist,
+                tp_distance=tp_dist,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot {pos.id[:8]}",
             )
@@ -691,9 +769,10 @@ def _open_broker_for_new(
             if result.success and result.broker_position_id:
                 store.set_broker_position_id(pos.id, result.broker_position_id, result.volume)
                 log.info(
-                    "  cTrader OPEN: %s %s → broker #%d @ %.5f (vol=%d)",
+                    "  cTrader OPEN: %s %s → broker #%d @ %.5f (vol=%d) TP±%.5f SL±%s",
                     pos.instrument, pos.direction,
                     result.broker_position_id, result.fill_price, result.volume,
+                    tp_dist or 0, f"{sl_dist:.5f}" if sl_dist else "—",
                 )
             elif not result.success:
                 if "NOT_ENOUGH_MONEY" in result.error:
@@ -726,7 +805,7 @@ def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, floa
         scalping = ("vwap_reversion", "stat_arb", "session_orb")
         if pos.strategy in scalping and peak_pips >= SCALPING_TRAIL_TRIGGER_PIPS:
             trail_dist = SCALPING_TRAIL_DISTANCE_PIPS * ps
-        elif pos.strategy == "outsiders" and peak_pips >= 5.0:
+        elif pos.strategy in ("outsiders", "ensemble") and peak_pips >= 5.0:
             trail_dist = 3.0 * ps
         elif pos.strategy == "leaders" and peak_pips > 0:
             atr = atrs.get(pos.instrument, pos.entry_price * 0.005)
@@ -760,6 +839,7 @@ def _detect_broker_closures(store: StatsStore, executor) -> int:
 
     Каждый цикл сверяем DB-позиции с broker_id против реально открытых на cTrader.
     Если позиции нет у брокера — значит cTrader закрыл по TP/SL.
+    Запрашиваем deal history для реального P&L.
     """
     try:
         broker_ids = {bp.positionId for bp in executor.get_open_positions()}
@@ -769,16 +849,67 @@ def _detect_broker_closures(store: StatsStore, executor) -> int:
 
     db_open = [p for p in store.get_open_positions() if p.broker_position_id]
     closed = 0
+    closed_broker_ids: list[tuple[str, int, str, str, float]] = []
     for pos in db_open:
         if pos.broker_position_id not in broker_ids:
             store.close_position(pos.id, "broker_tp_sl")
             closed += 1
+            closed_broker_ids.append((pos.id, pos.broker_position_id, pos.instrument, pos.direction, pos.entry_price))
             log.info(
-                "  BROKER TP/SL: %s %s %s → broker #%d закрыт сервером (%+.1f pips)",
+                "  BROKER TP/SL: %s %s %s → broker #%d закрыт сервером",
                 pos.strategy.upper(), display_name(pos.instrument),
-                pos.direction.upper(), pos.broker_position_id, pos.profit_pips,
+                pos.direction.upper(), pos.broker_position_id,
             )
+
+    if closed_broker_ids:
+        _update_broker_pnl(store, executor, closed_broker_ids)
+
     return closed
+
+
+def _update_broker_pnl(
+    store: StatsStore,
+    executor,
+    closed_positions: list[tuple[str, int, str, str, float]],
+) -> None:
+    """Запросить deal history и обновить P&L для закрытых брокером позиций."""
+    import time as _time
+
+    now_ms = int(_time.time() * 1000)
+    day_ago_ms = now_ms - 24 * 3600 * 1000
+
+    try:
+        deals = executor.get_deal_list(day_ago_ms, now_ms)
+    except Exception as exc:
+        log.warning("_update_broker_pnl: get_deal_list failed: %s", exc)
+        return
+
+    deal_by_pos: dict[int, dict] = {}
+    for d in deals:
+        deal_by_pos[d["positionId"]] = d
+
+    for pos_id, broker_id, instrument, direction, entry_price in closed_positions:
+        deal = deal_by_pos.get(broker_id)
+        if not deal:
+            log.debug("_update_broker_pnl: no deal for broker #%d", broker_id)
+            continue
+
+        ps = pip_size(instrument)
+        exec_price = deal.get("executionPrice", 0)
+        if exec_price and entry_price and ps > 0:
+            if direction == "long":
+                pnl_pips = (exec_price - entry_price) / ps
+            else:
+                pnl_pips = (entry_price - exec_price) / ps
+            pnl_pct = pnl_pips * ps / entry_price * 100 if entry_price else 0.0
+            store.update_closed_pnl(pos_id, round(pnl_pips, 2), round(pnl_pct, 4))
+            log.info(
+                "  BROKER PNL: broker #%d → %+.1f pips (exec=%.5f, entry=%.5f)",
+                broker_id, pnl_pips, exec_price, entry_price,
+            )
+        elif deal.get("grossProfit") is not None:
+            gross = deal["grossProfit"]
+            log.info("  BROKER PNL (USD): broker #%d → $%.2f (no pip calc)", broker_id, gross)
 
 
 def _sync_broker_closes(

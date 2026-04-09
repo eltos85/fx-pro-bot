@@ -54,7 +54,7 @@ class CostEstimate:
 
     @property
     def round_trip_pips(self) -> float:
-        return self.total_pips * 2
+        return self.total_pips
 
 
 def estimate_entry_cost(
@@ -75,7 +75,7 @@ def estimate_entry_cost(
         CostEstimate с оценкой спреда и проскальзывания в пипсах
     """
     base_spread = spread_cost_pips(symbol)
-    multiplier = _SPREAD_MULTIPLIERS.get(source, 1.5)
+    multiplier = _SPREAD_MULTIPLIERS.get(source, 1.0)
     spread = base_spread * multiplier
 
     slippage_atr_pct = _SLIPPAGE_ATR_PCT.get(source, 0.03)

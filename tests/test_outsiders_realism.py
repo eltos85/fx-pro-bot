@@ -69,7 +69,7 @@ class TestCostEstimate:
 
     def test_round_trip(self):
         c = CostEstimate(spread_pips=3.0, slippage_pips=2.0)
-        assert c.round_trip_pips == 10.0
+        assert c.round_trip_pips == 5.0
 
     def test_zero_cost(self):
         c = CostEstimate(spread_pips=0.0, slippage_pips=0.0)
@@ -97,7 +97,7 @@ class TestEstimateEntryCost:
 
     def test_unknown_source_uses_defaults(self):
         cost = estimate_entry_cost("EURUSD=X", "unknown_source", atr=0.0020, pip_sz=0.0001)
-        assert cost.spread_pips == 1.5 * 1.5
+        assert cost.spread_pips == 1.5 * 1.0
 
     def test_zero_pip_size_no_crash(self):
         cost = estimate_entry_cost("EURUSD=X", "extreme_rsi", atr=0.0020, pip_sz=0.0)
@@ -105,7 +105,7 @@ class TestEstimateEntryCost:
 
     def test_round_trip_for_outsiders_is_significant(self):
         cost = estimate_entry_cost("EURUSD=X", "atr_spike", atr=0.0030, pip_sz=0.0001)
-        assert cost.round_trip_pips > 10.0, "ATR spike entry should have >10 pips round-trip cost"
+        assert cost.round_trip_pips > 5.0, "ATR spike entry should have >5 pips round-trip cost"
 
 
 # ── Session filter ────────────────────────────────────────────

@@ -537,6 +537,15 @@ class StatsStore:
             )
             conn.commit()
 
+    def update_closed_pnl(self, position_id: str, profit_pips: float, profit_pct: float) -> None:
+        """Обновить P&L закрытой позиции (например, по данным из broker deal history)."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE positions SET profit_pips=?, profit_pct=? WHERE id=?",
+                (profit_pips, profit_pct, position_id),
+            )
+            conn.commit()
+
     def update_stop_loss(self, position_id: str, new_sl: float) -> None:
         with self._connect() as conn:
             conn.execute(

@@ -65,6 +65,13 @@ class KillSwitch:
         if self._tripped:
             return False
 
+        if current_equity <= 0:
+            log.warning("KillSwitch: equity=%.2f (ошибка API?), пропускаем проверку drawdown", current_equity)
+            if open_positions >= self._config.max_positions:
+                log.warning("KillSwitch: макс позиций (%d/%d)", open_positions, self._config.max_positions)
+                return False
+            return True
+
         self._rotate_day(current_equity)
 
         if self._today.peak_equity > 0:

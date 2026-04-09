@@ -1,4 +1,4 @@
-# FX Pro Bot v0.8 — Стратегии
+# FX Pro Bot v0.9 — Стратегии
 
 ## Обзор архитектуры
 
@@ -206,11 +206,25 @@ SCALPING_MAX_POSITIONS=50
 
 ---
 
-## 3c. Автоторговля cTrader — серверные TP/SL + динамический trailing
+## 3c. Автоторговля cTrader — относительные TP/SL + динамический trailing
 
-**Файл:** `app/main.py`, `trading/executor.py`
+**Файлы:** `app/main.py`, `trading/executor.py`, `trading/client.py`
 
-Все стратегии автоматически торгуют через cTrader Open API. При открытии позиции на брокере выставляются **серверные TP и SL** — cTrader сам закрывает позицию при достижении цели или лимита убытка, без ожидания 5-минутного цикла бота.
+Все стратегии автоматически торгуют через cTrader Open API (FxPro cTrader Raw+).
+При открытии рыночного ордера SL и TP задаются **относительно** через
+`ProtoOANewOrderReq.relativeStopLoss` / `relativeTakeProfit` — cTrader сам
+рассчитывает абсолютные уровни от реальной цены заливки (fill price), исключая
+расхождения с yfinance-ценой.
+
+### Формат relative (cTrader)
+
+```
+relative = Round(distance, symbol.Digits) * 100_000
+```
+
+Для символов с малым количеством digits (2-3, например BITCOIN digits=2)
+значение выравнивается на `step = 10^(5 - digits)` и гарантируется
+`>= step` (минимум 1 тик).
 
 ### Серверные уровни по стратегиям
 
@@ -222,10 +236,11 @@ SCALPING_MAX_POSITIONS=50
 | outsiders | **10 pips** | ATR-based | с +5 pips, дистанция 3 pips |
 | leaders | **50 pips** | ATR-based | с 0.7×ATR от пика |
 
-### Как работает серверный TP
+### Как работает серверный TP/SL
 
-1. Бот открывает позицию на cTrader
-2. Сразу ставит **и SL, и TP** через `amend_position_sl_tp`
+1. Бот открывает рыночный ордер через `send_new_order` с `relativeStopLoss`
+   и `relativeTakeProfit` — SL/TP ставятся **атомарно** вместе с ордером
+2. cTrader рассчитывает абсолютные уровни от реальной цены заливки
 3. cTrader закрывает позицию **мгновенно** при касании уровня
 
 ### Как работает динамический trailing SL
@@ -233,26 +248,48 @@ SCALPING_MAX_POSITIONS=50
 Каждые 5 минут бот пересчитывает trailing stop и **двигает SL на cTrader**:
 
 1. Цена двигается в нашу сторону — бот вычисляет новый SL (peak - trail_distance)
-2. Если новый SL выше старого — бот обновляет SL на брокере через `amend_sl_tp`
+2. Если новый SL лучше старого — бот обновляет SL через `amend_position_sl_tp`
 3. Цена откатывается — **cTrader сам закрывает** по обновлённому SL
-
-**Пример (скальпинг, аккордеон 3/5):**
-```
-Покупка EURUSD @ 1.08000
-  SL = 1.07950 (начальный, ATR-based)
-  TP = 1.08050 (серверный, +5 pips)
-
-Цена → 1.08030 (+3 pips, trail активируется)
-  SL → 1.08010 (+1 pip зафиксирован на брокере)
-
-Сценарий A: цена → 1.08050 → cTrader закрывает по TP (+5 pips)
-Сценарий B: цена → 1.08010 → cTrader закрывает по trail SL (+1 pip)
-Оба — в плюсе.
-```
 
 ### Детектирование broker-side closures
 
-Каждый цикл бот сверяет открытые позиции в БД с реально открытыми на cTrader. Если позиция исчезла (cTrader закрыл по TP/SL) — бот обновляет статус в БД с причиной `broker_tp_sl`.
+Каждый цикл бот сверяет открытые позиции в БД с реально открытыми на cTrader.
+Если позиция исчезла (cTrader закрыл по TP/SL) — бот обновляет статус в БД
+с причиной `broker_tp_sl`.
+
+### Комиссия FxPro cTrader Raw+
+
+| Параметр | Значение |
+|----------|----------|
+| Комиссия за сторону | **$3.50** за 1.0 стандартный лот |
+| Round-trip (0.01 лот) | **$0.07** за сделку |
+| Учёт в статистике | Автоматический — в P&L и логах |
+
+### Переподключение cTrader
+
+При обрыве TCP-соединения клиент автоматически переподключается:
+- Экспоненциальный backoff: **5с → 10с → 30с → 60с → 120с**
+- Создание нового `Client` объекта при каждой попытке
+- Полная реавторизация приложения и аккаунта
+- Сброс счётчика при успехе
+
+---
+
+## 3d. Kill Switch — защита от потерь
+
+**Файл:** `trading/killswitch.py`
+
+Перед каждым открытием позиции на cTrader проверяются лимиты:
+
+| Параметр | По умолчанию | Описание |
+|----------|:------------:|----------|
+| `KILLSWITCH_MAX_DAILY_LOSS` | $500 | Макс убыток за день — все позиции закрываются |
+| `KILLSWITCH_MAX_DRAWDOWN_PCT` | 50% | Макс просадка от баланса |
+| `KILLSWITCH_MAX_POSITIONS` | 30 | Макс одновременных позиций на cTrader |
+| `KILLSWITCH_MAX_LOSS_PER_TRADE` | $100 | Макс убыток на одну сделку |
+
+При срабатывании любого лимита новые ордера **блокируются**.
+При критической просадке все позиции **закрываются аварийно**.
 
 ---
 
@@ -382,19 +419,50 @@ Leaders: 20 всего, win-rate 60%, +125 gross, -15 издержки, +110 net
 
 ## Инструменты
 
-| Символ | Название | Пипс | Pip Value (0.01 лот) | Спред |
-|--------|----------|------|---------------------|-------|
-| EURUSD=X | EUR/USD | 0.0001 | $0.10 | 1.5 |
-| GBPUSD=X | GBP/USD | 0.0001 | $0.10 | 1.8 |
-| USDJPY=X | USD/JPY | 0.01 | $0.07 | 1.5 |
-| AUDUSD=X | AUD/USD | 0.0001 | $0.10 | 1.8 |
-| USDCAD=X | USD/CAD | 0.0001 | $0.07 | 2.2 |
-| EURGBP=X | EUR/GBP | 0.0001 | $0.13 | 1.8 |
-| NZDUSD=X | NZD/USD | 0.0001 | $0.10 | 2.0 |
-| GC=F | Золото (XAU) | 0.10 | $0.10 | 3.5 |
-| SI=F | Серебро (XAG) | 0.01 | $0.50 | 3.5 |
-| CL=F | Нефть WTI | 0.01 | $0.10 | 4.0 |
-| BZ=F | Нефть Brent | 0.01 | $0.10 | 4.0 |
+### Forex (9 пар + NZD для скальпинга)
+
+| yfinance | cTrader | Пипс | Pip Value (0.01) | Спред (pips) |
+|----------|---------|------|:----------------:|:------------:|
+| EURUSD=X | EURUSD | 0.0001 | $0.10 | 1.5 |
+| GBPUSD=X | GBPUSD | 0.0001 | $0.10 | 1.8 |
+| USDJPY=X | USDJPY | 0.01 | $0.07 | 1.5 |
+| AUDUSD=X | AUDUSD | 0.0001 | $0.10 | 1.8 |
+| USDCAD=X | USDCAD | 0.0001 | $0.07 | 2.2 |
+| EURGBP=X | EURGBP | 0.0001 | $0.13 | 1.8 |
+| USDCHF=X | USDCHF | 0.0001 | $0.10 | 1.8 |
+| EURJPY=X | EURJPY | 0.01 | $0.07 | 2.0 |
+| GBPJPY=X | GBPJPY | 0.01 | $0.07 | 2.5 |
+| NZDUSD=X | — (скальпинг) | 0.0001 | $0.10 | 2.0 |
+
+### Commodities (7)
+
+| yfinance | cTrader | Пипс | Pip Value (0.01) | Спред (pips) |
+|----------|---------|------|:----------------:|:------------:|
+| GC=F | XAUUSD | 0.10 | $0.10 | 3.5 |
+| CL=F | #USOIL | 0.01 | $0.10 | 4.0 |
+| BZ=F | #UKOIL | 0.01 | $0.10 | 4.0 |
+| NG=F | #NGAS | 0.001 | $0.10 | 5.0 |
+| HG=F | COPPER | 0.0005 | $0.10 | 3.0 |
+| PL=F | XPTUSD | 0.10 | $0.10 | 4.0 |
+| ZN=F | — (paper) | 0.01 | $0.10 | 1.5 |
+
+### Indices (2)
+
+| yfinance | cTrader | Пипс | Pip Value (0.01) | Спред (pips) |
+|----------|---------|------|:----------------:|:------------:|
+| ES=F | #US500 | 0.25 | $0.125 | 2.0 |
+| NQ=F | #USTEC | 0.25 | $0.05 | 3.0 |
+
+### Crypto (2)
+
+| yfinance | cTrader | digits | Пипс | Спред (pips) |
+|----------|---------|:------:|------|:------------:|
+| BTC-USD | BITCOIN | 2 | 1.0 | 30.0 |
+| ETH-USD | ETHEREUM | 2 | 0.10 | 15.0 |
+
+> **Примечание:** Альткоины (SOL, XRP, DOGE, ADA, LINK, LTC) доступны на FxPro cTrader,
+> но cTrader Open API **не применяет `relativeStopLoss`** для них — позиции открываются
+> без SL. Только BTC и ETH поддерживают полный набор параметров ордера.
 
 ---
 
@@ -456,6 +524,12 @@ src/fx_pro_bot/
       vwap_reversion.py # VWAP mean-reversion micro-scalper
       stat_arb.py      # Stat-arb cross-pair spread
       session_orb.py   # Opening Range Breakout + News Fade
+  trading/
+    client.py          # Низкоуровневый cTrader Open API (protobuf/TCP/Twisted)
+    executor.py        # Высокоуровневый исполнитель сделок
+    symbols.py         # Маппинг yfinance ↔ cTrader, SymbolCache
+    killswitch.py      # Kill Switch — защита от потерь
+    auth.py            # OAuth2 авторизация cTrader
   whales/
     cot.py             # CFTC COT reports
     sentiment.py       # Myfxbook sentiment
@@ -466,10 +540,13 @@ src/fx_pro_bot/
     store.py           # SQLite: suggestions + positions + paper + shadow
     cost_model.py      # Модель реалистичных торговых издержек
     verifier.py        # Автопроверка сигналов
+    cleanup.py         # Очистка старых данных
   events/
     calendar_loader.py # Экономический календарь
   config/
-    settings.py        # Все настройки (.env)
+    settings.py        # Все настройки (.env), PIP_SIZES, SPREAD_PIPS, комиссии FxPro
   app/
-    main.py            # Главный цикл
+    main.py            # Главный цикл, координация всех стратегий
+    auth_cli.py        # CLI для OAuth2 авторизации cTrader
+    stats_cli.py       # CLI для просмотра статистики
 ```

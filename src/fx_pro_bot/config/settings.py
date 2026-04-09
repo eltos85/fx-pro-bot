@@ -9,7 +9,6 @@ DEFAULT_SYMBOLS = (
     # Forex
     "EURUSD=X",
     "GBPUSD=X",
-    "USDJPY=X",
     "AUDUSD=X",
     "USDCAD=X",
     "EURGBP=X",
@@ -21,8 +20,6 @@ DEFAULT_SYMBOLS = (
     "CL=F",
     "BZ=F",
     "NG=F",
-    "HG=F",
-    "PL=F",
     # Indices
     "ES=F",
     "NQ=F",
@@ -33,7 +30,7 @@ DEFAULT_SYMBOLS = (
     "ZN=F",
 )
 
-SCALPING_EXTRA_SYMBOLS = ("NZDUSD=X",)
+SCALPING_EXTRA_SYMBOLS: tuple[str, ...] = ()
 
 DISPLAY_NAMES: dict[str, str] = {
     "EURUSD=X": "EUR/USD",
@@ -131,8 +128,8 @@ SPREAD_PIPS: dict[str, float] = {
     "PL=F": 4.0,
     "ES=F": 2.0,
     "NQ=F": 3.0,
-    "BTC-USD": 30.0,
-    "ETH-USD": 15.0,
+    "BTC-USD": 8.0,
+    "ETH-USD": 4.0,
     "ZN=F": 1.5,
 }
 
@@ -170,6 +167,14 @@ def pip_value_from_volume(symbol: str, broker_volume: int) -> float:
             return raw * rate
 
     return raw
+
+
+FXPRO_COMMISSION_PER_SIDE = 3.50  # USD за 1.0 лот за сторону (cTrader Raw+)
+
+
+def broker_commission_usd(lot_size: float = 0.01) -> float:
+    """Round-trip комиссия FxPro cTrader Raw+ в USD."""
+    return FXPRO_COMMISSION_PER_SIDE * lot_size * 2
 
 
 def spread_cost_pips(symbol: str) -> float:
