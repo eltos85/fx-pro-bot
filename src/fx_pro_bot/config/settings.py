@@ -19,7 +19,6 @@ DEFAULT_SYMBOLS = (
     "GC=F",
     "CL=F",
     "BZ=F",
-    "NG=F",
     # Indices
     "ES=F",
     "NQ=F",
