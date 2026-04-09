@@ -13,7 +13,7 @@ from fx_pro_bot.market_data.yfinance_feed import bars_from_yfinance
 
 log = logging.getLogger(__name__)
 
-MIN_STRENGTH = 0.7
+MIN_STRENGTH = 0.6
 
 
 @dataclass(frozen=True, slots=True)
