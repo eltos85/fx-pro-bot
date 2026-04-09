@@ -13,6 +13,7 @@ from fx_pro_bot.strategies.monitor import (
     SCALPING_TP_PIPS, SCALPING_TRAIL_TRIGGER_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
     OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
     OUTSIDERS_TP_ATR_MULT, SCALPING_TP_ATR_MULT,
+    OUTSIDERS_TRAIL_TRIGGER_ATR_MULT, OUTSIDERS_TRAIL_DISTANCE_ATR_MULT,
 )
 
 LEADERS_TP_PIPS = 50.0
@@ -805,8 +806,13 @@ def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, floa
         scalping = ("vwap_reversion", "stat_arb", "session_orb")
         if pos.strategy in scalping and peak_pips >= SCALPING_TRAIL_TRIGGER_PIPS:
             trail_dist = SCALPING_TRAIL_DISTANCE_PIPS * ps
-        elif pos.strategy in ("outsiders", "ensemble") and peak_pips >= 5.0:
-            trail_dist = 3.0 * ps
+        elif pos.strategy in ("outsiders", "ensemble"):
+            atr = atrs.get(pos.instrument, pos.entry_price * 0.005)
+            atr_pips = atr / ps if ps > 0 else 0
+            trigger = max(OUTSIDERS_TRAIL_TRIGGER_ATR_MULT * atr_pips, 5.0)
+            if peak_pips < trigger:
+                continue
+            trail_dist = max(OUTSIDERS_TRAIL_DISTANCE_ATR_MULT * atr_pips, 3.0) * ps
         elif pos.strategy == "leaders" and peak_pips > 0:
             atr = atrs.get(pos.instrument, pos.entry_price * 0.005)
             trail_dist = 0.7 * atr
