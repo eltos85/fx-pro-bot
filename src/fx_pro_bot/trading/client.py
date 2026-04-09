@@ -24,6 +24,20 @@ def _ensure_reactor() -> None:
     with _reactor_lock:
         if _reactor_started:
             return
+
+        from twisted.python import log as twisted_log
+
+        class _QuietObserver:
+            """Подавить спам 'Unhandled error in Deferred' от Twisted."""
+            def __call__(self, event: dict) -> None:
+                if event.get("isError"):
+                    text = str(event.get("failure", ""))
+                    if "TimeoutError" in text or "CancelledError" in text:
+                        return
+                    log.debug("twisted: %s", text)
+
+        twisted_log.startLoggingWithObserver(_QuietObserver(), setStdout=False)
+
         from twisted.internet import reactor
 
         t = threading.Thread(
