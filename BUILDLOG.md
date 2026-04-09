@@ -180,3 +180,31 @@ P&L берётся из cTrader API (unrealized PnL endpoint).
 Сверка открытых позиций при старте. Если позиция есть в DB но нет
 на cTrader — закрытие как `broker_closed`. Использование
 `tradeData.volume` из `ProtoOAPosition`.
+
+---
+
+## 2026-04-09 (вечер) — Risk:Reward rebalance + XAUUSD exclusion
+
+### XAUUSD исключён из outsiders/ensemble
+Золото (GC=F) исключено из стратегий outsiders и ensemble из-за
+неблагоприятного R:R на высоковолатильном инструменте (два крупных
+стопа -$6.62 и -$10.68 за 2 часа при мелких TP). Золото остаётся
+доступным для Leaders (copy-trading) и скальпинга.
+
+Добавлен `OUTSIDERS_EXCLUDE_SYMBOLS` — frozenset фильтрации в
+`outsiders.py` (process_signals) и `main.py` (ensemble-блок).
+
+### Risk:Reward → 2:1 (Вариант A)
+Прежний R:R ≈ 4:1 (SL 2×ATR vs TP 0.5×ATR) давал большие убытки
+при стопе и маленькие выигрыши при TP. Параметры изменены:
+
+| Параметр | Было | Стало |
+|----------|------|-------|
+| SL (confirmed) | 2.0×ATR | 1.5×ATR |
+| TP | max(0.5×ATR, 10 pips) | max(0.75×ATR, 10 pips) |
+| Trail trigger | max(0.3×ATR, 5) | max(0.4×ATR, 5) |
+| Trail distance | max(0.15×ATR, 3) | max(0.2×ATR, 3) |
+
+Итоговый R:R ≈ 2:1 — при win-rate >33% стратегия прибыльна.
+
+Затронутые файлы: `outsiders.py`, `monitor.py`, `main.py`, `STRATEGIES.md`.

@@ -26,7 +26,7 @@ from fx_pro_bot.stats.verifier import run_verification
 from fx_pro_bot.strategies.leaders import LeadersStrategy, aggregate_leader_signals
 from fx_pro_bot.strategies.monitor import PositionMonitor
 from fx_pro_bot.strategies.exits import create_paper_positions
-from fx_pro_bot.strategies.outsiders import CONFIRMED_SL_ATR, OutsidersStrategy, detect_extreme_setups
+from fx_pro_bot.strategies.outsiders import CONFIRMED_SL_ATR, OUTSIDERS_EXCLUDE_SYMBOLS, OutsidersStrategy, detect_extreme_setups
 from fx_pro_bot.strategies.shadow import ShadowTracker
 from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
@@ -412,6 +412,9 @@ def _run_cycle(
                 sl = price - CONFIRMED_SL_ATR * atr
             else:
                 sl = price + CONFIRMED_SL_ATR * atr
+
+            if r.symbol in OUTSIDERS_EXCLUDE_SYMBOLS:
+                continue
 
             ens_count = store.count_open_positions(strategy="ensemble", instrument=r.symbol)
             if ens_count >= 2:
@@ -856,7 +859,7 @@ def _ensure_broker_sl_tp(
 
         if not has_sl:
             pos_atr = atrs.get(db_pos.instrument, 0.0)
-            sl_dist = pos_atr * 2 if pos_atr > 0 else 10 * ps
+            sl_dist = pos_atr * CONFIRMED_SL_ATR if pos_atr > 0 else 10 * ps
             new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
 
         if not has_tp:

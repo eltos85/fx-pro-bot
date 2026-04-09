@@ -94,6 +94,8 @@ LEADERS_TRAIL_ATR=0.7
 
 **Лимиты:** макс 50 позиций, макс 3 на один инструмент.
 
+**Исключения:** XAUUSD (GC=F) не торгуется через outsiders/ensemble из-за высокой волатильности. Золото доступно только в Leaders и Скальпинге.
+
 ### Фильтр ликвидности (confirmed mode)
 
 Вход разрешён только в часы высокой ликвидности:
@@ -110,7 +112,7 @@ LEADERS_TRAIL_ATR=0.7
 
 | Параметр | Classic | Confirmed | Описание |
 |----------|---------|-----------|----------|
-| Stop-Loss | **3 ATR** | **2 ATR** | Ближе в confirmed, т.к. вход подтверждён |
+| Stop-Loss | **3 ATR** | **1.5 ATR** | Ближе в confirmed, т.к. вход подтверждён |
 | Aggressive TP | **+10 пипсов** | **+10 пипсов** | Серверный TP на cTrader |
 | Time Stop 1ч | -90 пипсов | — | В confirmed нет 1ч стопа |
 | Time Stop 2ч | -60 пипсов | -60 пипсов | |
@@ -233,8 +235,8 @@ relative = Round(distance, symbol.Digits) * 100_000
 | vwap_reversion | **5 pips** | ATR-based | с +3 pips, дистанция 2 pips |
 | stat_arb | **5 pips** | ATR-based | с +3 pips, дистанция 2 pips |
 | session_orb | **5 pips** | ATR-based | с +3 pips, дистанция 2 pips |
-| outsiders | **max(0.5×ATR, 10 pips)** | 2×ATR | с max(0.3×ATR, 5) pips, дистанция max(0.15×ATR, 3) pips |
-| ensemble | **max(0.5×ATR, 10 pips)** | 2×ATR | с max(0.3×ATR, 5) pips, дистанция max(0.15×ATR, 3) pips |
+| outsiders | **max(0.75×ATR, 10 pips)** | 1.5×ATR | с max(0.4×ATR, 5) pips, дистанция max(0.2×ATR, 3) pips |
+| ensemble | **max(0.75×ATR, 10 pips)** | 1.5×ATR | с max(0.4×ATR, 5) pips, дистанция max(0.2×ATR, 3) pips |
 | leaders | **50 pips** | ATR-based | с 0.7×ATR от пика |
 
 ### Как работает серверный TP/SL

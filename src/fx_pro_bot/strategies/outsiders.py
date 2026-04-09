@@ -32,8 +32,10 @@ ATR_SPIKE_MULT = 4.0
 NEWS_HOURS = 4.0
 
 CONFIRMED_RSI_RECOVERY = 5
-CONFIRMED_SL_ATR = 2.0
+CONFIRMED_SL_ATR = 1.5
 CLASSIC_SL_ATR = 3.0
+
+OUTSIDERS_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({"GC=F"})
 
 LONDON_START = time(7, 0)
 LONDON_END = time(16, 0)
@@ -458,6 +460,9 @@ class OutsidersStrategy:
         for sig in signals:
             if current_total >= self._max_positions:
                 break
+
+            if sig.instrument in OUTSIDERS_EXCLUDE_SYMBOLS:
+                continue
 
             instr_count = self._store.count_open_positions(
                 strategy="outsiders", instrument=sig.instrument,
