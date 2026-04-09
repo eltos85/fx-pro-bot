@@ -112,7 +112,8 @@ def _pick_front_month(names: list[str]) -> str | None:
     """Выбрать ближайший активный фьючерсный контракт из списка имён.
 
     Формат суффикса: _X26 где X — код месяца (F..Z), 26 — год.
-    Возвращает контракт с ближайшей датой >= текущего месяца.
+    Фьючерсы экспирируют до начала месяца поставки, поэтому
+    берём контракт строго > текущего месяца.
     """
     today = date.today()
     current = (today.year % 100, today.month)
@@ -131,7 +132,7 @@ def _pick_front_month(names: list[str]) -> str | None:
             year = int(year_str)
         except ValueError:
             continue
-        if (year, month) >= current:
+        if (year, month) > current:
             parsed.append((year, month, name))
 
     if not parsed:
