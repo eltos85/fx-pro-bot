@@ -685,6 +685,7 @@ def _sync_unlinked_positions(
                 tp_distance=tp_dist,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot sync {pos.id[:8]}",
+                entry_price_hint=pos.entry_price,
             )
 
             if result.success and result.broker_position_id:
@@ -765,6 +766,7 @@ def _open_broker_for_new(
                 tp_distance=tp_dist,
                 lot_size=settings.lot_size,
                 comment=f"fx-pro-bot {pos.id[:8]}",
+                entry_price_hint=pos.entry_price,
             )
 
             if result.success and result.broker_position_id:

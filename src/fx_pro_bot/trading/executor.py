@@ -115,20 +115,16 @@ class TradeExecutor:
         tp_distance: float | None = None,
         lot_size: float | None = None,
         comment: str = "",
+        entry_price_hint: float = 0.0,
     ) -> OrderResult:
         """Открыть рыночную позицию с SL/TP.
 
         cTrader API: relativeTakeProfit на MARKET ордерах ненадёжен
         (известная проблема, подтверждена на форуме cTrader).
         Поэтому: relativeStopLoss в ордере, TP — amend после fill.
-
-        Args:
-            yf_symbol: символ yfinance (EURUSD=X, GC=F, ...)
-            direction: "long" или "short"
-            sl_distance: расстояние SL от entry в единицах цены (всегда > 0)
-            tp_distance: расстояние TP от entry в единицах цены (всегда > 0)
-            lot_size: размер лота (по умолчанию self._lot_size)
-            comment: комментарий к ордеру
+        Первый execution event — ORDER_ACCEPTED (fill_price=0), FILLED
+        приходит асинхронно, поэтому при fill_price=0 используем
+        entry_price_hint или reconcile.
         """
         sym = self._symbols.resolve_yfinance(yf_symbol)
         if sym is None:
@@ -165,40 +161,64 @@ class TradeExecutor:
 
             deal = result.deal if hasattr(result, "deal") else None
             fill_price = (
-                deal.executionPrice if deal and hasattr(deal, "executionPrice") else
-                pos.price if pos and hasattr(pos, "price") else
+                deal.executionPrice if deal and hasattr(deal, "executionPrice") and deal.executionPrice else
+                pos.price if pos and hasattr(pos, "price") and pos.price else
                 0.0
             )
 
-            if pos_id and tp_distance and fill_price:
-                tp_price = (
-                    fill_price + tp_distance if direction.lower() == "long"
-                    else fill_price - tp_distance
-                )
-                tp_rounded = round(tp_price, sym.digits)
-                existing_sl = getattr(pos, "stopLoss", None) if pos else None
-                try:
-                    self._client.amend_position_sl_tp(
-                        pos_id,
-                        stop_loss=existing_sl if existing_sl else None,
-                        take_profit=tp_rounded,
+            if pos_id and tp_distance:
+                price_for_tp = fill_price
+                if not price_for_tp:
+                    price_for_tp = self._get_fill_price_from_reconcile(pos_id)
+                if not price_for_tp:
+                    price_for_tp = entry_price_hint
+
+                if price_for_tp:
+                    tp_price = (
+                        price_for_tp + tp_distance if direction.lower() == "long"
+                        else price_for_tp - tp_distance
                     )
-                    log.info(
-                        "cTrader: TP set via amend → pos %d, TP=%.5f SL=%.5f (fill=%.5f ±%.5f)",
-                        pos_id, tp_rounded, existing_sl or 0, fill_price, tp_distance,
-                    )
-                except Exception as tp_exc:
-                    log.warning("cTrader: amend TP failed for pos %d: %s", pos_id, tp_exc)
+                    tp_rounded = round(tp_price, sym.digits)
+                    existing_sl = getattr(pos, "stopLoss", 0) if pos else 0
+                    try:
+                        self._client.amend_position_sl_tp(
+                            pos_id,
+                            stop_loss=existing_sl if existing_sl else None,
+                            take_profit=tp_rounded,
+                        )
+                        log.info(
+                            "cTrader TP amend OK: pos %d, TP=%.5f SL=%s (base=%.5f ±%.5f)",
+                            pos_id, tp_rounded,
+                            f"{existing_sl:.5f}" if existing_sl else "kept",
+                            price_for_tp, tp_distance,
+                        )
+                    except Exception as tp_exc:
+                        log.warning("cTrader amend TP failed pos %d: %s", pos_id, tp_exc)
+                else:
+                    log.warning("cTrader: no price for TP amend on pos %d", pos_id)
 
             return OrderResult(
                 success=True,
                 broker_position_id=pos_id,
-                fill_price=fill_price,
+                fill_price=fill_price or entry_price_hint,
                 volume=volume,
             )
         except Exception as exc:
             log.error("Ошибка открытия позиции %s %s: %s", yf_symbol, direction, exc)
             return OrderResult(success=False, error=str(exc))
+
+    def _get_fill_price_from_reconcile(self, position_id: int) -> float:
+        """Получить VWAP price позиции из reconcile (fallback при fill_price=0)."""
+        import time as _time
+        _time.sleep(0.5)
+        try:
+            resp = self._client.reconcile()
+            for p in resp.position:
+                if p.positionId == position_id:
+                    return p.price if hasattr(p, "price") and p.price else 0.0
+        except Exception as exc:
+            log.debug("reconcile fallback for pos %d failed: %s", position_id, exc)
+        return 0.0
 
     def close_position(
         self,

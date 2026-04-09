@@ -60,7 +60,7 @@ def main():
         return
 
     log.info("Получаем список символов...")
-    sym_resp = client.get_light_symbols()
+    sym_resp = client.get_symbols()
     sym_map: dict[int, str] = {}
     for s in sym_resp.symbol:
         sym_map[s.symbolId] = getattr(s, "symbolName", str(s.symbolId))
