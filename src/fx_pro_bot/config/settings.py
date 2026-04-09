@@ -11,8 +11,6 @@ DEFAULT_SYMBOLS = (
     "GBPUSD=X",
     "AUDUSD=X",
     "USDCAD=X",
-    "EURGBP=X",
-    "USDCHF=X",
     "EURJPY=X",
     "GBPJPY=X",
     # Commodities
