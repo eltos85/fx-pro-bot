@@ -311,7 +311,7 @@ class Settings(BaseSettings):
     scalping_vwap_enabled: bool = Field(default=True, validation_alias="SCALPING_VWAP_ENABLED")
     scalping_statarb_enabled: bool = Field(default=True, validation_alias="SCALPING_STATARB_ENABLED")
     scalping_orb_enabled: bool = Field(default=True, validation_alias="SCALPING_ORB_ENABLED")
-    scalping_max_positions: int = Field(default=50, validation_alias="SCALPING_MAX_POSITIONS")
+    scalping_max_positions: int = Field(default=15, validation_alias="SCALPING_MAX_POSITIONS")
 
     # cTrader Open API (автоторговля)
     ctrader_trading_enabled: bool = Field(

@@ -144,16 +144,16 @@ OUTSIDERS_MODE=classic
 ### VWAP Mean-Reversion Micro-Scalper
 
 **Файл:** `strategies/scalping/vwap_reversion.py`
-**Идея:** цена стремится вернуться к VWAP (~70-75% времени). Вход при отклонении > 1 ATR + RSI-подтверждение.
+**Идея:** цена стремится вернуться к VWAP (~70-75% времени). Вход при отклонении > 2 ATR + RSI-подтверждение.
 
 | Параметр | Значение | Описание |
 |----------|----------|----------|
-| DEVIATION_THRESHOLD | **1.0 ATR** | Минимальное отклонение от VWAP для входа |
-| RSI_CONFIRM | **< 35** (LONG), **> 65** (SHORT) | RSI-фильтр подтверждения |
+| DEVIATION_THRESHOLD | **2.0 ATR** | Минимальное отклонение от VWAP для входа (95% boundary) |
+| RSI_CONFIRM | **< 30** (LONG), **> 70** (SHORT) | RSI-фильтр подтверждения (ужесточён) |
 | EMA Slope | EMA(50) | Не торговать против основного тренда |
-| Stop-Loss | **1.5 ATR** | |
-| Take-Profit | **Возврат к VWAP** (~1.0 ATR) | |
-| Макс позиций | **30** | |
+| Stop-Loss | **2.0 ATR** | Оптимум по бэктестам (9433 трейда, 6 активов) |
+| Take-Profit | **1.5 ATR** | Частичный возврат к VWAP, с учётом комиссии FxPro |
+| Макс позиций | **15** | Все скальпинг-стратегии |
 | Макс на инструмент | **3** | |
 
 ### Stat-Arb Cross-Pair Spread Scalping
@@ -203,13 +203,25 @@ OUTSIDERS_MODE=classic
 | TP | **50%** отката спайка | |
 | SL | **За экстремумом** спайка | |
 
+### Общие параметры скальпинга (monitor.py)
+
+| Параметр | Форекс | Крипто | Описание |
+|----------|--------|--------|----------|
+| TP | **1.5 × ATR** (мин 8 pips) | **1.0 × ATR** (мин 0.2%) | R:R 0.75:1 с учётом комиссии |
+| SL | **2.0 × ATR** | **0.75 × ATR** | Единообразно для всех стратегий |
+| Trail trigger | **0.6 × ATR** (мин 5 pips) | **0.6 × ATR** | Активация трейлинга |
+| Trail distance | **0.3 × ATR** (мин 3 pips) | **0.3 × ATR** | Дистанция трейлинга |
+| Time-stop | **4 часа** | **4 часа** | Скальп не висит полдня |
+| Commission floor | **3× round-trip cost** | — | TP ≥ 3× (спред + комиссия FxPro) |
+| Макс позиций | **15** | **15** | Фокус вместо размазывания |
+
 ### Скальпинг: настройки (.env)
 
 ```
 SCALPING_VWAP_ENABLED=true
 SCALPING_STATARB_ENABLED=true
 SCALPING_ORB_ENABLED=true
-SCALPING_MAX_POSITIONS=50
+SCALPING_MAX_POSITIONS=15
 ```
 
 ---
@@ -238,9 +250,9 @@ relative = Round(distance, symbol.Digits) * 100_000
 
 | Стратегия | Take-Profit (сервер) | Stop-Loss (сервер) | Trailing SL |
 |-----------|:-------------------:|:-----------------:|:----------:|
-| vwap_reversion | **5 pips** | ATR-based | с +3 pips, дистанция 2 pips |
-| stat_arb | **5 pips** | ATR-based | с +3 pips, дистанция 2 pips |
-| session_orb | **5 pips** | ATR-based | с +3 pips, дистанция 2 pips |
+| vwap_reversion | **max(1.5×ATR, 8 pips, 3×cost)** | **2.0×ATR** | с +0.6×ATR, дистанция 0.3×ATR |
+| stat_arb | **max(1.5×ATR, 8 pips, 3×cost)** | **2.0×ATR** | с +0.6×ATR, дистанция 0.3×ATR |
+| session_orb | **max(1.5×ATR, 8 pips, 3×cost)** | **2.0×ATR** | с +0.6×ATR, дистанция 0.3×ATR |
 | outsiders | **max(0.75×ATR, 10 pips)** | 1.5×ATR | с max(0.4×ATR, 5) pips, дистанция max(0.2×ATR, 3) pips |
 | ensemble | **max(0.75×ATR, 10 pips)** | 1.5×ATR | с max(0.4×ATR, 5) pips, дистанция max(0.2×ATR, 3) pips |
 | leaders | **50 pips** | ATR-based | с 0.7×ATR от пика |

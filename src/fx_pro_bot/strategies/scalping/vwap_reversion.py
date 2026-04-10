@@ -4,7 +4,7 @@
 т.к. институциональные алгоритмы используют VWAP как бенчмарк исполнения.
 
 Вход: отклонение от VWAP > DEVIATION_THRESHOLD * ATR + RSI подтверждение.
-Выход: возврат к VWAP или SL за 1.5 ATR.
+Выход: возврат к VWAP или SL за 2.0 ATR.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 
 from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema, _rsi
-from fx_pro_bot.config.settings import display_name, pip_size
+from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
@@ -21,11 +21,11 @@ from fx_pro_bot.strategies.scalping.indicators import ema_slope, vwap
 
 log = logging.getLogger(__name__)
 
-DEVIATION_THRESHOLD = 1.0
-RSI_CONFIRM_LOW = 35
-RSI_CONFIRM_HIGH = 65
-SL_ATR_MULT = 1.5
-TP_ATR_MULT = 1.0
+DEVIATION_THRESHOLD = 2.0
+RSI_CONFIRM_LOW = 30
+RSI_CONFIRM_HIGH = 70
+SL_ATR_MULT = 2.0
+TP_ATR_MULT = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,10 +127,14 @@ class VwapReversionStrategy:
             if price is None or price <= 0:
                 continue
 
+            sl_dist = SL_ATR_MULT * sig.atr
+            if is_crypto(sig.instrument):
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
+                sl_dist = max(sl_dist, price * CRYPTO_SCALP_SL_MIN_PCT)
             if sig.direction == TrendDirection.LONG:
-                sl = price - SL_ATR_MULT * sig.atr
+                sl = price - sl_dist
             else:
-                sl = price + SL_ATR_MULT * sig.atr
+                sl = price + sl_dist
 
             pid = self._store.open_position(
                 strategy="vwap_reversion",

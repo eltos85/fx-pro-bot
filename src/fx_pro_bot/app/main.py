@@ -730,7 +730,11 @@ def _calc_tp_distance(
     strategy: str, ps: float, atr: float = 0.0,
     instrument: str = "", entry_price: float = 0.0,
 ) -> float | None:
-    """Расстояние TP от entry в единицах цены. cTrader сам применит к fill price."""
+    """Расстояние TP от entry в единицах цены. cTrader сам применит к fill price.
+
+    Для скальпинга: TP >= max(ATR-based, fixed pips, commission buffer).
+    Commission buffer гарантирует что TP покрывает round-trip costs (спред + комиссия).
+    """
     from fx_pro_bot.strategies.monitor import (
         CRYPTO_SCALP_TP_ATR_MULT, CRYPTO_SCALP_TP_MIN_PCT,
     )
@@ -742,7 +746,9 @@ def _calc_tp_distance(
             return max(atr_tp, pct_tp)
         atr_tp = SCALPING_TP_ATR_MULT * atr if atr > 0 else 0.0
         fixed_tp = SCALPING_TP_PIPS * ps
-        return max(atr_tp, fixed_tp)
+        commission_pips = broker_commission_usd() / pip_value_usd(instrument) if pip_value_usd(instrument) > 0 else 1.0
+        cost_floor = (spread_cost_pips(instrument) + commission_pips) * 3.0 * ps
+        return max(atr_tp, fixed_tp, cost_floor)
     if strategy in ("outsiders", "ensemble"):
         atr_tp = OUTSIDERS_TP_ATR_MULT * atr if atr > 0 else 0.0
         fixed_tp = OUTSIDERS_CONFIRMED_AGGRESSIVE_TP * ps
@@ -788,6 +794,11 @@ def _open_broker_for_new(
                 pos_atr_sl = (atrs or {}).get(pos.instrument, 0.0)
                 if pos_atr_sl > 0:
                     sl_dist = CRYPTO_SCALP_SL_ATR_MULT * pos_atr_sl
+
+            if is_crypto(pos.instrument) and pos.entry_price > 0:
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
+                min_sl = pos.entry_price * CRYPTO_SCALP_SL_MIN_PCT
+                sl_dist = max(sl_dist or 0.0, min_sl) or None
 
             pos_atr = (atrs or {}).get(pos.instrument, 0.0)
             tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr, pos.instrument, pos.entry_price)
@@ -886,11 +897,41 @@ def _ensure_broker_sl_tp(
         if not has_sl:
             pos_atr = atrs.get(db_pos.instrument, 0.0)
             if is_crypto(db_pos.instrument) and pos_atr > 0:
-                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT
-                sl_dist = CRYPTO_SCALP_SL_ATR_MULT * pos_atr
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT, CRYPTO_SCALP_SL_MIN_PCT
+                sl_dist = max(CRYPTO_SCALP_SL_ATR_MULT * pos_atr, entry * CRYPTO_SCALP_SL_MIN_PCT)
+            elif is_crypto(db_pos.instrument):
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
+                sl_dist = entry * CRYPTO_SCALP_SL_MIN_PCT
             else:
                 sl_dist = pos_atr * CONFIRMED_SL_ATR if pos_atr > 0 else 10 * ps
             new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
+
+            cur_bid = None
+            try:
+                resp = executor._client.reconcile()
+                for rp in resp.position:
+                    if rp.positionId == pos_id:
+                        td_r = rp.tradeData if hasattr(rp, "tradeData") else None
+                        cur_bid = getattr(td_r, "currentPrice", 0) if td_r else 0
+                        break
+            except Exception:
+                pass
+
+            if cur_bid and cur_bid > 0:
+                sl_past = (is_buy and new_sl > cur_bid) or (not is_buy and new_sl < cur_bid)
+                if sl_past:
+                    log.warning(
+                        "  FORCE CLOSE: %s #%d — SL %.5f уже пройден (BID=%.5f)",
+                        display_name(db_pos.instrument), pos_id, new_sl, cur_bid,
+                    )
+                    try:
+                        executor.close_position(pos_id)
+                        if db_pos:
+                            store.close_position(db_pos.id, "audit_sl_past")
+                        fixed += 1
+                    except Exception as exc:
+                        log.error("  Ошибка FORCE CLOSE #%d: %s", pos_id, exc)
+                    continue
 
         if not has_tp:
             pos_atr = atrs.get(db_pos.instrument, 0.0)

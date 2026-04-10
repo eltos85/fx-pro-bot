@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
-from fx_pro_bot.config.settings import display_name, pip_size
+from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
@@ -140,15 +140,23 @@ class StatArbStrategy:
 
             pair_tag = f"sa_{uuid.uuid4().hex[:8]}"
 
+            sl_dist_a = SL_ATR_MULT * sig.atr_a
+            sl_dist_b = SL_ATR_MULT * sig.atr_b
+            if is_crypto(sig.symbol_a):
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
+                sl_dist_a = max(sl_dist_a, price_a * CRYPTO_SCALP_SL_MIN_PCT)
+            if is_crypto(sig.symbol_b):
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
+                sl_dist_b = max(sl_dist_b, price_b * CRYPTO_SCALP_SL_MIN_PCT)
             sl_a = (
-                price_a - SL_ATR_MULT * sig.atr_a
+                price_a - sl_dist_a
                 if sig.direction_a == TrendDirection.LONG
-                else price_a + SL_ATR_MULT * sig.atr_a
+                else price_a + sl_dist_a
             )
             sl_b = (
-                price_b - SL_ATR_MULT * sig.atr_b
+                price_b - sl_dist_b
                 if sig.direction_b == TrendDirection.LONG
-                else price_b + SL_ATR_MULT * sig.atr_b
+                else price_b + sl_dist_b
             )
 
             pid_a = self._store.open_position(

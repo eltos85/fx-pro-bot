@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
 from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema
-from fx_pro_bot.config.settings import display_name, pip_size
+from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
@@ -116,10 +116,14 @@ class SessionOrbStrategy:
             if price is None or price <= 0:
                 continue
 
+            sl_dist = SL_ATR_MULT * sig.atr
+            if is_crypto(sig.instrument):
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
+                sl_dist = max(sl_dist, price * CRYPTO_SCALP_SL_MIN_PCT)
             if sig.direction == TrendDirection.LONG:
-                sl = price - SL_ATR_MULT * sig.atr
+                sl = price - sl_dist
             else:
-                sl = price + SL_ATR_MULT * sig.atr
+                sl = price + sl_dist
 
             pid = self._store.open_position(
                 strategy="session_orb",
@@ -257,7 +261,7 @@ class SessionOrbStrategy:
 
         if LONDON_OPEN <= cur_time <= time(12, 0):
             session_start = LONDON_OPEN
-        elif NY_OPEN <= cur_time <= time(21, 0):
+        elif NY_OPEN <= cur_time <= time(17, 0):
             session_start = NY_OPEN
         else:
             return []

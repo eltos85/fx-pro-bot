@@ -6,6 +6,34 @@
 
 ## 2026-04-10
 
+### fix: крипто SL min floor + оптимизация скальпинга по 12 источникам
+
+**Проблема крипто SL:** LTC, DOT, BNB — SL distance $0.035 (0.065%!) при ATR $0.05. Позиции проскакивали SL, аудит не мог поставить (TRADING_BAD_STOPS — SL уже выше BID).
+
+**Исправления крипто:**
+- `CRYPTO_SCALP_SL_MIN_PCT = 0.005` (0.5%) — минимальный SL floor для всех крипто
+- Floor применяется: в стратегиях (vwap/orb/stat_arb), при открытии ордера, в аудите
+- Аудит: если SL уже пройден — **принудительное закрытие** (`audit_sl_past`)
+
+**Оптимизация скальпинга (12 источников, 9433+ трейдов в бэктестах):**
+
+| Параметр | Было | Стало | Источник |
+|----------|------|-------|----------|
+| VWAP deviation | 1.0 ATR | **2.0 ATR** | TradingView, StockSharp (95% boundary) |
+| RSI confirm | 35/65 | **30/70** | Более строгий фильтр |
+| Scalping SL | 1.5 ATR (VWAP) | **2.0 ATR** единообразно | Quant-Signals (оптимум 9433 трейда) |
+| Scalping TP | 0.3 ATR / 5 pips | **1.5 ATR / 8 pips** | R:R 0.75:1 vs 0.2:1 |
+| Trail trigger | 0.2 ATR / 3 pips | **0.6 ATR / 5 pips** | StratBase.ai backtest |
+| Trail distance | 0.1 ATR / 2 pips | **0.3 ATR / 3 pips** | StratBase.ai backtest |
+| Time-stop | 12 часов | **4 часа** | Scalping best practices |
+| NY ORB window | до 21:00 | до **17:00** | Edge пропадает после 2.5ч |
+| Max positions | 50 | **15** | Concentration risk management |
+| TP commission floor | нет | **3× round-trip cost** | Учёт комиссии FxPro ($3.50/lot/side) |
+
+**Файлы:** vwap_reversion.py, monitor.py, session_orb.py, stat_arb.py, settings.py, main.py, STRATEGIES.md
+
+---
+
 ### feat: крипто-скальпинг — процентная система TP/SL + 11 альткоинов
 
 **Проблема:** BTC-USD давал -867 pips/9ч потому что TP=5 pips ($5) при SL=$200+. R:R 1:40 против нас.
