@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from fx_pro_bot.config.settings import display_name, pip_size
+from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
 
@@ -44,6 +44,13 @@ SCALPING_TRAIL_TRIGGER_PIPS = 3.0
 SCALPING_TRAIL_TRIGGER_ATR_MULT = 0.2
 SCALPING_TRAIL_DISTANCE_PIPS = 2.0
 SCALPING_TRAIL_DISTANCE_ATR_MULT = 0.1
+
+CRYPTO_SCALP_TP_ATR_MULT = 1.0
+CRYPTO_SCALP_SL_ATR_MULT = 0.75
+CRYPTO_SCALP_TRAIL_TRIGGER_ATR_MULT = 0.6
+CRYPTO_SCALP_TRAIL_DISTANCE_ATR_MULT = 0.3
+CRYPTO_SCALP_TP_MIN_PCT = 0.002
+CRYPTO_SCALP_HARD_STOP_HOURS = 4.0
 
 GLOBAL_HARD_STOP_HOURS = 72.0
 
@@ -161,16 +168,33 @@ class PositionMonitor:
 
         scalping = ("vwap_reversion", "stat_arb", "session_orb")
         if pos.strategy in scalping:
-            atr_pips_sc = atr / ps if ps > 0 else 0
-            scalp_tp = max(SCALPING_TP_ATR_MULT * atr_pips_sc, SCALPING_TP_PIPS)
-            if pips >= scalp_tp:
-                return "scalp_tp"
-            scalp_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_TRIGGER_PIPS)
-            scalp_trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_DISTANCE_PIPS)
-            if peak_pips >= scalp_trigger and (peak_pips - pips) >= scalp_trail_d:
-                return "scalp_trail"
-            if age_hours >= SCALPING_HARD_STOP_HOURS:
-                return "scalp_time_12h"
+            if is_crypto(pos.instrument) and pos.entry_price > 0:
+                pct_move = (price - pos.entry_price) / pos.entry_price if pos.direction == "long" \
+                    else (pos.entry_price - price) / pos.entry_price
+                peak_ref = pos.peak_price if pos.direction == "long" else pos.peak_price
+                pct_peak = (peak_ref - pos.entry_price) / pos.entry_price if pos.direction == "long" \
+                    else (pos.entry_price - peak_ref) / pos.entry_price
+
+                tp_pct = max(CRYPTO_SCALP_TP_ATR_MULT * atr / pos.entry_price, CRYPTO_SCALP_TP_MIN_PCT)
+                if pct_move >= tp_pct:
+                    return "scalp_tp"
+                trail_trigger_pct = CRYPTO_SCALP_TRAIL_TRIGGER_ATR_MULT * atr / pos.entry_price
+                trail_dist_pct = CRYPTO_SCALP_TRAIL_DISTANCE_ATR_MULT * atr / pos.entry_price
+                if pct_peak >= trail_trigger_pct and (pct_peak - pct_move) >= trail_dist_pct:
+                    return "scalp_trail"
+                if age_hours >= CRYPTO_SCALP_HARD_STOP_HOURS:
+                    return "crypto_scalp_time_4h"
+            else:
+                atr_pips_sc = atr / ps if ps > 0 else 0
+                scalp_tp = max(SCALPING_TP_ATR_MULT * atr_pips_sc, SCALPING_TP_PIPS)
+                if pips >= scalp_tp:
+                    return "scalp_tp"
+                scalp_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_TRIGGER_PIPS)
+                scalp_trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_DISTANCE_PIPS)
+                if peak_pips >= scalp_trigger and (peak_pips - pips) >= scalp_trail_d:
+                    return "scalp_trail"
+                if age_hours >= SCALPING_HARD_STOP_HOURS:
+                    return "scalp_time_12h"
 
         if age_hours >= GLOBAL_HARD_STOP_HOURS:
             return "global_time_72h"

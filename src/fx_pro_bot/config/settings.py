@@ -20,12 +20,33 @@ DEFAULT_SYMBOLS = (
     "BZ=F",
     # Indices
     "ES=F",
+    # Crypto
+    "BTC-USD",
+    "ETH-USD",
+    "SOL-USD",
+    "XRP-USD",
+    "DOGE-USD",
+    "ADA-USD",
+    "LINK-USD",
+    "AVAX-USD",
+    "LTC-USD",
+    "BNB-USD",
+    "DOT-USD",
 )
 
 SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "EURJPY=X",
     "GBPJPY=X",
 })
+
+CRYPTO_SYMBOLS: frozenset[str] = frozenset({
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
+    "ADA-USD", "LINK-USD", "AVAX-USD", "LTC-USD", "BNB-USD", "DOT-USD",
+})
+
+
+def is_crypto(instrument: str) -> bool:
+    return instrument in CRYPTO_SYMBOLS
 
 SCALPING_EXTRA_SYMBOLS: tuple[str, ...] = ()
 
@@ -51,6 +72,15 @@ DISPLAY_NAMES: dict[str, str] = {
     "NQ=F": "Nasdaq 100",
     "BTC-USD": "Bitcoin",
     "ETH-USD": "Ethereum",
+    "SOL-USD": "Solana",
+    "XRP-USD": "XRP",
+    "DOGE-USD": "Dogecoin",
+    "ADA-USD": "Cardano",
+    "LINK-USD": "Chainlink",
+    "AVAX-USD": "Avalanche",
+    "LTC-USD": "Litecoin",
+    "BNB-USD": "BNB",
+    "DOT-USD": "Polkadot",
     "ZN=F": "US 10Y Bond",
 }
 
@@ -76,6 +106,15 @@ PIP_SIZES: dict[str, float] = {
     "NQ=F": 0.25,
     "BTC-USD": 1.0,
     "ETH-USD": 0.10,
+    "SOL-USD": 0.01,
+    "XRP-USD": 0.0001,
+    "DOGE-USD": 0.00001,
+    "ADA-USD": 0.0001,
+    "LINK-USD": 0.01,
+    "AVAX-USD": 0.01,
+    "LTC-USD": 0.10,
+    "BNB-USD": 0.10,
+    "DOT-USD": 0.001,
     "ZN=F": 0.01,
 }
 
@@ -102,6 +141,15 @@ PIP_VALUES_USD: dict[str, float] = {
     "NQ=F": 0.05,
     "BTC-USD": 0.01,
     "ETH-USD": 0.01,
+    "SOL-USD": 0.01,
+    "XRP-USD": 0.01,
+    "DOGE-USD": 0.01,
+    "ADA-USD": 0.01,
+    "LINK-USD": 0.01,
+    "AVAX-USD": 0.01,
+    "LTC-USD": 0.01,
+    "BNB-USD": 0.01,
+    "DOT-USD": 0.01,
     "ZN=F": 0.10,
 }
 
@@ -127,6 +175,15 @@ SPREAD_PIPS: dict[str, float] = {
     "NQ=F": 3.0,
     "BTC-USD": 8.0,
     "ETH-USD": 4.0,
+    "SOL-USD": 5.0,
+    "XRP-USD": 5.0,
+    "DOGE-USD": 5.0,
+    "ADA-USD": 5.0,
+    "LINK-USD": 5.0,
+    "AVAX-USD": 5.0,
+    "LTC-USD": 5.0,
+    "BNB-USD": 5.0,
+    "DOT-USD": 5.0,
     "ZN=F": 1.5,
 }
 
@@ -145,7 +202,9 @@ _QUOTE_TO_USD: dict[str, float] = {
 
 _USD_QUOTED = {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAGUSD", "XAUUSD"}
 _COMMODITY_USD = {"GC=F", "SI=F", "CL=F", "BZ=F", "NG=F", "HG=F", "PL=F",
-                  "BTC-USD", "ETH-USD", "ES=F", "NQ=F", "ZN=F"}
+                  "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
+                  "ADA-USD", "LINK-USD", "AVAX-USD", "LTC-USD", "BNB-USD",
+                  "DOT-USD", "ES=F", "NQ=F", "ZN=F"}
 
 
 def pip_value_from_volume(symbol: str, broker_volume: int) -> float:

@@ -31,6 +31,15 @@ YFINANCE_TO_CTRADER: dict[str, str] = {
     # Crypto
     "BTC-USD": "BITCOIN",
     "ETH-USD": "ETHEREUM",
+    "SOL-USD": "SOLANA",
+    "XRP-USD": "XRP",
+    "DOGE-USD": "DOGECOIN",
+    "ADA-USD": "CARDANO",
+    "LINK-USD": "CHAINLINK",
+    "AVAX-USD": "AVALANCHE",
+    "LTC-USD": "LITECOIN",
+    "BNB-USD": "BINANCECOIN",
+    "DOT-USD": "POLKADOT",
     # Spot energy CFDs (futures contracts на FxPro часто отключены)
     "NG=F": "NAT.GAS",
     "BZ=F": "BRENT",

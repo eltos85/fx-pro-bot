@@ -8,7 +8,7 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
-from fx_pro_bot.config.settings import SCALPING_EXCLUDE_SYMBOLS, SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, display_name, pip_size, pip_value_usd, spread_cost_pips
+from fx_pro_bot.config.settings import SCALPING_EXCLUDE_SYMBOLS, SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, display_name, is_crypto, pip_size, pip_value_usd, spread_cost_pips
 from fx_pro_bot.strategies.monitor import (
     SCALPING_TP_PIPS, SCALPING_TRAIL_TRIGGER_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
     OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
@@ -688,10 +688,13 @@ def _sync_unlinked_positions(
 
             ps = pip_size(pos.instrument)
             pos_atr = (atrs or {}).get(pos.instrument, 0.0)
-            tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr)
+            tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr, pos.instrument, pos.entry_price)
             sl_dist: float | None = None
             if pos.stop_loss_price > 0 and pos.entry_price > 0:
                 sl_dist = abs(pos.entry_price - pos.stop_loss_price)
+            elif is_crypto(pos.instrument) and pos_atr > 0:
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT
+                sl_dist = CRYPTO_SCALP_SL_ATR_MULT * pos_atr
 
             result = executor.open_position(
                 yf_symbol=pos.instrument,
@@ -723,10 +726,20 @@ def _sync_unlinked_positions(
     log.info("cTrader sync: открыто %d/%d ордеров", opened, len(available))
 
 
-def _calc_tp_distance(strategy: str, ps: float, atr: float = 0.0) -> float | None:
+def _calc_tp_distance(
+    strategy: str, ps: float, atr: float = 0.0,
+    instrument: str = "", entry_price: float = 0.0,
+) -> float | None:
     """Расстояние TP от entry в единицах цены. cTrader сам применит к fill price."""
+    from fx_pro_bot.strategies.monitor import (
+        CRYPTO_SCALP_TP_ATR_MULT, CRYPTO_SCALP_TP_MIN_PCT,
+    )
     scalping = ("vwap_reversion", "stat_arb", "session_orb")
     if strategy in scalping:
+        if is_crypto(instrument) and entry_price > 0:
+            atr_tp = CRYPTO_SCALP_TP_ATR_MULT * atr if atr > 0 else 0.0
+            pct_tp = entry_price * CRYPTO_SCALP_TP_MIN_PCT
+            return max(atr_tp, pct_tp)
         atr_tp = SCALPING_TP_ATR_MULT * atr if atr > 0 else 0.0
         fixed_tp = SCALPING_TP_PIPS * ps
         return max(atr_tp, fixed_tp)
@@ -770,9 +783,14 @@ def _open_broker_for_new(
             sl_dist: float | None = None
             if pos.stop_loss_price > 0 and pos.entry_price > 0:
                 sl_dist = abs(pos.entry_price - pos.stop_loss_price)
+            elif is_crypto(pos.instrument):
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT
+                pos_atr_sl = (atrs or {}).get(pos.instrument, 0.0)
+                if pos_atr_sl > 0:
+                    sl_dist = CRYPTO_SCALP_SL_ATR_MULT * pos_atr_sl
 
             pos_atr = (atrs or {}).get(pos.instrument, 0.0)
-            tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr)
+            tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr, pos.instrument, pos.entry_price)
 
             result = executor.open_position(
                 yf_symbol=pos.instrument,
@@ -867,16 +885,21 @@ def _ensure_broker_sl_tp(
 
         if not has_sl:
             pos_atr = atrs.get(db_pos.instrument, 0.0)
-            sl_dist = pos_atr * CONFIRMED_SL_ATR if pos_atr > 0 else 10 * ps
+            if is_crypto(db_pos.instrument) and pos_atr > 0:
+                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT
+                sl_dist = CRYPTO_SCALP_SL_ATR_MULT * pos_atr
+            else:
+                sl_dist = pos_atr * CONFIRMED_SL_ATR if pos_atr > 0 else 10 * ps
             new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
 
         if not has_tp:
             pos_atr = atrs.get(db_pos.instrument, 0.0)
-            tp_dist = _calc_tp_distance(db_pos.strategy, ps, pos_atr)
+            tp_dist = _calc_tp_distance(db_pos.strategy, ps, pos_atr, db_pos.instrument, entry)
             if tp_dist:
                 new_tp = (entry + tp_dist) if is_buy else (entry - tp_dist)
             else:
-                new_tp = (entry + 10 * ps) if is_buy else (entry - 10 * ps)
+                fallback = entry * 0.002 if is_crypto(db_pos.instrument) else 10 * ps
+                new_tp = (entry + fallback) if is_buy else (entry - fallback)
 
         ok = executor.amend_sl_tp(
             pos_id,
