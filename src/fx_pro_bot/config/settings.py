@@ -20,12 +20,12 @@ DEFAULT_SYMBOLS = (
     "BZ=F",
     # Indices
     "ES=F",
-    "NQ=F",
-    # Crypto
-    "BTC-USD",
-    # Bonds
-    "ZN=F",
 )
+
+SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
+    "EURJPY=X",
+    "GBPJPY=X",
+})
 
 SCALPING_EXTRA_SYMBOLS: tuple[str, ...] = ()
 

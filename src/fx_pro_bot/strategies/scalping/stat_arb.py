@@ -28,8 +28,6 @@ DEFAULT_PAIRS: list[tuple[str, str]] = [
     ("EURUSD=X", "GBPUSD=X"),
     ("AUDUSD=X", "NZDUSD=X"),
     ("USDJPY=X", "USDCAD=X"),
-    ("EURJPY=X", "GBPJPY=X"),
-    ("ES=F", "NQ=F"),
     ("BTC-USD", "ETH-USD"),
 ]
 

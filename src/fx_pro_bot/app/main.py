@@ -8,7 +8,7 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
-from fx_pro_bot.config.settings import SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, display_name, pip_size, pip_value_usd, spread_cost_pips
+from fx_pro_bot.config.settings import SCALPING_EXCLUDE_SYMBOLS, SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, display_name, pip_size, pip_value_usd, spread_cost_pips
 from fx_pro_bot.strategies.monitor import (
     SCALPING_TP_PIPS, SCALPING_TRAIL_TRIGGER_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
     OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
@@ -515,7 +515,8 @@ def _run_cycle(
                         atrs[r.symbol] = _atr(r.bars)
 
             if vwap_strat:
-                v_sigs = vwap_strat.scan(scalping_bars, scalping_prices)
+                v_sigs = [s for s in vwap_strat.scan(scalping_bars, scalping_prices)
+                          if s.instrument not in SCALPING_EXCLUDE_SYMBOLS]
                 before_ids = {p.id for p in store.get_open_positions()}
                 v_opened = vwap_strat.process_signals(v_sigs, scalping_prices) if v_sigs else 0
                 _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
@@ -530,7 +531,8 @@ def _run_cycle(
                 log.info("  Stat-Arb: %d сигналов, %d открыто, %d закрыто", len(sa_sigs), sa_opened, sa_closed)
 
             if orb_strat:
-                o_sigs = orb_strat.scan(scalping_bars, scalping_prices, events)
+                o_sigs = [s for s in orb_strat.scan(scalping_bars, scalping_prices, events)
+                          if s.instrument not in SCALPING_EXCLUDE_SYMBOLS]
                 before_ids = {p.id for p in store.get_open_positions()}
                 o_opened = orb_strat.process_signals(o_sigs, scalping_prices) if o_sigs else 0
                 _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)

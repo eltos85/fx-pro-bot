@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-04-10
+
+### fix: убраны убыточные пары по 9-часовому анализу
+
+**Анализ**: 65 сделок за 9 часов, общий -937 pips. BTC-USD = 92% всех потерь.
+
+**Убраны из DEFAULT_SYMBOLS:**
+- BTC-USD — 0% WR, -867 pips (pip=$1, скальпинг невозможен)
+- ZN=F — 0% WR (бонды, нет ликвидности в скальпинге)
+- NQ=F — не найден в cTrader
+
+**SCALPING_EXCLUDE_SYMBOLS (VWAP/ORB/StatArb):**
+- EURJPY — 0% WR в stat_arb (5 сделок)
+- GBPJPY — 40% WR но -23 pips в stat_arb
+
+**StatArb:** пары (EURJPY, GBPJPY) и (ES=F, NQ=F) удалены из DEFAULT_PAIRS.
+
+**docker-compose.yml:** SCAN_SYMBOLS убран — единственный источник правды DEFAULT_SYMBOLS в settings.py.
+
+---
+
+### fix: SCAN_SYMBOLS в docker-compose перезатирал DEFAULT_SYMBOLS
+
+Fallback `SCAN_SYMBOLS` в docker-compose.yml включал удалённые ранее символы (EURGBP, USDCHF, NG=F, ETH-USD).
+Бот торговал парами, которые были убраны из settings.py. Строка удалена.
+
+---
+
 ## 2026-04-09
 
 ### fix: safe amend SL/TP — reconcile перед каждым amend
