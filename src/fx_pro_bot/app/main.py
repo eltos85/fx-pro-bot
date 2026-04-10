@@ -877,8 +877,16 @@ def _ensure_broker_sl_tp(
 
         db_pos = db_map.get(pos_id)
         if not db_pos:
-            log.warning("  #%d — нет в DB, пропускаем (SL=%s TP=%s)",
-                        pos_id, "ok" if has_sl else "MISSING", "ok" if has_tp else "MISSING")
+            if not has_sl:
+                log.warning("  ORPHAN CLOSE: #%d без SL и без DB → закрываем", pos_id)
+                try:
+                    executor.close_position(pos_id)
+                    fixed += 1
+                except Exception as exc:
+                    log.error("  Ошибка ORPHAN CLOSE #%d: %s", pos_id, exc)
+            else:
+                log.warning("  #%d — нет в DB, пропускаем (SL=%s TP=%s)",
+                            pos_id, "ok" if has_sl else "MISSING", "ok" if has_tp else "MISSING")
             continue
 
         ps = pip_size(db_pos.instrument)
@@ -908,8 +916,9 @@ def _ensure_broker_sl_tp(
             new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
 
             cur_price = (prices or {}).get(db_pos.instrument, 0.0)
+            spread_buf = spread_cost_pips(db_pos.instrument) * ps
             if cur_price > 0:
-                sl_past = (is_buy and new_sl > cur_price) or (not is_buy and new_sl < cur_price)
+                sl_past = (is_buy and new_sl > cur_price - spread_buf) or (not is_buy and new_sl < cur_price + spread_buf)
                 if sl_past:
                     log.warning(
                         "  FORCE CLOSE: %s #%d — SL %.5f уже пройден (price=%.5f)",
