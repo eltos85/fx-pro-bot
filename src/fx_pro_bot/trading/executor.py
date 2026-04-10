@@ -166,41 +166,52 @@ class TradeExecutor:
                 0.0
             )
 
-            if pos_id and tp_distance:
+            if pos_id and (tp_distance or sl_distance):
                 import time as _time
                 _time.sleep(0.5)
 
-                price_for_tp = fill_price
-                if not price_for_tp:
+                price_for_amend = fill_price
+                if not price_for_amend:
                     try:
                         resp = self._client.reconcile()
                         for p in resp.position:
                             if p.positionId == pos_id:
-                                price_for_tp = p.price if hasattr(p, "price") and p.price else 0.0
+                                price_for_amend = p.price if hasattr(p, "price") and p.price else 0.0
                                 break
                     except Exception:
                         pass
-                if not price_for_tp:
-                    price_for_tp = entry_price_hint
+                if not price_for_amend:
+                    price_for_amend = entry_price_hint
 
-                if price_for_tp:
-                    tp_price = (
-                        price_for_tp + tp_distance if direction.lower() == "long"
-                        else price_for_tp - tp_distance
-                    )
-                    tp_rounded = round(tp_price, sym.digits)
+                if price_for_amend:
+                    is_long = direction.lower() == "long"
+                    amend_tp: float | None = None
+                    amend_sl: float | None = None
+
+                    if tp_distance:
+                        tp_price = price_for_amend + tp_distance if is_long else price_for_amend - tp_distance
+                        amend_tp = round(tp_price, sym.digits)
+
+                    if sl_distance:
+                        sl_price = price_for_amend - sl_distance if is_long else price_for_amend + sl_distance
+                        amend_sl = round(sl_price, sym.digits)
+
                     ok = self.amend_sl_tp(
                         pos_id,
-                        tp_price=tp_rounded,
+                        sl_price=amend_sl,
+                        tp_price=amend_tp,
                         yf_symbol=yf_symbol,
                     )
                     if ok:
                         log.info(
-                            "cTrader TP amend OK: pos %d, TP=%.5f (base=%.5f ±%.5f)",
-                            pos_id, tp_rounded, price_for_tp, tp_distance,
+                            "cTrader SL/TP amend OK: pos %d, %s%s(base=%.5f)",
+                            pos_id,
+                            f"SL={amend_sl:.5f} " if amend_sl else "",
+                            f"TP={amend_tp:.5f} " if amend_tp else "",
+                            price_for_amend,
                         )
                 else:
-                    log.warning("cTrader: no price for TP amend on pos %d", pos_id)
+                    log.warning("cTrader: no price for SL/TP amend on pos %d", pos_id)
 
             return OrderResult(
                 success=True,
