@@ -558,7 +558,7 @@ def _run_cycle(
 
     # 4c. cTrader: гарантировать SL+TP на всех позициях
     if executor:
-        _ensure_broker_sl_tp(store, executor, atrs)
+        _ensure_broker_sl_tp(store, executor, atrs, prices)
 
     # 4d. cTrader: двинуть trailing SL на брокере
     if executor:
@@ -832,6 +832,7 @@ def _open_broker_for_new(
 
 def _ensure_broker_sl_tp(
     store: StatsStore, executor, atrs: dict[str, float],
+    prices: dict[str, float] | None = None,
 ) -> None:
     """Каждый цикл проверяем все позиции на брокере — если SL/TP отсутствует, доставляем.
 
@@ -906,23 +907,13 @@ def _ensure_broker_sl_tp(
                 sl_dist = pos_atr * CONFIRMED_SL_ATR if pos_atr > 0 else 10 * ps
             new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
 
-            cur_bid = None
-            try:
-                resp = executor._client.reconcile()
-                for rp in resp.position:
-                    if rp.positionId == pos_id:
-                        td_r = rp.tradeData if hasattr(rp, "tradeData") else None
-                        cur_bid = getattr(td_r, "currentPrice", 0) if td_r else 0
-                        break
-            except Exception:
-                pass
-
-            if cur_bid and cur_bid > 0:
-                sl_past = (is_buy and new_sl > cur_bid) or (not is_buy and new_sl < cur_bid)
+            cur_price = (prices or {}).get(db_pos.instrument, 0.0)
+            if cur_price > 0:
+                sl_past = (is_buy and new_sl > cur_price) or (not is_buy and new_sl < cur_price)
                 if sl_past:
                     log.warning(
-                        "  FORCE CLOSE: %s #%d — SL %.5f уже пройден (BID=%.5f)",
-                        display_name(db_pos.instrument), pos_id, new_sl, cur_bid,
+                        "  FORCE CLOSE: %s #%d — SL %.5f уже пройден (price=%.5f)",
+                        display_name(db_pos.instrument), pos_id, new_sl, cur_price,
                     )
                     try:
                         executor.close_position(pos_id)
