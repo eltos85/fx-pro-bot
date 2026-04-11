@@ -2,8 +2,23 @@
 
 ## 2026-04-11
 
-### Fix: position sizing использовал демо-баланс ($175K) вместо настроек ($500)
+### Динамическая загрузка инструментов с Bybit API вместо хардкода
 `коммит ниже`
+
+**Симптом:** PEPEUSDT — "symbol invalid" на демо, хардкод `min_qty_map` на 38 монет мог не соответствовать реальным правилам биржи.
+
+**Решение:** при старте бота вызывается `GET /v5/market/instruments-info` (из оф. документации Bybit).
+Загружаются `minOrderQty`, `qtyStep`, `tickSize`, `minNotionalValue`, `maxLeverage` для каждого символа.
+Невалидные символы (не в статусе "Trading") автоматически исключаются из `scan_symbols`.
+Убран весь хардкод `min_qty_map` (38 строк) — теперь `_round_qty_api` использует данные API.
+Также добавлена проверка `minNotionalValue` — Bybit отклоняет ордера меньше $5 notional.
+
+**Файлы:** `trading/client.py` (`InstrumentInfo`, `get_instruments`), `trading/executor.py` (убран хардкод, `_round_qty_api`), `app/main.py` (фильтрация символов при старте), `tests/test_bybit_bot.py`
+
+---
+
+### Fix: position sizing использовал демо-баланс ($175K) вместо настроек ($500)
+`cf677eb`
 
 **Симптом:** скальпинг находил 3 сигнала (PEPEUSDT, DOGEUSDT, ATOMUSDT), но все отклонялись:
 `маржа $230522 > лимит $25005 (25% баланса)`. Также PEPEUSDT — "symbol invalid" на демо Bybit.

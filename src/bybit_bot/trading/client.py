@@ -38,6 +38,18 @@ class AccountBalance:
     unrealised_pnl: float
 
 
+@dataclass(frozen=True, slots=True)
+class InstrumentInfo:
+    """Торговые правила инструмента с Bybit API."""
+    symbol: str
+    status: str
+    min_order_qty: float
+    qty_step: float
+    tick_size: float
+    min_notional: float
+    max_leverage: float
+
+
 class BybitClient:
     """Синхронный клиент Bybit через pybit."""
 
@@ -176,6 +188,54 @@ class BybitClient:
         except Exception as e:
             log.warning("Не удалось обновить SL/TP %s: %s", symbol, e)
             return False
+
+    def get_instruments(self, symbols: tuple[str, ...] | list[str] | None = None) -> dict[str, InstrumentInfo]:
+        """Загрузить торговые правила инструментов (minQty, qtyStep, tickSize, maxLeverage).
+
+        Bybit API возвращает по 500 записей, пагинируем через cursor.
+        Если symbols задан — фильтруем только запрошенные.
+        """
+        result: dict[str, InstrumentInfo] = {}
+        cursor = ""
+        wanted = set(symbols) if symbols else None
+
+        while True:
+            params: dict = {"category": self._category, "limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = self._session.get_instruments_info(**params)
+            items = resp.get("result", {}).get("list", [])
+
+            for item in items:
+                sym = item["symbol"]
+                status = item.get("status", "")
+                if status != "Trading":
+                    continue
+                if wanted and sym not in wanted:
+                    continue
+
+                lot = item.get("lotSizeFilter", {})
+                price_f = item.get("priceFilter", {})
+                lev_f = item.get("leverageFilter", {})
+
+                result[sym] = InstrumentInfo(
+                    symbol=sym,
+                    status=status,
+                    min_order_qty=float(lot.get("minOrderQty", "0.001")),
+                    qty_step=float(lot.get("qtyStep", "0.001")),
+                    tick_size=float(price_f.get("tickSize", "0.01")),
+                    min_notional=float(lot.get("minNotionalValue", "5")),
+                    max_leverage=float(lev_f.get("maxLeverage", "1")),
+                )
+
+            next_cursor = resp.get("result", {}).get("nextPageCursor", "")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+
+        log.info("Загружено %d инструментов с Bybit API", len(result))
+        return result
 
     def get_tickers(self, symbol: str) -> dict:
         """Получить текущую цену."""

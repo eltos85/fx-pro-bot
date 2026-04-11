@@ -6,9 +6,9 @@ import logging
 from dataclasses import dataclass
 
 from bybit_bot.analysis.signals import Direction, Signal, atr
-from bybit_bot.config.settings import Settings, tick_size
+from bybit_bot.config.settings import Settings
 from bybit_bot.market_data.models import Bar
-from bybit_bot.trading.client import BybitClient, OrderResult
+from bybit_bot.trading.client import BybitClient, InstrumentInfo, OrderResult
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +25,15 @@ class TradeParams:
 class TradeExecutor:
     """Рассчитывает размер позиции, SL/TP и отправляет ордера."""
 
-    def __init__(self, client: BybitClient, settings: Settings) -> None:
+    def __init__(
+        self,
+        client: BybitClient,
+        settings: Settings,
+        instruments: dict[str, InstrumentInfo] | None = None,
+    ) -> None:
         self._client = client
         self._settings = settings
+        self._instruments = instruments or {}
 
     def compute_trade(
         self,
@@ -67,10 +73,18 @@ class TradeExecutor:
         risk_usd = capital * self._settings.capital_per_trade_pct
         qty_raw = risk_usd / (sl_distance * self._settings.leverage)
 
-        ts = tick_size(symbol)
-        qty_rounded = self._round_qty(qty_raw, symbol, ts)
+        inst = self._instruments.get(symbol)
+        if inst:
+            qty_rounded = self._round_qty_api(qty_raw, inst)
+        else:
+            qty_rounded = self._round_qty_fallback(qty_raw, symbol)
+
         if qty_rounded <= 0:
-            log.warning("%s: qty=0 после округления (капитал $%.0f слишком мал для %s)", symbol, capital, symbol)
+            log.warning("%s: qty=0 после округления (капитал $%.0f слишком мал)", symbol, capital)
+            return None
+
+        if inst and qty_rounded * price < inst.min_notional:
+            log.warning("%s: notional $%.2f < min $%.0f", symbol, qty_rounded * price, inst.min_notional)
             return None
 
         margin_required = qty_rounded * price / self._settings.leverage
@@ -90,11 +104,12 @@ class TradeExecutor:
             )
             return None
 
-        sl = round(sl, self._price_precision(ts))
-        tp = round(tp, self._price_precision(ts))
+        price_prec = self._price_precision(inst.tick_size if inst else 0.01)
+        sl = round(sl, price_prec)
+        tp = round(tp, price_prec)
 
         log.info(
-            "%s: qty=%.6f, risk=$%.2f (%.1f%%), margin=$%.2f (%.1f%% от $%.0f)",
+            "%s: qty=%s, risk=$%.2f (%.1f%%), margin=$%.2f (%.1f%% от $%.0f)",
             symbol, qty_rounded, qty_rounded * sl_distance,
             qty_rounded * sl_distance / capital * 100,
             margin_required, margin_required / capital * 100, capital,
@@ -129,57 +144,25 @@ class TradeExecutor:
         return self._client.set_leverage(symbol, self._settings.leverage)
 
     @staticmethod
-    def _round_qty(qty: float, symbol: str, ts: float) -> float:
-        min_qty_map = {
-            "BTCUSDT": 0.001,
-            "ETHUSDT": 0.01,
-            "SOLUSDT": 0.1,
-            "XRPUSDT": 1.0,
-            "BNBUSDT": 0.01,
-            "DOGEUSDT": 10.0,
-            "ADAUSDT": 1.0,
-            "LINKUSDT": 0.1,
-            "AVAXUSDT": 0.1,
-            "LTCUSDT": 0.01,
-            "DOTUSDT": 0.1,
-            "NEARUSDT": 0.1,
-            "APTUSDT": 0.1,
-            "ARBUSDT": 1.0,
-            "SUIUSDT": 0.1,
-            "UNIUSDT": 0.1,
-            "AAVEUSDT": 0.01,
-            "ATOMUSDT": 0.1,
-            "TRXUSDT": 1.0,
-            "FILUSDT": 0.1,
-            "INJUSDT": 0.1,
-            "FETUSDT": 1.0,
-            "RENDERUSDT": 0.1,
-            "TONUSDT": 0.1,
-            "SEIUSDT": 1.0,
-            "TIAUSDT": 0.1,
-            "ONDOUSDT": 1.0,
-            "PENDLEUSDT": 0.1,
-            "WLDUSDT": 1.0,
-            "OPUSDT": 1.0,
-            "HBARUSDT": 1.0,
-            "RUNEUSDT": 0.1,
-            "ALGOUSDT": 1.0,
-            "SHIBUSDT": 100.0,
-            "PEPEUSDT": 100.0,
-            "WIFUSDT": 1.0,
-            "BONKUSDT": 100.0,
-            "FLOKIUSDT": 100.0,
-        }
-        min_qty = min_qty_map.get(symbol, 0.01)
-
-        if qty < min_qty:
+    def _round_qty_api(qty: float, inst: InstrumentInfo) -> float:
+        """Округлить qty по правилам инструмента с Bybit API."""
+        if qty < inst.min_order_qty:
             return 0.0
 
-        step = min_qty
+        step = inst.qty_step
         rounded = round(qty / step) * step
 
-        decimals = max(0, len(str(step).rstrip("0").split(".")[-1])) if "." in str(step) else 0
+        decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[1])) if step < 1 else 0
         return round(rounded, decimals)
+
+    @staticmethod
+    def _round_qty_fallback(qty: float, symbol: str) -> float:
+        """Fallback для случаев без данных API (тесты)."""
+        step = 0.01
+        if qty < step:
+            return 0.0
+        rounded = round(qty / step) * step
+        return round(rounded, 2)
 
     @staticmethod
     def _price_precision(ts: float) -> int:

@@ -24,7 +24,7 @@ from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
 from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
 from bybit_bot.strategies.scalping.volume_spike import VolumeSpikeStrategy
 from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
-from bybit_bot.trading.client import BybitClient
+from bybit_bot.trading.client import BybitClient, InstrumentInfo
 from bybit_bot.trading.executor import TradeExecutor
 from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
 
@@ -79,7 +79,17 @@ def run_bot() -> None:
                 demo=settings.demo,
                 category=settings.category,
             )
-            executor = TradeExecutor(client, settings)
+            instruments = client.get_instruments(settings.scan_symbols)
+            valid_symbols = tuple(s for s in settings.scan_symbols if s in instruments)
+            skipped = set(settings.scan_symbols) - set(valid_symbols)
+            if skipped:
+                log.warning("Символы НЕ доступны на Bybit (%s): %s",
+                            "demo" if settings.demo else "live", ", ".join(sorted(skipped)))
+            settings.scan_symbols = valid_symbols
+            log.info("Торгуемые символы: %d/%d", len(valid_symbols),
+                     len(valid_symbols) + len(skipped))
+
+            executor = TradeExecutor(client, settings, instruments)
             killswitch = KillSwitch(
                 KillSwitchConfig(
                     max_daily_loss_usd=settings.killswitch_max_daily_loss,

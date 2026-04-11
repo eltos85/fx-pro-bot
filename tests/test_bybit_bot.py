@@ -118,9 +118,15 @@ def test_stats_store(tmp_path):
 
 def test_executor_round_qty():
     from bybit_bot.trading.executor import TradeExecutor
-    assert TradeExecutor._round_qty(0.0234, "BTCUSDT", 0.1) == 0.023
-    assert TradeExecutor._round_qty(0.0001, "BTCUSDT", 0.1) == 0.0
-    assert TradeExecutor._round_qty(15.7, "DOGEUSDT", 0.00001) == 20.0
+    from bybit_bot.trading.client import InstrumentInfo
+
+    btc = InstrumentInfo("BTCUSDT", "Trading", 0.001, 0.001, 0.10, 5.0, 100.0)
+    assert TradeExecutor._round_qty_api(0.0234, btc) == 0.023
+    assert TradeExecutor._round_qty_api(0.0001, btc) == 0.0
+
+    doge = InstrumentInfo("DOGEUSDT", "Trading", 10.0, 10.0, 0.00001, 5.0, 75.0)
+    assert TradeExecutor._round_qty_api(15.7, doge) == 20.0
+    assert TradeExecutor._round_qty_api(5.0, doge) == 0.0
 
 
 def test_executor_margin_check():
