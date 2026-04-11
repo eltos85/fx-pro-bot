@@ -29,15 +29,19 @@ def scan_instruments(
     period: str = "5d",
     interval: str = "5m",
     min_votes: int = 3,
+    bars_map: dict[str, list[Bar]] | None = None,
 ) -> list[ScanResult]:
     results: list[ScanResult] = []
 
     for symbol in symbols:
-        try:
-            bars = fetch_bars(symbol, period=period, interval=interval)
-        except Exception:
-            log.warning("Не удалось загрузить %s, пропускаю", symbol)
-            continue
+        if bars_map and symbol in bars_map:
+            bars = bars_map[symbol]
+        else:
+            try:
+                bars = fetch_bars(symbol, period=period, interval=interval)
+            except Exception:
+                log.warning("Не удалось загрузить %s, пропускаю", symbol)
+                continue
 
         if len(bars) < 51:
             log.debug("%s: мало баров (%d), нужно 51+", symbol, len(bars))

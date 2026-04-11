@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from bybit_bot.analysis.scanner import ScanResult, active_signals, scan_instruments
 from bybit_bot.analysis.signals import Direction
 from bybit_bot.config.settings import Settings, display_name
-from bybit_bot.market_data.feed import fetch_bars
+from bybit_bot.market_data.feed import fetch_bars, fetch_bars_batch
 from bybit_bot.market_data.models import Bar
 from bybit_bot.stats.store import StatsStore
 from bybit_bot.strategies.momentum import MomentumStrategy
@@ -150,22 +150,20 @@ def _run_cycle(
     now = datetime.now(tz=UTC)
     log.info("─── Цикл %d │ %s ───", cycle, now.strftime("%H:%M:%S UTC"))
 
-    # Загрузить бары для всех символов
-    bars_map: dict[str, list[Bar]] = {}
-    for symbol in settings.scan_symbols:
-        try:
-            bars = fetch_bars(symbol, period=settings.yfinance_period, interval=settings.yfinance_interval)
-            if bars:
-                bars_map[symbol] = bars
-        except Exception:
-            log.warning("Не удалось загрузить %s", symbol)
+    # Batch-загрузка: один запрос yfinance.download() вместо 38 отдельных
+    bars_map = fetch_bars_batch(
+        settings.scan_symbols,
+        period=settings.yfinance_period,
+        interval=settings.yfinance_interval,
+    )
 
-    # Momentum: ансамбль → сигналы
+    # Momentum: ансамбль → сигналы (используем уже загруженные бары)
     scan = scan_instruments(
         settings.scan_symbols,
         period=settings.yfinance_period,
         interval=settings.yfinance_interval,
         min_votes=settings.min_ensemble_votes,
+        bars_map=bars_map,
     )
     signals = active_signals(scan)
     _log_scan_results(scan, signals)
