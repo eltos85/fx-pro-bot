@@ -232,10 +232,10 @@ class TradeExecutor:
 
         Args:
             broker_position_id: ID позиции в cTrader
-            volume: объём для закрытия (None = полное закрытие)
+            volume: объём для закрытия (None = reconcile для точного volume)
         """
         if volume is None:
-            volume = lots_to_volume(self._lot_size)
+            volume = self._resolve_position_volume(broker_position_id)
 
         try:
             result = self._client.close_position(broker_position_id, volume)
@@ -243,6 +243,19 @@ class TradeExecutor:
         except Exception as exc:
             log.error("Ошибка закрытия позиции %d: %s", broker_position_id, exc)
             return OrderResult(success=False, error=str(exc))
+
+    def _resolve_position_volume(self, broker_position_id: int) -> int:
+        """Получить реальный volume позиции из cTrader reconcile."""
+        try:
+            resp = self._client.reconcile()
+            for p in resp.position:
+                if p.positionId == broker_position_id:
+                    vol = p.tradeData.volume if hasattr(p, "tradeData") else 0
+                    if vol:
+                        return vol
+        except Exception as exc:
+            log.debug("_resolve_position_volume %d failed: %s", broker_position_id, exc)
+        return lots_to_volume(self._lot_size)
 
     def amend_sl_tp(
         self,

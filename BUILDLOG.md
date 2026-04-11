@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-04-11
+
+### fix: TRADING_BAD_VOLUME при закрытии orphan-позиций + аварийный SL/TP
+
+**Симптом:** 8 orphan-позиций (альткоины, commodities) висели без SL/TP бесконечно.
+Каждые 5 минут в логах: `ORPHAN CLOSE → TRADING_BAD_VOLUME — closeVolume 1000.00 > position volume 0.01`.
+За 16 часов -$63 (4.2% от депозита), 353 сделки с 20.7% win rate.
+
+**Причина:** `executor.close_position()` при `volume=None` подставлял
+`lots_to_volume(0.01)` = 1000 (forex 100k contract). Для CFD-инструментов
+(альткоины, commodities) реальный volume = 1 → cTrader отклоняет.
+
+**Решение:**
+1. `close_position(volume=None)` → reconcile для точного volume с брокера
+   (`_resolve_position_volume` — новый метод)
+2. Orphan-позиции: если close не удался → аварийный SL/TP ±2% от entry
+   (лучше аварийная защита чем открытый риск)
+3. Передача `bp.tradeData.volume` при закрытии orphan в аудите
+
+**Файлы:** `executor.py`, `main.py`
+
+---
+
 ## 2026-04-10
 
 ### fix: крипто SL min floor + оптимизация скальпинга по 12 источникам

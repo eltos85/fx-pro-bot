@@ -877,16 +877,35 @@ def _ensure_broker_sl_tp(
 
         db_pos = db_map.get(pos_id)
         if not db_pos:
+            td_orphan = bp.tradeData if hasattr(bp, "tradeData") else None
+            orphan_vol = td_orphan.volume if td_orphan else 0
+
             if not has_sl:
-                log.warning("  ORPHAN CLOSE: #%d без SL и без DB → закрываем", pos_id)
+                log.warning("  ORPHAN CLOSE: #%d без SL и без DB → закрываем (vol=%s)", pos_id, orphan_vol)
                 try:
-                    executor.close_position(pos_id)
-                    fixed += 1
+                    result = executor.close_position(pos_id, orphan_vol if orphan_vol else None)
+                    if result.success:
+                        fixed += 1
+                        continue
+                    log.warning("  ORPHAN CLOSE FAILED #%d: %s → ставим аварийный SL/TP", pos_id, result.error)
                 except Exception as exc:
-                    log.error("  Ошибка ORPHAN CLOSE #%d: %s", pos_id, exc)
+                    log.warning("  ORPHAN CLOSE FAILED #%d: %s → ставим аварийный SL/TP", pos_id, exc)
+
+            entry = bp.price if hasattr(bp, "price") and bp.price else 0
+            if entry:
+                is_buy_orphan = td_orphan.tradeSide == 1 if td_orphan else True
+                emergency_dist = entry * 0.02
+                e_sl = (entry - emergency_dist) if is_buy_orphan else (entry + emergency_dist)
+                e_tp = (entry + emergency_dist) if is_buy_orphan else (entry - emergency_dist)
+                try:
+                    executor.amend_sl_tp(pos_id, sl_price=e_sl if not has_sl else None,
+                                         tp_price=e_tp if not has_tp else None)
+                    fixed += 1
+                    log.info("  ORPHAN SL/TP: #%d → SL=%.5f TP=%.5f (emergency ±2%%)", pos_id, e_sl, e_tp)
+                except Exception as exc:
+                    log.error("  ORPHAN SL/TP FAILED #%d: %s", pos_id, exc)
             else:
-                log.warning("  #%d — нет в DB, пропускаем (SL=%s TP=%s)",
-                            pos_id, "ok" if has_sl else "MISSING", "ok" if has_tp else "MISSING")
+                log.warning("  #%d — orphan, нет entry price, пропускаем", pos_id)
             continue
 
         ps = pip_size(db_pos.instrument)
