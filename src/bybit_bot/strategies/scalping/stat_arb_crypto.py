@@ -103,6 +103,8 @@ class StatArbCryptoStrategy:
             sprd = spread_series(ca, cb, beta)
             z = rolling_z_score(sprd, ZSCORE_WINDOW)
 
+            log.debug("%s/%s: corr=%.2f β=%.4f z=%.2f (нужно |z|>%.1f)", sym_a, sym_b, corr, beta, z, Z_ENTRY)
+
             if abs(z) < Z_ENTRY:
                 continue
 

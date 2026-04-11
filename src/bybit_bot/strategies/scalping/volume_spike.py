@@ -69,6 +69,7 @@ class VolumeSpikeStrategy:
                 continue
 
             vol_ratio = last_bar.volume / avg_vol
+            log.debug("%s: vol_ratio=%.1fx (нужно >=%.1f)", symbol, vol_ratio, VOLUME_SPIKE_MULT)
             if vol_ratio < VOLUME_SPIKE_MULT:
                 continue
 

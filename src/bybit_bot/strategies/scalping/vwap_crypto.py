@@ -126,6 +126,11 @@ class VwapCryptoStrategy:
             ema_vals = ema(closes, 50)
             slope = ema_slope(ema_vals, 5)
 
+            log.debug(
+                "%s: VWAP=%.4f price=%.4f dev=%.2f ATR, ADX=%.1f, RSI=%.1f, slope=%.6f",
+                symbol, vwap_val, price, deviation, adx, rsi_val, slope,
+            )
+
             if deviation < -DEVIATION_THRESHOLD and rsi_val < RSI_CONFIRM_LOW:
                 if slope < 0:
                     continue

@@ -177,55 +177,8 @@ def _run_cycle(
             price=sr.last_price,
         )
 
-    # Скальпинг: VWAP
-    scalp_count = 0
-    if scalp_vwap and bars_map:
-        vwap_signals = scalp_vwap.scan(bars_map)
-        for vs in vwap_signals:
-            stats.log_signal(vs.symbol, vs.direction.value, 0.7, f"vwap_dev={vs.deviation_atr:.1f}", vs.entry_price)
-            scalp_count += 1
-            log.info(
-                "  VWAP %s %s dev=%.1f ATR RSI=%.0f VWAP=%.2f",
-                vs.direction.value.upper(), vs.symbol, vs.deviation_atr, vs.rsi, vs.vwap_price,
-            )
-
-    # Скальпинг: Stat-Arb
-    if scalp_statarb and bars_map:
-        sa_signals = scalp_statarb.scan(bars_map)
-        for sa in sa_signals:
-            stats.log_signal(sa.symbol_a, sa.direction_a.value, 0.7, f"statarb_z={sa.z_score:.2f}", sa.price_a)
-            scalp_count += 1
-            log.info(
-                "  STAT-ARB %s/%s z=%.2f β=%.4f",
-                sa.symbol_a, sa.symbol_b, sa.z_score, sa.beta,
-            )
-
-    # Скальпинг: Funding Rate
-    if scalp_funding and bars_map:
-        fund_signals = scalp_funding.scan(settings.scan_symbols, bars_map)
-        for fs in fund_signals:
-            stats.log_signal(fs.symbol, fs.direction.value, fs.strength, f"funding={fs.funding_rate:.4f}%", fs.entry_price)
-            scalp_count += 1
-            log.info(
-                "  FUNDING %s %s rate=%.4f%% сила=%.0f%%",
-                fs.direction.value.upper(), fs.symbol, fs.funding_rate * 100, fs.strength * 100,
-            )
-
-    # Скальпинг: Volume Spike
-    if scalp_volume and bars_map:
-        vol_signals = scalp_volume.scan(bars_map)
-        for vs in vol_signals:
-            stats.log_signal(vs.symbol, vs.direction.value, 0.8, f"vol_spike={vs.volume_ratio:.1f}x", vs.entry_price)
-            scalp_count += 1
-            log.info(
-                "  VOLUME SPIKE %s %s vol=%.1fx move=%.1f ATR",
-                vs.direction.value.upper(), vs.symbol, vs.volume_ratio, vs.price_move_atr,
-            )
-
-    if scalp_count:
-        log.info("Скальпинг-сигналов: %d", scalp_count)
-
     if not executor or not client or not killswitch:
+        log.info("Торговля отключена — только сигналы")
         return
 
     _process_momentum(
@@ -376,6 +329,9 @@ def _process_scalping(
             if vs.symbol not in open_symbols:
                 sig = Signal(direction=vs.direction, strength=0.8, reasons=(f"vol_spike={vs.volume_ratio:.1f}x",))
                 scalp_trades.append((vs.symbol, sig, bars_map[vs.symbol], "scalp_volume"))
+
+    log.info("Скальпинг: найдено %d сигналов (max позиций=%d, открыто=%d)",
+             len(scalp_trades), settings.scalping_max_positions, scalp_opened)
 
     for symbol, sig, bars, strategy in scalp_trades:
         if not killswitch.check_allowed(len(positions), balance.total_equity):
