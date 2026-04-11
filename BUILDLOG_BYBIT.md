@@ -2,6 +2,40 @@
 
 ## 2026-04-11
 
+### Fix: position sizing использовал демо-баланс ($175K) вместо настроек ($500)
+`коммит ниже`
+
+**Симптом:** скальпинг находил 3 сигнала (PEPEUSDT, DOGEUSDT, ATOMUSDT), но все отклонялись:
+`маржа $230522 > лимит $25005 (25% баланса)`. Также PEPEUSDT — "symbol invalid" на демо Bybit.
+
+**Причина:** `compute_trade` получал `available_balance` из API ($100K демо),
+но настройки risk management рассчитаны на `account_balance = $500`.
+Формула `risk_usd = 100000 * 0.05 = $5000` → огромная позиция → маржа не проходит.
+
+**Решение:** размер позиции считается по `settings.account_balance` ($500),
+`available_balance` из API используется только для проверки наличия свободной маржи на бирже.
+Теперь: `risk_usd = 500 * 0.05 = $25` → адекватная позиция для $500 счёта.
+
+**Файлы:** `trading/executor.py`, `tests/test_bybit_bot.py`
+
+---
+
+### Debug-логирование скальпинг-стратегий
+`e3185d2`
+
+После batch-фикса данные загружаются (38/38), но сигналов 0.
+Добавлено verbose-логирование в каждую стратегию:
+- VWAP: выводит deviation, ADX, RSI, slope для каждого символа
+- Stat-Arb: выводит correlation, beta, z-score для каждой пары
+- Volume Spike: выводит vol_ratio для каждого символа
+- Убрано дублирование scan (раньше скальпинг сканировался дважды — для лога и для исполнения)
+
+Временно включён LOG_LEVEL=DEBUG для диагностики на VPS.
+
+**Файлы:** `strategies/scalping/vwap_crypto.py`, `stat_arb_crypto.py`, `volume_spike.py`, `app/main.py`, `.env`
+
+---
+
 ### Batch-загрузка yfinance — 1 запрос вместо 76
 `68a7a0a`
 

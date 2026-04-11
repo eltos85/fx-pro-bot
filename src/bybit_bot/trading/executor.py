@@ -34,9 +34,14 @@ class TradeExecutor:
         symbol: str,
         signal: Signal,
         bars: list[Bar],
-        balance: float,
+        available_balance: float,
     ) -> TradeParams | None:
-        """Рассчитать параметры сделки на основе сигнала и проверить маржу."""
+        """Рассчитать параметры сделки на основе сигнала и проверить маржу.
+
+        Размер позиции считается по account_balance из настроек (а не по API-балансу),
+        чтобы на демо-счёте ($175K) торговать как на реальном ($500).
+        available_balance используется только для проверки наличия свободной маржи.
+        """
         if signal.direction == Direction.FLAT:
             return None
 
@@ -58,22 +63,30 @@ class TradeExecutor:
             sl = price + sl_distance
             tp = price - tp_distance
 
-        risk_usd = balance * self._settings.capital_per_trade_pct
+        capital = self._settings.account_balance
+        risk_usd = capital * self._settings.capital_per_trade_pct
         qty_raw = risk_usd / (sl_distance * self._settings.leverage)
 
         ts = tick_size(symbol)
         qty_rounded = self._round_qty(qty_raw, symbol, ts)
         if qty_rounded <= 0:
-            log.warning("%s: qty=0 после округления (баланс $%.0f слишком мал для %s)", symbol, balance, symbol)
+            log.warning("%s: qty=0 после округления (капитал $%.0f слишком мал для %s)", symbol, capital, symbol)
             return None
 
         margin_required = qty_rounded * price / self._settings.leverage
-        max_margin = balance * self._settings.max_margin_per_trade_pct
+        max_margin = capital * self._settings.max_margin_per_trade_pct
         if margin_required > max_margin:
             log.warning(
-                "%s: маржа $%.2f > лимит $%.2f (%.0f%% баланса), пропускаю",
+                "%s: маржа $%.2f > лимит $%.2f (%.0f%% от $%.0f), пропускаю",
                 symbol, margin_required, max_margin,
-                self._settings.max_margin_per_trade_pct * 100,
+                self._settings.max_margin_per_trade_pct * 100, capital,
+            )
+            return None
+
+        if margin_required > available_balance:
+            log.warning(
+                "%s: маржа $%.2f > доступно $%.2f на бирже, пропускаю",
+                symbol, margin_required, available_balance,
             )
             return None
 
@@ -81,10 +94,10 @@ class TradeExecutor:
         tp = round(tp, self._price_precision(ts))
 
         log.info(
-            "%s: qty=%.6f, risk=$%.2f (%.1f%%), margin=$%.2f (%.1f%% баланса)",
+            "%s: qty=%.6f, risk=$%.2f (%.1f%%), margin=$%.2f (%.1f%% от $%.0f)",
             symbol, qty_rounded, qty_rounded * sl_distance,
-            qty_rounded * sl_distance / balance * 100,
-            margin_required, margin_required / balance * 100,
+            qty_rounded * sl_distance / capital * 100,
+            margin_required, margin_required / capital * 100, capital,
         )
 
         return TradeParams(

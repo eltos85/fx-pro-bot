@@ -148,7 +148,7 @@ def test_executor_margin_check():
     ]
     signal = Signal(direction=Direction.LONG, strength=0.8, reasons=("test",))
 
-    result = executor.compute_trade("BTCUSDT", signal, bars, balance=500.0)
+    result = executor.compute_trade("BTCUSDT", signal, bars, available_balance=500.0)
     if result is not None:
         qty = float(result.qty)
         margin = qty * bars[-1].close / settings.leverage
@@ -179,7 +179,7 @@ def test_executor_micro_account_sizing():
         for i in range(30)
     ]
     signal = Signal(direction=Direction.LONG, strength=0.8, reasons=("test",))
-    result = executor.compute_trade("SOLUSDT", signal, bars, balance=500.0)
+    result = executor.compute_trade("SOLUSDT", signal, bars, available_balance=500.0)
 
     assert result is not None, "SOL позиция должна открываться на $500 счёте"
     qty = float(result.qty)
