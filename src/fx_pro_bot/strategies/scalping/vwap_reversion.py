@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema, _rsi
-from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
+from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema, _rsi, compute_adx
+from fx_pro_bot.config.settings import SCALPING_CRYPTO_ALLOWED, display_name, is_crypto, pip_size
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
@@ -26,6 +26,7 @@ RSI_CONFIRM_LOW = 30
 RSI_CONFIRM_HIGH = 70
 SL_ATR_MULT = 2.0
 TP_ATR_MULT = 1.5
+ADX_MAX = 25.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,12 +64,19 @@ class VwapReversionStrategy:
             if len(bars) < 51:
                 continue
 
+            if is_crypto(symbol) and symbol not in SCALPING_CRYPTO_ALLOWED:
+                continue
+
             price = prices.get(symbol)
             if price is None or price <= 0:
                 continue
 
             atr = _atr(bars)
             if atr <= 0:
+                continue
+
+            adx = compute_adx(bars)
+            if adx > ADX_MAX:
                 continue
 
             vwap_val = vwap(bars[-50:])

@@ -39,6 +39,11 @@ SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "GBPJPY=X",
 })
 
+SCALPING_CRYPTO_ALLOWED: frozenset[str] = frozenset({
+    "BTC-USD",
+    "ETH-USD",
+})
+
 CRYPTO_SYMBOLS: frozenset[str] = frozenset({
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
     "ADA-USD", "LINK-USD", "AVAX-USD", "LTC-USD", "BNB-USD", "DOT-USD",

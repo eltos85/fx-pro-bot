@@ -13,8 +13,8 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 
-from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema
-from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
+from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema, compute_adx
+from fx_pro_bot.config.settings import SCALPING_CRYPTO_ALLOWED, display_name, is_crypto, pip_size
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
@@ -28,6 +28,8 @@ VOLUME_MULT = 1.3
 SL_ATR_MULT = 2.0
 TP_RANGE_MULT = 2.0
 NEWS_SPIKE_ATR = 2.0
+NEWS_SPIKE_ATR_CRYPTO = 3.0
+ADX_MAX = 25.0
 
 LONDON_OPEN = time(8, 0)
 LONDON_ORB_END = time(8, 15)
@@ -72,12 +74,19 @@ class SessionOrbStrategy:
             if len(bars) < 51:
                 continue
 
+            if is_crypto(symbol) and symbol not in SCALPING_CRYPTO_ALLOWED:
+                continue
+
             price = prices.get(symbol)
             if price is None or price <= 0:
                 continue
 
             atr = _atr(bars)
             if atr <= 0:
+                continue
+
+            adx = compute_adx(bars)
+            if adx > ADX_MAX:
                 continue
 
             closes = [b.close for b in bars]
@@ -214,7 +223,8 @@ class SessionOrbStrategy:
         move = recent[-1].close - recent[0].open
         abs_move = abs(move)
 
-        if abs_move < NEWS_SPIKE_ATR * atr:
+        spike_threshold = NEWS_SPIKE_ATR_CRYPTO if is_crypto(symbol) else NEWS_SPIKE_ATR
+        if abs_move < spike_threshold * atr:
             return None
 
         spike_up = move > 0
