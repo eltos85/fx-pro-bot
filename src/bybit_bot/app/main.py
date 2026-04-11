@@ -1,0 +1,353 @@
+"""Bybit Crypto Bot — точка входа и главный цикл.
+
+Стратегии:
+- Momentum (ансамбль 5 индикаторов)
+- Скальпинг: VWAP reversion, Stat-Arb, Funding Rate, Volume Spike
+"""
+
+from __future__ import annotations
+
+import logging
+import signal
+import sys
+import time
+from datetime import UTC, datetime
+
+from bybit_bot.analysis.scanner import ScanResult, active_signals, scan_instruments
+from bybit_bot.analysis.signals import Direction
+from bybit_bot.config.settings import Settings, display_name
+from bybit_bot.market_data.feed import fetch_bars
+from bybit_bot.market_data.models import Bar
+from bybit_bot.stats.store import StatsStore
+from bybit_bot.strategies.momentum import MomentumStrategy
+from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
+from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
+from bybit_bot.strategies.scalping.volume_spike import VolumeSpikeStrategy
+from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
+from bybit_bot.trading.client import BybitClient
+from bybit_bot.trading.executor import TradeExecutor
+from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
+
+log = logging.getLogger(__name__)
+
+_shutdown = False
+
+
+def _handle_signal(signum: int, frame: object) -> None:
+    global _shutdown
+    _shutdown = True
+    log.info("Получен сигнал %d, завершаю...", signum)
+
+
+def run_bot() -> None:
+    settings = Settings()
+
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    log.info("=" * 60)
+    log.info("Bybit Crypto Bot запущен")
+    log.info("Demo: %s | Category: %s", settings.demo, settings.category)
+    log.info("Символы: %s", ", ".join(settings.scan_symbols))
+    log.info("Торговля: %s", "ВКЛЮЧЕНА" if settings.trading_enabled else "только сигналы")
+    _log_scalping_config(settings)
+    log.info("=" * 60)
+
+    stats = StatsStore(settings.stats_db_path)
+    momentum = MomentumStrategy(min_votes=settings.min_ensemble_votes)
+
+    scalp_vwap = VwapCryptoStrategy(
+        max_positions=settings.scalping_max_positions,
+    ) if settings.scalping_vwap_enabled else None
+
+    scalp_statarb = StatArbCryptoStrategy() if settings.scalping_statarb_enabled else None
+    scalp_volume = VolumeSpikeStrategy() if settings.scalping_volume_enabled else None
+
+    client: BybitClient | None = None
+    executor: TradeExecutor | None = None
+    killswitch: KillSwitch | None = None
+    scalp_funding: FundingScalpStrategy | None = None
+
+    if settings.trading_enabled and settings.api_key and settings.api_secret:
+        try:
+            client = BybitClient(
+                api_key=settings.api_key,
+                api_secret=settings.api_secret,
+                demo=settings.demo,
+                category=settings.category,
+            )
+            executor = TradeExecutor(client, settings)
+            killswitch = KillSwitch(
+                KillSwitchConfig(
+                    max_daily_loss_usd=settings.killswitch_max_daily_loss,
+                    max_drawdown_pct=settings.killswitch_max_drawdown_pct,
+                    max_positions=settings.killswitch_max_positions,
+                    max_loss_per_trade_usd=settings.killswitch_max_loss_per_trade,
+                ),
+                initial_equity=settings.account_balance,
+            )
+            if settings.scalping_funding_enabled:
+                scalp_funding = FundingScalpStrategy(client)
+            balance = client.get_balance()
+            log.info(
+                "Bybit баланс: equity=%.2f, available=%.2f, uPnL=%.2f",
+                balance.total_equity, balance.available_balance, balance.unrealised_pnl,
+            )
+        except Exception:
+            log.exception("Не удалось подключиться к Bybit API")
+            client = None
+            executor = None
+    else:
+        log.info("Торговля отключена — работаю в режиме сигналов")
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    cycle = 0
+    while not _shutdown:
+        cycle += 1
+        try:
+            _run_cycle(
+                cycle=cycle,
+                settings=settings,
+                stats=stats,
+                momentum=momentum,
+                scalp_vwap=scalp_vwap,
+                scalp_statarb=scalp_statarb,
+                scalp_funding=scalp_funding,
+                scalp_volume=scalp_volume,
+                client=client,
+                executor=executor,
+                killswitch=killswitch,
+            )
+        except Exception:
+            log.exception("Ошибка в цикле %d", cycle)
+
+        if not _shutdown:
+            log.info("Следующий цикл через %d сек...", settings.poll_interval_sec)
+            _sleep_interruptible(settings.poll_interval_sec)
+
+    log.info("Bybit Crypto Bot остановлен")
+
+
+def _run_cycle(
+    *,
+    cycle: int,
+    settings: Settings,
+    stats: StatsStore,
+    momentum: MomentumStrategy,
+    scalp_vwap: VwapCryptoStrategy | None,
+    scalp_statarb: StatArbCryptoStrategy | None,
+    scalp_funding: FundingScalpStrategy | None,
+    scalp_volume: VolumeSpikeStrategy | None,
+    client: BybitClient | None,
+    executor: TradeExecutor | None,
+    killswitch: KillSwitch | None,
+) -> None:
+    now = datetime.now(tz=UTC)
+    log.info("─── Цикл %d │ %s ───", cycle, now.strftime("%H:%M:%S UTC"))
+
+    # Загрузить бары для всех символов
+    bars_map: dict[str, list[Bar]] = {}
+    for symbol in settings.scan_symbols:
+        try:
+            bars = fetch_bars(symbol, period=settings.yfinance_period, interval=settings.yfinance_interval)
+            if bars:
+                bars_map[symbol] = bars
+        except Exception:
+            log.warning("Не удалось загрузить %s", symbol)
+
+    # Momentum: ансамбль → сигналы
+    scan = scan_instruments(
+        settings.scan_symbols,
+        period=settings.yfinance_period,
+        interval=settings.yfinance_interval,
+        min_votes=settings.min_ensemble_votes,
+    )
+    signals = active_signals(scan)
+    _log_scan_results(scan, signals)
+
+    for sr in signals:
+        stats.log_signal(
+            symbol=sr.symbol,
+            direction=sr.signal.direction.value,
+            strength=sr.signal.strength,
+            reasons=", ".join(sr.signal.reasons),
+            price=sr.last_price,
+        )
+
+    # Скальпинг: VWAP
+    scalp_count = 0
+    if scalp_vwap and bars_map:
+        vwap_signals = scalp_vwap.scan(bars_map)
+        for vs in vwap_signals:
+            stats.log_signal(vs.symbol, vs.direction.value, 0.7, f"vwap_dev={vs.deviation_atr:.1f}", vs.entry_price)
+            scalp_count += 1
+            log.info(
+                "  VWAP %s %s dev=%.1f ATR RSI=%.0f VWAP=%.2f",
+                vs.direction.value.upper(), vs.symbol, vs.deviation_atr, vs.rsi, vs.vwap_price,
+            )
+
+    # Скальпинг: Stat-Arb
+    if scalp_statarb and bars_map:
+        sa_signals = scalp_statarb.scan(bars_map)
+        for sa in sa_signals:
+            stats.log_signal(sa.symbol_a, sa.direction_a.value, 0.7, f"statarb_z={sa.z_score:.2f}", sa.price_a)
+            scalp_count += 1
+            log.info(
+                "  STAT-ARB %s/%s z=%.2f β=%.4f",
+                sa.symbol_a, sa.symbol_b, sa.z_score, sa.beta,
+            )
+
+    # Скальпинг: Funding Rate
+    if scalp_funding and bars_map:
+        fund_signals = scalp_funding.scan(settings.scan_symbols, bars_map)
+        for fs in fund_signals:
+            stats.log_signal(fs.symbol, fs.direction.value, fs.strength, f"funding={fs.funding_rate:.4f}%", fs.entry_price)
+            scalp_count += 1
+            log.info(
+                "  FUNDING %s %s rate=%.4f%% сила=%.0f%%",
+                fs.direction.value.upper(), fs.symbol, fs.funding_rate * 100, fs.strength * 100,
+            )
+
+    # Скальпинг: Volume Spike
+    if scalp_volume and bars_map:
+        vol_signals = scalp_volume.scan(bars_map)
+        for vs in vol_signals:
+            stats.log_signal(vs.symbol, vs.direction.value, 0.8, f"vol_spike={vs.volume_ratio:.1f}x", vs.entry_price)
+            scalp_count += 1
+            log.info(
+                "  VOLUME SPIKE %s %s vol=%.1fx move=%.1f ATR",
+                vs.direction.value.upper(), vs.symbol, vs.volume_ratio, vs.price_move_atr,
+            )
+
+    if scalp_count:
+        log.info("Скальпинг-сигналов: %d", scalp_count)
+
+    # Исполнение (если торговля включена)
+    if not executor or not client or not killswitch:
+        return
+
+    _process_momentum(
+        signals=signals,
+        settings=settings,
+        stats=stats,
+        momentum=momentum,
+        client=client,
+        executor=executor,
+        killswitch=killswitch,
+    )
+
+
+def _process_momentum(
+    *,
+    signals: list[ScanResult],
+    settings: Settings,
+    stats: StatsStore,
+    momentum: MomentumStrategy,
+    client: BybitClient,
+    executor: TradeExecutor,
+    killswitch: KillSwitch,
+) -> None:
+    try:
+        balance = client.get_balance()
+        positions = client.get_positions()
+    except Exception:
+        log.exception("Ошибка получения данных Bybit")
+        return
+
+    if not killswitch.check_allowed(len(positions), balance.total_equity):
+        if killswitch.is_tripped:
+            log.critical("KillSwitch сработал: %s — закрываю все позиции!", killswitch.trip_reason)
+            client.close_all_positions()
+        return
+
+    open_symbols = {p.symbol for p in positions}
+
+    for sr in signals:
+        if sr.symbol in open_symbols:
+            continue
+
+        trade_signal = momentum.evaluate(sr.symbol, sr.bars)
+        if trade_signal is None:
+            continue
+
+        executor.set_leverage(sr.symbol)
+
+        params = executor.compute_trade(
+            sr.symbol,
+            sr.signal,
+            sr.bars,
+            balance.available_balance,
+        )
+        if params is None:
+            continue
+
+        result = executor.execute(params)
+        if result.success:
+            stats.open_position(
+                symbol=params.symbol,
+                side=params.side,
+                qty=params.qty,
+                entry_price=sr.last_price,
+                order_id=result.order_id,
+                sl=params.sl,
+                tp=params.tp,
+                strategy="momentum",
+                signal_strength=sr.signal.strength,
+                signal_reasons=", ".join(sr.signal.reasons),
+            )
+            log.info(
+                "ОТКРЫТА: %s %s %s qty=%s SL=%.4f TP=%.4f",
+                params.side, display_name(params.symbol), params.symbol,
+                params.qty, params.sl or 0, params.tp or 0,
+            )
+
+
+def _log_scalping_config(settings: Settings) -> None:
+    active = []
+    if settings.scalping_vwap_enabled:
+        active.append("VWAP")
+    if settings.scalping_statarb_enabled:
+        active.append("StatArb")
+    if settings.scalping_funding_enabled:
+        active.append("Funding")
+    if settings.scalping_volume_enabled:
+        active.append("VolSpike")
+    log.info("Скальпинг: %s", ", ".join(active) if active else "отключён")
+
+
+def _log_scan_results(scan: list[ScanResult], signals: list[ScanResult]) -> None:
+    log.info("Просканировано %d инструментов, сигналов: %d", len(scan), len(signals))
+    for sr in signals:
+        arrow = "▲" if sr.signal.direction == Direction.LONG else "▼"
+        log.info(
+            "  %s %s %s (сила %.0f%%) @ %.4f │ %s",
+            arrow,
+            sr.signal.direction.value.upper(),
+            display_name(sr.symbol),
+            sr.signal.strength * 100,
+            sr.last_price,
+            ", ".join(sr.signal.reasons),
+        )
+
+
+def _sleep_interruptible(seconds: int) -> None:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end and not _shutdown:
+        time.sleep(1)
+
+
+def main() -> None:
+    try:
+        run_bot()
+    except KeyboardInterrupt:
+        log.info("Прервано пользователем")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

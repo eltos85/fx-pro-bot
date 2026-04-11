@@ -18,6 +18,7 @@ dependencies = [
   "beautifulsoup4>=4.12",
   "ctrader-open-api>=0.9.2",
   "service-identity>=24.1.0",
+  "pybit>=5.9.0",
 ]
 
 [project.optional-dependencies]
@@ -27,9 +28,10 @@ dev = ["pytest>=8.0", "ruff>=0.4"]
 fx-pro-bot = "fx_pro_bot.app.main:main"
 fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
 fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
+bybit-bot = "bybit_bot.app.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fx_pro_bot"]
+packages = ["src/fx_pro_bot", "src/bybit_bot"]
 
 [tool.ruff]
 line-length = 100
