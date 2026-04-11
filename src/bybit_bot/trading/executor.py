@@ -129,7 +129,6 @@ class TradeExecutor:
             "AVAXUSDT": 0.1,
             "LTCUSDT": 0.01,
             "DOTUSDT": 0.1,
-            "MATICUSDT": 1.0,
             "NEARUSDT": 0.1,
             "APTUSDT": 0.1,
             "ARBUSDT": 1.0,

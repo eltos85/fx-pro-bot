@@ -197,3 +197,28 @@
 - `src/bybit_bot/trading/executor.py` — min_qty_map для всех 39 монет
 - `src/bybit_bot/strategies/scalping/stat_arb_crypto.py` — 10 пар
 - `.env`, `.env.example` — SCAN_SYMBOLS со всеми 39 монетами
+
+### Деплой на VPS + включение демо-торговли
+
+Первый деплой bybit-bot на VPS. Два контейнера работают параллельно:
+- `fx-pro-bot-advisor-1` — форекс-бот (без изменений)
+- `fx-pro-bot-bybit-bot-1` — крипто-бот (новый)
+
+**Первый цикл сканирования:**
+- 37 из 39 монет загрузились успешно
+- MATIC delisted на yfinance (ребренд в POL, Yahoo не поддерживает) → убран
+- APT тикер обновлён: APT-USD → APT21794-USD
+- Первый сигнал: Stat-Arb DOT/ETH z=-2.07 (DOT недооценён vs ETH)
+
+**Фиксы по результатам первого запуска:**
+- Убран MATICUSDT (38 монет вместо 39)
+- Исправлен тикер APTUSDT → APT21794-USD
+
+**Включена демо-торговля:** `TRADING_ENABLED=true`.
+Бот теперь открывает позиции на демо-счёте Bybit (виртуальные $100K).
+Risk management ($500 профиль) активен — ограничит реальные потери при переходе на live.
+
+**Файлы:**
+- `src/bybit_bot/config/settings.py` — удалён MATIC, фикс APT тикера
+- `src/bybit_bot/trading/executor.py` — удалён MATIC из min_qty_map
+- `.env`, `.env.example` — 38 монет, TRADING_ENABLED=true
