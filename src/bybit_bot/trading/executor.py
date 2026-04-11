@@ -51,6 +51,10 @@ class TradeExecutor:
         if signal.direction == Direction.FLAT:
             return None
 
+        if self._instruments and symbol not in self._instruments:
+            log.debug("%s: не найден в инструментах Bybit, пропускаю", symbol)
+            return None
+
         price = bars[-1].close
         atr_val = atr(bars)
         if atr_val <= 0:
@@ -141,7 +145,13 @@ class TradeExecutor:
         return self._client.close_position(symbol, side, qty)
 
     def set_leverage(self, symbol: str) -> bool:
-        return self._client.set_leverage(symbol, self._settings.leverage)
+        if self._instruments and symbol not in self._instruments:
+            return False
+        inst = self._instruments.get(symbol)
+        lev = self._settings.leverage
+        if inst and lev > inst.max_leverage:
+            lev = int(inst.max_leverage)
+        return self._client.set_leverage(symbol, lev)
 
     @staticmethod
     def _round_qty_api(qty: float, inst: InstrumentInfo) -> float:

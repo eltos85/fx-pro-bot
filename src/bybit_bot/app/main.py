@@ -80,14 +80,13 @@ def run_bot() -> None:
                 category=settings.category,
             )
             instruments = client.get_instruments(settings.scan_symbols)
-            valid_symbols = tuple(s for s in settings.scan_symbols if s in instruments)
-            skipped = set(settings.scan_symbols) - set(valid_symbols)
+            tradeable_symbols = tuple(s for s in settings.scan_symbols if s in instruments)
+            skipped = set(settings.scan_symbols) - set(tradeable_symbols)
             if skipped:
                 log.warning("Символы НЕ доступны на Bybit (%s): %s",
                             "demo" if settings.demo else "live", ", ".join(sorted(skipped)))
-            settings.scan_symbols = valid_symbols
-            log.info("Торгуемые символы: %d/%d", len(valid_symbols),
-                     len(valid_symbols) + len(skipped))
+            log.info("Торгуемые символы: %d/%d", len(tradeable_symbols),
+                     len(tradeable_symbols) + len(skipped))
 
             executor = TradeExecutor(client, settings, instruments)
             killswitch = KillSwitch(
