@@ -923,16 +923,19 @@ def _ensure_broker_sl_tp(
         new_tp: float | None = None
 
         if not has_sl:
-            pos_atr = atrs.get(db_pos.instrument, 0.0)
-            if is_crypto(db_pos.instrument) and pos_atr > 0:
-                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT, CRYPTO_SCALP_SL_MIN_PCT
-                sl_dist = max(CRYPTO_SCALP_SL_ATR_MULT * pos_atr, entry * CRYPTO_SCALP_SL_MIN_PCT)
-            elif is_crypto(db_pos.instrument):
-                from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
-                sl_dist = entry * CRYPTO_SCALP_SL_MIN_PCT
+            if db_pos.stop_loss_price and db_pos.stop_loss_price > 0:
+                new_sl = db_pos.stop_loss_price
             else:
-                sl_dist = pos_atr * CONFIRMED_SL_ATR if pos_atr > 0 else 10 * ps
-            new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
+                pos_atr = atrs.get(db_pos.instrument, 0.0)
+                if is_crypto(db_pos.instrument) and pos_atr > 0:
+                    from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT, CRYPTO_SCALP_SL_MIN_PCT
+                    sl_dist = max(CRYPTO_SCALP_SL_ATR_MULT * pos_atr, entry * CRYPTO_SCALP_SL_MIN_PCT)
+                elif is_crypto(db_pos.instrument):
+                    from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_MIN_PCT
+                    sl_dist = entry * CRYPTO_SCALP_SL_MIN_PCT
+                else:
+                    sl_dist = pos_atr * CONFIRMED_SL_ATR if pos_atr > 0 else 10 * ps
+                new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
 
             cur_price = (prices or {}).get(db_pos.instrument, 0.0)
             spread_buf = spread_cost_pips(db_pos.instrument) * ps

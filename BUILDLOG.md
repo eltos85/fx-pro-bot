@@ -6,6 +6,24 @@
 
 ## 2026-04-11
 
+### fix: аудит SL — использовать db_pos.stop_loss_price вместо пересчёта
+
+**Симптом:** альткоины (DOT, SOL, LINK, AVAX, LTC, DOGE, ADA) закрывались
+FORCE CLOSE через 2-6 сек после открытия. 10 из 10 audit_sl_past — false positive.
+
+**Причина:** `_ensure_broker_sl_tp()` при `has_sl=False` (cTrader не ставит SL
+для альткоинов) **пересчитывал SL из текущего ATR** вместо использования
+`db_pos.stop_loss_price` (который стратегия уже рассчитала с 0.5% floor).
+Пересчитанный SL отличался от DB: для DOT даже оказывался НИЖЕ entry для SHORT.
+Проверка `sl_past` срабатывала → мгновенный force close.
+
+**Решение:** если `db_pos.stop_loss_price > 0` — брать SL из DB напрямую.
+Пересчёт из ATR — только fallback когда в DB нет SL.
+
+**Файлы:** `main.py`
+
+---
+
 ### fix: крипто R:R — TP floor 0.2% → 0.6% (было 2.5:1 против нас)
 
 **Проблема:** `CRYPTO_SCALP_TP_MIN_PCT = 0.002` (0.2%) при `SL_MIN_PCT = 0.005` (0.5%).
