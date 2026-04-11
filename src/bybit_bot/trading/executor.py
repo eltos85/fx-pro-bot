@@ -87,18 +87,22 @@ class TradeExecutor:
             log.warning("%s: qty=0 после округления (капитал $%.0f слишком мал)", symbol, capital)
             return None
 
-        if inst and qty_rounded * price < inst.min_notional:
-            log.warning("%s: notional $%.2f < min $%.0f", symbol, qty_rounded * price, inst.min_notional)
-            return None
-
         margin_required = qty_rounded * price / self._settings.leverage
         max_margin = capital * self._settings.max_margin_per_trade_pct
-        if margin_required > max_margin:
-            log.warning(
-                "%s: маржа $%.2f > лимит $%.2f (%.0f%% от $%.0f), пропускаю",
-                symbol, margin_required, max_margin,
-                self._settings.max_margin_per_trade_pct * 100, capital,
-            )
+
+        if margin_required > max_margin and inst:
+            max_qty = max_margin * self._settings.leverage / price
+            qty_rounded = self._round_qty_api(max_qty, inst)
+            if qty_rounded <= 0:
+                log.warning("%s: даже min qty ($%.2f маржи) > лимит $%.2f, пропускаю",
+                            symbol, inst.min_order_qty * price / self._settings.leverage, max_margin)
+                return None
+            margin_required = qty_rounded * price / self._settings.leverage
+            log.info("%s: qty уменьшен до %.6f (маржа $%.2f ≤ лимит $%.2f)",
+                     symbol, qty_rounded, margin_required, max_margin)
+        elif margin_required > max_margin:
+            log.warning("%s: маржа $%.2f > лимит $%.2f, пропускаю",
+                        symbol, margin_required, max_margin)
             return None
 
         if margin_required > available_balance:
@@ -106,6 +110,10 @@ class TradeExecutor:
                 "%s: маржа $%.2f > доступно $%.2f на бирже, пропускаю",
                 symbol, margin_required, available_balance,
             )
+            return None
+
+        if inst and qty_rounded * price < inst.min_notional:
+            log.warning("%s: notional $%.2f < min $%.0f", symbol, qty_rounded * price, inst.min_notional)
             return None
 
         price_prec = self._price_precision(inst.tick_size if inst else 0.01)
