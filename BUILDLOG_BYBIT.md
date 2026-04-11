@@ -222,3 +222,20 @@ Risk management ($500 профиль) активен — ограничит ре
 - `src/bybit_bot/config/settings.py` — удалён MATIC, фикс APT тикера
 - `src/bybit_bot/trading/executor.py` — удалён MATIC из min_qty_map
 - `.env`, `.env.example` — 38 монет, TRADING_ENABLED=true
+
+### Подключение исполнения скальпинг-сигналов
+
+Скальпинг-стратегии генерировали сигналы, но не передавали их в executor —
+только логировали. Добавлена функция `_process_scalping()` в main loop.
+
+**Что делает:**
+- После логирования сигналов проверяет KillSwitch и лимит скальп-позиций
+- Для каждого скальп-сигнала (VWAP, Stat-Arb, Funding, Volume Spike):
+  - Проверяет что символ ещё не открыт
+  - Устанавливает leverage, рассчитывает qty/SL/TP через executor
+  - Отправляет ордер на Bybit
+  - Записывает позицию в SQLite с тегом стратегии (scalp_vwap и т.д.)
+- Stat-Arb: открывает ОБЕ ноги (long A + short B)
+
+**Файлы:**
+- `src/bybit_bot/app/main.py` — `_process_scalping()`, вызов из `_run_cycle()`

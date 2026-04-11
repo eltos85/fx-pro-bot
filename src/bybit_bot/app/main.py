@@ -227,7 +227,6 @@ def _run_cycle(
     if scalp_count:
         log.info("Скальпинг-сигналов: %d", scalp_count)
 
-    # Исполнение (если торговля включена)
     if not executor or not client or not killswitch:
         return
 
@@ -239,6 +238,19 @@ def _run_cycle(
         client=client,
         executor=executor,
         killswitch=killswitch,
+    )
+
+    _process_scalping(
+        bars_map=bars_map,
+        settings=settings,
+        stats=stats,
+        client=client,
+        executor=executor,
+        killswitch=killswitch,
+        scalp_vwap=scalp_vwap,
+        scalp_statarb=scalp_statarb,
+        scalp_funding=scalp_funding,
+        scalp_volume=scalp_volume,
     )
 
 
@@ -304,6 +316,101 @@ def _process_momentum(
                 "ОТКРЫТА: %s %s %s qty=%s SL=%.4f TP=%.4f",
                 params.side, display_name(params.symbol), params.symbol,
                 params.qty, params.sl or 0, params.tp or 0,
+            )
+
+
+def _process_scalping(
+    *,
+    bars_map: dict[str, list[Bar]],
+    settings: Settings,
+    stats: StatsStore,
+    client: BybitClient,
+    executor: TradeExecutor,
+    killswitch: KillSwitch,
+    scalp_vwap: VwapCryptoStrategy | None,
+    scalp_statarb: StatArbCryptoStrategy | None,
+    scalp_funding: FundingScalpStrategy | None,
+    scalp_volume: VolumeSpikeStrategy | None,
+) -> None:
+    """Исполнение скальпинг-сигналов: открытие позиций на Bybit."""
+    try:
+        balance = client.get_balance()
+        positions = client.get_positions()
+    except Exception:
+        log.exception("Ошибка получения данных Bybit для скальпинга")
+        return
+
+    open_symbols = {p.symbol for p in positions}
+    scalp_opened = sum(1 for p in positions if getattr(p, "strategy", "") in
+                       ("scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume"))
+
+    if scalp_opened >= settings.scalping_max_positions:
+        log.debug("Скальпинг: макс позиций (%d/%d)", scalp_opened, settings.scalping_max_positions)
+        return
+
+    from bybit_bot.analysis.signals import Signal
+
+    scalp_trades: list[tuple[str, Signal, list[Bar], str]] = []
+
+    if scalp_vwap and bars_map:
+        for vs in scalp_vwap.scan(bars_map):
+            if vs.symbol not in open_symbols:
+                sig = Signal(direction=vs.direction, strength=0.7, reasons=(f"vwap_dev={vs.deviation_atr:.1f}",))
+                scalp_trades.append((vs.symbol, sig, bars_map[vs.symbol], "scalp_vwap"))
+
+    if scalp_statarb and bars_map:
+        for sa in scalp_statarb.scan(bars_map):
+            if sa.symbol_a not in open_symbols:
+                sig = Signal(direction=sa.direction_a, strength=0.7, reasons=(f"statarb_z={sa.z_score:.2f}",))
+                scalp_trades.append((sa.symbol_a, sig, bars_map[sa.symbol_a], "scalp_statarb"))
+            if sa.symbol_b not in open_symbols:
+                sig = Signal(direction=sa.direction_b, strength=0.7, reasons=(f"statarb_z={sa.z_score:.2f}",))
+                scalp_trades.append((sa.symbol_b, sig, bars_map[sa.symbol_b], "scalp_statarb"))
+
+    if scalp_funding and bars_map:
+        for fs in scalp_funding.scan(settings.scan_symbols, bars_map):
+            if fs.symbol not in open_symbols:
+                sig = Signal(direction=fs.direction, strength=fs.strength, reasons=(f"funding={fs.funding_rate:.4f}%",))
+                scalp_trades.append((fs.symbol, sig, bars_map.get(fs.symbol, []), "scalp_funding"))
+
+    if scalp_volume and bars_map:
+        for vs in scalp_volume.scan(bars_map):
+            if vs.symbol not in open_symbols:
+                sig = Signal(direction=vs.direction, strength=0.8, reasons=(f"vol_spike={vs.volume_ratio:.1f}x",))
+                scalp_trades.append((vs.symbol, sig, bars_map[vs.symbol], "scalp_volume"))
+
+    for symbol, sig, bars, strategy in scalp_trades:
+        if not killswitch.check_allowed(len(positions), balance.total_equity):
+            if killswitch.is_tripped:
+                log.critical("KillSwitch: %s — стоп", killswitch.trip_reason)
+            break
+
+        if not bars:
+            continue
+
+        executor.set_leverage(symbol)
+        params = executor.compute_trade(symbol, sig, bars, balance.available_balance)
+        if params is None:
+            continue
+
+        result = executor.execute(params)
+        if result.success:
+            stats.open_position(
+                symbol=params.symbol,
+                side=params.side,
+                qty=params.qty,
+                entry_price=bars[-1].close,
+                order_id=result.order_id,
+                sl=params.sl,
+                tp=params.tp,
+                strategy=strategy,
+                signal_strength=sig.strength,
+                signal_reasons=", ".join(sig.reasons),
+            )
+            open_symbols.add(symbol)
+            log.info(
+                "СКАЛЬП ОТКРЫТ: %s %s %s qty=%s [%s]",
+                params.side, display_name(symbol), symbol, params.qty, strategy,
             )
 
 
