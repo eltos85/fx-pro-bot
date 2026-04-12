@@ -131,8 +131,10 @@ class TradeExecutor:
             return None
 
         price_prec = self._price_precision(inst.tick_size if inst else 0.01)
-        sl = round(sl, price_prec)
-        tp = round(tp, price_prec)
+        if sl is not None:
+            sl = round(sl, price_prec)
+        if tp is not None:
+            tp = round(tp, price_prec)
 
         log.info(
             "%s: qty=%s, risk=$%.2f (%.1f%%), margin=$%.2f (%.1f%% от $%.0f)",
