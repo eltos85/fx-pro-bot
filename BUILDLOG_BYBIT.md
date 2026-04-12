@@ -2,6 +2,17 @@
 
 ## 2026-04-12
 
+### Fix: round(None) crash для Stat-Arb позиций без SL/TP
+`4822d01`
+
+Stat-Arb стратегия устанавливает sl=None и tp=None (exit через z-score и trailing, не через фиксированные стопы).
+Но `compute_trade()` безусловно вызывал `round(sl, price_prec)`, что падало с TypeError.
+Добавлена проверка `if sl is not None` / `if tp is not None` перед округлением.
+
+**Файлы:** `src/bybit_bot/trading/executor.py`
+
+---
+
 ### Fix: 7 критических проблем exit-логики, KillSwitch и Stat-Arb
 
 Анализ 50 закрытых сделок (PnL -$86.77, win-rate 28%) выявил системные проблемы.
