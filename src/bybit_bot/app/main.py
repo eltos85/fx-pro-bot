@@ -264,7 +264,7 @@ def _close_and_record(
 
     real_pnl = api_pnl
     exit_price = 0.0
-    time.sleep(0.5)
+    time.sleep(1.5)
     cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms)
     if cpnl:
         real_pnl = float(cpnl["closedPnl"])

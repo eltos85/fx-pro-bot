@@ -27,7 +27,11 @@
    не только по z-score, но и когда суммарный uPnL пары >= $0.80. Раньше бот упускал
    прибыль, ожидая z-score сигнал.
 
-**Файлы:** `app/main.py`, `trading/client.py`
+6. **TP валидация**: добавлена проверка TP по lastPrice (Buy: TP > lastPrice,
+   Sell: TP < lastPrice). Ранее проверялся только SL, из-за чего Bybit отклонял
+   ордера AVAXUSDT/FILUSDT с невалидным TP.
+
+**Файлы:** `app/main.py`, `trading/client.py`, `trading/executor.py`
 
 ---
 

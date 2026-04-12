@@ -163,19 +163,28 @@ class TradeExecutor:
             except Exception:
                 last_price = 0.0
 
-            if last_price > 0 and sl is not None:
-                if params.side == "Buy" and sl >= last_price:
-                    log.warning(
-                        "%s: SL=%.6f >= lastPrice=%.6f для Buy, убираю SL/TP",
-                        params.symbol, sl, last_price,
-                    )
-                    sl = None
-                    tp = None
-                elif params.side == "Sell" and sl <= last_price:
-                    log.warning(
-                        "%s: SL=%.6f <= lastPrice=%.6f для Sell, убираю SL/TP",
-                        params.symbol, sl, last_price,
-                    )
+            if last_price > 0:
+                invalid = False
+                if sl is not None:
+                    if params.side == "Buy" and sl >= last_price:
+                        log.warning("%s: SL=%.6f >= lastPrice=%.6f для Buy",
+                                    params.symbol, sl, last_price)
+                        invalid = True
+                    elif params.side == "Sell" and sl <= last_price:
+                        log.warning("%s: SL=%.6f <= lastPrice=%.6f для Sell",
+                                    params.symbol, sl, last_price)
+                        invalid = True
+                if tp is not None and not invalid:
+                    if params.side == "Buy" and tp <= last_price:
+                        log.warning("%s: TP=%.6f <= lastPrice=%.6f для Buy",
+                                    params.symbol, tp, last_price)
+                        invalid = True
+                    elif params.side == "Sell" and tp >= last_price:
+                        log.warning("%s: TP=%.6f >= lastPrice=%.6f для Sell",
+                                    params.symbol, tp, last_price)
+                        invalid = True
+                if invalid:
+                    log.warning("%s: убираю SL/TP, откроюсь без них", params.symbol)
                     sl = None
                     tp = None
 
