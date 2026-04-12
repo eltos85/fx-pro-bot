@@ -21,6 +21,7 @@ class TradeParams:
     qty: str
     sl: float | None = None
     tp: float | None = None
+    force_market: bool = False
 
 
 class TradeExecutor:
@@ -149,6 +150,7 @@ class TradeExecutor:
             qty=str(qty_rounded),
             sl=sl,
             tp=tp,
+            force_market=is_statarb,
         )
 
     def execute(self, params: TradeParams) -> OrderResult:
@@ -187,7 +189,7 @@ class TradeExecutor:
                 sl = None
                 tp = None
 
-        if last_price > 0:
+        if last_price > 0 and not params.force_market:
             inst = self._instruments.get(params.symbol)
             tick = inst.tick_size if inst else 0.01
             if params.side == "Buy":

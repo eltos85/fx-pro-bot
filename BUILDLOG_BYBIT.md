@@ -2,6 +2,19 @@
 
 ## 2026-04-12
 
+### Stat-Arb: Market ордера вместо Limit PostOnly
+
+Limit PostOnly для Stat-Arb пар приводил к тому, что одна нога исполнялась,
+а вторая зависала как Open Order (цена ушла). Результат — однонаправленная
+позиция без хеджа. Добавлен флаг `force_market` в `TradeParams`: для Stat-Arb
+пар ордера всегда идут через Market (гарантированное исполнение обеих ног).
+Остальные стратегии (VWAP, Momentum, Volume Spike) по-прежнему используют
+Limit PostOnly с fallback на Market.
+
+**Файлы:** `trading/executor.py`
+
+---
+
 ### Централизация конфигурации: один источник правды
 
 Проблема: одни и те же параметры (символы, balance, leverage, KillSwitch) были
