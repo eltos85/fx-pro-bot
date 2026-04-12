@@ -32,7 +32,7 @@ TIME_STOP_SECONDS = 50 * 300  # 50 баров × 5 мин = 15000 сек (~4.2 �
 TRAILING_ACTIVATION_ATR = 0.7
 TRAILING_DISTANCE_ATR = 0.5
 STATARB_EMERGENCY_LOSS = 15.0
-STATARB_PAIR_TP_USD = 0.80  # take-profit по суммарному uPnL пары
+STATARB_PAIR_TP_USD = 2.00  # take-profit по суммарному uPnL пары (с запасом на комиссии ~$0.70)
 
 log = logging.getLogger(__name__)
 
