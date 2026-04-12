@@ -35,9 +35,9 @@ def test_settings_defaults():
     assert s.account_balance == 500.0
     assert s.max_positions == 3
     assert s.max_margin_per_trade_pct == 0.25
-    assert s.killswitch_max_daily_loss == 15.0
-    assert s.killswitch_max_drawdown_pct == 10.0
-    assert s.killswitch_max_loss_per_trade == 7.50
+    assert s.killswitch_max_daily_loss == 37.50
+    assert s.killswitch_max_drawdown_pct == 25.0
+    assert s.killswitch_max_loss_per_trade == 12.50
     assert s.scalping_max_positions == 3
 
 
@@ -68,22 +68,30 @@ def test_rsi_insufficient_data():
     assert rsi([100, 101], 14) == 50.0
 
 
+def _ks_cfg(**overrides) -> "KillSwitchConfig":
+    from bybit_bot.trading.killswitch import KillSwitchConfig
+    defaults = dict(max_daily_loss_usd=37.50, max_drawdown_pct=25.0,
+                    max_positions=5, max_loss_per_trade_usd=12.50)
+    defaults.update(overrides)
+    return KillSwitchConfig(**defaults)
+
+
 def test_killswitch_allows_initially():
-    from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
-    ks = KillSwitch(KillSwitchConfig(max_positions=5), initial_equity=1000)
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(max_positions=5), initial_equity=1000)
     assert ks.check_allowed(0, 1000) is True
     assert ks.is_tripped is False
 
 
 def test_killswitch_blocks_max_positions():
-    from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
-    ks = KillSwitch(KillSwitchConfig(max_positions=3), initial_equity=1000)
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(max_positions=3), initial_equity=1000)
     assert ks.check_allowed(3, 1000) is False
 
 
 def test_killswitch_trips_on_daily_loss():
-    from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
-    ks = KillSwitch(KillSwitchConfig(max_daily_loss_usd=10.0), initial_equity=1000)
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(max_daily_loss_usd=10.0), initial_equity=1000)
     ks.record_trade_close(-11.0)
     assert ks.check_allowed(0, 989) is False
     assert ks.is_tripped is True

@@ -29,10 +29,10 @@ class DailyStats:
 
 @dataclass
 class KillSwitchConfig:
-    max_daily_loss_usd: float = 15.0
-    max_drawdown_pct: float = 10.0
-    max_positions: int = 5
-    max_loss_per_trade_usd: float = 7.50
+    max_daily_loss_usd: float
+    max_drawdown_pct: float
+    max_positions: int
+    max_loss_per_trade_usd: float
     enabled: bool = True
 
 

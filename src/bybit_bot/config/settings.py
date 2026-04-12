@@ -277,21 +277,21 @@ class Settings(BaseSettings):
         default=3, validation_alias="BYBIT_BOT_SCALP_MAX_POSITIONS",
     )
 
-    # Kill Switch — лимиты для $500 микро-счёта.
-    # Daily loss $15 = 3% (3 подряд стопа = пауза до завтра).
-    # Drawdown 10% = $50 от пика (жёсткий предел).
-    # Max loss per trade $7.50 = 1.5% (буфер для проскальзывания сверх 1% risk).
+    # Kill Switch — лимиты для демо-торговли.
+    # Daily loss 7.5% = $37.50 при $500 (больше свободы на демо).
+    # Drawdown 25% = $125 от пика (при переходе на реал — снизить до 10%).
+    # Max loss per trade 2.5% = $12.50 (буфер для проскальзывания).
     killswitch_max_daily_loss: float = Field(
-        default=15.0, validation_alias="BYBIT_BOT_KS_MAX_DAILY_LOSS",
+        default=37.50, validation_alias="BYBIT_BOT_KS_MAX_DAILY_LOSS",
     )
     killswitch_max_drawdown_pct: float = Field(
-        default=10.0, validation_alias="BYBIT_BOT_KS_MAX_DRAWDOWN_PCT",
+        default=25.0, validation_alias="BYBIT_BOT_KS_MAX_DRAWDOWN_PCT",
     )
     killswitch_max_positions: int = Field(
         default=5, validation_alias="BYBIT_BOT_KS_MAX_POSITIONS",
     )
     killswitch_max_loss_per_trade: float = Field(
-        default=7.50, validation_alias="BYBIT_BOT_KS_MAX_LOSS_PER_TRADE",
+        default=12.50, validation_alias="BYBIT_BOT_KS_MAX_LOSS_PER_TRADE",
     )
 
     @property
