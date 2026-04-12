@@ -28,7 +28,7 @@ from bybit_bot.trading.client import BybitClient, InstrumentInfo
 from bybit_bot.trading.executor import TradeExecutor
 from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
 
-TIME_STOP_BARS = 50
+TIME_STOP_SECONDS = 50 * 300  # 50 баров × 5 мин = 15000 сек (~4.2 часа)
 TRAILING_ACTIVATION_ATR = 0.7
 TRAILING_DISTANCE_ATR = 0.5
 STATARB_EMERGENCY_LOSS = 15.0
@@ -201,7 +201,6 @@ def _run_cycle(
         killswitch=killswitch,
         settings=settings,
         bars_map=bars_map,
-        cycle=cycle,
         scalp_statarb=scalp_statarb,
     )
 
@@ -274,7 +273,6 @@ def _process_exits(
     killswitch: KillSwitch,
     settings: Settings,
     bars_map: dict[str, list[Bar]],
-    cycle: int,
     scalp_statarb: StatArbCryptoStrategy | None,
 ) -> None:
     """Проверить открытые позиции и закрыть по условиям exit-логики."""
@@ -318,6 +316,8 @@ def _process_exits(
                     if _close_and_record(client, stats, killswitch, pp, pnl, "statarb_zscore_exit"):
                         already_closed.add(pp.symbol)
 
+    now = datetime.now(tz=UTC)
+
     for db_pos in db_open:
         if db_pos.symbol in already_closed:
             continue
@@ -327,6 +327,21 @@ def _process_exits(
             continue
 
         upnl = api_pos.unrealised_pnl
+
+        try:
+            opened_dt = datetime.fromisoformat(db_pos.opened_at)
+            if opened_dt.tzinfo is None:
+                opened_dt = opened_dt.replace(tzinfo=UTC)
+            age_sec = (now - opened_dt).total_seconds()
+        except (ValueError, TypeError):
+            age_sec = 0.0
+        age_min = age_sec / 60
+
+        log.info(
+            "EXIT-CHECK: %s %s uPnL=%.2f age=%.0fmin strat=%s pair=%s",
+            db_pos.side, db_pos.symbol, upnl, age_min,
+            db_pos.strategy, db_pos.pair_tag or "-",
+        )
 
         # 2. KillSwitch: max_loss_per_trade
         if upnl <= -killswitch._config.max_loss_per_trade_usd:
@@ -360,10 +375,10 @@ def _process_exits(
                         already_closed.add(pp.symbol)
                 continue
 
-        # 4. Time-stop: 50 баров (~4 часа на 5-мин TF)
-        bars_held = cycle - db_pos.opened_bar_idx
-        if bars_held >= TIME_STOP_BARS:
-            log.info("TIME-STOP: %s held %d bars", db_pos.symbol, bars_held)
+        # 4. Time-stop по реальному времени (~4.2 часа)
+        if age_sec >= TIME_STOP_SECONDS:
+            log.info("TIME-STOP: %s held %.0f min (limit %.0f min)",
+                     db_pos.symbol, age_min, TIME_STOP_SECONDS / 60)
             if _close_and_record(client, stats, killswitch, db_pos, upnl, "time_stop"):
                 already_closed.add(db_pos.symbol)
                 if db_pos.pair_tag:
