@@ -2,6 +2,35 @@
 
 ## 2026-04-12
 
+### Реальный PnL из Bybit API + entry_price из API + pair take-profit
+
+Аудит показал расхождение DB vs API: бот записывал расчётный PnL (из uPnL на момент
+закрытия), а реальный PnL с учётом комиссий и проскальзывания отличался. Также entry_price
+бралась из yfinance вместо реальной цены исполнения.
+
+**Что изменено:**
+
+1. **`_close_and_record`**: после закрытия ордера запрашивает `get_closed_pnl(symbol)` из
+   Bybit API и записывает реальный `closedPnl` и `avgExitPrice`. Фоллбэк на uPnL если API
+   не вернул данные.
+
+2. **`sync_closed`**: вместо `pnl=0` подтягивает реальный PnL из `closed-pnl` API по
+   `startTime` = момент открытия позиции.
+
+3. **`_fetch_entry_price`**: после открытия ордера запрашивает `get_positions()` и берёт
+   реальный `avgPrice` вместо yfinance close.
+
+4. **`client.fetch_realized_pnl`**: новый метод — обёртка над `get_closed_pnl` с фильтром
+   по символу и времени.
+
+5. **Pair take-profit** (`STATARB_PAIR_TP_USD = $0.80`): Stat-Arb пары теперь закрываются
+   не только по z-score, но и когда суммарный uPnL пары >= $0.80. Раньше бот упускал
+   прибыль, ожидая z-score сигнал.
+
+**Файлы:** `app/main.py`, `trading/client.py`
+
+---
+
 ### KillSwitch: ослабление лимитов для демо + убрано дублирование дефолтов
 `b18788d`
 

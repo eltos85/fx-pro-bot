@@ -248,17 +248,35 @@ class BybitClient:
         self,
         symbol: str | None = None,
         limit: int = 50,
+        start_time: int | None = None,
     ) -> list[dict]:
-        """GET /v5/position/closed-pnl -- реализованный PnL закрытых позиций."""
+        """GET /v5/position/closed-pnl -- реализованный PnL закрытых позиций.
+
+        Каждый элемент содержит: symbol, orderId, side, qty, closedPnl,
+        avgEntryPrice, avgExitPrice, openFee, closeFee, updatedTime и др.
+        """
         params: dict = {"category": self._category, "limit": limit}
         if symbol:
             params["symbol"] = symbol
+        if start_time is not None:
+            params["startTime"] = start_time
         try:
             resp = self._session.get_closed_pnl(**params)
             return resp.get("result", {}).get("list", [])
         except Exception as e:
             log.warning("get_closed_pnl error: %s", e)
             return []
+
+    def fetch_realized_pnl(self, symbol: str, since_ms: int) -> dict | None:
+        """Найти последнюю запись closed-pnl для символа после since_ms.
+
+        Возвращает dict с ключами closedPnl, avgEntryPrice, avgExitPrice
+        или None если не найдено.
+        """
+        records = self.get_closed_pnl(symbol=symbol, limit=5, start_time=since_ms)
+        if records:
+            return records[0]
+        return None
 
     def get_instruments(self, symbols: tuple[str, ...] | list[str] | None = None) -> dict[str, InstrumentInfo]:
         """Загрузить торговые правила инструментов (minQty, qtyStep, tickSize, maxLeverage).
