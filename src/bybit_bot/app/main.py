@@ -14,11 +14,11 @@ import time
 from datetime import UTC, datetime
 
 from bybit_bot.analysis.scanner import ScanResult, active_signals, scan_instruments
-from bybit_bot.analysis.signals import Direction
+from bybit_bot.analysis.signals import Direction, atr as compute_atr
 from bybit_bot.config.settings import Settings, display_name
 from bybit_bot.market_data.feed import fetch_bars, fetch_bars_batch
 from bybit_bot.market_data.models import Bar
-from bybit_bot.stats.store import StatsStore
+from bybit_bot.stats.store import PositionRow, StatsStore
 from bybit_bot.strategies.momentum import MomentumStrategy
 from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
 from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
@@ -27,6 +27,11 @@ from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
 from bybit_bot.trading.client import BybitClient, InstrumentInfo
 from bybit_bot.trading.executor import TradeExecutor
 from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
+
+TIME_STOP_BARS = 50
+TRAILING_ACTIVATION_ATR = 0.7
+TRAILING_DISTANCE_ATR = 0.5
+STATARB_EMERGENCY_LOSS = 15.0
 
 log = logging.getLogger(__name__)
 
@@ -190,6 +195,16 @@ def _run_cycle(
         log.info("Торговля отключена — только сигналы")
         return
 
+    _process_exits(
+        client=client,
+        stats=stats,
+        killswitch=killswitch,
+        settings=settings,
+        bars_map=bars_map,
+        cycle=cycle,
+        scalp_statarb=scalp_statarb,
+    )
+
     _process_momentum(
         signals=signals,
         settings=settings,
@@ -211,7 +226,154 @@ def _run_cycle(
         scalp_statarb=scalp_statarb,
         scalp_funding=scalp_funding,
         scalp_volume=scalp_volume,
+        cycle_counter=cycle,
     )
+
+
+def _close_and_record(
+    client: BybitClient,
+    stats: StatsStore,
+    killswitch: KillSwitch,
+    db_pos: PositionRow,
+    api_pnl: float,
+    reason: str,
+) -> bool:
+    """Закрыть позицию на бирже и записать результат в БД + KillSwitch."""
+    result = client.close_position(db_pos.symbol, db_pos.side, db_pos.qty)
+    if not result.success:
+        log.error("Не удалось закрыть %s: %s", db_pos.symbol, result.message)
+        return False
+    stats.close_position(db_pos.id, exit_price=0.0, pnl_usd=api_pnl, close_reason=reason)
+    killswitch.record_trade_close(api_pnl)
+    log.info("ЗАКРЫТА: %s %s pnl=%.2f [%s]", db_pos.side, db_pos.symbol, api_pnl, reason)
+    return True
+
+
+def _close_pair_legs(
+    client: BybitClient,
+    stats: StatsStore,
+    killswitch: KillSwitch,
+    pair_tag: str,
+    exclude_symbol: str,
+    api_positions: dict[str, object],
+) -> None:
+    """Закрыть все ноги Stat-Arb пары кроме уже закрытого символа."""
+    pair_positions = stats.get_open_by_pair_tag(pair_tag)
+    for pp in pair_positions:
+        if pp.symbol == exclude_symbol:
+            continue
+        api_pos = api_positions.get(pp.symbol)
+        pnl = api_pos.unrealised_pnl if api_pos else 0.0
+        _close_and_record(client, stats, killswitch, pp, pnl, "pair_close")
+
+
+def _process_exits(
+    *,
+    client: BybitClient,
+    stats: StatsStore,
+    killswitch: KillSwitch,
+    settings: Settings,
+    bars_map: dict[str, list[Bar]],
+    cycle: int,
+    scalp_statarb: StatArbCryptoStrategy | None,
+) -> None:
+    """Проверить открытые позиции и закрыть по условиям exit-логики."""
+    try:
+        api_positions = client.get_positions()
+    except Exception:
+        log.exception("Ошибка получения позиций для exit-проверки")
+        return
+
+    api_map = {p.symbol: p for p in api_positions}
+    db_open = stats.get_open_positions()
+
+    if not db_open:
+        return
+
+    already_closed: set[str] = set()
+
+    # 1. Stat-Arb z-score exit
+    if scalp_statarb and bars_map:
+        open_pair_tags = stats.get_open_pair_tags()
+        if open_pair_tags:
+            tags_to_close = scalp_statarb.check_exits(bars_map, open_pair_tags)
+            for tag in tags_to_close:
+                pair_positions = stats.get_open_by_pair_tag(tag)
+                for pp in pair_positions:
+                    if pp.symbol in already_closed:
+                        continue
+                    api_pos = api_map.get(pp.symbol)
+                    pnl = api_pos.unrealised_pnl if api_pos else 0.0
+                    if _close_and_record(client, stats, killswitch, pp, pnl, "statarb_zscore_exit"):
+                        already_closed.add(pp.symbol)
+
+    for db_pos in db_open:
+        if db_pos.symbol in already_closed:
+            continue
+
+        api_pos = api_map.get(db_pos.symbol)
+        if not api_pos:
+            continue
+
+        upnl = api_pos.unrealised_pnl
+
+        # 2. KillSwitch: max_loss_per_trade
+        if upnl <= -killswitch._config.max_loss_per_trade_usd:
+            log.warning(
+                "MAX_LOSS_PER_TRADE: %s uPnL=%.2f < -%.2f",
+                db_pos.symbol, upnl, killswitch._config.max_loss_per_trade_usd,
+            )
+            if _close_and_record(client, stats, killswitch, db_pos, upnl, "max_loss_per_trade"):
+                already_closed.add(db_pos.symbol)
+                if db_pos.pair_tag:
+                    _close_pair_legs(client, stats, killswitch, db_pos.pair_tag, db_pos.symbol, api_map)
+                    for pp in stats.get_open_by_pair_tag(db_pos.pair_tag):
+                        already_closed.add(pp.symbol)
+            continue
+
+        # 3. Stat-Arb emergency: суммарный uPnL пары < -$15
+        if db_pos.pair_tag and db_pos.strategy == "scalp_statarb":
+            pair_positions = stats.get_open_by_pair_tag(db_pos.pair_tag)
+            pair_upnl = sum(
+                api_map[pp.symbol].unrealised_pnl
+                for pp in pair_positions
+                if pp.symbol in api_map
+            )
+            if pair_upnl <= -STATARB_EMERGENCY_LOSS:
+                log.warning("STAT-ARB EMERGENCY: pair %s uPnL=%.2f", db_pos.pair_tag, pair_upnl)
+                for pp in pair_positions:
+                    if pp.symbol in already_closed:
+                        continue
+                    pp_pnl = api_map[pp.symbol].unrealised_pnl if pp.symbol in api_map else 0.0
+                    if _close_and_record(client, stats, killswitch, pp, pp_pnl, "statarb_emergency"):
+                        already_closed.add(pp.symbol)
+                continue
+
+        # 4. Time-stop: 50 баров (~4 часа на 5-мин TF)
+        bars_held = cycle - db_pos.opened_bar_idx
+        if bars_held >= TIME_STOP_BARS:
+            log.info("TIME-STOP: %s held %d bars", db_pos.symbol, bars_held)
+            if _close_and_record(client, stats, killswitch, db_pos, upnl, "time_stop"):
+                already_closed.add(db_pos.symbol)
+                if db_pos.pair_tag:
+                    _close_pair_legs(client, stats, killswitch, db_pos.pair_tag, db_pos.symbol, api_map)
+            continue
+
+        # 5. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API
+        if upnl > 0 and not db_pos.pair_tag:
+            bars = bars_map.get(db_pos.symbol, [])
+            if bars:
+                atr_val = compute_atr(bars)
+                size = float(db_pos.qty)
+                if size > 0 and atr_val > 0:
+                    profit_in_atr = upnl / (atr_val * size)
+                    if profit_in_atr >= TRAILING_ACTIVATION_ATR:
+                        distance = atr_val * TRAILING_DISTANCE_ATR
+                        client.set_trailing_stop(db_pos.symbol, distance)
+
+    closed_count = len(already_closed)
+    if closed_count > 0:
+        log.info("Exit-проверка: закрыто %d позиций", closed_count)
 
 
 def _process_momentum(
@@ -231,7 +393,8 @@ def _process_momentum(
         log.exception("Ошибка получения данных Bybit")
         return
 
-    if not killswitch.check_allowed(len(positions), balance.total_equity):
+    effective_equity = settings.account_balance + stats.get_cumulative_pnl()
+    if not killswitch.check_allowed(len(positions), effective_equity):
         if killswitch.is_tripped:
             log.critical("KillSwitch сработал: %s — закрываю все позиции!", killswitch.trip_reason)
             client.close_all_positions()
@@ -291,6 +454,7 @@ def _process_scalping(
     scalp_statarb: StatArbCryptoStrategy | None,
     scalp_funding: FundingScalpStrategy | None,
     scalp_volume: VolumeSpikeStrategy | None,
+    cycle_counter: int = 0,
 ) -> None:
     """Исполнение скальпинг-сигналов: открытие позиций на Bybit."""
     try:
@@ -301,8 +465,9 @@ def _process_scalping(
         return
 
     open_symbols = {p.symbol for p in positions}
-    scalp_opened = sum(1 for p in positions if getattr(p, "strategy", "") in
-                       ("scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume"))
+    scalp_strategies = {"scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume"}
+    db_open = stats.get_open_positions()
+    scalp_opened = sum(1 for dp in db_open if dp.strategy in scalp_strategies)
 
     if scalp_opened >= settings.scalping_max_positions:
         log.debug("Скальпинг: макс позиций (%d/%d)", scalp_opened, settings.scalping_max_positions)
@@ -315,37 +480,61 @@ def _process_scalping(
     if scalp_vwap and bars_map:
         for vs in scalp_vwap.scan(bars_map):
             if vs.symbol not in open_symbols:
-                sig = Signal(direction=vs.direction, strength=0.7, reasons=(f"vwap_dev={vs.deviation_atr:.1f}",))
+                sig = Signal(
+                    direction=vs.direction, strength=0.7,
+                    reasons=(f"vwap_dev={vs.deviation_atr:.1f}",),
+                    sl_atr_mult=2.0, tp_atr_mult=1.5, strategy_name="scalp_vwap",
+                )
                 scalp_trades.append((vs.symbol, sig, bars_map[vs.symbol], "scalp_vwap"))
 
     if scalp_statarb and bars_map:
         for sa in scalp_statarb.scan(bars_map):
             if sa.symbol_a not in open_symbols:
-                sig = Signal(direction=sa.direction_a, strength=0.7, reasons=(f"statarb_z={sa.z_score:.2f}",))
+                sig = Signal(
+                    direction=sa.direction_a, strength=0.7,
+                    reasons=(f"statarb_z={sa.z_score:.2f}",),
+                    sl_atr_mult=None, tp_atr_mult=None,
+                    pair_tag=sa.pair_tag, strategy_name="scalp_statarb",
+                )
                 scalp_trades.append((sa.symbol_a, sig, bars_map[sa.symbol_a], "scalp_statarb"))
             if sa.symbol_b not in open_symbols:
-                sig = Signal(direction=sa.direction_b, strength=0.7, reasons=(f"statarb_z={sa.z_score:.2f}",))
+                sig = Signal(
+                    direction=sa.direction_b, strength=0.7,
+                    reasons=(f"statarb_z={sa.z_score:.2f}",),
+                    sl_atr_mult=None, tp_atr_mult=None,
+                    pair_tag=sa.pair_tag, strategy_name="scalp_statarb",
+                )
                 scalp_trades.append((sa.symbol_b, sig, bars_map[sa.symbol_b], "scalp_statarb"))
 
     if scalp_funding and bars_map:
         for fs in scalp_funding.scan(settings.scan_symbols, bars_map):
             if fs.symbol not in open_symbols:
-                sig = Signal(direction=fs.direction, strength=fs.strength, reasons=(f"funding={fs.funding_rate:.4f}%",))
+                sig = Signal(
+                    direction=fs.direction, strength=fs.strength,
+                    reasons=(f"funding={fs.funding_rate:.4f}%",),
+                    sl_atr_mult=1.5, tp_atr_mult=1.0, strategy_name="scalp_funding",
+                )
                 scalp_trades.append((fs.symbol, sig, bars_map.get(fs.symbol, []), "scalp_funding"))
 
     if scalp_volume and bars_map:
         for vs in scalp_volume.scan(bars_map):
             if vs.symbol not in open_symbols:
-                sig = Signal(direction=vs.direction, strength=0.8, reasons=(f"vol_spike={vs.volume_ratio:.1f}x",))
+                sig = Signal(
+                    direction=vs.direction, strength=0.8,
+                    reasons=(f"vol_spike={vs.volume_ratio:.1f}x",),
+                    sl_atr_mult=2.0, tp_atr_mult=2.0, strategy_name="scalp_volume",
+                )
                 scalp_trades.append((vs.symbol, sig, bars_map[vs.symbol], "scalp_volume"))
 
     log.info("Скальпинг: найдено %d сигналов (max позиций=%d, открыто=%d)",
              len(scalp_trades), settings.scalping_max_positions, scalp_opened)
 
+    effective_equity = settings.account_balance + stats.get_cumulative_pnl()
     for symbol, sig, bars, strategy in scalp_trades:
-        if not killswitch.check_allowed(len(positions), balance.total_equity):
+        if not killswitch.check_allowed(len(positions), effective_equity):
             if killswitch.is_tripped:
-                log.critical("KillSwitch: %s — стоп", killswitch.trip_reason)
+                log.critical("KillSwitch: %s — закрываю все позиции!", killswitch.trip_reason)
+                client.close_all_positions()
             break
 
         if not bars:
@@ -369,6 +558,8 @@ def _process_scalping(
                 strategy=strategy,
                 signal_strength=sig.strength,
                 signal_reasons=", ".join(sig.reasons),
+                pair_tag=sig.pair_tag or "",
+                opened_bar_idx=cycle_counter,
             )
             open_symbols.add(symbol)
             log.info(

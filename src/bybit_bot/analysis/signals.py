@@ -21,6 +21,10 @@ class Signal:
     reasons: tuple[str, ...]
     rsi: float | None = None
     trend: Direction | None = None
+    sl_atr_mult: float | None = None
+    tp_atr_mult: float | None = None
+    pair_tag: str | None = None
+    strategy_name: str = ""
 
 
 # ── Базовые индикаторы ──────────────────────────────────────

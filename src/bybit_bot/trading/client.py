@@ -144,9 +144,30 @@ class BybitClient:
             return OrderResult(order_id="", symbol=symbol, side=side, qty=qty, success=False, message=str(e))
 
     def close_position(self, symbol: str, side: str, qty: str) -> OrderResult:
-        """Закрыть позицию рыночным ордером (встречная сторона)."""
+        """Закрыть позицию рыночным ордером с reduceOnly=True."""
         close_side = "Sell" if side == "Buy" else "Buy"
-        return self.place_order(symbol, close_side, qty)
+        params: dict = {
+            "category": self._category,
+            "symbol": symbol,
+            "side": close_side,
+            "orderType": "Market",
+            "qty": qty,
+            "reduceOnly": True,
+            "timeInForce": "GTC",
+        }
+        try:
+            resp = self._session.place_order(**params)
+            ret_code = resp.get("retCode", -1)
+            if ret_code == 0:
+                order_id = resp["result"]["orderId"]
+                log.info("Закрытие %s %s qty=%s → orderId=%s", close_side, symbol, qty, order_id)
+                return OrderResult(order_id=order_id, symbol=symbol, side=close_side, qty=qty, success=True)
+            msg = resp.get("retMsg", "unknown error")
+            log.error("Ошибка закрытия %s: %s", symbol, msg)
+            return OrderResult(order_id="", symbol=symbol, side=close_side, qty=qty, success=False, message=msg)
+        except Exception as e:
+            log.exception("Исключение при закрытии %s", symbol)
+            return OrderResult(order_id="", symbol=symbol, side=close_side, qty=qty, success=False, message=str(e))
 
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         """Установить плечо для символа."""
@@ -188,6 +209,56 @@ class BybitClient:
         except Exception as e:
             log.warning("Не удалось обновить SL/TP %s: %s", symbol, e)
             return False
+
+    def set_trailing_stop(
+        self,
+        symbol: str,
+        distance: float,
+        active_price: float | None = None,
+    ) -> bool:
+        """Установить trailing stop через POST /v5/position/trading-stop."""
+        params: dict = {
+            "category": self._category,
+            "symbol": symbol,
+            "tpslMode": "Full",
+            "positionIdx": 0,
+            "trailingStop": str(round(distance, 8)),
+        }
+        if active_price is not None:
+            params["activePrice"] = str(round(active_price, 8))
+        try:
+            resp = self._session.set_trading_stop(**params)
+            ok = resp.get("retCode", -1) == 0
+            if ok:
+                log.info("Trailing stop %s: distance=%.4f", symbol, distance)
+            else:
+                log.warning("Trailing stop %s failed: %s", symbol, resp.get("retMsg", ""))
+            return ok
+        except Exception as e:
+            if "not modified" in str(e).lower() or "34040" in str(e):
+                return True
+            log.warning("Trailing stop %s error: %s", symbol, e)
+            return False
+
+    def cancel_sl_tp(self, symbol: str) -> bool:
+        """Отменить SL/TP для позиции (для Stat-Arb ног)."""
+        return self.amend_sl_tp(symbol, sl=0.0, tp=0.0)
+
+    def get_closed_pnl(
+        self,
+        symbol: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """GET /v5/position/closed-pnl -- реализованный PnL закрытых позиций."""
+        params: dict = {"category": self._category, "limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        try:
+            resp = self._session.get_closed_pnl(**params)
+            return resp.get("result", {}).get("list", [])
+        except Exception as e:
+            log.warning("get_closed_pnl error: %s", e)
+            return []
 
     def get_instruments(self, symbols: tuple[str, ...] | list[str] | None = None) -> dict[str, InstrumentInfo]:
         """Загрузить торговые правила инструментов (minQty, qtyStep, tickSize, maxLeverage).

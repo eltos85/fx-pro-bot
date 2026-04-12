@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 from bybit_bot.analysis.signals import Direction, Signal, atr
@@ -63,18 +64,32 @@ class TradeExecutor:
 
         side = "Buy" if signal.direction == Direction.LONG else "Sell"
 
-        sl_distance = atr_val * self._settings.strategy_sl_atr_mult
-        tp_distance = atr_val * self._settings.strategy_tp_atr_mult
+        sl_mult = signal.sl_atr_mult if signal.sl_atr_mult is not None else self._settings.strategy_sl_atr_mult
+        tp_mult = signal.tp_atr_mult if signal.tp_atr_mult is not None else self._settings.strategy_tp_atr_mult
 
-        if side == "Buy":
-            sl = price - sl_distance
-            tp = price + tp_distance
+        is_statarb = signal.pair_tag is not None and signal.sl_atr_mult is None
+
+        if is_statarb:
+            sl = None
+            tp = None
+            sl_distance = atr_val * 2.0
         else:
-            sl = price + sl_distance
-            tp = price - tp_distance
+            sl_distance = atr_val * sl_mult
+            tp_distance = atr_val * tp_mult
+            if side == "Buy":
+                sl = price - sl_distance
+                tp = price + tp_distance
+            else:
+                sl = price + sl_distance
+                tp = price - tp_distance
 
         capital = self._settings.account_balance
         risk_usd = capital * self._settings.capital_per_trade_pct
+
+        max_margin = capital * self._settings.max_margin_per_trade_pct
+        if is_statarb:
+            max_margin = max_margin / 2
+
         qty_raw = risk_usd / (sl_distance * self._settings.leverage)
 
         inst = self._instruments.get(symbol)
@@ -88,7 +103,6 @@ class TradeExecutor:
             return None
 
         margin_required = qty_rounded * price / self._settings.leverage
-        max_margin = capital * self._settings.max_margin_per_trade_pct
 
         if margin_required > max_margin and inst:
             max_qty = max_margin * self._settings.leverage / price
@@ -163,15 +177,15 @@ class TradeExecutor:
 
     @staticmethod
     def _round_qty_api(qty: float, inst: InstrumentInfo) -> float:
-        """Округлить qty по правилам инструмента с Bybit API."""
+        """Округлить qty ВНИЗ (floor) по правилам инструмента с Bybit API."""
         if qty < inst.min_order_qty:
             return 0.0
 
         step = inst.qty_step
-        rounded = round(qty / step) * step
+        floored = math.floor(qty / step) * step
 
         decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[1])) if step < 1 else 0
-        return round(rounded, decimals)
+        return round(floored, decimals)
 
     @staticmethod
     def _round_qty_fallback(qty: float, symbol: str) -> float:

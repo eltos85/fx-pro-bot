@@ -29,6 +29,8 @@ class PositionRow:
     exit_price: float | None = None
     pnl_usd: float | None = None
     close_reason: str | None = None
+    pair_tag: str = ""
+    opened_bar_idx: int = 0
 
 
 @dataclass
@@ -98,6 +100,25 @@ class StatsStore:
             CREATE INDEX IF NOT EXISTS idx_positions_open ON positions(closed_at);
             CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
         """)
+        self._migrate_schema()
+        self.conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_positions_pair_tag ON positions(pair_tag);
+            CREATE INDEX IF NOT EXISTS idx_positions_strategy ON positions(strategy);
+        """)
+
+    def _migrate_schema(self) -> None:
+        """Добавить новые колонки к существующей БД (idempotent)."""
+        cursor = self.conn.execute("PRAGMA table_info(positions)")
+        existing = {row[1] for row in cursor.fetchall()}
+        migrations = [
+            ("pair_tag", "TEXT NOT NULL DEFAULT ''"),
+            ("opened_bar_idx", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for col, col_type in migrations:
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {col_type}")
+                log.info("Миграция: добавлена колонка positions.%s", col)
+        self.conn.commit()
 
     def log_signal(
         self,
@@ -129,15 +150,17 @@ class StatsStore:
         strategy: str = "ensemble",
         signal_strength: float = 0.0,
         signal_reasons: str = "",
+        pair_tag: str = "",
+        opened_bar_idx: int = 0,
     ) -> int:
         now = datetime.now(tz=UTC).isoformat()
         cur = self.conn.execute(
             "INSERT INTO positions "
             "(symbol, side, qty, entry_price, sl, tp, order_id, strategy, "
-            " signal_strength, signal_reasons, opened_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " signal_strength, signal_reasons, opened_at, pair_tag, opened_bar_idx) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (symbol, side, qty, entry_price, sl, tp, order_id, strategy,
-             signal_strength, signal_reasons, now),
+             signal_strength, signal_reasons, now, pair_tag, opened_bar_idx),
         )
         self.conn.commit()
         return cur.lastrowid or 0
@@ -169,6 +192,29 @@ class StatsStore:
             (symbol,),
         ).fetchone()
         return self._row_to_position(row) if row else None
+
+    def get_open_by_pair_tag(self, pair_tag: str) -> list[PositionRow]:
+        """Все открытые позиции с данным pair_tag (для парного закрытия Stat-Arb)."""
+        rows = self.conn.execute(
+            "SELECT * FROM positions WHERE pair_tag=? AND closed_at IS NULL",
+            (pair_tag,),
+        ).fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    def get_open_pair_tags(self) -> list[str]:
+        """Уникальные pair_tag открытых Stat-Arb позиций."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT pair_tag FROM positions "
+            "WHERE pair_tag != '' AND closed_at IS NULL",
+        ).fetchall()
+        return [r["pair_tag"] for r in rows]
+
+    def get_cumulative_pnl(self) -> float:
+        """Суммарный реализованный PnL всех закрытых позиций."""
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(pnl_usd), 0) as total FROM positions WHERE closed_at IS NOT NULL",
+        ).fetchone()
+        return float(row["total"]) if row else 0.0
 
     def get_daily_pnl(self, date_str: str | None = None) -> float:
         if date_str is None:
@@ -221,4 +267,6 @@ class StatsStore:
             exit_price=row["exit_price"],
             pnl_usd=row["pnl_usd"],
             close_reason=row["close_reason"],
+            pair_tag=row["pair_tag"] if "pair_tag" in row.keys() else "",
+            opened_bar_idx=row["opened_bar_idx"] if "opened_bar_idx" in row.keys() else 0,
         )

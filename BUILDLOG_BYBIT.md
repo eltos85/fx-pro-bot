@@ -1,9 +1,48 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-12
+
+### Fix: 7 критических проблем exit-логики, KillSwitch и Stat-Arb
+
+Анализ 50 закрытых сделок (PnL -$86.77, win-rate 28%) выявил системные проблемы.
+Все исправления основаны на офиц. документации Bybit API v5 и лучших практиках.
+
+**Проблема 1 — Нет exit-логики:** бот только открывал позиции, закрытие только по SL/TP Bybit.
+Добавлена `_process_exits()` в каждый цикл: max_loss_per_trade ($7.50), time-stop (50 баров),
+Stat-Arb z-score exit, trailing stop через Bybit API (0.7 ATR активация, 0.5 ATR дистанция).
+
+**Проблема 2 — KillSwitch не проверял uPnL:** ETH потеряла $37.42 при лимите $7.50.
+Теперь `_process_exits` проверяет `unrealisedPnl` каждой позиции и закрывает при превышении.
+`record_trade_close()` вызывается после каждого закрытия. Drawdown считается от account_balance.
+
+**Проблема 3 — Stat-Arb ноги закрывались независимо:** SL на одной ноге оставлял вторую открытой.
+Добавлен `pair_tag` в БД. При закрытии одной ноги — немедленно закрывается вторая.
+Stat-Arb позиции открываются без SL/TP, exit по z-score < 0.5 или emergency ($15 суммарный убыток).
+
+**Проблема 4 — qty округлялся вверх:** floor вместо round, маржа Stat-Arb делится пополам.
+
+**Проблема 5 — Единый SL/TP для всех стратегий:** Signal расширен полями `sl_atr_mult`, `tp_atr_mult`.
+VWAP: SL=2.0/TP=1.5, Funding: SL=1.5/TP=1.0, Volume: SL=2.0/TP=2.0, Momentum: SL=2.0/TP=3.0.
+
+**Проблема 6 — scalp_opened всегда 0:** проверял несуществующее поле PositionInfo.strategy.
+Заменено на подсчёт через БД (strategy_name).
+
+**Проблема 7 — trip в scalping не закрывал позиции:** добавлен close_all_positions().
+
+**Bybit API (из офиц. доки):**
+- `close_position` теперь использует `reduceOnly=True`
+- `set_trailing_stop` через `POST /v5/position/trading-stop` (trailingStop + activePrice)
+- `get_closed_pnl` через `GET /v5/position/closed-pnl`
+
+**Файлы:** `analysis/signals.py`, `trading/client.py`, `trading/executor.py`,
+`stats/store.py`, `app/main.py`, `tests/test_bybit_bot.py`
+
+---
+
 ## 2026-04-11
 
 ### Fix: margin cap — уменьшать qty вместо отказа от сделки
-`коммит ниже`
+`10b3930`
 
 **Симптом:** бот находил 2 сигнала (BTCUSDT, ETHUSDT Stat-Arb) каждый цикл,
 но все отклонялись: `маржа $566 > лимит $125 (25% от $500), пропускаю`.
