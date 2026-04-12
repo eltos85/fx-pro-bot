@@ -2,6 +2,28 @@
 
 ## 2026-04-12
 
+### Аудит доступности символов + новые Stat-Arb пары из исследований
+
+Проверка Bybit demo testnet выявила: 14 из 38 символов **недоступны** на демо
+(AVAXUSDT, LTCUSDT, ARBUSDT, ATOMUSDT, FILUSDT, FETUSDT, TONUSDT, SEIUSDT,
+WLDUSDT, ALGOUSDT; SHIBUSDT/PEPEUSDT/BONKUSDT/FLOKIUSDT — другие тикеры).
+Это ломало 7 из 10 Stat-Arb пар (одна нога отсутствовала → однонаправленные
+позиции без хеджа).
+
+**Исправления:**
+1. `DEFAULT_SYMBOLS`: убраны 14 недоступных, добавлены ETCUSDT, BCHUSDT (для пар)
+2. `DEFAULT_PAIRS`: 14 пар на основе исследований корреляций (FullSwing AI,
+   Springer Nature copula study, TradingEconomics): BTC/ETH (0.82), ADA/DOT (0.98),
+   SOL/NEAR, ETH/BNB (0.78), AAVE/UNI, APT/SUI, ETC/BCH и др.
+3. `_process_scalping`: добавлен параметр `tradeable_symbols` — Stat-Arb пары
+   пропускаются если хотя бы один символ недоступен на бирже
+4. Обновлены DISPLAY_NAMES, TICK_SIZES, BYBIT_TO_YFINANCE маппинги
+
+**Файлы:** `config/settings.py`, `strategies/scalping/stat_arb_crypto.py`,
+`app/main.py`
+
+---
+
 ### Limit PostOnly для открытия позиций (снижение комиссий)
 
 Было: все ордера открываются Market (taker fee 0.055%).

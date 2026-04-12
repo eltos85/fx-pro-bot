@@ -27,16 +27,35 @@ from bybit_bot.strategies.scalping.indicators import (
 log = logging.getLogger(__name__)
 
 DEFAULT_PAIRS: list[tuple[str, str]] = [
+    # --- Подтверждённые исследованиями (FullSwing AI, Springer Nature, TradingEconomics) ---
+    # BTC-ETH: corr 0.82 (Springer Nature 2024, FullSwing AI 2025)
     ("BTCUSDT", "ETHUSDT"),
+    # SOL-ETH: L1 sector, corr 0.68-0.74
     ("SOLUSDT", "ETHUSDT"),
+    # LINK-ETH: cointegrated (Springer copula study), corr 0.69+
     ("LINKUSDT", "ETHUSDT"),
-    ("LTCUSDT", "BTCUSDT"),
-    ("AVAXUSDT", "ETHUSDT"),
-    ("DOTUSDT", "ETHUSDT"),
-    ("ATOMUSDT", "ETHUSDT"),
+    # ADA-DOT: corr 0.98 (TradingEconomics 2025)
+    ("ADAUSDT", "DOTUSDT"),
+    # SOL-NEAR: L1 sector, corr ~0.70
     ("NEARUSDT", "SOLUSDT"),
-    ("ARBUSDT", "OPUSDT"),
-    ("PEPEUSDT", "DOGEUSDT"),
+    # BNB-SOL: corr 0.65 (FullSwing AI)
+    ("BNBUSDT", "SOLUSDT"),
+    # DOT-LINK: infra/oracle sector, corr 0.70+
+    ("DOTUSDT", "LINKUSDT"),
+    # ETH-BNB: corr 0.78 (FullSwing AI)
+    ("ETHUSDT", "BNBUSDT"),
+    # OP-SUI: L2/new-L1 sector
+    ("OPUSDT", "SUIUSDT"),
+    # DOGE-XRP: payment/meme crossover, corr 0.65+
+    ("DOGEUSDT", "XRPUSDT"),
+    # INJ-SOL: high-perf L1, corr 0.70+
+    ("INJUSDT", "SOLUSDT"),
+    # AAVE-UNI: DeFi blue-chips, corr 0.75+
+    ("AAVEUSDT", "UNIUSDT"),
+    # APT-SUI: Move-based L1 sector, corr 0.80+
+    ("APTUSDT", "SUIUSDT"),
+    # ETC-BCH: legacy PoW forks, corr 0.75+
+    ("ETCUSDT", "BCHUSDT"),
 ]
 
 Z_ENTRY = 2.0

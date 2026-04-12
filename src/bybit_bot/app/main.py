@@ -76,6 +76,7 @@ def run_bot() -> None:
     executor: TradeExecutor | None = None
     killswitch: KillSwitch | None = None
     scalp_funding: FundingScalpStrategy | None = None
+    tradeable_symbols: tuple[str, ...] = ()
 
     if settings.trading_enabled and settings.api_key and settings.api_secret:
         try:
@@ -137,6 +138,7 @@ def run_bot() -> None:
                 client=client,
                 executor=executor,
                 killswitch=killswitch,
+                tradeable_symbols=set(tradeable_symbols) if client else set(),
             )
         except Exception:
             log.exception("Ошибка в цикле %d", cycle)
@@ -161,6 +163,7 @@ def _run_cycle(
     client: BybitClient | None,
     executor: TradeExecutor | None,
     killswitch: KillSwitch | None,
+    tradeable_symbols: set[str] | None = None,
 ) -> None:
     now = datetime.now(tz=UTC)
     log.info("─── Цикл %d │ %s ───", cycle, now.strftime("%H:%M:%S UTC"))
@@ -227,6 +230,7 @@ def _run_cycle(
         scalp_funding=scalp_funding,
         scalp_volume=scalp_volume,
         cycle_counter=cycle,
+        tradeable_symbols=tradeable_symbols,
     )
 
 
@@ -559,6 +563,7 @@ def _process_scalping(
     scalp_funding: FundingScalpStrategy | None,
     scalp_volume: VolumeSpikeStrategy | None,
     cycle_counter: int = 0,
+    tradeable_symbols: set[str] | None = None,
 ) -> None:
     """Исполнение скальпинг-сигналов: открытие позиций на Bybit."""
     try:
@@ -593,22 +598,26 @@ def _process_scalping(
 
     if scalp_statarb and bars_map:
         for sa in scalp_statarb.scan(bars_map):
-            if sa.symbol_a not in open_symbols:
-                sig = Signal(
-                    direction=sa.direction_a, strength=0.7,
-                    reasons=(f"statarb_z={sa.z_score:.2f}",),
-                    sl_atr_mult=None, tp_atr_mult=None,
-                    pair_tag=sa.pair_tag, strategy_name="scalp_statarb",
-                )
-                scalp_trades.append((sa.symbol_a, sig, bars_map[sa.symbol_a], "scalp_statarb"))
-            if sa.symbol_b not in open_symbols:
-                sig = Signal(
-                    direction=sa.direction_b, strength=0.7,
-                    reasons=(f"statarb_z={sa.z_score:.2f}",),
-                    sl_atr_mult=None, tp_atr_mult=None,
-                    pair_tag=sa.pair_tag, strategy_name="scalp_statarb",
-                )
-                scalp_trades.append((sa.symbol_b, sig, bars_map[sa.symbol_b], "scalp_statarb"))
+            if sa.symbol_a in open_symbols or sa.symbol_b in open_symbols:
+                continue
+            if tradeable_symbols and (sa.symbol_a not in tradeable_symbols or sa.symbol_b not in tradeable_symbols):
+                log.debug("Stat-Arb %s/%s: символ недоступен на бирже, пропускаю",
+                          sa.symbol_a, sa.symbol_b)
+                continue
+            sig_a = Signal(
+                direction=sa.direction_a, strength=0.7,
+                reasons=(f"statarb_z={sa.z_score:.2f}",),
+                sl_atr_mult=None, tp_atr_mult=None,
+                pair_tag=sa.pair_tag, strategy_name="scalp_statarb",
+            )
+            sig_b = Signal(
+                direction=sa.direction_b, strength=0.7,
+                reasons=(f"statarb_z={sa.z_score:.2f}",),
+                sl_atr_mult=None, tp_atr_mult=None,
+                pair_tag=sa.pair_tag, strategy_name="scalp_statarb",
+            )
+            scalp_trades.append((sa.symbol_a, sig_a, bars_map[sa.symbol_a], "scalp_statarb"))
+            scalp_trades.append((sa.symbol_b, sig_b, bars_map[sa.symbol_b], "scalp_statarb"))
 
     if scalp_funding and bars_map:
         for fs in scalp_funding.scan(settings.scan_symbols, bars_map):
