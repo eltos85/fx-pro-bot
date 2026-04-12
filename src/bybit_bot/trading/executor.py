@@ -152,17 +152,43 @@ class TradeExecutor:
         )
 
     def execute(self, params: TradeParams) -> OrderResult:
-        """Отправить ордер на Bybit."""
+        """Отправить ордер на Bybit с валидацией SL/TP по реальной цене."""
+        sl = params.sl
+        tp = params.tp
+
+        if sl is not None or tp is not None:
+            try:
+                ticker = self._client.get_tickers(params.symbol)
+                last_price = float(ticker.get("lastPrice", 0))
+            except Exception:
+                last_price = 0.0
+
+            if last_price > 0 and sl is not None:
+                if params.side == "Buy" and sl >= last_price:
+                    log.warning(
+                        "%s: SL=%.6f >= lastPrice=%.6f для Buy, убираю SL/TP",
+                        params.symbol, sl, last_price,
+                    )
+                    sl = None
+                    tp = None
+                elif params.side == "Sell" and sl <= last_price:
+                    log.warning(
+                        "%s: SL=%.6f <= lastPrice=%.6f для Sell, убираю SL/TP",
+                        params.symbol, sl, last_price,
+                    )
+                    sl = None
+                    tp = None
+
         log.info(
             "Открываю %s %s qty=%s SL=%.4f TP=%.4f",
-            params.side, params.symbol, params.qty, params.sl or 0, params.tp or 0,
+            params.side, params.symbol, params.qty, sl or 0, tp or 0,
         )
         return self._client.place_order(
             params.symbol,
             params.side,
             params.qty,
-            sl=params.sl,
-            tp=params.tp,
+            sl=sl,
+            tp=tp,
         )
 
     def close_position(self, symbol: str, side: str, qty: str) -> OrderResult:
