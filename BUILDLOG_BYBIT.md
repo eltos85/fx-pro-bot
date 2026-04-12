@@ -2,6 +2,21 @@
 
 ## 2026-04-12
 
+### Fix: валидация SL/TP по реальной цене Bybit перед отправкой ордера
+`92ed496`
+
+yfinance close price может расходиться с реальной ценой на Bybit.
+Для Buy: если SL рассчитан от yfinance-цены (выше реальной), SL оказывается выше lastPrice — Bybit отклоняет ордер.
+Пример: ATOMUSDT SL=1.7453 > lastPrice=1.7431 → `InvalidRequestError`.
+
+Теперь `execute()` перед отправкой ордера запрашивает `get_tickers(symbol)` и проверяет:
+Buy → SL < lastPrice, Sell → SL > lastPrice. Если невалидно — ордер открывается без SL/TP,
+exit-логика `_process_exits()` всё равно закроет по time-stop, max_loss или trailing.
+
+**Файлы:** `src/bybit_bot/trading/executor.py`
+
+---
+
 ### Fix: round(None) crash для Stat-Arb позиций без SL/TP
 `4822d01`
 
