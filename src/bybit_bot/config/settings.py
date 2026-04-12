@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_SYMBOLS = (
-    # Majors (все проверены на Bybit demo testnet)
+    # Majors
     "BTCUSDT",
     "ETHUSDT",
     "SOLUSDT",
@@ -19,27 +19,41 @@ DEFAULT_SYMBOLS = (
     "DOGEUSDT",
     "ADAUSDT",
     "LINKUSDT",
+    "AVAXUSDT",
+    "LTCUSDT",
     "DOTUSDT",
     "NEARUSDT",
     "APTUSDT",
+    "ARBUSDT",
     "SUIUSDT",
     "UNIUSDT",
     "AAVEUSDT",
+    "ATOMUSDT",
     "TRXUSDT",
     # Mid-cap alts
+    "FILUSDT",
     "INJUSDT",
+    "FETUSDT",
     "RENDERUSDT",
+    "TONUSDT",
+    "SEIUSDT",
     "TIAUSDT",
     "ONDOUSDT",
     "PENDLEUSDT",
+    "WLDUSDT",
     "OPUSDT",
     "HBARUSDT",
     "RUNEUSDT",
-    # Stat-Arb пары (добавлены для парного трейдинга)
+    "ALGOUSDT",
+    # Stat-Arb (legacy PoW forks, corr 0.75+)
     "ETCUSDT",
     "BCHUSDT",
-    # Meme (дешёвые, высокий объём)
+    # Meme
+    "SHIBUSDT",
+    "PEPEUSDT",
     "WIFUSDT",
+    "BONKUSDT",
+    "FLOKIUSDT",
 )
 
 DISPLAY_NAMES: dict[str, str] = {
@@ -51,53 +65,38 @@ DISPLAY_NAMES: dict[str, str] = {
     "DOGEUSDT": "Dogecoin",
     "ADAUSDT": "Cardano",
     "LINKUSDT": "Chainlink",
+    "AVAXUSDT": "Avalanche",
+    "LTCUSDT": "Litecoin",
     "DOTUSDT": "Polkadot",
     "NEARUSDT": "NEAR",
     "APTUSDT": "Aptos",
+    "ARBUSDT": "Arbitrum",
     "SUIUSDT": "Sui",
     "UNIUSDT": "Uniswap",
     "AAVEUSDT": "Aave",
+    "ATOMUSDT": "Cosmos",
     "TRXUSDT": "TRON",
+    "FILUSDT": "Filecoin",
     "INJUSDT": "Injective",
+    "FETUSDT": "Fetch.ai",
     "RENDERUSDT": "Render",
+    "TONUSDT": "Toncoin",
+    "SEIUSDT": "Sei",
     "TIAUSDT": "Celestia",
     "ONDOUSDT": "Ondo",
     "PENDLEUSDT": "Pendle",
+    "WLDUSDT": "Worldcoin",
     "OPUSDT": "Optimism",
     "HBARUSDT": "Hedera",
     "RUNEUSDT": "THORChain",
+    "ALGOUSDT": "Algorand",
     "ETCUSDT": "Ethereum Classic",
     "BCHUSDT": "Bitcoin Cash",
+    "SHIBUSDT": "Shiba Inu",
+    "PEPEUSDT": "Pepe",
     "WIFUSDT": "dogwifhat",
-}
-
-TICK_SIZES: dict[str, float] = {
-    "BTCUSDT": 0.10,
-    "ETHUSDT": 0.01,
-    "SOLUSDT": 0.01,
-    "XRPUSDT": 0.0001,
-    "BNBUSDT": 0.01,
-    "DOGEUSDT": 0.00001,
-    "ADAUSDT": 0.0001,
-    "LINKUSDT": 0.001,
-    "DOTUSDT": 0.001,
-    "NEARUSDT": 0.001,
-    "APTUSDT": 0.001,
-    "SUIUSDT": 0.0001,
-    "UNIUSDT": 0.001,
-    "AAVEUSDT": 0.01,
-    "TRXUSDT": 0.0001,
-    "INJUSDT": 0.001,
-    "RENDERUSDT": 0.001,
-    "TIAUSDT": 0.001,
-    "ONDOUSDT": 0.0001,
-    "PENDLEUSDT": 0.001,
-    "OPUSDT": 0.0001,
-    "HBARUSDT": 0.00001,
-    "RUNEUSDT": 0.001,
-    "ETCUSDT": 0.01,
-    "BCHUSDT": 0.01,
-    "WIFUSDT": 0.0001,
+    "BONKUSDT": "Bonk",
+    "FLOKIUSDT": "Floki",
 }
 
 BYBIT_TO_YFINANCE: dict[str, str] = {
@@ -109,24 +108,38 @@ BYBIT_TO_YFINANCE: dict[str, str] = {
     "DOGEUSDT": "DOGE-USD",
     "ADAUSDT": "ADA-USD",
     "LINKUSDT": "LINK-USD",
+    "AVAXUSDT": "AVAX-USD",
+    "LTCUSDT": "LTC-USD",
     "DOTUSDT": "DOT-USD",
     "NEARUSDT": "NEAR-USD",
     "APTUSDT": "APT21794-USD",
+    "ARBUSDT": "ARB-USD",
     "SUIUSDT": "SUI20947-USD",
     "UNIUSDT": "UNI7083-USD",
     "AAVEUSDT": "AAVE-USD",
+    "ATOMUSDT": "ATOM-USD",
     "TRXUSDT": "TRX-USD",
+    "FILUSDT": "FIL-USD",
     "INJUSDT": "INJ-USD",
+    "FETUSDT": "FET-USD",
     "RENDERUSDT": "RENDER-USD",
+    "TONUSDT": "TON11419-USD",
+    "SEIUSDT": "SEI-USD",
     "TIAUSDT": "TIA-USD",
     "ONDOUSDT": "ONDO-USD",
     "PENDLEUSDT": "PENDLE-USD",
+    "WLDUSDT": "WLD-USD",
     "OPUSDT": "OP-USD",
     "HBARUSDT": "HBAR-USD",
     "RUNEUSDT": "RUNE-USD",
+    "ALGOUSDT": "ALGO-USD",
     "ETCUSDT": "ETC-USD",
     "BCHUSDT": "BCH-USD",
+    "SHIBUSDT": "SHIB-USD",
+    "PEPEUSDT": "PEPE24478-USD",
     "WIFUSDT": "WIF-USD",
+    "BONKUSDT": "BONK-USD",
+    "FLOKIUSDT": "FLOKI-USD",
 }
 
 YFINANCE_TO_BYBIT: dict[str, str] = {v: k for k, v in BYBIT_TO_YFINANCE.items()}
@@ -134,10 +147,6 @@ YFINANCE_TO_BYBIT: dict[str, str] = {v: k for k, v in BYBIT_TO_YFINANCE.items()}
 
 def display_name(symbol: str) -> str:
     return DISPLAY_NAMES.get(symbol, symbol)
-
-
-def tick_size(symbol: str) -> float:
-    return TICK_SIZES.get(symbol, 0.01)
 
 
 def to_yfinance(bybit_symbol: str) -> str:

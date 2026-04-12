@@ -2,6 +2,31 @@
 
 ## 2026-04-12
 
+### Централизация конфигурации: один источник правды
+
+Проблема: одни и те же параметры (символы, balance, leverage, KillSwitch) были
+разбросаны по 3-4 местам с разными значениями — `settings.py`, `docker-compose.yml`,
+`.env.example`, `.env` на VPS. Символы: 26 в коде, 8 в compose, 38 в .env.
+
+Решение: единственный источник правды — `settings.py` (Pydantic defaults).
+- `DEFAULT_SYMBOLS`: восстановлен полный список 42 символа (включая AVAX, LTC,
+  ATOM, ARB и др. — они доступны на Bybit demo, предыдущий аудит был ошибочным)
+- `TICK_SIZES` / `tick_size()`: удалены — мёртвый код, executor берёт tick_size
+  из Bybit API через `InstrumentInfo`
+- `docker-compose.yml`: убраны все fallback-значения для bybit-bot, оставлен
+  только проброс `${VAR:-}`. Если .env не задаёт — Pydantic берёт default из кода
+- `.env.example`: синхронизирован с defaults в settings.py, убран дублирующий
+  список символов (закомментирован как override)
+- `.env` на VPS: убран `BYBIT_BOT_SCAN_SYMBOLS` — берётся из кода
+- `DEFAULT_PAIRS`: 16 пар (9 оригинальных + 7 новых из исследований FullSwing AI,
+  Springer Nature, TradingEconomics). Проверка `tradeable_symbols` защищает от
+  открытия пар с недоступными символами
+
+**Файлы:** `config/settings.py`, `docker-compose.yml`, `.env.example`,
+`strategies/scalping/stat_arb_crypto.py`
+
+---
+
 ### Аудит доступности символов + новые Stat-Arb пары из исследований
 
 Проверка Bybit demo testnet выявила: 14 из 38 символов **недоступны** на демо
