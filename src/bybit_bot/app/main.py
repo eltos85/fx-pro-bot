@@ -290,7 +290,18 @@ def _process_exits(
     if not db_open:
         return
 
+    # Синхронизация: закрыть в БД позиции, которых уже нет на бирже
+    for db_pos in db_open:
+        if db_pos.symbol not in api_map:
+            log.info("SYNC: %s нет на бирже, закрываю в БД", db_pos.symbol)
+            stats.close_position(db_pos.id, exit_price=0.0, pnl_usd=0.0, close_reason="sync_closed")
+
+    db_open = [p for p in db_open if p.symbol in api_map]
+    if not db_open:
+        return
+
     already_closed: set[str] = set()
+    trailing_set: set[str] = set()
 
     # 1. Stat-Arb z-score exit
     if scalp_statarb and bars_map:
@@ -359,8 +370,8 @@ def _process_exits(
                     _close_pair_legs(client, stats, killswitch, db_pos.pair_tag, db_pos.symbol, api_map)
             continue
 
-        # 5. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API
-        if upnl > 0 and not db_pos.pair_tag:
+        # 5. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API (один раз за цикл)
+        if upnl > 0 and not db_pos.pair_tag and db_pos.symbol not in trailing_set:
             bars = bars_map.get(db_pos.symbol, [])
             if bars:
                 atr_val = compute_atr(bars)
@@ -370,6 +381,7 @@ def _process_exits(
                     if profit_in_atr >= TRAILING_ACTIVATION_ATR:
                         distance = atr_val * TRAILING_DISTANCE_ATR
                         client.set_trailing_stop(db_pos.symbol, distance)
+                        trailing_set.add(db_pos.symbol)
 
     closed_count = len(already_closed)
     if closed_count > 0:
