@@ -2,6 +2,19 @@
 
 ## 2026-04-12
 
+### Limit PostOnly для открытия позиций (снижение комиссий)
+
+Было: все ордера открываются Market (taker fee 0.055%).
+Стало: `executor.execute()` сначала пытает Limit PostOnly (maker fee 0.02%),
+при отклонении — fallback на Market. Закрытие остаётся Market.
+
+Avg open fee: $0.165 → ~$0.076 (экономия ~$0.09/сделку, 22% от total fees).
+Торговая логика, параметры стратегий, pair TP, KillSwitch — без изменений.
+
+**Файлы:** `trading/client.py` (новый `place_limit_order`), `trading/executor.py`
+
+---
+
 ### Revert OPT 1-6: откат оптимизаций стратегий
 
 Откачены все 6 оптимизаций из коммита `6635cab`. Причина: после деплоя OPT 1-6
