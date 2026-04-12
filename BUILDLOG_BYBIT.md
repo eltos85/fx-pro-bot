@@ -2,6 +2,25 @@
 
 ## 2026-04-12
 
+### Fix: time-stop по реальному времени + EXIT-CHECK логирование
+`0eec615`
+
+Time-stop использовал `opened_bar_idx` (номер цикла при открытии). При перезапуске контейнера
+счётчик сбрасывался → позиции жили дольше лимита. Заменено на `opened_at` (ISO timestamp из БД):
+`age_sec = (now - opened_at).total_seconds()`, лимит `TIME_STOP_SECONDS = 15000` (~4.2 часа).
+
+Добавлен INFO-лог `EXIT-CHECK` для каждой открытой позиции в каждом цикле:
+`EXIT-CHECK: Buy AVAXUSDT uPnL=0.90 age=63min strat=scalp_statarb pair=sa_AVAXUSDT_ETHUSDT_3b68c6`
+
+Подтверждена работа всех exit-механизмов:
+- Z-score exit: закрыл пару LTCUSDT/BTCUSDT (z < 0.5)
+- Time-stop: теперь корректен при перезапусках
+- Max loss / Emergency / Trailing: готовы, ждут условий
+
+**Файлы:** `src/bybit_bot/app/main.py`
+
+---
+
 ### Fix: валидация SL/TP по реальной цене Bybit перед отправкой ордера
 `92ed496`
 
