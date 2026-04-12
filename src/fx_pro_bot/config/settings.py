@@ -20,18 +20,6 @@ DEFAULT_SYMBOLS = (
     "BZ=F",
     # Indices
     "ES=F",
-    # Crypto
-    "BTC-USD",
-    "ETH-USD",
-    "SOL-USD",
-    "XRP-USD",
-    "DOGE-USD",
-    "ADA-USD",
-    "LINK-USD",
-    "AVAX-USD",
-    "LTC-USD",
-    "BNB-USD",
-    "DOT-USD",
 )
 
 SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
@@ -39,10 +27,7 @@ SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "GBPJPY=X",
 })
 
-SCALPING_CRYPTO_ALLOWED: frozenset[str] = frozenset({
-    "BTC-USD",
-    "ETH-USD",
-})
+SCALPING_CRYPTO_ALLOWED: frozenset[str] = frozenset()
 
 CRYPTO_SYMBOLS: frozenset[str] = frozenset({
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",

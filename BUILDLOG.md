@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-04-12
+
+### remove: крипта полностью убрана из FxPro advisor
+
+За 24ч (11-12.04): 96 сделок, суммарный P&L -1108 pips (-6.05%).
+stat_arb BTC/ETH: -627 pips (34 сделки), ETH-нога систематически проигрывает.
+session_orb крипто: -457 pips (56 сделок), 16 из них audit_sl_past (SL пробит при открытии).
+Крипта нерентабельна на FxPro cTrader — высокие спреды, проблемы с SL на альткоинах.
+
+**Изменения:**
+- `DEFAULT_SYMBOLS`: убраны все 11 крипто-тикеров
+- `SCALPING_CRYPTO_ALLOWED`: очищен (BTC/ETH больше не допущены)
+- `stat_arb.DEFAULT_PAIRS`: убрана пара BTC-USD/ETH-USD
+- `STRATEGIES.md`: обновлены описания, убрана секция Crypto из инструментов
+
+**Файлы:** `config/settings.py`, `strategies/scalping/stat_arb.py`, `STRATEGIES.md`
+
+---
+
 ## 2026-04-11
 
 ### calibrate: калибровка скальпинга — альткоины, ADX, news_fade
