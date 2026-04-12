@@ -40,13 +40,15 @@ DEFAULT_PAIRS: list[tuple[str, str]] = [
 ]
 
 Z_ENTRY = 2.0
-Z_EXIT = 0.5
+Z_EXIT = 0.3  # Было 0.5 → 0.3: ждём более полную реверсию спреда (OPT-3)
 LOOKBACK = 100
 ZSCORE_WINDOW = 50
 SL_ATR_MULT = 2.0
 # Минимальная корреляция для входа в пару.
-# При корреляции < 0.5 коинтеграция нестабильна (Crypto Economy, 2025).
-MIN_CORRELATION = 0.5
+# При корреляции < 0.7 коинтеграция нестабильна — слишком много ложных сигналов.
+# BTC-ETH: 0.75-0.82 (Springer Nature 2024), SOL-ETH: ~0.70.
+# Было 0.5 → поднято до 0.7 для фильтрации слабых пар (OPT-2).
+MIN_CORRELATION = 0.7
 
 
 @dataclass(frozen=True, slots=True)
