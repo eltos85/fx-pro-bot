@@ -2,45 +2,27 @@
 
 ## 2026-04-12
 
-### OPT 1-6: Оптимизация стратегий по данным форумов и топ-трейдеров
+### Revert OPT 1-6: откат оптимизаций стратегий
 
-Комплексная оптимизация по результатам анализа международных источников (Springer Nature,
-StratBase.ai, Quant Signals, Trader Dale, FullSwing AI) и реальной статистики бота.
+Откачены все 6 оптимизаций из коммита `6635cab`. Причина: после деплоя OPT 1-6
+пошла серия убытков. Ослабленные фильтры VWAP (deviation 1.5, RSI 35/65, ADX 25)
+генерировали слишком много слабых сигналов, а Limit PostOnly ордера не успели
+показать эффект (рынок тихий, суббота).
 
-**OPT-1: Limit PostOnly ордера (maker fee 0.02% вместо taker 0.055%)**
-Было: все ордера Market (taker fee). При 4 ордерах на пару Stat-Arb комиссия ~$0.70.
-Стало: `executor.execute()` сначала пытается Limit PostOnly (цена = lastPrice ± 1 tick),
-при отклонении — fallback на Market. Экономия ~63% на комиссиях.
-Файлы: `trading/client.py` (новый `place_limit_order`), `trading/executor.py`
+Предыдущая логика (до OPT) давала стабильный gross-плюс. Проблема не в стратегии,
+а в комиссиях: при taker fee 0.11% roundtrip и notional ~$310 каждая сделка стоит
+~$0.34. Нужно снижать fee без изменения торговой логики.
 
-**OPT-2: MIN_CORRELATION 0.5 → 0.7**
-Было: входили в пары с корреляцией 0.5 — слабая коинтеграция, ложные сигналы.
-Стало: порог 0.7 — только устойчивые пары (BTC/ETH: 0.75-0.82, SOL/ETH: ~0.70).
-Файл: `strategies/scalping/stat_arb_crypto.py`
+**Откачено:**
+- OPT-1: Limit PostOnly (вернулся Market)
+- OPT-2: MIN_CORRELATION 0.7 → 0.5
+- OPT-3: Z_EXIT 0.3 → 0.5
+- OPT-4: VWAP deviation 1.5→2.0, RSI 35/65→30/70, ADX 25→20
+- OPT-5: VOLUME_SPIKE_MULT 2.5 → 3.0
+- OPT-6: Динамический pair TP → фикс $2.00
 
-**OPT-3: Z_EXIT 0.5 → 0.3**
-Было: закрывали пару при z < 0.5 — часто недобирали прибыль.
-Стало: ждём более полную реверсию спреда (z < 0.3).
-Файл: `strategies/scalping/stat_arb_crypto.py`
-
-**OPT-4: VWAP ослабление фильтров**
-Было: deviation 2.0, RSI 30/70, ADX 20 → почти 0 сигналов на 5m крипто.
-Стало: deviation 1.5, RSI 35/65, ADX 25 — больше входов при сохранении фильтрации.
-Файл: `strategies/scalping/vwap_crypto.py`
-
-**OPT-5: VOLUME_SPIKE_MULT 3.0 → 2.5**
-Было: порог 3x от среднего объёма — слишком строгий, мало сигналов.
-Стало: 2.5x — ловим больше значимых спайков.
-Файл: `strategies/scalping/volume_spike.py`
-
-**OPT-6: Динамический pair TP**
-Было: фиксированный $2.00 для всех пар.
-Стало: 1% от notional пары (мин $1.50). Крупные пары (BTC/ETH) получают
-больший TP, мелкие — минимум $1.50 для покрытия комиссий.
-Файл: `app/main.py`
-
-**Откат:** каждое изменение помечено OPT-N в комментариях кода. Для отката —
-вернуть значение "было" из этой записи. Тесты: 43 passed.
+**Файлы:** `app/main.py`, `trading/client.py`, `trading/executor.py`,
+`strategies/scalping/stat_arb_crypto.py`, `vwap_crypto.py`, `volume_spike.py`
 
 ---
 

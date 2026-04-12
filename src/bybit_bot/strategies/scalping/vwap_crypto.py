@@ -16,15 +16,15 @@ from bybit_bot.strategies.scalping.indicators import ema_slope, vwap
 
 log = logging.getLogger(__name__)
 
-# OPT-4: ослаблены фильтры для генерации сигналов.
-# Было: deviation 2.0, RSI 30/70, ADX 20 → почти 0 сигналов на 5m крипто.
-# Стало: deviation 1.5, RSI 35/65, ADX 25 — больше входов при сохранении фильтрации.
-DEVIATION_THRESHOLD = 1.5  # было 2.0
-RSI_CONFIRM_LOW = 35       # было 30
-RSI_CONFIRM_HIGH = 65      # было 70
+DEVIATION_THRESHOLD = 2.0
+RSI_CONFIRM_LOW = 30
+RSI_CONFIRM_HIGH = 70
 SL_ATR_MULT = 2.0
 TP_ATR_MULT = 1.5
-ADX_MAX = 25.0             # было 20.0
+# ADX < 20 = боковик (mean reversion зона).
+# 20-25 = серая зона (избегать). > 25 = тренд (не торговать reversion).
+# Источник: StratBase.ai — бэктест 763 конфигураций, QuantLab.
+ADX_MAX = 20.0
 
 
 def _compute_adx(bars: list[Bar], period: int = 14) -> float:

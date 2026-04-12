@@ -32,8 +32,7 @@ TIME_STOP_SECONDS = 50 * 300  # 50 баров × 5 мин = 15000 сек (~4.2 �
 TRAILING_ACTIVATION_ATR = 0.7
 TRAILING_DISTANCE_ATR = 0.5
 STATARB_EMERGENCY_LOSS = 15.0
-STATARB_PAIR_TP_MIN = 1.50   # минимальный pair TP (покрывает комиссии ~$0.70)
-STATARB_PAIR_TP_PCT = 0.01   # 1% от notional пары (OPT-6: динамический pair TP)
+STATARB_PAIR_TP_USD = 2.00  # take-profit по суммарному uPnL пары (с запасом на комиссии ~$0.70)
 
 log = logging.getLogger(__name__)
 
@@ -370,7 +369,7 @@ def _process_exits(
                     if _close_and_record(client, stats, killswitch, pp, pnl, "statarb_zscore_exit"):
                         already_closed.add(pp.symbol)
 
-    # 1b. Stat-Arb pair take-profit: динамический порог = 1% notional (мин $1.50)
+    # 1b. Stat-Arb pair take-profit: суммарный uPnL пары >= порог
     checked_tags: set[str] = set()
     for db_pos in db_open:
         tag = db_pos.pair_tag
@@ -378,17 +377,14 @@ def _process_exits(
             continue
         checked_tags.add(tag)
         pair_positions = stats.get_open_by_pair_tag(tag)
-        pair_upnl = 0.0
-        pair_notional = 0.0
-        for pp in pair_positions:
-            ap = api_map.get(pp.symbol)
-            if ap:
-                pair_upnl += ap.unrealised_pnl
-                pair_notional += float(ap.size) * ap.entry_price
-        tp_threshold = max(STATARB_PAIR_TP_MIN, pair_notional * STATARB_PAIR_TP_PCT)
-        if pair_upnl >= tp_threshold:
-            log.info("PAIR-TP: %s uPnL=$%.2f >= $%.2f (notional=$%.0f), фиксирую прибыль",
-                     tag, pair_upnl, tp_threshold, pair_notional)
+        pair_upnl = sum(
+            api_map[pp.symbol].unrealised_pnl
+            for pp in pair_positions
+            if pp.symbol in api_map
+        )
+        if pair_upnl >= STATARB_PAIR_TP_USD:
+            log.info("PAIR-TP: %s суммарный uPnL=$%.2f >= $%.2f, фиксирую прибыль",
+                     tag, pair_upnl, STATARB_PAIR_TP_USD)
             for pp in pair_positions:
                 if pp.symbol in already_closed:
                     continue

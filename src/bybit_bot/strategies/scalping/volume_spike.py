@@ -17,10 +17,9 @@ from bybit_bot.strategies.scalping.indicators import avg_volume
 
 log = logging.getLogger(__name__)
 
-# Volume spike 2.5-5x = значимый (Trader Dale, AlgoStorm Volume Profile guide).
+# Volume spike 3-5x = значимый (Trader Dale, AlgoStorm Volume Profile guide).
 # "First Test Rule": первый подход к зоне объёма = самый надёжный сигнал.
-# OPT-5: снижено с 3.0 до 2.5 — больше сигналов при сохранении фильтрации.
-VOLUME_SPIKE_MULT = 2.5  # было 3.0
+VOLUME_SPIKE_MULT = 3.0
 PRICE_MOVE_ATR_MIN = 0.5
 RSI_FILTER_LOW = 20
 RSI_FILTER_HIGH = 80

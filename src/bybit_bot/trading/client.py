@@ -143,48 +143,6 @@ class BybitClient:
             log.exception("Исключение при отправке ордера %s %s", side, symbol)
             return OrderResult(order_id="", symbol=symbol, side=side, qty=qty, success=False, message=str(e))
 
-    def place_limit_order(
-        self,
-        symbol: str,
-        side: str,
-        qty: str,
-        price: str,
-        *,
-        sl: float | None = None,
-        tp: float | None = None,
-    ) -> OrderResult:
-        """Открыть лимитный PostOnly ордер (maker fee 0.02%)."""
-        params: dict = {
-            "category": self._category,
-            "symbol": symbol,
-            "side": side,
-            "orderType": "Limit",
-            "qty": qty,
-            "price": price,
-            "timeInForce": "PostOnly",
-        }
-        if sl is not None:
-            params["stopLoss"] = str(sl)
-        if tp is not None:
-            params["takeProfit"] = str(tp)
-
-        try:
-            resp = self._session.place_order(**params)
-            ret_code = resp.get("retCode", -1)
-            if ret_code == 0:
-                order_id = resp["result"]["orderId"]
-                log.info("Limit PostOnly %s %s qty=%s price=%s → orderId=%s",
-                         side, symbol, qty, price, order_id)
-                return OrderResult(
-                    order_id=order_id, symbol=symbol, side=side, qty=qty, success=True,
-                )
-            msg = resp.get("retMsg", "unknown error")
-            log.warning("Limit PostOnly %s %s отклонён: %s", side, symbol, msg)
-            return OrderResult(order_id="", symbol=symbol, side=side, qty=qty, success=False, message=msg)
-        except Exception as e:
-            log.warning("Limit PostOnly %s %s exception: %s", side, symbol, e)
-            return OrderResult(order_id="", symbol=symbol, side=side, qty=qty, success=False, message=str(e))
-
     def close_position(self, symbol: str, side: str, qty: str) -> OrderResult:
         """Закрыть позицию рыночным ордером с reduceOnly=True."""
         close_side = "Sell" if side == "Buy" else "Buy"

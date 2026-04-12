@@ -152,75 +152,44 @@ class TradeExecutor:
         )
 
     def execute(self, params: TradeParams) -> OrderResult:
-        """Отправить ордер на Bybit: Limit PostOnly → Market fallback.
-
-        Сначала пытаемся Limit PostOnly (maker fee 0.02%).
-        Если PostOnly отклонён (цена пересеклась с книгой) — фоллбэк на Market.
-        """
+        """Отправить ордер на Bybit с валидацией SL/TP по реальной цене."""
         sl = params.sl
         tp = params.tp
 
-        try:
-            ticker = self._client.get_tickers(params.symbol)
-            last_price = float(ticker.get("lastPrice", 0))
-        except Exception:
-            last_price = 0.0
+        if sl is not None or tp is not None:
+            try:
+                ticker = self._client.get_tickers(params.symbol)
+                last_price = float(ticker.get("lastPrice", 0))
+            except Exception:
+                last_price = 0.0
 
-        if last_price > 0 and (sl is not None or tp is not None):
-            invalid = False
-            if sl is not None:
-                if params.side == "Buy" and sl >= last_price:
-                    log.warning("%s: SL=%.6f >= lastPrice=%.6f для Buy",
-                                params.symbol, sl, last_price)
-                    invalid = True
-                elif params.side == "Sell" and sl <= last_price:
-                    log.warning("%s: SL=%.6f <= lastPrice=%.6f для Sell",
-                                params.symbol, sl, last_price)
-                    invalid = True
-            if tp is not None and not invalid:
-                if params.side == "Buy" and tp <= last_price:
-                    log.warning("%s: TP=%.6f <= lastPrice=%.6f для Buy",
-                                params.symbol, tp, last_price)
-                    invalid = True
-                elif params.side == "Sell" and tp >= last_price:
-                    log.warning("%s: TP=%.6f >= lastPrice=%.6f для Sell",
-                                params.symbol, tp, last_price)
-                    invalid = True
-            if invalid:
-                log.warning("%s: убираю SL/TP, откроюсь без них", params.symbol)
-                sl = None
-                tp = None
-
-        if last_price > 0:
-            inst = self._instruments.get(params.symbol)
-            tick = inst.tick_size if inst else 0.01
-            if params.side == "Buy":
-                limit_price = last_price - tick
-            else:
-                limit_price = last_price + tick
-
-            price_prec = self._price_precision(tick)
-            limit_price_str = str(round(limit_price, price_prec))
-
-            log.info(
-                "Limit PostOnly %s %s qty=%s price=%s SL=%.4f TP=%.4f",
-                params.side, params.symbol, params.qty, limit_price_str,
-                sl or 0, tp or 0,
-            )
-            result = self._client.place_limit_order(
-                params.symbol,
-                params.side,
-                params.qty,
-                limit_price_str,
-                sl=sl,
-                tp=tp,
-            )
-            if result.success:
-                return result
-            log.info("%s: PostOnly отклонён, fallback на Market", params.symbol)
+            if last_price > 0:
+                invalid = False
+                if sl is not None:
+                    if params.side == "Buy" and sl >= last_price:
+                        log.warning("%s: SL=%.6f >= lastPrice=%.6f для Buy",
+                                    params.symbol, sl, last_price)
+                        invalid = True
+                    elif params.side == "Sell" and sl <= last_price:
+                        log.warning("%s: SL=%.6f <= lastPrice=%.6f для Sell",
+                                    params.symbol, sl, last_price)
+                        invalid = True
+                if tp is not None and not invalid:
+                    if params.side == "Buy" and tp <= last_price:
+                        log.warning("%s: TP=%.6f <= lastPrice=%.6f для Buy",
+                                    params.symbol, tp, last_price)
+                        invalid = True
+                    elif params.side == "Sell" and tp >= last_price:
+                        log.warning("%s: TP=%.6f >= lastPrice=%.6f для Sell",
+                                    params.symbol, tp, last_price)
+                        invalid = True
+                if invalid:
+                    log.warning("%s: убираю SL/TP, откроюсь без них", params.symbol)
+                    sl = None
+                    tp = None
 
         log.info(
-            "Market %s %s qty=%s SL=%.4f TP=%.4f",
+            "Открываю %s %s qty=%s SL=%.4f TP=%.4f",
             params.side, params.symbol, params.qty, sl or 0, tp or 0,
         )
         return self._client.place_order(
