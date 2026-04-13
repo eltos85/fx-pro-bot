@@ -49,6 +49,7 @@ class EmaTrendStrategy:
         volume_ratio: float = 0.7,
         sl_atr_mult: float = 2.0,
         tp_atr_mult: float = 3.0,
+        cross_lookback: int = 3,
     ) -> None:
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -58,6 +59,34 @@ class EmaTrendStrategy:
         self.volume_ratio = volume_ratio
         self.sl_atr_mult = sl_atr_mult
         self.tp_atr_mult = tp_atr_mult
+        self.cross_lookback = cross_lookback
+
+    def _find_crossover(
+        self, ema_fast: list[float], ema_slow: list[float],
+    ) -> tuple[str | None, int]:
+        """Найти последний crossover в пределах lookback баров.
+
+        Возвращает (direction, bars_ago) или (None, 0).
+        Дополнительно проверяет что EMA fast всё ещё на стороне сигнала
+        (не произошёл обратный crossover).
+        """
+        n = min(len(ema_fast), len(ema_slow))
+        start = max(1, n - self.cross_lookback)
+
+        for i in range(n - 1, start - 1, -1):
+            prev_f, cur_f = ema_fast[i - 1], ema_fast[i]
+            prev_s, cur_s = ema_slow[i - 1], ema_slow[i]
+
+            if prev_f <= prev_s and cur_f > cur_s:
+                if ema_fast[-1] > ema_slow[-1]:
+                    return "Buy", n - 1 - i
+                return None, 0
+            if prev_f >= prev_s and cur_f < cur_s:
+                if ema_fast[-1] < ema_slow[-1]:
+                    return "Sell", n - 1 - i
+                return None, 0
+
+        return None, 0
 
     @property
     def min_bars(self) -> int:
@@ -94,25 +123,21 @@ class EmaTrendStrategy:
         if len(ema_fast) < 2 or len(ema_slow) < 2:
             return None
 
-        cur_fast = ema_fast[-1]
-        cur_slow = ema_slow[-1]
-        prev_fast = ema_fast[-2]
-        prev_slow = ema_slow[-2]
+        cross_dir, bars_ago = self._find_crossover(ema_fast, ema_slow)
+        if cross_dir is None:
+            return None
 
-        cross_up = prev_fast <= prev_slow and cur_fast > cur_slow
-        cross_down = prev_fast >= prev_slow and cur_fast < cur_slow
-
-        if not cross_up and not cross_down:
+        if ema_fast[-1] == ema_slow[-1]:
             return None
 
         reasons: list[str] = []
 
-        if cross_up:
+        if cross_dir == "Buy":
             direction = "Buy"
-            reasons.append("ema_cross_up")
+            reasons.append(f"ema_cross_up({bars_ago}b)")
         else:
             direction = "Sell"
-            reasons.append("ema_cross_down")
+            reasons.append(f"ema_cross_down({bars_ago}b)")
 
         price = closes[-1]
 
