@@ -413,7 +413,12 @@ def _process_entries(
 
         result = executor.execute(params)
         if result.success:
-            entry = _fetch_entry_price(client, params.symbol, sig.price)
+            time.sleep(2)
+            entry = _fetch_entry_price(client, params.symbol, 0.0)
+            if entry == 0.0:
+                log.warning("%s: Limit ордер не исполнился (нет позиции на бирже), пропускаю",
+                            params.symbol)
+                continue
             stats.open_position(
                 symbol=params.symbol,
                 side=params.side,
