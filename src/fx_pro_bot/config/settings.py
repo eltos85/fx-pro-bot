@@ -14,12 +14,6 @@ DEFAULT_SYMBOLS = (
     "USDCAD=X",
     "EURJPY=X",
     "GBPJPY=X",
-    # Commodities
-    "GC=F",
-    "CL=F",
-    "BZ=F",
-    # Indices
-    "ES=F",
 )
 
 SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
