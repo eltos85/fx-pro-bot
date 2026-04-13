@@ -1,5 +1,32 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-13
+
+### Stat-Arb: убраны ETH-пары, поднят MIN_CORRELATION, вычищены убыточные пары
+
+Анализ 201 сделки за 2 дня: PnL -$201.62, WR 31%, комиссии $127.
+ETH — главный убыток (-$59.50, 30% всех потерь): 6 из 13 пар использовали ETH
+как ногу (BTC/ETH, SOL/ETH, LINK/ETH, AVAX/ETH, ATOM/ETH, ETH/BNB). При
+трендовом движении ETH все 6 пар двигались синхронно — не диверсификация,
+а концентрация риска на одном активе.
+
+**Изменения (только параметры пар и фильтр, торговая логика не тронута):**
+
+| Что | Было | Стало |
+|---|---|---|
+| DEFAULT_PAIRS | 13 пар (6 с ETH-ногой) | 6 пар (без ETH) |
+| MIN_CORRELATION | 0.5 | 0.7 |
+
+**Убраны пары:**
+- 6 ETH-пар: BTC/ETH, SOL/ETH, LINK/ETH, AVAX/ETH, ATOM/ETH, ETH/BNB
+- Убыточные: INJ/SOL (концентрация на SOL)
+
+**Оставлены 6 пар:** LTC/BTC, APT/SUI, ETC/BCH, NEAR/SOL, ARB/OP, DOGE/XRP
+
+**Файлы:** `strategies/scalping/stat_arb_crypto.py`, `tests/test_bybit_scalping.py`
+
+---
+
 ## 2026-04-12
 
 ### Ужесточение защиты под $500 депозит + удаление убыточных пар

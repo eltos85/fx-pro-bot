@@ -1,13 +1,12 @@
-"""Stat-Arb для крипто-пар (BTC/ETH, SOL/ETH и др.).
+"""Stat-Arb для крипто-пар (LTC/BTC, APT/SUI, ETC/BCH и др.).
 
 Статистический арбитраж между коинтегрированными крипто-парами.
 Когда spread (z-score) расходится на ±2σ — вход на возврат к среднему.
 Market-neutral: одновременно long одну и short другую.
 
-Коинтеграция BTC-ETH: корреляция 0.75-0.82 (Springer Nature, 2024; Racthera, 2025).
-При корреляции < 0.5 — mean reversion success rate 73% (FullSwing AI).
-Риск: корреляция ослабевает в бычий рынок (инвесторы бегут в альты).
-ETH vol 55-75% vs BTC 45-65% — учитывать при sizing.
+ETH убран как нога: 6 ETH-пар создавали концентрацию риска — при трендовом
+движении ETH все пары двигались синхронно (-$59 за 2 дня).
+MIN_CORRELATION поднят до 0.7 (было 0.5) — отсечка слабых пар.
 """
 
 from __future__ import annotations
@@ -27,21 +26,16 @@ from bybit_bot.strategies.scalping.indicators import (
 log = logging.getLogger(__name__)
 
 DEFAULT_PAIRS: list[tuple[str, str]] = [
-    # --- Оригинальные пары (работали в проде) ---
-    ("BTCUSDT", "ETHUSDT"),      # corr 0.82 (Springer Nature 2024)
-    ("SOLUSDT", "ETHUSDT"),      # L1 sector, corr 0.68-0.74
-    ("LINKUSDT", "ETHUSDT"),     # cointegrated (Springer copula study)
+    # Пары без ETH-ноги (ETH давал -$59 из-за концентрации риска: 6 пар
+    # одновременно двигались против при трендовом движении ETH).
+    # Убраны: BTC/ETH, SOL/ETH, LINK/ETH, AVAX/ETH, ATOM/ETH, ETH/BNB.
+    # Убраны убыточные: AAVE/UNI (0% WR, -$17), DOT/* (-$27), INJ/SOL.
     ("LTCUSDT", "BTCUSDT"),     # legacy PoW, corr 0.75+
-    ("AVAXUSDT", "ETHUSDT"),    # L1 sector, corr 0.80+
-    ("ATOMUSDT", "ETHUSDT"),    # cosmos/L1, corr 0.70+
-    ("NEARUSDT", "SOLUSDT"),    # L1 sector, corr ~0.70
-    ("ARBUSDT", "OPUSDT"),      # L2 sector, corr 0.80+
-    # --- Из исследований (FullSwing AI, TradingEconomics 2025) ---
-    ("ETHUSDT", "BNBUSDT"),     # corr 0.78 (FullSwing AI)
     ("APTUSDT", "SUIUSDT"),     # Move-based L1, corr 0.80+
     ("ETCUSDT", "BCHUSDT"),     # legacy PoW forks, corr 0.75+
+    ("NEARUSDT", "SOLUSDT"),    # L1 sector, corr ~0.70
+    ("ARBUSDT", "OPUSDT"),      # L2 sector, corr 0.80+
     ("DOGEUSDT", "XRPUSDT"),    # payment/meme crossover, corr 0.65+
-    ("INJUSDT", "SOLUSDT"),     # high-perf L1, corr 0.70+
 ]
 
 Z_ENTRY = 2.0
@@ -50,8 +44,9 @@ LOOKBACK = 100
 ZSCORE_WINDOW = 50
 SL_ATR_MULT = 2.0
 # Минимальная корреляция для входа в пару.
-# При корреляции < 0.5 коинтеграция нестабильна (Crypto Economy, 2025).
-MIN_CORRELATION = 0.5
+# 0.5 давал слишком много слабых пар — по сути две независимые позиции.
+# 0.7 отсекает нестабильную коинтеграцию на 5m таймфрейме.
+MIN_CORRELATION = 0.7
 
 
 @dataclass(frozen=True, slots=True)
