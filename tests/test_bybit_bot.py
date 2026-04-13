@@ -35,9 +35,9 @@ def test_settings_defaults():
     assert s.account_balance == 500.0
     assert s.max_positions == 3
     assert s.max_margin_per_trade_pct == 0.25
-    assert s.killswitch_max_daily_loss == 37.50
+    assert s.killswitch_max_daily_loss == 25.0
     assert s.killswitch_max_drawdown_pct == 25.0
-    assert s.killswitch_max_loss_per_trade == 12.50
+    assert s.killswitch_max_loss_per_trade == 8.0
     assert s.scalping_max_positions == 3
 
 
