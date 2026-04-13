@@ -81,8 +81,8 @@ class Settings(BaseSettings):
     ema_fast: int = Field(default=12, validation_alias="BYBIT_BOT_EMA_FAST")
     ema_slow: int = Field(default=26, validation_alias="BYBIT_BOT_EMA_SLOW")
     ema_trend: int = Field(default=200, validation_alias="BYBIT_BOT_EMA_TREND")
-    adx_threshold: float = Field(default=20.0, validation_alias="BYBIT_BOT_ADX_THRESHOLD")
-    volume_filter_ratio: float = Field(default=0.7, validation_alias="BYBIT_BOT_VOLUME_FILTER_RATIO")
+    adx_threshold: float = Field(default=15.0, validation_alias="BYBIT_BOT_ADX_THRESHOLD")
+    volume_filter_ratio: float = Field(default=0.5, validation_alias="BYBIT_BOT_VOLUME_FILTER_RATIO")
 
     # SL / TP / Trailing
     sl_atr_mult: float = Field(default=2.0, validation_alias="BYBIT_BOT_SL_ATR")

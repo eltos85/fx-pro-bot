@@ -88,7 +88,7 @@ def test_settings_v2_defaults():
     assert s.ema_fast == 12
     assert s.ema_slow == 26
     assert s.ema_trend == 200
-    assert s.adx_threshold == 20.0
+    assert s.adx_threshold == 15.0
     assert s.sl_atr_mult == 2.0
     assert s.tp_atr_mult == 3.0
     assert s.trailing_activation_atr == 1.5
