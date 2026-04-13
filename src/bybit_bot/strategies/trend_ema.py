@@ -61,7 +61,7 @@ class EmaTrendStrategy:
 
     @property
     def min_bars(self) -> int:
-        return self.trend_period + 2
+        return max(self.slow_period, self.adx_period * 2) + 2
 
     def scan(
         self,
@@ -114,19 +114,17 @@ class EmaTrendStrategy:
             direction = "Sell"
             reasons.append("ema_cross_down")
 
-        ema_trend = ema(closes, self.trend_period)
-        if not ema_trend:
-            return None
-        trend_val = ema_trend[-1]
         price = closes[-1]
 
-        if direction == "Buy" and price < trend_val:
-            log.debug("%s: Buy отфильтрован — цена ниже EMA%d", symbol, self.trend_period)
-            return None
-        if direction == "Sell" and price > trend_val:
-            log.debug("%s: Sell отфильтрован — цена выше EMA%d", symbol, self.trend_period)
-            return None
-        reasons.append(f"ema{self.trend_period}_ok")
+        ema_trend = ema(closes, self.trend_period)
+        if ema_trend:
+            trend_val = ema_trend[-1]
+            trend_aligned = (direction == "Buy" and price > trend_val) or \
+                            (direction == "Sell" and price < trend_val)
+            if trend_aligned:
+                reasons.append(f"ema{self.trend_period}_ok")
+            else:
+                reasons.append(f"ema{self.trend_period}_counter")
 
         adx_val = adx(bars, self.adx_period)
         if adx_val < self.adx_threshold:

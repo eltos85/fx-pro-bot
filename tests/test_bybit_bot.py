@@ -201,8 +201,8 @@ class TestEmaTrendStrategy:
 
     def test_min_bars_property(self):
         from bybit_bot.strategies.trend_ema import EmaTrendStrategy
-        strat = EmaTrendStrategy(trend_period=200)
-        assert strat.min_bars == 202
+        strat = EmaTrendStrategy(slow_period=26, adx_period=14)
+        assert strat.min_bars == 30  # max(26, 28) + 2
 
 
 # ── Executor V2 ──────────────────────────────────────────────
