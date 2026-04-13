@@ -1,4 +1,6 @@
-"""VWAP Mean-Reversion для крипто-скальпинга.
+"""[DEPRECATED V1] VWAP Mean-Reversion для крипто-скальпинга.
+
+Отключена в V2 (13.04.2026). Заменена на EmaTrendStrategy.
 
 Цена стремится вернуться к VWAP (~70-75% времени).
 Вход: отклонение > DEVIATION_THRESHOLD * ATR + RSI подтверждение + фильтр ADX.

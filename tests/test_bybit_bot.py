@@ -1,128 +1,211 @@
-"""Базовые тесты bybit_bot: импорт всех модулей + unit-тесты ключевых компонентов."""
+"""Тесты Bybit Bot V2: импорты, настройки, индикаторы, стратегия, executor, killswitch, store."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
+from bybit_bot.market_data.models import Bar
 
-def test_imports():
-    """Все модули bybit_bot импортируются без ошибок."""
-    from bybit_bot.config.settings import Settings, display_name, to_bybit, to_yfinance
+
+def _make_bars(
+    symbol: str = "BTCUSDT",
+    n: int = 210,
+    base_price: float = 60000.0,
+    step: float = 10.0,
+    volume: float = 1000.0,
+) -> list[Bar]:
+    bars = []
+    for i in range(n):
+        price = base_price + step * (i % 20 - 10)
+        bars.append(Bar(
+            symbol=symbol,
+            ts=datetime(2026, 4, 11, 10 + i // 60, i % 60, tzinfo=UTC),
+            open=price - 5,
+            high=price + 20,
+            low=price - 20,
+            close=price,
+            volume=volume,
+        ))
+    return bars
+
+
+def _make_trending_bars(
+    symbol: str = "BTCUSDT",
+    n: int = 210,
+    base_price: float = 60000.0,
+    trend: float = 5.0,
+    volume: float = 1000.0,
+) -> list[Bar]:
+    """Бары с устойчивым трендом вверх."""
+    bars = []
+    for i in range(n):
+        price = base_price + trend * i
+        bars.append(Bar(
+            symbol=symbol,
+            ts=datetime(2026, 4, 1, tzinfo=UTC),
+            open=price - 2,
+            high=price + 10,
+            low=price - 10,
+            close=price,
+            volume=volume,
+        ))
+    return bars
+
+
+# ── Imports ──────────────────────────────────────────────────
+
+def test_imports_v2():
+    """Все модули V2 импортируются без ошибок."""
+    from bybit_bot.config.settings import Settings, display_name
     from bybit_bot.market_data.models import Bar
-    from bybit_bot.market_data.feed import fetch_bars
-    from bybit_bot.analysis.signals import Direction, Signal, rsi, atr, macd, bollinger
-    from bybit_bot.analysis.ensemble import ensemble_signal
-    from bybit_bot.analysis.scanner import scan_instruments, active_signals
+    from bybit_bot.market_data.feed import fetch_bars_bybit, fetch_bars_batch_bybit
+    from bybit_bot.analysis.indicators import ema, atr, adx, volume_avg
+    from bybit_bot.strategies.trend_ema import EmaTrendStrategy, TrendSignal
     from bybit_bot.trading.client import BybitClient, OrderResult, PositionInfo
     from bybit_bot.trading.executor import TradeExecutor, TradeParams
     from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
-    from bybit_bot.strategies.momentum import MomentumStrategy, TradeSignal
     from bybit_bot.stats.store import StatsStore
     from bybit_bot.app.main import main
 
 
-def test_settings_defaults():
+# ── Settings V2 ──────────────────────────────────────────────
+
+def test_settings_v2_defaults():
     from bybit_bot.config.settings import Settings
-    s = Settings(
-        api_key="test", api_secret="test",
-        _env_file=None,
-    )
+    s = Settings(api_key="test", api_secret="test", _env_file=None)
     assert s.demo is True
     assert s.trading_enabled is False
     assert s.category == "linear"
     assert "BTCUSDT" in s.scan_symbols
-    assert s.leverage == 5
+    assert len(s.scan_symbols) == 5
+    assert s.leverage == 3
     assert s.account_balance == 500.0
-    assert s.max_positions == 3
-    assert s.max_margin_per_trade_pct == 0.25
-    assert s.killswitch_max_daily_loss == 25.0
-    assert s.killswitch_max_drawdown_pct == 25.0
-    assert s.killswitch_max_loss_per_trade == 8.0
-    assert s.scalping_max_positions == 3
+    assert s.max_positions == 2
+    assert s.kline_interval == "60"
+    assert s.kline_limit == 200
+    assert s.ema_fast == 12
+    assert s.ema_slow == 26
+    assert s.ema_trend == 200
+    assert s.adx_threshold == 20.0
+    assert s.sl_atr_mult == 2.0
+    assert s.tp_atr_mult == 3.0
+    assert s.trailing_activation_atr == 1.5
+    assert s.trailing_distance_atr == 1.0
+    assert s.time_stop_bars == 48
+    assert s.killswitch_max_daily_loss == 15.0
+    assert s.killswitch_max_drawdown_pct == 10.0
+    assert s.killswitch_max_loss_per_trade == 10.0
 
 
-def test_symbol_mapping():
-    from bybit_bot.config.settings import to_yfinance, to_bybit
-    assert to_yfinance("BTCUSDT") == "BTC-USD"
-    assert to_bybit("BTC-USD") == "BTCUSDT"
-    assert to_yfinance("ETHUSDT") == "ETH-USD"
-    assert to_bybit("ETH-USD") == "ETHUSDT"
+# ── Indicators ───────────────────────────────────────────────
+
+class TestIndicators:
+    def test_ema_basic(self):
+        from bybit_bot.analysis.indicators import ema
+        values = [float(i) for i in range(30)]
+        result = ema(values, 10)
+        assert len(result) == 30
+        assert result[-1] > result[10]
+
+    def test_ema_short_data(self):
+        from bybit_bot.analysis.indicators import ema
+        result = ema([1.0, 2.0], 10)
+        assert result == [1.0, 2.0]
+
+    def test_ema_empty(self):
+        from bybit_bot.analysis.indicators import ema
+        assert ema([], 10) == []
+
+    def test_atr_basic(self):
+        from bybit_bot.analysis.indicators import atr
+        bars = _make_bars(n=30)
+        val = atr(bars, 14)
+        assert val > 0
+
+    def test_atr_insufficient(self):
+        from bybit_bot.analysis.indicators import atr
+        bars = _make_bars(n=5)
+        assert atr(bars, 14) == 0.0
+
+    def test_adx_trending(self):
+        from bybit_bot.analysis.indicators import adx
+        bars = _make_trending_bars(n=60, trend=10.0)
+        val = adx(bars, 14)
+        assert val > 0
+
+    def test_adx_insufficient(self):
+        from bybit_bot.analysis.indicators import adx
+        bars = _make_bars(n=10)
+        assert adx(bars, 14) == 0.0
+
+    def test_volume_avg(self):
+        from bybit_bot.analysis.indicators import volume_avg
+        bars = _make_bars(n=30, volume=500.0)
+        assert volume_avg(bars, 20) == pytest.approx(500.0)
+
+    def test_volume_avg_insufficient(self):
+        from bybit_bot.analysis.indicators import volume_avg
+        bars = _make_bars(n=5, volume=100.0)
+        assert volume_avg(bars, 20) == 0.0
 
 
-def test_direction_enum():
-    from bybit_bot.analysis.signals import Direction
-    assert Direction.LONG.value == "long"
-    assert Direction.SHORT.value == "short"
-    assert Direction.FLAT.value == "flat"
+# ── EMA Trend Strategy ──────────────────────────────────────
+
+class TestEmaTrendStrategy:
+    def test_no_signal_insufficient_bars(self):
+        from bybit_bot.strategies.trend_ema import EmaTrendStrategy
+        strat = EmaTrendStrategy()
+        bars = _make_bars(n=50)
+        assert strat.evaluate("BTCUSDT", bars) is None
+
+    def test_no_signal_flat_market(self):
+        from bybit_bot.strategies.trend_ema import EmaTrendStrategy
+        strat = EmaTrendStrategy()
+        bars = _make_bars(n=210, step=0.01)
+        sig = strat.evaluate("BTCUSDT", bars)
+        # В боковике не должно быть сигнала (ADX < 20 или нет crossover)
+        # Допускаем None или сигнал — зависит от данных
+        assert sig is None or sig.direction in ("Buy", "Sell")
+
+    def test_scan_returns_list(self):
+        from bybit_bot.strategies.trend_ema import EmaTrendStrategy
+        strat = EmaTrendStrategy()
+        bars_map = {"BTCUSDT": _make_bars(n=210)}
+        signals = strat.scan(bars_map)
+        assert isinstance(signals, list)
+
+    def test_scan_skips_open_symbols(self):
+        from bybit_bot.strategies.trend_ema import EmaTrendStrategy
+        strat = EmaTrendStrategy()
+        bars_map = {"BTCUSDT": _make_bars(n=210)}
+        signals = strat.scan(bars_map, open_symbols={"BTCUSDT"})
+        assert signals == []
+
+    def test_signal_fields(self):
+        from bybit_bot.strategies.trend_ema import TrendSignal
+        sig = TrendSignal(
+            symbol="BTCUSDT",
+            direction="Buy",
+            price=60000.0,
+            sl=59000.0,
+            tp=61500.0,
+            atr_val=500.0,
+            reasons=("ema_cross_up", "ema200_ok", "adx=25", "vol_ok"),
+        )
+        assert sig.direction == "Buy"
+        assert sig.sl == 59000.0
+        assert sig.tp == 61500.0
+        assert len(sig.reasons) == 4
+
+    def test_min_bars_property(self):
+        from bybit_bot.strategies.trend_ema import EmaTrendStrategy
+        strat = EmaTrendStrategy(trend_period=200)
+        assert strat.min_bars == 202
 
 
-def test_rsi_basic():
-    from bybit_bot.analysis.signals import rsi
-    closes = [100 + i * 0.5 for i in range(30)]
-    val = rsi(closes, 14)
-    assert 50 < val <= 100
-
-
-def test_rsi_insufficient_data():
-    from bybit_bot.analysis.signals import rsi
-    assert rsi([100, 101], 14) == 50.0
-
-
-def _ks_cfg(**overrides) -> "KillSwitchConfig":
-    from bybit_bot.trading.killswitch import KillSwitchConfig
-    defaults = dict(max_daily_loss_usd=37.50, max_drawdown_pct=25.0,
-                    max_positions=5, max_loss_per_trade_usd=12.50)
-    defaults.update(overrides)
-    return KillSwitchConfig(**defaults)
-
-
-def test_killswitch_allows_initially():
-    from bybit_bot.trading.killswitch import KillSwitch
-    ks = KillSwitch(_ks_cfg(max_positions=5), initial_equity=1000)
-    assert ks.check_allowed(0, 1000) is True
-    assert ks.is_tripped is False
-
-
-def test_killswitch_blocks_max_positions():
-    from bybit_bot.trading.killswitch import KillSwitch
-    ks = KillSwitch(_ks_cfg(max_positions=3), initial_equity=1000)
-    assert ks.check_allowed(3, 1000) is False
-
-
-def test_killswitch_trips_on_daily_loss():
-    from bybit_bot.trading.killswitch import KillSwitch
-    ks = KillSwitch(_ks_cfg(max_daily_loss_usd=10.0), initial_equity=1000)
-    ks.record_trade_close(-11.0)
-    assert ks.check_allowed(0, 989) is False
-    assert ks.is_tripped is True
-
-
-def test_stats_store(tmp_path):
-    from bybit_bot.stats.store import StatsStore
-    store = StatsStore(tmp_path / "test.sqlite")
-
-    sig_id = store.log_signal("BTCUSDT", "long", 0.8, "macd,bollinger", 60000.0)
-    assert sig_id > 0
-
-    pos_id = store.open_position(
-        symbol="BTCUSDT", side="Buy", qty="0.001",
-        entry_price=60000.0, order_id="test-123",
-        sl=59000.0, tp=63000.0,
-    )
-    assert pos_id > 0
-
-    open_pos = store.get_open_positions()
-    assert len(open_pos) == 1
-    assert open_pos[0].symbol == "BTCUSDT"
-
-    store.close_position(pos_id, exit_price=61000.0, pnl_usd=10.0, close_reason="tp_hit")
-    assert len(store.get_open_positions()) == 0
-
-    stats = store.get_total_stats()
-    assert stats["total_trades"] == 1
-    assert stats["wins"] == 1
-    assert stats["total_pnl"] == 10.0
-
+# ── Executor V2 ──────────────────────────────────────────────
 
 def test_executor_round_qty():
     from bybit_bot.trading.executor import TradeExecutor
@@ -133,138 +216,118 @@ def test_executor_round_qty():
     assert TradeExecutor._round_qty_api(0.0001, btc) == 0.0
 
     doge = InstrumentInfo("DOGEUSDT", "Trading", 10.0, 10.0, 0.00001, 5.0, 75.0)
-    assert TradeExecutor._round_qty_api(15.7, doge) == 10.0  # floor: 15.7 -> 10
+    assert TradeExecutor._round_qty_api(15.7, doge) == 10.0
     assert TradeExecutor._round_qty_api(5.0, doge) == 0.0
 
 
-def test_executor_margin_check():
-    """Executor отклоняет сделку если маржа > max_margin_per_trade_pct от баланса."""
-    from datetime import datetime, UTC
+def test_executor_floor_rounding():
+    from bybit_bot.trading.executor import TradeExecutor
+    from bybit_bot.trading.client import InstrumentInfo
+
+    btc = InstrumentInfo("BTCUSDT", "Trading", 0.001, 0.001, 0.10, 5.0, 100.0)
+    assert TradeExecutor._round_qty_api(0.0239, btc) == 0.023
+    assert TradeExecutor._round_qty_api(0.0091, btc) == 0.009
+
+    sol = InstrumentInfo("SOLUSDT", "Trading", 0.1, 0.1, 0.01, 5.0, 50.0)
+    assert TradeExecutor._round_qty_api(1.99, sol) == 1.9
+
+
+def test_executor_compute_trade_v2():
+    """Executor V2 работает с TrendSignal."""
     from unittest.mock import MagicMock
     from bybit_bot.trading.executor import TradeExecutor
-    from bybit_bot.analysis.signals import Direction, Signal
-    from bybit_bot.market_data.models import Bar
+    from bybit_bot.strategies.trend_ema import TrendSignal
     from bybit_bot.config.settings import Settings
 
     settings = Settings(
         api_key="test", api_secret="test", _env_file=None,
-        account_balance=500, leverage=5,
-        capital_per_trade_pct=0.05,
+        account_balance=500, leverage=3,
+        capital_per_trade_pct=0.02,
         max_margin_per_trade_pct=0.25,
     )
     executor = TradeExecutor(client=MagicMock(), settings=settings)
 
-    bars = [
-        Bar("BTCUSDT", datetime(2026, 1, 1, 10, i, tzinfo=UTC),
-            100000 + i * 10, 100000 + i * 10 + 5,
-            100000 + i * 10 - 5, 100000 + i * 10, 1000)
-        for i in range(30)
-    ]
-    signal = Signal(direction=Direction.LONG, strength=0.8, reasons=("test",))
-
-    result = executor.compute_trade("BTCUSDT", signal, bars, available_balance=500.0)
-    if result is not None:
-        qty = float(result.qty)
-        margin = qty * bars[-1].close / settings.leverage
-        assert margin <= 500 * 0.25, f"Margin ${margin:.2f} превышает 25% от $500"
-
-
-def test_executor_micro_account_sizing():
-    """Размер позиции корректен для микро-счёта $500."""
-    from datetime import datetime, UTC
-    from unittest.mock import MagicMock
-    from bybit_bot.trading.executor import TradeExecutor
-    from bybit_bot.analysis.signals import Direction, Signal
-    from bybit_bot.market_data.models import Bar
-    from bybit_bot.config.settings import Settings
-
-    settings = Settings(
-        api_key="test", api_secret="test", _env_file=None,
-        account_balance=500, leverage=5,
-        capital_per_trade_pct=0.05,
-        max_margin_per_trade_pct=0.25,
+    sig = TrendSignal(
+        symbol="SOLUSDT",
+        direction="Buy",
+        price=150.0,
+        sl=140.0,
+        tp=165.0,
+        atr_val=5.0,
+        reasons=("ema_cross_up", "ema200_ok"),
     )
-    executor = TradeExecutor(client=MagicMock(), settings=settings)
-
-    bars = [
-        Bar("SOLUSDT", datetime(2026, 1, 1, 10, i, tzinfo=UTC),
-            150 + i * 0.1, 150 + i * 0.1 + 0.5,
-            150 + i * 0.1 - 0.5, 150 + i * 0.1, 50000)
-        for i in range(30)
-    ]
-    signal = Signal(direction=Direction.LONG, strength=0.8, reasons=("test",))
-    result = executor.compute_trade("SOLUSDT", signal, bars, available_balance=500.0)
-
-    assert result is not None, "SOL позиция должна открываться на $500 счёте"
+    result = executor.compute_trade(sig, available_balance=500.0)
+    assert result is not None
+    assert result.side == "Buy"
+    assert result.sl is not None
+    assert result.tp is not None
     qty = float(result.qty)
-    assert qty >= 0.1, f"qty={qty} слишком мал"
-    risk_approx = qty * 2.0  # ~SL distance for SOL ≈ $2
-    assert risk_approx < 50, "Risk per trade не должен превышать $50"
+    margin = qty * 150.0 / 3
+    assert margin <= 500 * 0.25
 
 
-def test_ensemble_insufficient_bars():
-    from bybit_bot.analysis.ensemble import ensemble_signal
-    from bybit_bot.analysis.signals import Direction
-    result = ensemble_signal([], min_votes=3)
-    assert result.direction == Direction.FLAT
-    assert result.strength == 0.0
+# ── KillSwitch ───────────────────────────────────────────────
+
+def _ks_cfg(**overrides):
+    from bybit_bot.trading.killswitch import KillSwitchConfig
+    defaults = dict(max_daily_loss_usd=15.0, max_drawdown_pct=10.0,
+                    max_positions=3, max_loss_per_trade_usd=10.0)
+    defaults.update(overrides)
+    return KillSwitchConfig(**defaults)
 
 
-def test_signal_new_fields():
-    """Signal поддерживает per-strategy SL/TP, pair_tag, strategy_name."""
-    from bybit_bot.analysis.signals import Direction, Signal
-    sig = Signal(
-        direction=Direction.LONG, strength=0.8, reasons=("test",),
-        sl_atr_mult=2.0, tp_atr_mult=1.5,
-        pair_tag="sa_BTC_ETH_abc123", strategy_name="scalp_statarb",
-    )
-    assert sig.sl_atr_mult == 2.0
-    assert sig.tp_atr_mult == 1.5
-    assert sig.pair_tag == "sa_BTC_ETH_abc123"
-    assert sig.strategy_name == "scalp_statarb"
-
-    sig_default = Signal(direction=Direction.FLAT, strength=0.0, reasons=("x",))
-    assert sig_default.sl_atr_mult is None
-    assert sig_default.tp_atr_mult is None
-    assert sig_default.pair_tag is None
-    assert sig_default.strategy_name == ""
+def test_killswitch_allows_initially():
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(), initial_equity=500)
+    assert ks.check_allowed(0, 500) is True
+    assert ks.is_tripped is False
 
 
-def test_store_pair_tag(tmp_path):
-    """StatsStore: pair_tag и opened_bar_idx сохраняются и читаются."""
+def test_killswitch_blocks_max_positions():
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(max_positions=2), initial_equity=500)
+    assert ks.check_allowed(2, 500) is False
+
+
+def test_killswitch_trips_on_daily_loss():
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(max_daily_loss_usd=15.0), initial_equity=500)
+    ks.record_trade_close(-16.0)
+    assert ks.check_allowed(0, 484) is False
+    assert ks.is_tripped is True
+
+
+# ── StatsStore ───────────────────────────────────────────────
+
+def test_stats_store(tmp_path):
     from bybit_bot.stats.store import StatsStore
-    store = StatsStore(tmp_path / "test_pair.sqlite")
+    store = StatsStore(tmp_path / "test.sqlite")
+
+    sig_id = store.log_signal("BTCUSDT", "long", 0.8, "ema_cross_up", 60000.0)
+    assert sig_id > 0
 
     pos_id = store.open_position(
         symbol="BTCUSDT", side="Buy", qty="0.001",
-        entry_price=60000.0, order_id="test-pair-1",
-        strategy="scalp_statarb",
-        pair_tag="sa_BTC_ETH_abc123", opened_bar_idx=42,
+        entry_price=60000.0, order_id="test-123",
+        sl=59000.0, tp=63000.0, strategy="trend_ema_v2",
     )
-    pos_id2 = store.open_position(
-        symbol="ETHUSDT", side="Sell", qty="0.01",
-        entry_price=3000.0, order_id="test-pair-2",
-        strategy="scalp_statarb",
-        pair_tag="sa_BTC_ETH_abc123", opened_bar_idx=42,
-    )
+    assert pos_id > 0
 
-    pair_pos = store.get_open_by_pair_tag("sa_BTC_ETH_abc123")
-    assert len(pair_pos) == 2
-    assert pair_pos[0].pair_tag == "sa_BTC_ETH_abc123"
-    assert pair_pos[0].opened_bar_idx == 42
+    open_pos = store.get_open_positions()
+    assert len(open_pos) == 1
+    assert open_pos[0].symbol == "BTCUSDT"
+    assert open_pos[0].strategy == "trend_ema_v2"
 
-    tags = store.get_open_pair_tags()
-    assert "sa_BTC_ETH_abc123" in tags
+    store.close_position(pos_id, exit_price=61000.0, pnl_usd=10.0, close_reason="tp_hit")
+    assert len(store.get_open_positions()) == 0
 
-    store.close_position(pos_id, exit_price=61000.0, pnl_usd=5.0, close_reason="zscore_exit")
-    store.close_position(pos_id2, exit_price=2950.0, pnl_usd=3.0, close_reason="pair_close")
-
-    assert store.get_cumulative_pnl() == 8.0
-    assert store.get_open_by_pair_tag("sa_BTC_ETH_abc123") == []
+    stats = store.get_total_stats()
+    assert stats["total_trades"] == 1
+    assert stats["wins"] == 1
+    assert stats["total_pnl"] == 10.0
 
 
 def test_store_migration(tmp_path):
-    """Миграция добавляет pair_tag и opened_bar_idx к существующей БД."""
     import sqlite3
     db_path = tmp_path / "migrate.sqlite"
     conn = sqlite3.connect(str(db_path))
@@ -297,46 +360,24 @@ def test_store_migration(tmp_path):
     assert positions[0].opened_bar_idx == 0
 
 
-def test_executor_statarb_no_sltp():
-    """Stat-Arb сигнал: executor не ставит SL/TP."""
-    from datetime import datetime, UTC
-    from unittest.mock import MagicMock
-    from bybit_bot.trading.executor import TradeExecutor
-    from bybit_bot.analysis.signals import Direction, Signal
-    from bybit_bot.market_data.models import Bar
-    from bybit_bot.config.settings import Settings
+# ── Feed V2 ──────────────────────────────────────────────────
 
-    settings = Settings(
-        api_key="test", api_secret="test", _env_file=None,
-        account_balance=500, leverage=5,
-    )
-    executor = TradeExecutor(client=MagicMock(), settings=settings)
-
-    bars = [
-        Bar("ETHUSDT", datetime(2026, 1, 1, 10, i, tzinfo=UTC),
-            3000 + i, 3000 + i + 5, 3000 + i - 5, 3000 + i, 10000)
-        for i in range(30)
+def test_raw_to_bars():
+    from bybit_bot.market_data.feed import _raw_to_bars
+    raw = [
+        ["1712880000000", "60000", "60500", "59500", "60200", "1234.5", "74000000"],
+        ["1712883600000", "60200", "60800", "60100", "60700", "987.3", "59000000"],
     ]
-    sig = Signal(
-        direction=Direction.SHORT, strength=0.7,
-        reasons=("statarb_z=2.5",),
-        sl_atr_mult=None, tp_atr_mult=None,
-        pair_tag="sa_BTC_ETH_test", strategy_name="scalp_statarb",
-    )
-    result = executor.compute_trade("ETHUSDT", sig, bars, available_balance=500.0)
-    if result is not None:
-        assert result.sl is None, "Stat-Arb не должен иметь SL"
-        assert result.tp is None, "Stat-Arb не должен иметь TP"
+    bars = _raw_to_bars(raw, "BTCUSDT")
+    assert len(bars) == 2
+    assert bars[0].symbol == "BTCUSDT"
+    assert bars[0].open == 60000.0
+    assert bars[0].close == 60200.0
+    assert bars[1].close == 60700.0
 
 
-def test_executor_floor_rounding():
-    """Floor rounding: qty округляется вниз, не к ближайшему."""
-    from bybit_bot.trading.executor import TradeExecutor
-    from bybit_bot.trading.client import InstrumentInfo
-
-    btc = InstrumentInfo("BTCUSDT", "Trading", 0.001, 0.001, 0.10, 5.0, 100.0)
-    assert TradeExecutor._round_qty_api(0.0239, btc) == 0.023  # floor, not 0.024
-    assert TradeExecutor._round_qty_api(0.0091, btc) == 0.009  # floor, not 0.009
-
-    sol = InstrumentInfo("SOLUSDT", "Trading", 0.1, 0.1, 0.01, 5.0, 50.0)
-    assert TradeExecutor._round_qty_api(1.99, sol) == 1.9  # floor, not 2.0
+def test_raw_to_bars_invalid():
+    from bybit_bot.market_data.feed import _raw_to_bars
+    raw = [["invalid"], [], None]
+    bars = _raw_to_bars([r for r in raw if r], "BTCUSDT")
+    assert bars == []

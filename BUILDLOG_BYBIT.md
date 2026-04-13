@@ -2,6 +2,31 @@
 
 ## 2026-04-13
 
+### V2: полная переработка — EMA Trend-Following на 1h
+
+Предыдущий подход (5 скальпинг-стратегий на 5m) дал -$201 за 6 дней при WR 31%.
+Основные проблемы: комиссии $127 (63% от убытка), нестабильные корреляции на 5m,
+yfinance как источник данных (задержки, расхождения).
+
+**Что изменилось:**
+- Одна стратегия: EMA 12/26 crossover + EMA 200 trend filter + ADX > 20 + volume filter
+- Таймфрейм: 1h вместо 5m (5-15 сделок/неделю вместо 94/день)
+- Данные: Bybit API klines напрямую (убран yfinance)
+- Ордера: Limit PostOnly (maker 0.02%) с fallback на Market
+- Риск: 2% на сделку, leverage 3x, макс 2 позиции, KillSwitch $15/день
+- Символы: 5 ликвидных (BTC, ETH, SOL, BNB, XRP) вместо 40
+- Exit: SL=2 ATR, TP=3 ATR, trailing при +1.5 ATR, time-stop 48h
+
+**Файлы:**
+- `trading/client.py` — добавлен `get_kline()`
+- `market_data/feed.py` — переписан на Bybit API (убран yfinance)
+- `analysis/indicators.py` — новый модуль (EMA, ATR, ADX, volume_avg)
+- `strategies/trend_ema.py` — новая единственная стратегия
+- `trading/executor.py` — упрощён (убрана Stat-Arb/pair логика)
+- `app/main.py` — переписан цикл (один источник, одна стратегия)
+- `config/settings.py` — V2 параметры (убраны yfinance/scalping)
+- Старые стратегии помечены [DEPRECATED V1], не удалены
+
 ### Stat-Arb: пары по реальным 5m корреляциям (8 пар, corr 0.79-0.93)
 
 Сканирование всех 780 комбинаций из 40 символов показало: старые пары из
