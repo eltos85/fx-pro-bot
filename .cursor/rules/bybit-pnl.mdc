@@ -1,0 +1,53 @@
+---
+description: Правила интерпретации P&L и работы с данными Bybit
+alwaysApply: true
+---
+
+# Bybit: P&L и статистика
+
+## P&L на Bybit — всегда NET
+
+Bybit Trade History показывает P&L **с учётом комиссии** (Cash Flow = closedPnl).
+Не нужно вычитать комиссию повторно — она уже включена.
+
+При анализе API-данных:
+- `closedPnl` — итоговая прибыль/убыток (уже за вычетом комиссий)
+- `Fee Paid` — комиссия (информационно, уже учтена в closedPnl)
+- **НЕ вычитать комиссию из closedPnl** — это двойной учёт
+
+## Источник правды — только Bybit API
+
+- **НЕ** использовать данные из SQLite/БД для анализа реальных результатов
+- **НЕ** использовать логи бота как источник P&L
+- Реальная статистика — только через Bybit API
+- Запрашивать через VPS: `docker exec fx-pro-bot-bybit-bot-1 python3 -c '...'`
+
+## Как получить статистику
+
+```python
+from bybit_bot.config.settings import Settings
+from bybit_bot.trading.client import BybitClient
+from pybit.unified_trading import HTTP
+
+s = Settings()
+c = BybitClient(s.api_key, s.api_secret, demo=s.demo)
+
+# Баланс
+b = c.get_balance()
+# b.total_equity, b.available_balance, b.unrealised_pnl
+
+# Открытые позиции
+positions = c.get_positions()
+
+# Закрытые сделки (closedPnl уже net)
+session = HTTP(api_key=s.api_key, api_secret=s.api_secret, demo=s.demo)
+resp = session.get_closed_pnl(category="linear", limit=50)
+records = resp.get("result", {}).get("list", [])
+```
+
+## При анализе статистики
+
+1. Запросить closed PnL из API за нужный период
+2. `closedPnl` — это итоговый результат (комиссия уже вычтена)
+3. Разбивать по символам для точного анализа
+4. Для текущих позиций: `unrealised_pnl` из `get_positions()`

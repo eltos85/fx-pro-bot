@@ -2,6 +2,18 @@
 
 ## 2026-04-13
 
+### Убраны убыточные пары: BTCUSDT, DOGEUSDT, AAVEUSDT, HBARUSDT
+
+По статистике 228 сделок с Bybit API:
+- BTCUSDT: 12% WR, -$33 (24 сделки)
+- AAVEUSDT: 0% WR, -$17 (4 сделки)
+- DOGEUSDT: 13% WR, -$16 (15 сделок)
+- HBARUSDT: 0% WR, -$6 (4 сделки)
+
+Итого убыток этих 4 пар: -$72 из общих -$200. Остальные 36 символов оставлены.
+
+**Файлы:** `config/settings.py`, `tests/test_bybit_bot.py`
+
 ### Откат Bybit-бота к e3deea3 (рабочая стратегия)
 
 V2 EMA Trend-Following и V2.1 positional state + pullback показали убыток

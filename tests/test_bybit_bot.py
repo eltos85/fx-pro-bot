@@ -30,7 +30,7 @@ def test_settings_defaults():
     assert s.demo is True
     assert s.trading_enabled is False
     assert s.category == "linear"
-    assert "BTCUSDT" in s.scan_symbols
+    assert "ETHUSDT" in s.scan_symbols
     assert s.leverage == 5
     assert s.account_balance == 500.0
     assert s.max_positions == 3

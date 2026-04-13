@@ -9,14 +9,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_SYMBOLS = (
-    # Majors
-    "BTCUSDT",
+    # Majors (BTCUSDT убран: 12% WR, -$33 за 24 сделки)
     "ETHUSDT",
     "SOLUSDT",
     "XRPUSDT",
     "BNBUSDT",
-    # Large-cap alts
-    "DOGEUSDT",
+    # Large-cap alts (DOGEUSDT убран: 13% WR, -$16; AAVEUSDT убран: 0% WR, -$17)
     "ADAUSDT",
     "LINKUSDT",
     "AVAXUSDT",
@@ -27,10 +25,9 @@ DEFAULT_SYMBOLS = (
     "ARBUSDT",
     "SUIUSDT",
     "UNIUSDT",
-    "AAVEUSDT",
     "ATOMUSDT",
     "TRXUSDT",
-    # Mid-cap alts
+    # Mid-cap alts (HBARUSDT убран: 0% WR, -$6)
     "FILUSDT",
     "INJUSDT",
     "FETUSDT",
@@ -42,7 +39,6 @@ DEFAULT_SYMBOLS = (
     "PENDLEUSDT",
     "WLDUSDT",
     "OPUSDT",
-    "HBARUSDT",
     "RUNEUSDT",
     "ALGOUSDT",
     # Stat-Arb (legacy PoW forks, corr 0.75+)
