@@ -2,6 +2,30 @@
 
 ## 2026-04-13
 
+### Stat-Arb: пары по реальным 5m корреляциям (8 пар, corr 0.79-0.93)
+
+Сканирование всех 780 комбинаций из 40 символов показало: старые пары из
+исследований (дневные данные) не работают на 5m — NEAR/SOL corr 0.44,
+ETC/BCH 0.47, ARB/OP 0.00. Новые пары подобраны по реальным Pearson
+корреляциям на 100 барах 5m. Каждый символ макс в 2 парах.
+
+**Новые пары (8 шт.):**
+
+| Пара | Corr | Сектор |
+|---|---|---|
+| BTC/LINK | 0.92 | major/infra |
+| SUI/ETC | 0.92 | L1/PoW fork |
+| LINK/PENDLE | 0.93 | DeFi infra |
+| FIL/TIA | 0.91 | storage/DA |
+| TIA/OP | 0.90 | modular/L2 |
+| DOGE/SUI | 0.92 | meme/L1 |
+| LTC/BTC | 0.79 | legacy PoW |
+| DOGE/XRP | 0.79 | payment/meme |
+
+**Файлы:** `strategies/scalping/stat_arb_crypto.py`, `tests/test_bybit_scalping.py`
+
+---
+
 ### Stat-Arb: убраны ETH-пары, поднят MIN_CORRELATION, вычищены убыточные пары
 
 Анализ 201 сделки за 2 дня: PnL -$201.62, WR 31%, комиссии $127.

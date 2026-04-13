@@ -1,12 +1,12 @@
-"""Stat-Arb для крипто-пар (LTC/BTC, APT/SUI, ETC/BCH и др.).
+"""Stat-Arb для крипто-пар на основе реальных 5m корреляций.
 
 Статистический арбитраж между коинтегрированными крипто-парами.
 Когда spread (z-score) расходится на ±2σ — вход на возврат к среднему.
 Market-neutral: одновременно long одну и short другую.
 
-ETH убран как нога: 6 ETH-пар создавали концентрацию риска — при трендовом
-движении ETH все пары двигались синхронно (-$59 за 2 дня).
-MIN_CORRELATION поднят до 0.7 (было 0.5) — отсечка слабых пар.
+Пары подобраны по реальным Pearson-корреляциям на 5m данных (100 баров),
+а не по академическим исследованиям на дневных данных. Каждый символ
+участвует максимум в 2 парах — защита от концентрации риска.
 """
 
 from __future__ import annotations
@@ -26,16 +26,16 @@ from bybit_bot.strategies.scalping.indicators import (
 log = logging.getLogger(__name__)
 
 DEFAULT_PAIRS: list[tuple[str, str]] = [
-    # Пары без ETH-ноги (ETH давал -$59 из-за концентрации риска: 6 пар
-    # одновременно двигались против при трендовом движении ETH).
-    # Убраны: BTC/ETH, SOL/ETH, LINK/ETH, AVAX/ETH, ATOM/ETH, ETH/BNB.
-    # Убраны убыточные: AAVE/UNI (0% WR, -$17), DOT/* (-$27), INJ/SOL.
-    ("LTCUSDT", "BTCUSDT"),     # legacy PoW, corr 0.75+
-    ("APTUSDT", "SUIUSDT"),     # Move-based L1, corr 0.80+
-    ("ETCUSDT", "BCHUSDT"),     # legacy PoW forks, corr 0.75+
-    ("NEARUSDT", "SOLUSDT"),    # L1 sector, corr ~0.70
-    ("ARBUSDT", "OPUSDT"),      # L2 sector, corr 0.80+
-    ("DOGEUSDT", "XRPUSDT"),    # payment/meme crossover, corr 0.65+
+    # Подобраны по реальным 5m корреляциям (Pearson, 100 баров, 13.04.2026).
+    # Каждый символ макс в 2 парах — защита от концентрации.
+    ("BTCUSDT", "LINKUSDT"),    # corr 0.92, оба major/infra
+    ("SUIUSDT", "ETCUSDT"),     # corr 0.92, L1/PoW fork
+    ("LINKUSDT", "PENDLEUSDT"), # corr 0.93, DeFi infra
+    ("FILUSDT", "TIAUSDT"),     # corr 0.91, storage/DA sector
+    ("TIAUSDT", "OPUSDT"),      # corr 0.90, modular/L2
+    ("DOGEUSDT", "SUIUSDT"),    # corr 0.92, meme/L1
+    ("LTCUSDT", "BTCUSDT"),     # corr 0.79, legacy PoW
+    ("DOGEUSDT", "XRPUSDT"),    # corr 0.79, payment/meme
 ]
 
 Z_ENTRY = 2.0
