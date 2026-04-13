@@ -1,6 +1,4 @@
-"""[DEPRECATED V1] Funding Rate Scalp — стратегия на перекосе funding rate.
-
-Отключена в V2 (13.04.2026). Заменена на EmaTrendStrategy.
+"""Funding Rate Scalp — стратегия на перекосе funding rate.
 
 Bybit perpetual контракты имеют funding каждые 8 часов (00:00, 08:00, 16:00 UTC).
 Когда funding rate сильно отклоняется:

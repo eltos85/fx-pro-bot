@@ -1,7 +1,4 @@
-"""Исполнитель сделок V2: Limit PostOnly с fallback на Market.
-
-Убрана Stat-Arb/pair логика. Работает с TrendSignal напрямую.
-"""
+"""Исполнитель сделок: преобразует сигналы в ордера Bybit."""
 
 from __future__ import annotations
 
@@ -9,8 +6,9 @@ import logging
 import math
 from dataclasses import dataclass
 
+from bybit_bot.analysis.signals import Direction, Signal, atr
 from bybit_bot.config.settings import Settings
-from bybit_bot.strategies.trend_ema import TrendSignal
+from bybit_bot.market_data.models import Bar
 from bybit_bot.trading.client import BybitClient, InstrumentInfo, OrderResult
 
 log = logging.getLogger(__name__)
@@ -23,6 +21,7 @@ class TradeParams:
     qty: str
     sl: float | None = None
     tp: float | None = None
+    force_market: bool = False
 
 
 class TradeExecutor:
@@ -40,27 +39,57 @@ class TradeExecutor:
 
     def compute_trade(
         self,
-        signal: TrendSignal,
+        symbol: str,
+        signal: Signal,
+        bars: list[Bar],
         available_balance: float,
     ) -> TradeParams | None:
-        """Рассчитать параметры сделки на основе TrendSignal."""
-        symbol = signal.symbol
+        """Рассчитать параметры сделки на основе сигнала и проверить маржу.
+
+        Размер позиции считается по account_balance из настроек (а не по API-балансу),
+        чтобы на демо-счёте ($175K) торговать как на реальном ($500).
+        available_balance используется только для проверки наличия свободной маржи.
+        """
+        if signal.direction == Direction.FLAT:
+            return None
 
         if self._instruments and symbol not in self._instruments:
             log.debug("%s: не найден в инструментах Bybit, пропускаю", symbol)
             return None
 
-        price = signal.price
-        atr_val = signal.atr_val
+        price = bars[-1].close
+        atr_val = atr(bars)
         if atr_val <= 0:
             log.warning("%s: ATR=0, пропускаю", symbol)
             return None
 
-        sl_distance = abs(price - signal.sl)
+        side = "Buy" if signal.direction == Direction.LONG else "Sell"
+
+        sl_mult = signal.sl_atr_mult if signal.sl_atr_mult is not None else self._settings.strategy_sl_atr_mult
+        tp_mult = signal.tp_atr_mult if signal.tp_atr_mult is not None else self._settings.strategy_tp_atr_mult
+
+        is_statarb = signal.pair_tag is not None and signal.sl_atr_mult is None
+
+        if is_statarb:
+            sl = None
+            tp = None
+            sl_distance = atr_val * 2.0
+        else:
+            sl_distance = atr_val * sl_mult
+            tp_distance = atr_val * tp_mult
+            if side == "Buy":
+                sl = price - sl_distance
+                tp = price + tp_distance
+            else:
+                sl = price + sl_distance
+                tp = price - tp_distance
 
         capital = self._settings.account_balance
         risk_usd = capital * self._settings.capital_per_trade_pct
+
         max_margin = capital * self._settings.max_margin_per_trade_pct
+        if is_statarb:
+            max_margin = max_margin / 2
 
         qty_raw = risk_usd / (sl_distance * self._settings.leverage)
 
@@ -103,8 +132,10 @@ class TradeExecutor:
             return None
 
         price_prec = self._price_precision(inst.tick_size if inst else 0.01)
-        sl = round(signal.sl, price_prec)
-        tp = round(signal.tp, price_prec)
+        if sl is not None:
+            sl = round(sl, price_prec)
+        if tp is not None:
+            tp = round(tp, price_prec)
 
         log.info(
             "%s: qty=%s, risk=$%.2f (%.1f%%), margin=$%.2f (%.1f%% от $%.0f)",
@@ -115,10 +146,11 @@ class TradeExecutor:
 
         return TradeParams(
             symbol=symbol,
-            side=signal.direction,
+            side=side,
             qty=str(qty_rounded),
             sl=sl,
             tp=tp,
+            force_market=is_statarb,
         )
 
     def execute(self, params: TradeParams) -> OrderResult:
@@ -157,7 +189,7 @@ class TradeExecutor:
                 sl = None
                 tp = None
 
-        if last_price > 0:
+        if last_price > 0 and not params.force_market:
             inst = self._instruments.get(params.symbol)
             tick = inst.tick_size if inst else 0.01
             if params.side == "Buy":

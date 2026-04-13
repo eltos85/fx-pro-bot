@@ -2,6 +2,18 @@
 
 ## 2026-04-13
 
+### Откат Bybit-бота к e3deea3 (рабочая стратегия)
+
+V2 EMA Trend-Following и V2.1 positional state + pullback показали убыток
+на реальном демо-счёте. Откат к коммиту e3deea3 — последняя рабочая версия
+с Stat-Arb + Momentum + Scalping стратегиями, которая торговала в плюс.
+
+Откат через `git checkout e3deea3 -- <файлы>` (не git revert, чтобы не
+затронуть форекс-бот). Удалены файлы, которых не было в e3deea3:
+`strategies/trend_ema.py`, `analysis/indicators.py`.
+
+**Файлы:** все модули `src/bybit_bot/`, тесты `tests/test_bybit_*.py`
+
 ### V2.1: positional state + pullback entry (по исследованиям)
 
 Первая версия V2 использовала EMA 12/26 crossover — сигнал только в момент

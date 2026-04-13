@@ -126,25 +126,25 @@ class TestVwapCrypto:
 class TestStatArbCrypto:
     def test_no_signals_insufficient_data(self):
         from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
-        strat = StatArbCryptoStrategy(pairs=[("LTCUSDT", "BTCUSDT")])
+        strat = StatArbCryptoStrategy()
         bars = _make_bars(n=50)
-        signals = strat.scan({"LTCUSDT": bars, "BTCUSDT": bars})
+        signals = strat.scan({"BTCUSDT": bars, "ETHUSDT": bars})
         assert signals == []
 
     def test_scan_with_enough_data(self):
         from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
-        strat = StatArbCryptoStrategy(pairs=[("LTCUSDT", "BTCUSDT")])
-        bars_ltc = _make_bars("LTCUSDT", n=200, base_price=55)
+        strat = StatArbCryptoStrategy()
         bars_btc = _make_bars("BTCUSDT", n=200, base_price=60000)
-        signals = strat.scan({"LTCUSDT": bars_ltc, "BTCUSDT": bars_btc})
+        bars_eth = _make_bars("ETHUSDT", n=200, base_price=3000)
+        signals = strat.scan({"BTCUSDT": bars_btc, "ETHUSDT": bars_eth})
         assert isinstance(signals, list)
 
     def test_check_exits_empty(self):
         from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
-        strat = StatArbCryptoStrategy(pairs=[("LTCUSDT", "BTCUSDT")])
-        bars_ltc = _make_bars("LTCUSDT", n=200, base_price=55)
+        strat = StatArbCryptoStrategy()
         bars_btc = _make_bars("BTCUSDT", n=200, base_price=60000)
-        to_close = strat.check_exits({"LTCUSDT": bars_ltc, "BTCUSDT": bars_btc}, [])
+        bars_eth = _make_bars("ETHUSDT", n=200, base_price=3000)
+        to_close = strat.check_exits({"BTCUSDT": bars_btc, "ETHUSDT": bars_eth}, [])
         assert to_close == []
 
 

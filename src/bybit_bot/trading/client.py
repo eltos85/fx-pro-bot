@@ -368,31 +368,6 @@ class BybitClient:
         log.info("Загружено %d инструментов с Bybit API", len(result))
         return result
 
-    def get_kline(
-        self,
-        symbol: str,
-        interval: str = "60",
-        limit: int = 200,
-    ) -> list[dict]:
-        """GET /v5/market/kline — OHLCV свечи с Bybit.
-
-        interval: "1","3","5","15","30","60","120","240","360","720","D","W","M"
-        Возвращает list[dict] с ключами: startTime, open, high, low, close, volume.
-        Bybit отдаёт от новых к старым — разворачиваем.
-        """
-        try:
-            resp = self._session.get_kline(
-                category=self._category,
-                symbol=symbol,
-                interval=interval,
-                limit=limit,
-            )
-            raw = resp.get("result", {}).get("list", [])
-            return list(reversed(raw))
-        except Exception as e:
-            log.warning("get_kline %s error: %s", symbol, e)
-            return []
-
     def get_tickers(self, symbol: str) -> dict:
         """Получить текущую цену."""
         resp = self._session.get_tickers(category=self._category, symbol=symbol)
