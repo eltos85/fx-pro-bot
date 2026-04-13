@@ -2,6 +2,25 @@
 
 ## 2026-04-13
 
+### V2.1: positional state + pullback entry (по исследованиям)
+
+Первая версия V2 использовала EMA 12/26 crossover — сигнал только в момент
+пересечения. Проблема: crossover на 1h — редкое событие (раз в 30+ часов),
+бот с 5-мин циклом пропускал его. Попытка добавить lookback — подгонка без
+обоснования.
+
+**Исследования (quant-signals.com, fmz.com, cryptotrading-guide.com):**
+- 9/21 EMA лучше 12/26 на 1h: +0.069R expectancy (2716 бэктестов)
+- Retest/pullback entry: вход на откате к fast EMA, а не на crossover
+- ADX=20 — стандартный порог (не 15)
+- SL=1.5 ATR, TP=3 ATR (R:R 1:2) — оптимально по анализу 500+ сделок
+- Volume по предыдущему закрытому бару (текущий неполный)
+
+**Новая логика:** positional state (EMA9 > EMA21 = long zone) + pullback к
+EMA9 (в пределах 0.3%) + ADX > 20 + volume. Не зависит от момента crossover.
+
+**Файлы:** `strategies/trend_ema.py`, `config/settings.py`, `app/main.py`
+
 ### V2: полная переработка — EMA Trend-Following на 1h
 
 Предыдущий подход (5 скальпинг-стратегий на 5m) дал -$201 за 6 дней при WR 31%.

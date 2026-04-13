@@ -77,15 +77,16 @@ class Settings(BaseSettings):
     )
     max_positions: int = Field(default=2, validation_alias="BYBIT_BOT_MAX_POSITIONS")
 
-    # EMA Trend Strategy
-    ema_fast: int = Field(default=12, validation_alias="BYBIT_BOT_EMA_FAST")
-    ema_slow: int = Field(default=26, validation_alias="BYBIT_BOT_EMA_SLOW")
+    # EMA Trend Strategy (9/21 — best 1h expectancy per quant-signals.com backtests)
+    ema_fast: int = Field(default=9, validation_alias="BYBIT_BOT_EMA_FAST")
+    ema_slow: int = Field(default=21, validation_alias="BYBIT_BOT_EMA_SLOW")
     ema_trend: int = Field(default=200, validation_alias="BYBIT_BOT_EMA_TREND")
-    adx_threshold: float = Field(default=15.0, validation_alias="BYBIT_BOT_ADX_THRESHOLD")
+    adx_threshold: float = Field(default=20.0, validation_alias="BYBIT_BOT_ADX_THRESHOLD")
     volume_filter_ratio: float = Field(default=0.5, validation_alias="BYBIT_BOT_VOLUME_FILTER_RATIO")
+    pullback_pct: float = Field(default=0.003, validation_alias="BYBIT_BOT_PULLBACK_PCT")
 
     # SL / TP / Trailing
-    sl_atr_mult: float = Field(default=2.0, validation_alias="BYBIT_BOT_SL_ATR")
+    sl_atr_mult: float = Field(default=1.5, validation_alias="BYBIT_BOT_SL_ATR")
     tp_atr_mult: float = Field(default=3.0, validation_alias="BYBIT_BOT_TP_ATR")
     trailing_activation_atr: float = Field(default=1.5, validation_alias="BYBIT_BOT_TRAIL_ACTIVATION_ATR")
     trailing_distance_atr: float = Field(default=1.0, validation_alias="BYBIT_BOT_TRAIL_DISTANCE_ATR")

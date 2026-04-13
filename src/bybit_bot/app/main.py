@@ -60,6 +60,7 @@ def run_bot() -> None:
         trend_period=settings.ema_trend,
         adx_threshold=settings.adx_threshold,
         volume_ratio=settings.volume_filter_ratio,
+        pullback_pct=settings.pullback_pct,
         sl_atr_mult=settings.sl_atr_mult,
         tp_atr_mult=settings.tp_atr_mult,
     )

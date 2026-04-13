@@ -1,16 +1,23 @@
 """EMA Trend-Following стратегия (V2).
 
-Сигнал входа:
-  - EMA 12/26 crossover
-  - EMA 200 фильтр тренда (long только выше, short только ниже)
-  - ADX > 20 (подтверждение тренда)
-  - Volume > 0.7x avg (подтверждение объёмом)
+Основано на исследованиях:
+- 9/21 EMA: +0.069R expectancy на BTC 1h (quant-signals.com, 2716 бэктестов)
+- ADX > 20 стандартный порог (Medium, fmz.com, cryptotrading-guide.com)
+- Retest entry: вход на откате к fast EMA после crossover (fmz.com/strategy/491506)
+- Volume по закрытому бару (freqtrade best practices)
+- ATR-based SL: 64% WR vs 52% фиксированных (quant-signals.com)
+
+Логика входа (positional state + pullback):
+  1. EMA fast > EMA slow = "long zone" (или наоборот для short)
+  2. ADX > 20 = тренд подтверждён
+  3. Цена откатила к fast EMA (в пределах 0.3% от неё) = pullback entry
+  4. Volume предыдущего закрытого бара > 0.5x avg
 
 Выход:
-  - SL = 2x ATR
-  - TP = 3x ATR (risk:reward 1:1.5)
+  - SL = 1.5x ATR (исследования: 1.5-2x оптимально)
+  - TP = 3x ATR (risk:reward 1:2)
   - Trailing: активация при +1.5 ATR, дистанция 1 ATR
-  - Time-stop: 48 свечей без +1%
+  - Time-stop: 48 часов без +1%
 """
 
 from __future__ import annotations
@@ -36,20 +43,20 @@ class TrendSignal:
 
 
 class EmaTrendStrategy:
-    """Единственная стратегия V2: EMA crossover + фильтры."""
+    """EMA trend-following: positional state + pullback entry."""
 
     def __init__(
         self,
         *,
-        fast_period: int = 12,
-        slow_period: int = 26,
+        fast_period: int = 9,
+        slow_period: int = 21,
         trend_period: int = 200,
         adx_period: int = 14,
         adx_threshold: float = 20.0,
-        volume_ratio: float = 0.7,
-        sl_atr_mult: float = 2.0,
+        volume_ratio: float = 0.5,
+        pullback_pct: float = 0.003,
+        sl_atr_mult: float = 1.5,
         tp_atr_mult: float = 3.0,
-        cross_lookback: int = 3,
     ) -> None:
         self.fast_period = fast_period
         self.slow_period = slow_period
@@ -57,36 +64,9 @@ class EmaTrendStrategy:
         self.adx_period = adx_period
         self.adx_threshold = adx_threshold
         self.volume_ratio = volume_ratio
+        self.pullback_pct = pullback_pct
         self.sl_atr_mult = sl_atr_mult
         self.tp_atr_mult = tp_atr_mult
-        self.cross_lookback = cross_lookback
-
-    def _find_crossover(
-        self, ema_fast: list[float], ema_slow: list[float],
-    ) -> tuple[str | None, int]:
-        """Найти последний crossover в пределах lookback баров.
-
-        Возвращает (direction, bars_ago) или (None, 0).
-        Дополнительно проверяет что EMA fast всё ещё на стороне сигнала
-        (не произошёл обратный crossover).
-        """
-        n = min(len(ema_fast), len(ema_slow))
-        start = max(1, n - self.cross_lookback)
-
-        for i in range(n - 1, start - 1, -1):
-            prev_f, cur_f = ema_fast[i - 1], ema_fast[i]
-            prev_s, cur_s = ema_slow[i - 1], ema_slow[i]
-
-            if prev_f <= prev_s and cur_f > cur_s:
-                if ema_fast[-1] > ema_slow[-1]:
-                    return "Buy", n - 1 - i
-                return None, 0
-            if prev_f >= prev_s and cur_f < cur_s:
-                if ema_fast[-1] < ema_slow[-1]:
-                    return "Sell", n - 1 - i
-                return None, 0
-
-        return None, 0
 
     @property
     def min_bars(self) -> int:
@@ -97,7 +77,6 @@ class EmaTrendStrategy:
         bars_map: dict[str, list[Bar]],
         open_symbols: set[str] | None = None,
     ) -> list[TrendSignal]:
-        """Сканировать все символы и вернуть сигналы."""
         signals: list[TrendSignal] = []
         open_symbols = open_symbols or set()
 
@@ -110,12 +89,12 @@ class EmaTrendStrategy:
         return signals
 
     def evaluate(self, symbol: str, bars: list[Bar]) -> TrendSignal | None:
-        """Оценить один символ. Возвращает TrendSignal или None."""
         if len(bars) < self.min_bars:
             log.debug("%s: недостаточно баров (%d < %d)", symbol, len(bars), self.min_bars)
             return None
 
         closes = [b.close for b in bars]
+        price = closes[-1]
 
         ema_fast = ema(closes, self.fast_period)
         ema_slow = ema(closes, self.slow_period)
@@ -123,47 +102,62 @@ class EmaTrendStrategy:
         if len(ema_fast) < 2 or len(ema_slow) < 2:
             return None
 
-        cross_dir, bars_ago = self._find_crossover(ema_fast, ema_slow)
-        if cross_dir is None:
-            return None
+        fast_val = ema_fast[-1]
+        slow_val = ema_slow[-1]
 
-        if ema_fast[-1] == ema_slow[-1]:
+        # 1. Positional state: определяем зону
+        if fast_val > slow_val:
+            direction = "Buy"
+        elif fast_val < slow_val:
+            direction = "Sell"
+        else:
             return None
 
         reasons: list[str] = []
+        reasons.append(f"ema{self.fast_period}{'>' if direction == 'Buy' else '<'}ema{self.slow_period}")
 
-        if cross_dir == "Buy":
-            direction = "Buy"
-            reasons.append(f"ema_cross_up({bars_ago}b)")
+        # 2. Pullback к fast EMA: цена в пределах pullback_pct от fast EMA
+        distance_to_fast = abs(price - fast_val) / fast_val if fast_val > 0 else 1.0
+
+        if direction == "Buy":
+            near_fast = price <= fast_val * (1 + self.pullback_pct)
+            if not near_fast:
+                log.debug("%s: Buy — цена %.2f слишком далеко от EMA%d=%.2f (%.1f%%)",
+                          symbol, price, self.fast_period, fast_val, distance_to_fast * 100)
+                return None
         else:
-            direction = "Sell"
-            reasons.append(f"ema_cross_down({bars_ago}b)")
+            near_fast = price >= fast_val * (1 - self.pullback_pct)
+            if not near_fast:
+                log.debug("%s: Sell — цена %.2f слишком далеко от EMA%d=%.2f (%.1f%%)",
+                          symbol, price, self.fast_period, fast_val, distance_to_fast * 100)
+                return None
 
-        price = closes[-1]
+        reasons.append(f"pullback={distance_to_fast:.1%}")
 
-        ema_trend = ema(closes, self.trend_period)
-        if ema_trend:
-            trend_val = ema_trend[-1]
-            trend_aligned = (direction == "Buy" and price > trend_val) or \
-                            (direction == "Sell" and price < trend_val)
-            if trend_aligned:
-                reasons.append(f"ema{self.trend_period}_ok")
-            else:
-                reasons.append(f"ema{self.trend_period}_counter")
-
+        # 3. ADX > threshold
         adx_val = adx(bars, self.adx_period)
         if adx_val < self.adx_threshold:
-            log.debug("%s: ADX=%.1f < %.1f, нет тренда", symbol, adx_val, self.adx_threshold)
+            log.debug("%s: ADX=%.1f < %.1f", symbol, adx_val, self.adx_threshold)
             return None
         reasons.append(f"adx={adx_val:.0f}")
 
-        avg_vol = volume_avg(bars, 20)
-        cur_vol = bars[-1].volume
-        if avg_vol > 0 and cur_vol < avg_vol * self.volume_ratio:
-            log.debug("%s: volume=%.0f < %.1fx avg=%.0f", symbol, cur_vol, self.volume_ratio, avg_vol)
+        # 4. Volume предыдущего закрытого бара
+        avg_vol = volume_avg(bars[:-1], 20) if len(bars) > 21 else 0.0
+        prev_vol = bars[-2].volume if len(bars) > 1 else 0.0
+        if avg_vol > 0 and prev_vol < avg_vol * self.volume_ratio:
+            log.debug("%s: prev_vol=%.0f < %.1fx avg=%.0f", symbol, prev_vol, self.volume_ratio, avg_vol)
             return None
         reasons.append("vol_ok")
 
+        # 5. EMA 200 trend alignment (информационный, не блокирует)
+        ema_trend = ema(closes, self.trend_period)
+        if ema_trend:
+            trend_val = ema_trend[-1]
+            aligned = (direction == "Buy" and price > trend_val) or \
+                      (direction == "Sell" and price < trend_val)
+            reasons.append(f"ema{self.trend_period}_{'ok' if aligned else 'counter'}")
+
+        # SL / TP
         atr_val = atr(bars)
         if atr_val <= 0:
             return None

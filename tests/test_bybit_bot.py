@@ -85,11 +85,12 @@ def test_settings_v2_defaults():
     assert s.max_positions == 2
     assert s.kline_interval == "60"
     assert s.kline_limit == 200
-    assert s.ema_fast == 12
-    assert s.ema_slow == 26
+    assert s.ema_fast == 9
+    assert s.ema_slow == 21
     assert s.ema_trend == 200
-    assert s.adx_threshold == 15.0
-    assert s.sl_atr_mult == 2.0
+    assert s.adx_threshold == 20.0
+    assert s.sl_atr_mult == 1.5
+    assert s.pullback_pct == 0.003
     assert s.tp_atr_mult == 3.0
     assert s.trailing_activation_atr == 1.5
     assert s.trailing_distance_atr == 1.0
@@ -157,7 +158,7 @@ class TestEmaTrendStrategy:
     def test_no_signal_insufficient_bars(self):
         from bybit_bot.strategies.trend_ema import EmaTrendStrategy
         strat = EmaTrendStrategy()
-        bars = _make_bars(n=50)
+        bars = _make_bars(n=20)
         assert strat.evaluate("BTCUSDT", bars) is None
 
     def test_no_signal_flat_market(self):
@@ -201,8 +202,8 @@ class TestEmaTrendStrategy:
 
     def test_min_bars_property(self):
         from bybit_bot.strategies.trend_ema import EmaTrendStrategy
-        strat = EmaTrendStrategy(slow_period=26, adx_period=14)
-        assert strat.min_bars == 30  # max(26, 28) + 2
+        strat = EmaTrendStrategy(slow_period=21, adx_period=14)
+        assert strat.min_bars == 30  # max(21, 28) + 2
 
 
 # ── Executor V2 ──────────────────────────────────────────────
