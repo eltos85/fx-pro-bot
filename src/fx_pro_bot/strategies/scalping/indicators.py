@@ -121,3 +121,79 @@ def avg_volume(bars: list[Bar], window: int = 20) -> float:
     if not subset:
         return 0.0
     return sum(b.volume for b in subset) / len(subset)
+
+
+def resample_m5_to_h1(bars: list[Bar]) -> list[Bar]:
+    """Агрегирует M5 бары в H1 (по часу UTC)."""
+    if not bars:
+        return []
+    hourly: dict[str, list[Bar]] = {}
+    for b in bars:
+        key = b.ts.strftime("%Y-%m-%d-%H")
+        hourly.setdefault(key, []).append(b)
+
+    result: list[Bar] = []
+    for key in sorted(hourly):
+        group = hourly[key]
+        result.append(Bar(
+            instrument=group[0].instrument,
+            ts=group[0].ts,
+            open=group[0].open,
+            high=max(b.high for b in group),
+            low=min(b.low for b in group),
+            close=group[-1].close,
+            volume=sum(b.volume for b in group),
+        ))
+    return result
+
+
+def htf_ema_trend(bars_m5: list[Bar], ema_period: int = 200) -> float | None:
+    """EMA trend на H1 (ресемплированных из M5).
+
+    Возвращает slope EMA: >0 = uptrend, <0 = downtrend, None = недостаточно данных.
+    """
+    h1 = resample_m5_to_h1(bars_m5)
+    if len(h1) < ema_period + 5:
+        return None
+    closes = [b.close for b in h1]
+    # Рассчитываем EMA вручную
+    mult = 2.0 / (ema_period + 1)
+    ema = closes[0]
+    ema_vals = [ema]
+    for c in closes[1:]:
+        ema = c * mult + ema * (1 - mult)
+        ema_vals.append(ema)
+    return ema_slope(ema_vals, 5)
+
+
+def adf_test_stationary(spread: list[float], max_lag: int = 1) -> float:
+    """Simplified ADF test: returns t-statistic for stationarity.
+
+    Более отрицательное значение = больше уверенности в стационарности.
+    Критические значения: -3.43 (1%), -2.86 (5%), -2.57 (10%).
+    Возвращает t-stat; если > -2.86 — коинтеграция сомнительна.
+    """
+    n = len(spread)
+    if n < max_lag + 10:
+        return 0.0
+    dy = [spread[i] - spread[i - 1] for i in range(1, n)]
+    y_lag = spread[:-1]
+
+    n_obs = len(dy)
+    mean_dy = sum(dy) / n_obs
+    mean_y = sum(y_lag) / n_obs
+
+    cov_xy = sum((y_lag[i] - mean_y) * (dy[i] - mean_dy) for i in range(n_obs)) / n_obs
+    var_x = sum((y_lag[i] - mean_y) ** 2 for i in range(n_obs)) / n_obs
+
+    if var_x == 0:
+        return 0.0
+
+    beta = cov_xy / var_x
+    residuals = [dy[i] - beta * y_lag[i] for i in range(n_obs)]
+    sse = sum(r * r for r in residuals)
+    se_beta = (sse / (n_obs - 1) / (var_x * n_obs)) ** 0.5 if var_x * n_obs > 0 else 1.0
+
+    if se_beta == 0:
+        return 0.0
+    return beta / se_beta

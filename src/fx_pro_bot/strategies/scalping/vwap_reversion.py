@@ -17,7 +17,7 @@ from fx_pro_bot.config.settings import SCALPING_CRYPTO_ALLOWED, display_name, is
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
-from fx_pro_bot.strategies.scalping.indicators import ema_slope, vwap
+from fx_pro_bot.strategies.scalping.indicators import ema_slope, htf_ema_trend, vwap
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ RSI_CONFIRM_LOW = 30
 RSI_CONFIRM_HIGH = 70
 SL_ATR_MULT = 2.0
 TP_ATR_MULT = 1.5
-ADX_MAX = 25.0
+ADX_MAX = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +79,12 @@ class VwapReversionStrategy:
             if adx > ADX_MAX:
                 continue
 
+            adx_prev = compute_adx(bars[:-1]) if len(bars) > 30 else adx
+            if adx > adx_prev:
+                continue
+
+            htf_slope = htf_ema_trend(bars)
+
             vwap_val = vwap(bars[-50:])
             deviation = (price - vwap_val) / atr
 
@@ -89,6 +95,8 @@ class VwapReversionStrategy:
 
             if deviation < -DEVIATION_THRESHOLD and rsi < RSI_CONFIRM_LOW:
                 if slope < 0:
+                    continue
+                if htf_slope is not None and htf_slope < 0:
                     continue
                 signals.append(VwapSignal(
                     instrument=symbol,
@@ -101,6 +109,8 @@ class VwapReversionStrategy:
 
             elif deviation > DEVIATION_THRESHOLD and rsi > RSI_CONFIRM_HIGH:
                 if slope > 0:
+                    continue
+                if htf_slope is not None and htf_slope > 0:
                     continue
                 signals.append(VwapSignal(
                     instrument=symbol,

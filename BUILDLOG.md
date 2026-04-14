@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-04-13
+
+### fix: ужесточение фильтров скальпинг-стратегий по результатам анализа API
+
+Анализ 25 сделок за 10 часов (через cTrader API) выявил системные проблемы:
+- **VWAP reversion**: 100% loss rate (4/4) — входы против тренда в трендовом рынке
+- **Stat-arb**: обе ноги EUR/GBP летят в минус одновременно, корреляция разваливается
+- **Session ORB news_fade**: ложные сигналы в тихие часы (00:00–02:00 UTC), нет реальных новостей
+
+Применённые изменения (подтверждены исследованием литературы и best practices):
+1. **VWAP**: ADX_MAX 25→20, добавлен ADX falling check, HTF EMA(200) H1 тренд-фильтр
+2. **News fade**: ограничен часами London (08-12) и NY (14:30-17 UTC)
+3. **Stat-arb**: ADF-тест коинтеграции (t-stat < -2.86), Z_ENTRY 2.0→2.5
+4. **Общее**: HTF фильтр EMA(200) на H1 для всех скальпинг-стратегий (вместо шумного EMA50 M5)
+
+**Файлы:** `strategies/scalping/vwap_reversion.py`, `strategies/scalping/session_orb.py`, `strategies/scalping/stat_arb.py`, `strategies/scalping/indicators.py`, `STRATEGIES.md`
+
+---
+
 ## 2026-04-12
 
 ### remove: коммодити и индексы убраны — только валютные пары

@@ -18,7 +18,7 @@ from fx_pro_bot.config.settings import SCALPING_CRYPTO_ALLOWED, display_name, is
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
-from fx_pro_bot.strategies.scalping.indicators import avg_volume, ema_slope, session_range
+from fx_pro_bot.strategies.scalping.indicators import avg_volume, ema_slope, htf_ema_trend, session_range
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +33,10 @@ ADX_MAX = 25.0
 
 LONDON_OPEN = time(8, 0)
 LONDON_ORB_END = time(8, 15)
+LONDON_CLOSE = time(12, 0)
 NY_OPEN = time(14, 30)
 NY_ORB_END = time(14, 45)
+NY_CLOSE = time(17, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,12 +94,13 @@ class SessionOrbStrategy:
             closes = [b.close for b in bars]
             ema_vals = _ema(closes, 50)
             slope = ema_slope(ema_vals, 5)
+            htf_slope = htf_ema_trend(bars)
 
-            orb_sig = self._check_orb(symbol, bars, price, atr, slope)
+            orb_sig = self._check_orb(symbol, bars, price, atr, slope, htf_slope)
             if orb_sig:
                 signals.append(orb_sig)
 
-            fade_sig = self._check_news_fade(symbol, bars, price, atr, slope)
+            fade_sig = self._check_news_fade(symbol, bars, price, atr, slope, htf_slope)
             if fade_sig:
                 signals.append(fade_sig)
 
@@ -165,6 +168,7 @@ class SessionOrbStrategy:
         price: float,
         atr: float,
         slope: float,
+        htf_slope: float | None = None,
     ) -> OrbSignal | None:
         session_bars = self._get_session_bars(bars)
         if not session_bars or len(session_bars) < ORB_BARS + 1:
@@ -185,6 +189,8 @@ class SessionOrbStrategy:
             return None
 
         if price > box_high + filt and slope > 0:
+            if htf_slope is not None and htf_slope < 0:
+                return None
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.LONG,
@@ -196,6 +202,8 @@ class SessionOrbStrategy:
             )
 
         if price < box_low - filt and slope < 0:
+            if htf_slope is not None and htf_slope > 0:
+                return None
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.SHORT,
@@ -215,8 +223,20 @@ class SessionOrbStrategy:
         price: float,
         atr: float,
         slope: float,
+        htf_slope: float | None = None,
     ) -> OrbSignal | None:
         if len(bars) < 4:
+            return None
+
+        last_ts = bars[-1].ts
+        if last_ts.tzinfo is None:
+            from datetime import timezone
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        cur_time = last_ts.time()
+
+        in_london = LONDON_OPEN <= cur_time <= LONDON_CLOSE
+        in_ny = NY_OPEN <= cur_time <= NY_CLOSE
+        if not in_london and not in_ny:
             return None
 
         recent = bars[-3:]
@@ -237,6 +257,8 @@ class SessionOrbStrategy:
         box_l = min(b.low for b in recent)
 
         if spike_up:
+            if htf_slope is not None and htf_slope > 0:
+                return None
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.SHORT,
@@ -247,6 +269,8 @@ class SessionOrbStrategy:
                 detail=f"fade spike +{abs_move:.5f} (>{NEWS_SPIKE_ATR}xATR)",
             )
         else:
+            if htf_slope is not None and htf_slope < 0:
+                return None
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.LONG,

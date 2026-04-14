@@ -17,6 +17,7 @@ from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.strategies.scalping.indicators import (
+    adf_test_stationary,
     ols_hedge_ratio,
     rolling_z_score,
     spread_series,
@@ -30,11 +31,12 @@ DEFAULT_PAIRS: list[tuple[str, str]] = [
     ("USDJPY=X", "USDCAD=X"),
 ]
 
-Z_ENTRY = 2.0
+Z_ENTRY = 2.5
 Z_EXIT = 0.5
 LOOKBACK = 100
 ZSCORE_WINDOW = 50
 SL_ATR_MULT = 2.0
+ADF_CRITICAL = -2.86
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +88,15 @@ class StatArbStrategy:
 
             beta = ols_hedge_ratio(ca[-LOOKBACK:], cb[-LOOKBACK:])
             sprd = spread_series(ca, cb, beta)
+
+            adf_stat = adf_test_stationary(sprd)
+            if adf_stat > ADF_CRITICAL:
+                log.debug(
+                    "  STAT-ARB skip %s/%s: ADF=%.2f (need < %.2f)",
+                    sym_a, sym_b, adf_stat, ADF_CRITICAL,
+                )
+                continue
+
             z = rolling_z_score(sprd, ZSCORE_WINDOW)
 
             if abs(z) < Z_ENTRY:
