@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from bybit_bot.analysis.signals import Direction, atr, rsi, trend_direction
 from bybit_bot.market_data.models import Bar
-from bybit_bot.strategies.scalping.indicators import avg_volume
+from bybit_bot.strategies.scalping.indicators import avg_volume, compute_adx
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ SL_ATR_MULT = 2.0
 TP_ATR_MULT = 2.0
 # Не торговать если за последние N баров уже был спайк (first test only).
 COOLDOWN_BARS = 5
+ADX_MIN = 20.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,12 @@ class VolumeSpikeStrategy:
 
             atr_val = atr(bars)
             if atr_val <= 0:
+                continue
+
+            adx_val = compute_adx(bars)
+            if adx_val < ADX_MIN:
+                log.debug("%s: ADX=%.1f < %.1f, volume spike в боковике — пропускаю",
+                          symbol, adx_val, ADX_MIN)
                 continue
 
             price_move = last_bar.close - last_bar.open

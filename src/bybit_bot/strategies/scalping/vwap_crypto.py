@@ -94,12 +94,18 @@ class VwapCryptoStrategy:
     """VWAP Mean-Reversion скальпинг для крипто.
 
     Rolling VWAP по последним 50 барам (без привязки к FX-сессиям).
-    Фильтр: ADX ≤ 25 (боковик), RSI подтверждение, EMA slope.
+    Фильтр: ADX ≤ 20 (боковик), RSI подтверждение, EMA slope.
+    HTF фильтр: 1h EMA(50) slope определяет разрешённое направление.
     """
 
     def __init__(self, *, max_positions: int = 10, max_per_symbol: int = 2) -> None:
         self._max_positions = max_positions
         self._max_per_symbol = max_per_symbol
+        self._htf_slopes: dict[str, float] = {}
+
+    def set_htf_slopes(self, slopes: dict[str, float]) -> None:
+        """Задать 1h EMA(50) slope для каждого символа (рассчитывается в main.py)."""
+        self._htf_slopes = slopes
 
     def scan(self, bars_map: dict[str, list[Bar]]) -> list[VwapSignal]:
         signals: list[VwapSignal] = []
@@ -131,8 +137,13 @@ class VwapCryptoStrategy:
                 symbol, vwap_val, price, deviation, adx, rsi_val, slope,
             )
 
+            htf_slope = self._htf_slopes.get(symbol)
+
             if deviation < -DEVIATION_THRESHOLD and rsi_val < RSI_CONFIRM_LOW:
                 if slope < 0:
+                    continue
+                if htf_slope is not None and htf_slope < 0:
+                    log.debug("%s: HTF slope=%.6f < 0, long заблокирован", symbol, htf_slope)
                     continue
                 signals.append(VwapSignal(
                     symbol=symbol,
@@ -146,6 +157,9 @@ class VwapCryptoStrategy:
 
             elif deviation > DEVIATION_THRESHOLD and rsi_val > RSI_CONFIRM_HIGH:
                 if slope > 0:
+                    continue
+                if htf_slope is not None and htf_slope > 0:
+                    log.debug("%s: HTF slope=%.6f > 0, short заблокирован", symbol, htf_slope)
                     continue
                 signals.append(VwapSignal(
                     symbol=symbol,

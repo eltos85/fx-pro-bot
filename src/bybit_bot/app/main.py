@@ -218,6 +218,9 @@ def _run_cycle(
         killswitch=killswitch,
     )
 
+    if scalp_vwap and client:
+        _update_htf_slopes(scalp_vwap, client, settings)
+
     _process_scalping(
         bars_map=bars_map,
         settings=settings,
@@ -483,6 +486,38 @@ def _process_exits(
         log.info("Exit-проверка: закрыто %d позиций", closed_count)
 
 
+def _update_htf_slopes(
+    scalp_vwap: VwapCryptoStrategy,
+    client: BybitClient,
+    settings: Settings,
+) -> None:
+    """Загрузить 1h бары через Bybit API и рассчитать EMA(50) slope для VWAP HTF фильтра."""
+    from bybit_bot.analysis.signals import ema
+    from bybit_bot.strategies.scalping.indicators import ema_slope
+
+    slopes: dict[str, float] = {}
+    for symbol in settings.scan_symbols:
+        try:
+            raw = client.get_kline(symbol, interval="60", limit=60)
+            if len(raw) < 55:
+                continue
+            closes = [float(r[4]) for r in raw]
+            ema_vals = ema(closes, 50)
+            slopes[symbol] = ema_slope(ema_vals, 5)
+        except Exception:
+            log.debug("HTF kline %s: ошибка загрузки", symbol)
+    scalp_vwap.set_htf_slopes(slopes)
+    log.debug("HTF slopes: %d символов", len(slopes))
+
+
+def _in_trading_session(settings: Settings) -> bool:
+    """Проверить что текущее время UTC в разрешённом окне для входов."""
+    if not settings.session_filter_enabled:
+        return True
+    hour = datetime.now(tz=UTC).hour
+    return settings.session_start_utc <= hour < settings.session_end_utc
+
+
 def _process_momentum(
     *,
     signals: list[ScanResult],
@@ -493,6 +528,11 @@ def _process_momentum(
     executor: TradeExecutor,
     killswitch: KillSwitch,
 ) -> None:
+    if not _in_trading_session(settings):
+        log.info("Momentum: вне торговой сессии (%02d:00-%02d:00 UTC), входы заблокированы",
+                 settings.session_start_utc, settings.session_end_utc)
+        return
+
     try:
         balance = client.get_balance()
         positions = client.get_positions()
@@ -566,6 +606,11 @@ def _process_scalping(
     tradeable_symbols: set[str] | None = None,
 ) -> None:
     """Исполнение скальпинг-сигналов: открытие позиций на Bybit."""
+    if not _in_trading_session(settings):
+        log.info("Скальпинг: вне торговой сессии (%02d:00-%02d:00 UTC), входы заблокированы",
+                 settings.session_start_utc, settings.session_end_utc)
+        return
+
     try:
         balance = client.get_balance()
         positions = client.get_positions()

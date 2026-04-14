@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from bybit_bot.analysis.signals import Direction, atr
 from bybit_bot.market_data.models import Bar
 from bybit_bot.strategies.scalping.indicators import (
+    adf_pvalue,
     ols_hedge_ratio,
     rolling_z_score,
     spread_series,
@@ -47,7 +48,7 @@ DEFAULT_PAIRS: list[tuple[str, str]] = [
     ("INJUSDT", "SOLUSDT"),     # high-perf L1, corr 0.70+
 ]
 
-Z_ENTRY = 2.0
+Z_ENTRY = 2.5
 Z_EXIT = 0.5
 LOOKBACK = 100
 ZSCORE_WINDOW = 50
@@ -109,9 +110,16 @@ class StatArbCryptoStrategy:
 
             beta = ols_hedge_ratio(ca[-LOOKBACK:], cb[-LOOKBACK:])
             sprd = spread_series(ca, cb, beta)
+
+            pval = adf_pvalue(sprd[-LOOKBACK:])
+            if pval > 0.05:
+                log.debug("%s/%s: ADF p=%.3f > 0.05, спред нестационарен", sym_a, sym_b, pval)
+                continue
+
             z = rolling_z_score(sprd, ZSCORE_WINDOW)
 
-            log.debug("%s/%s: corr=%.2f β=%.4f z=%.2f (нужно |z|>%.1f)", sym_a, sym_b, corr, beta, z, Z_ENTRY)
+            log.debug("%s/%s: corr=%.2f β=%.4f z=%.2f adf_p=%.3f (нужно |z|>%.1f)",
+                      sym_a, sym_b, corr, beta, z, pval, Z_ENTRY)
 
             if abs(z) < Z_ENTRY:
                 continue

@@ -1,5 +1,26 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-14
+
+### Адаптированные фильтры (по аналогии с FxPro ботом)
+
+5 фильтров, подтверждённых статистикой 258 сделок и исследованиями:
+
+1. **Сессионный фильтр 07:00-22:00 UTC**: dead zone (22-07) = -$147 при
+   81 сделке (72% потерь, WR 31%). Блокирует входы, выходы работают 24/7.
+2. **Stat-Arb ADF-тест**: проверка стационарности спреда (p < 0.05).
+   Без ADF пары расходились без возврата (DOT -$23, ATOM -$9).
+3. **Stat-Arb Z_ENTRY 2.0→2.5**: строже, меньше ложных входов.
+4. **VWAP HTF фильтр**: 1h EMA(50) slope через Bybit API get_kline().
+   Блокирует вход против старшего тренда.
+5. **Volume Spike ADX > 20**: volume spike в боковике = ложный сигнал.
+
+Все фильтры аддитивные — только блокируют вход, не меняют SL/TP/exit.
+
+**Файлы:** `app/main.py`, `config/settings.py`, `strategies/scalping/stat_arb_crypto.py`,
+`strategies/scalping/vwap_crypto.py`, `strategies/scalping/volume_spike.py`,
+`strategies/scalping/indicators.py`, `trading/client.py`, `pyproject.toml`
+
 ## 2026-04-13
 
 ### Убраны убыточные пары: BTCUSDT, DOGEUSDT, AAVEUSDT, HBARUSDT

@@ -234,6 +234,12 @@ class Settings(BaseSettings):
         default=3, validation_alias="BYBIT_BOT_SCALP_MAX_POSITIONS",
     )
 
+    # Сессионный фильтр: блокировка входов в dead zone (22-07 UTC).
+    # По статистике 258 сделок: dead zone = -$147 (72% потерь), WR 31%.
+    session_filter_enabled: bool = Field(default=True, validation_alias="BYBIT_BOT_SESSION_FILTER")
+    session_start_utc: int = Field(default=7, validation_alias="BYBIT_BOT_SESSION_START")
+    session_end_utc: int = Field(default=22, validation_alias="BYBIT_BOT_SESSION_END")
+
     # Kill Switch — лимиты для демо-торговли.
     # Daily loss 7.5% = $37.50 при $500 (больше свободы на демо).
     # Drawdown 25% = $125 от пика (при переходе на реал — снизить до 10%).

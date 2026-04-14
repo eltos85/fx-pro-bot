@@ -102,3 +102,71 @@ def avg_volume(bars: list[Bar], window: int = 20) -> float:
     if not subset:
         return 0.0
     return sum(b.volume for b in subset) / len(subset)
+
+
+def adf_pvalue(series: list[float]) -> float:
+    """ADF-тест стационарности спреда. Возвращает p-value.
+
+    p < 0.05 → спред стационарен (коинтеграция подтверждена).
+    Источник: стандарт для Stat-Arb (Frontiers 2026, Springer 2025).
+    """
+    if len(series) < 20:
+        return 1.0
+    try:
+        from statsmodels.tsa.stattools import adfuller
+        result = adfuller(series, maxlag=1, autolag=None)
+        return float(result[1])
+    except Exception:
+        return 1.0
+
+
+def compute_adx(bars: list[Bar], period: int = 14) -> float:
+    """ADX — сила тренда (0-100). ADX < 20 = боковик, ADX > 25 = сильный тренд."""
+    n = len(bars)
+    if n < period * 2 + 1:
+        return 0.0
+
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    tr_list: list[float] = []
+
+    for i in range(1, n):
+        high_diff = bars[i].high - bars[i - 1].high
+        low_diff = bars[i - 1].low - bars[i].low
+        plus_dm.append(high_diff if high_diff > low_diff and high_diff > 0 else 0.0)
+        minus_dm.append(low_diff if low_diff > high_diff and low_diff > 0 else 0.0)
+        tr = max(
+            bars[i].high - bars[i].low,
+            abs(bars[i].high - bars[i - 1].close),
+            abs(bars[i].low - bars[i - 1].close),
+        )
+        tr_list.append(tr)
+
+    def _smooth(values: list[float], p: int) -> list[float]:
+        result = [sum(values[:p])]
+        for v in values[p:]:
+            result.append(result[-1] - result[-1] / p + v)
+        return result
+
+    sm_tr = _smooth(tr_list, period)
+    sm_plus = _smooth(plus_dm, period)
+    sm_minus = _smooth(minus_dm, period)
+
+    dx_values: list[float] = []
+    for i in range(len(sm_tr)):
+        if sm_tr[i] == 0:
+            continue
+        plus_di = 100 * sm_plus[i] / sm_tr[i]
+        minus_di = 100 * sm_minus[i] / sm_tr[i]
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            continue
+        dx_values.append(100 * abs(plus_di - minus_di) / di_sum)
+
+    if len(dx_values) < period:
+        return sum(dx_values) / len(dx_values) if dx_values else 0.0
+
+    adx_val = sum(dx_values[:period]) / period
+    for dx in dx_values[period:]:
+        adx_val = (adx_val * (period - 1) + dx) / period
+    return adx_val
