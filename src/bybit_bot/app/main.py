@@ -48,8 +48,8 @@ def _handle_signal(signum: int, frame: object) -> None:
 def _sync_positions_on_startup(client: BybitClient, stats: StatsStore) -> None:
     """При старте: восстановить в БД позиции, открытые на бирже но потерянные ботом.
 
-    Без этого бот не может управлять exit-логикой (trailing, time-stop, TP)
-    для позиций, оставшихся после перезапуска контейнера.
+    Все позиции с биржи добавляются в БД (даже если символ не в scan_symbols),
+    чтобы exit-логика (trailing, time-stop) могла ими управлять.
     """
     try:
         api_positions = client.get_positions()

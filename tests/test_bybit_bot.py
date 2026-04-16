@@ -346,7 +346,7 @@ def test_executor_floor_rounding():
 
 
 def test_sync_positions_on_startup(tmp_path):
-    """При старте бот восстанавливает позиции с биржи, отсутствующие в БД."""
+    """При старте бот восстанавливает все позиции с биржи в БД."""
     from unittest.mock import MagicMock
     from bybit_bot.stats.store import StatsStore
     from bybit_bot.trading.client import PositionInfo
@@ -361,16 +361,21 @@ def test_sync_positions_on_startup(tmp_path):
             entry_price=1.1628, unrealised_pnl=38.42,
             leverage="5", position_idx=0,
         ),
+        PositionInfo(
+            symbol="ATOMUSDT", side="Buy", size="10",
+            entry_price=5.0, unrealised_pnl=-1.64,
+            leverage="5", position_idx=0,
+        ),
     ]
 
     assert len(store.get_open_positions()) == 0
     _sync_positions_on_startup(mock_client, store)
 
     open_pos = store.get_open_positions()
-    assert len(open_pos) == 1
-    assert open_pos[0].symbol == "DOTUSDT"
-    assert open_pos[0].strategy == "recovered"
-    assert open_pos[0].entry_price == 1.1628
+    assert len(open_pos) == 2
+    symbols = {p.symbol for p in open_pos}
+    assert symbols == {"DOTUSDT", "ATOMUSDT"}
+    assert all(p.strategy == "recovered" for p in open_pos)
 
     _sync_positions_on_startup(mock_client, store)
-    assert len(store.get_open_positions()) == 1
+    assert len(store.get_open_positions()) == 2
