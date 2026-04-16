@@ -35,7 +35,7 @@ DEFAULT_PAIRS: list[tuple[str, str]] = [
 ]
 
 Z_ENTRY = 2.5
-Z_EXIT = 0.5
+Z_EXIT = 0.0
 LOOKBACK = 100
 ZSCORE_WINDOW = 50
 SL_ATR_MULT = 2.0

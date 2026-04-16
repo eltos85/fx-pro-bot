@@ -31,7 +31,7 @@ from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
 TIME_STOP_SECONDS = 50 * 300  # 50 баров × 5 мин = 15000 сек (~4.2 часа)
 TRAILING_ACTIVATION_ATR = 0.7
 TRAILING_DISTANCE_ATR = 0.5
-STATARB_EMERGENCY_LOSS = 15.0
+STATARB_EMERGENCY_LOSS = 25.0
 STATARB_PAIR_TP_USD = 2.00  # take-profit по суммарному uPnL пары (с запасом на комиссии ~$0.70)
 
 log = logging.getLogger(__name__)
@@ -471,21 +471,7 @@ def _process_exits(
             db_pos.strategy, db_pos.pair_tag or "-",
         )
 
-        # 2. KillSwitch: max_loss_per_trade
-        if upnl <= -killswitch._config.max_loss_per_trade_usd:
-            log.warning(
-                "MAX_LOSS_PER_TRADE: %s uPnL=%.2f < -%.2f",
-                db_pos.symbol, upnl, killswitch._config.max_loss_per_trade_usd,
-            )
-            if _close_and_record(client, stats, killswitch, db_pos, upnl, "max_loss_per_trade"):
-                already_closed.add(db_pos.symbol)
-                if db_pos.pair_tag:
-                    _close_pair_legs(client, stats, killswitch, db_pos.pair_tag, db_pos.symbol, api_map)
-                    for pp in stats.get_open_by_pair_tag(db_pos.pair_tag):
-                        already_closed.add(pp.symbol)
-            continue
-
-        # 3. Stat-Arb emergency: суммарный uPnL пары < -$15
+        # 2. Stat-Arb emergency: суммарный uPnL пары < -$25
         if db_pos.pair_tag and db_pos.strategy == "scalp_statarb":
             pair_positions = stats.get_open_by_pair_tag(db_pos.pair_tag)
             pair_upnl = sum(
@@ -503,17 +489,7 @@ def _process_exits(
                         already_closed.add(pp.symbol)
                 continue
 
-        # 4. Time-stop по реальному времени (~4.2 часа)
-        if age_sec >= TIME_STOP_SECONDS:
-            log.info("TIME-STOP: %s held %.0f min (limit %.0f min)",
-                     db_pos.symbol, age_min, TIME_STOP_SECONDS / 60)
-            if _close_and_record(client, stats, killswitch, db_pos, upnl, "time_stop"):
-                already_closed.add(db_pos.symbol)
-                if db_pos.pair_tag:
-                    _close_pair_legs(client, stats, killswitch, db_pos.pair_tag, db_pos.symbol, api_map)
-            continue
-
-        # 5. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API (один раз за цикл)
+        # 3. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API (один раз за цикл)
         if upnl > 0 and not db_pos.pair_tag and db_pos.symbol not in trailing_set:
             bars = bars_map.get(db_pos.symbol, [])
             if bars:
