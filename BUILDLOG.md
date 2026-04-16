@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-04-16
+
+### restrict: outsiders/ensemble — только USDJPY
+
+Анализ 281 сделки за 48ч (14–16.04) через cTrader API выявил:
+- **outsiders** генерирует 63% общих убытков (-$30.46 из -$48.04)
+- Убыточен на 4 из 5 пар: GBPUSD WR 16% (-$13.66), EURUSD WR 22% (-$10.22), AUDUSD WR 19% (-$7.12), GBPJPY WR 43% но R:R 0.75 (-$2.41)
+- Единственный прибыльный символ — USDJPY: WR 64%, net +$2.95, LONG-нога +$4.87
+
+Решение: заменить чёрный список `OUTSIDERS_EXCLUDE_SYMBOLS` на белый список
+`OUTSIDERS_ALLOW_SYMBOLS = {"USDJPY=X"}`. Фильтр применяется и к outsiders, и к ensemble.
+
+**Файлы:** `strategies/outsiders.py`, `app/main.py`, `STRATEGIES.md`
+
+---
+
 ## 2026-04-13
 
 ### fix: ужесточение фильтров скальпинг-стратегий по результатам анализа API
