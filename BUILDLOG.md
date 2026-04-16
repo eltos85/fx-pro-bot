@@ -6,7 +6,26 @@
 
 ## 2026-04-16
 
-### restrict: outsiders/ensemble — только USDJPY
+### revert: откат OUTSIDERS_ALLOW_SYMBOLS — защита от оверфита
+
+Откат решения от 2026-04-16 ограничить outsiders/ensemble только `USDJPY=X`.
+
+Причина: мета-анализ BUILDLOG показал системный риск оверфита — несколько последних
+решений принимались на малых выборках (2 сделки XAUUSD, 25 сделок по скальпингу,
+28 сделок outsiders на пару за 48ч в одном рыночном режиме). По мировым практикам
+(Lopez de Prado, Bailey, Harvey) для статистически значимого отключения инструмента
+нужно ≥100 сделок в разных рыночных режимах.
+
+Возвращён прежний `OUTSIDERS_EXCLUDE_SYMBOLS` (крипта, GC=F, EURJPY). Собираем
+данные 1–2 недели в разных режимах, затем пересматриваем при sample ≥100.
+
+Добавлено правило `.cursor/rules/sample-size.mdc`: порог 100 сделок / 2 недели
+перед изменением стратегий на основе P&L-статистики.
+
+**Файлы:** `strategies/outsiders.py`, `app/main.py`, `STRATEGIES.md`,
+`tests/test_outsiders_realism.py`, `.cursor/rules/sample-size.mdc`
+
+### restrict: outsiders/ensemble — только USDJPY (откачено)
 
 Анализ 281 сделки за 48ч (14–16.04) через cTrader API выявил:
 - **outsiders** генерирует 63% общих убытков (-$30.46 из -$48.04)
@@ -15,6 +34,9 @@
 
 Решение: заменить чёрный список `OUTSIDERS_EXCLUDE_SYMBOLS` на белый список
 `OUTSIDERS_ALLOW_SYMBOLS = {"USDJPY=X"}`. Фильтр применяется и к outsiders, и к ensemble.
+
+**Откачено** в рамках антиоверфит-ревизии — sample size (28 сделок/пару) не даёт
+статистической значимости.
 
 **Файлы:** `strategies/outsiders.py`, `app/main.py`, `STRATEGIES.md`
 

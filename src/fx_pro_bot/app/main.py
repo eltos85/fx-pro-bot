@@ -26,7 +26,7 @@ from fx_pro_bot.stats.verifier import run_verification
 from fx_pro_bot.strategies.leaders import LeadersStrategy, aggregate_leader_signals
 from fx_pro_bot.strategies.monitor import PositionMonitor
 from fx_pro_bot.strategies.exits import create_paper_positions
-from fx_pro_bot.strategies.outsiders import ADX_MAX_FOR_MEAN_REVERSION, CONFIRMED_SL_ATR, OUTSIDERS_ALLOW_SYMBOLS, OUTSIDERS_EXCLUDE_SYMBOLS, OutsidersStrategy, detect_extreme_setups
+from fx_pro_bot.strategies.outsiders import ADX_MAX_FOR_MEAN_REVERSION, CONFIRMED_SL_ATR, OUTSIDERS_EXCLUDE_SYMBOLS, OutsidersStrategy, detect_extreme_setups
 from fx_pro_bot.strategies.shadow import ShadowTracker
 from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
@@ -413,7 +413,7 @@ def _run_cycle(
             else:
                 sl = price + CONFIRMED_SL_ATR * atr
 
-            if r.symbol not in OUTSIDERS_ALLOW_SYMBOLS:
+            if r.symbol in OUTSIDERS_EXCLUDE_SYMBOLS:
                 continue
 
             from fx_pro_bot.analysis.signals import compute_adx

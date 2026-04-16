@@ -41,10 +41,6 @@ OUTSIDERS_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "ADA-USD", "LINK-USD", "AVAX-USD", "LTC-USD", "BNB-USD", "DOT-USD",
 })
 
-OUTSIDERS_ALLOW_SYMBOLS: frozenset[str] = frozenset({
-    "USDJPY=X",
-})
-
 ADX_MAX_FOR_MEAN_REVERSION = 25.0
 
 LONDON_START = time(7, 0)
@@ -475,7 +471,7 @@ class OutsidersStrategy:
             if current_total >= self._max_positions:
                 break
 
-            if sig.instrument not in OUTSIDERS_ALLOW_SYMBOLS:
+            if sig.instrument in OUTSIDERS_EXCLUDE_SYMBOLS:
                 continue
 
             instr_count = self._store.count_open_positions(

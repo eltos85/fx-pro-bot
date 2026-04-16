@@ -306,55 +306,55 @@ class TestOutsidersStrategyMode:
         assert strat.mode == "confirmed"
 
         sig = OutsiderSignal(
-            instrument="USDJPY=X",
+            instrument="EURUSD=X",
             direction=TrendDirection.LONG,
             source="extreme_rsi",
             detail="test",
-            atr=0.50,
+            atr=0.0020,
         )
-        opened = strat.process_signals([sig], {"USDJPY=X": 150.000})
+        opened = strat.process_signals([sig], {"EURUSD=X": 1.1000})
         assert opened == 1
 
         positions = store.get_open_positions()
         assert len(positions) == 1
         pos = positions[0]
 
-        expected_entry = 150.000 - 0.3 * 0.50
-        expected_sl = expected_entry - CONFIRMED_SL_ATR * 0.50
-        assert pos.entry_price == pytest.approx(expected_entry, abs=1e-3)
-        assert pos.stop_loss_price == pytest.approx(expected_sl, abs=1e-3)
+        expected_entry = 1.1000 - 0.3 * 0.0020
+        expected_sl = expected_entry - CONFIRMED_SL_ATR * 0.0020
+        assert pos.entry_price == pytest.approx(expected_entry, abs=1e-6)
+        assert pos.stop_loss_price == pytest.approx(expected_sl, abs=1e-6)
 
     def test_classic_mode_uses_original_sl(self, tmp_path):
         store = StatsStore(tmp_path / "test.sqlite")
         strat = OutsidersStrategy(store, mode="classic")
 
         sig = OutsiderSignal(
-            instrument="USDJPY=X",
+            instrument="EURUSD=X",
             direction=TrendDirection.LONG,
             source="extreme_rsi",
             detail="test",
-            atr=0.50,
+            atr=0.0020,
         )
-        opened = strat.process_signals([sig], {"USDJPY=X": 150.000})
+        opened = strat.process_signals([sig], {"EURUSD=X": 1.1000})
         assert opened == 1
 
         positions = store.get_open_positions()
         pos = positions[0]
-        expected_sl = 150.000 - CLASSIC_SL_ATR * 0.50
-        assert pos.stop_loss_price == pytest.approx(expected_sl, abs=1e-3)
+        expected_sl = 1.1000 - CLASSIC_SL_ATR * 0.0020
+        assert pos.stop_loss_price == pytest.approx(expected_sl, abs=1e-6)
 
     def test_cost_is_recorded(self, tmp_path):
         store = StatsStore(tmp_path / "test.sqlite")
         strat = OutsidersStrategy(store, mode="classic")
 
         sig = OutsiderSignal(
-            instrument="USDJPY=X",
+            instrument="EURUSD=X",
             direction=TrendDirection.LONG,
             source="extreme_rsi",
             detail="test",
-            atr=0.50,
+            atr=0.0020,
         )
-        strat.process_signals([sig], {"USDJPY=X": 150.000})
+        strat.process_signals([sig], {"EURUSD=X": 1.1000})
 
         positions = store.get_open_positions()
         assert positions[0].estimated_cost_pips > 0
