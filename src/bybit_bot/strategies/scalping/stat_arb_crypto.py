@@ -28,14 +28,19 @@ from bybit_bot.strategies.scalping.indicators import (
 log = logging.getLogger(__name__)
 
 DEFAULT_PAIRS: list[tuple[str, str]] = [
-    # Только ADF-подтверждённые пары (p < 0.05, 5d/5m, 2026-04-13).
-    # Остальные 14 пар убраны: спреды нестационарны на текущих данных.
-    ("SOLUSDT", "LINKUSDT"),    # corr 0.82, ADF p=0.0012
-    ("SOLUSDT", "WIFUSDT"),     # corr 0.68, ADF p=0.0055
+    # ADF-подтверждённые пары (p < 0.05, 5d/5m, 2026-04-16).
+    # Старые SOL/LINK и SOL/WIF устарели (p=0.17 и 0.44), заменены на актуальные.
+    # Research (MDPI Risks 2023): оптимум 4-6 пар для диверсификации.
+    ("ADAUSDT", "TIAUSDT"),     # corr 0.83, ADF p=0.002
+    ("LINKUSDT", "SUIUSDT"),    # corr 0.98, ADF p=0.006
+    ("WIFUSDT", "TIAUSDT"),     # corr 0.85, ADF p=0.023
+    ("ADAUSDT", "SUIUSDT"),     # corr 0.87, ADF p=0.033
 ]
 
-Z_ENTRY = 2.5
-Z_EXIT = 0.0
+# Z_ENTRY стандарт 2.0 (InsiderFinance, ThunderAlgo, arxiv 2305.06961 — все 2025).
+# Z_EXIT стандарт 0.5 — захват прибыли до полного пересечения mean.
+Z_ENTRY = 2.0
+Z_EXIT = 0.5
 LOOKBACK = 100
 ZSCORE_WINDOW = 50
 SL_ATR_MULT = 2.0

@@ -17,9 +17,10 @@ from bybit_bot.strategies.scalping.indicators import avg_volume, compute_adx
 
 log = logging.getLogger(__name__)
 
-# Volume spike 3-5x = значимый (Trader Dale, AlgoStorm Volume Profile guide).
-# "First Test Rule": первый подход к зоне объёма = самый надёжный сигнал.
-VOLUME_SPIKE_MULT = 3.0
+# Volume spike 2x = значимый всплеск на крипте (TradingView/Medium 2025 backtests).
+# Стандарт для breakout-стратегий 1.5-1.8, для крипты берём 2.0 — баланс между
+# частотой и качеством сигналов. 3.0 слишком строг (редкие входы).
+VOLUME_SPIKE_MULT = 2.0
 PRICE_MOVE_ATR_MIN = 0.5
 RSI_FILTER_LOW = 20
 RSI_FILTER_HIGH = 80

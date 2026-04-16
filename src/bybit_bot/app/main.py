@@ -28,7 +28,7 @@ from bybit_bot.trading.client import BybitClient, InstrumentInfo
 from bybit_bot.trading.executor import TradeExecutor
 from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
 
-TIME_STOP_SECONDS = 50 * 300  # 50 баров × 5 мин = 15000 сек (~4.2 часа)
+TIME_STOP_SECONDS = 24 * 3600  # 24 часа (Finaur/TrendRider 2026: time-exit убирает dead money)
 TRAILING_ACTIVATION_ATR = 0.7
 TRAILING_DISTANCE_ATR = 0.5
 STATARB_EMERGENCY_LOSS = 25.0
@@ -489,7 +489,17 @@ def _process_exits(
                         already_closed.add(pp.symbol)
                 continue
 
-        # 3. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API (один раз за цикл)
+        # 3. Time-stop 24ч: убирает "dead money" трейды (Finaur/TrendRider 2026)
+        if age_sec >= TIME_STOP_SECONDS:
+            log.info("TIME-STOP: %s held %.0f min (limit %.0f min) uPnL=%.2f",
+                     db_pos.symbol, age_min, TIME_STOP_SECONDS / 60, upnl)
+            if _close_and_record(client, stats, killswitch, db_pos, upnl, "time_stop"):
+                already_closed.add(db_pos.symbol)
+                if db_pos.pair_tag:
+                    _close_pair_legs(client, stats, killswitch, db_pos.pair_tag, db_pos.symbol, api_map)
+            continue
+
+        # 4. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API (один раз за цикл)
         if upnl > 0 and not db_pos.pair_tag and db_pos.symbol not in trailing_set:
             bars = bars_map.get(db_pos.symbol, [])
             if bars:

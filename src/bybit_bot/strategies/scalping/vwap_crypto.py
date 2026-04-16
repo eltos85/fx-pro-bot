@@ -21,10 +21,9 @@ RSI_CONFIRM_LOW = 30
 RSI_CONFIRM_HIGH = 70
 SL_ATR_MULT = 2.0
 TP_ATR_MULT = 1.5
-# ADX < 20 = боковик (mean reversion зона).
-# 20-25 = серая зона (избегать). > 25 = тренд (не торговать reversion).
-# Источник: StratBase.ai — бэктест 763 конфигураций, QuantLab.
-ADX_MAX = 20.0
+# ADX < 25 = допустимо для mean reversion (PyQuantLab 2025: 108 конфигураций).
+# Крипта редко даёт ADX < 20, зона 20-25 приемлема. > 25 = сильный тренд.
+ADX_MAX = 25.0
 
 
 def _compute_adx(bars: list[Bar], period: int = 14) -> float:
