@@ -30,7 +30,8 @@ def test_settings_defaults():
     assert s.demo is True
     assert s.trading_enabled is False
     assert s.category == "linear"
-    assert "ETHUSDT" in s.scan_symbols
+    assert "SOLUSDT" in s.scan_symbols
+    assert len(s.scan_symbols) == 8
     assert s.leverage == 5
     assert s.account_balance == 500.0
     assert s.max_positions == 3
@@ -39,6 +40,8 @@ def test_settings_defaults():
     assert s.killswitch_max_drawdown_pct == 25.0
     assert s.killswitch_max_loss_per_trade == 12.50
     assert s.scalping_max_positions == 3
+    assert s.momentum_enabled is False
+    assert s.scalping_funding_enabled is False
 
 
 def test_symbol_mapping():
@@ -340,3 +343,34 @@ def test_executor_floor_rounding():
 
     sol = InstrumentInfo("SOLUSDT", "Trading", 0.1, 0.1, 0.01, 5.0, 50.0)
     assert TradeExecutor._round_qty_api(1.99, sol) == 1.9  # floor, not 2.0
+
+
+def test_sync_positions_on_startup(tmp_path):
+    """При старте бот восстанавливает позиции с биржи, отсутствующие в БД."""
+    from unittest.mock import MagicMock
+    from bybit_bot.stats.store import StatsStore
+    from bybit_bot.trading.client import PositionInfo
+    from bybit_bot.app.main import _sync_positions_on_startup
+
+    store = StatsStore(tmp_path / "sync_test.sqlite")
+
+    mock_client = MagicMock()
+    mock_client.get_positions.return_value = [
+        PositionInfo(
+            symbol="DOTUSDT", side="Buy", size="535.1",
+            entry_price=1.1628, unrealised_pnl=38.42,
+            leverage="5", position_idx=0,
+        ),
+    ]
+
+    assert len(store.get_open_positions()) == 0
+    _sync_positions_on_startup(mock_client, store)
+
+    open_pos = store.get_open_positions()
+    assert len(open_pos) == 1
+    assert open_pos[0].symbol == "DOTUSDT"
+    assert open_pos[0].strategy == "recovered"
+    assert open_pos[0].entry_price == 1.1628
+
+    _sync_positions_on_startup(mock_client, store)
+    assert len(store.get_open_positions()) == 1

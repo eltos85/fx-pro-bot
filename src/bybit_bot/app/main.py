@@ -45,6 +45,46 @@ def _handle_signal(signum: int, frame: object) -> None:
     log.info("Получен сигнал %d, завершаю...", signum)
 
 
+def _sync_positions_on_startup(client: BybitClient, stats: StatsStore) -> None:
+    """При старте: восстановить в БД позиции, открытые на бирже но потерянные ботом.
+
+    Без этого бот не может управлять exit-логикой (trailing, time-stop, TP)
+    для позиций, оставшихся после перезапуска контейнера.
+    """
+    try:
+        api_positions = client.get_positions()
+    except Exception:
+        log.exception("Не удалось получить позиции при старте")
+        return
+
+    if not api_positions:
+        return
+
+    db_open = stats.get_open_positions()
+    db_symbols = {p.symbol for p in db_open}
+
+    recovered = 0
+    for ap in api_positions:
+        if ap.symbol in db_symbols:
+            continue
+        stats.open_position(
+            symbol=ap.symbol,
+            side=ap.side,
+            qty=ap.size,
+            entry_price=ap.entry_price,
+            order_id="recovered_on_startup",
+            strategy="recovered",
+        )
+        recovered += 1
+        log.warning(
+            "RECOVERED: %s %s qty=%s entry=%.4f uPnL=%.2f (не было в БД)",
+            ap.side, ap.symbol, ap.size, ap.entry_price, ap.unrealised_pnl,
+        )
+
+    if recovered:
+        log.info("Синхронизация при старте: восстановлено %d позиций", recovered)
+
+
 def run_bot() -> None:
     settings = Settings()
 
@@ -59,11 +99,12 @@ def run_bot() -> None:
     log.info("Demo: %s | Category: %s", settings.demo, settings.category)
     log.info("Символы: %s", ", ".join(settings.scan_symbols))
     log.info("Торговля: %s", "ВКЛЮЧЕНА" if settings.trading_enabled else "только сигналы")
+    log.info("Momentum: %s", "ВКЛ" if settings.momentum_enabled else "ОТКЛ")
     _log_scalping_config(settings)
     log.info("=" * 60)
 
     stats = StatsStore(settings.stats_db_path)
-    momentum = MomentumStrategy(min_votes=settings.min_ensemble_votes)
+    momentum = MomentumStrategy(min_votes=settings.min_ensemble_votes) if settings.momentum_enabled else None
 
     scalp_vwap = VwapCryptoStrategy(
         max_positions=settings.scalping_max_positions,
@@ -119,6 +160,9 @@ def run_bot() -> None:
     else:
         log.info("Торговля отключена — работаю в режиме сигналов")
 
+    if client and stats:
+        _sync_positions_on_startup(client, stats)
+
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
@@ -155,7 +199,7 @@ def _run_cycle(
     cycle: int,
     settings: Settings,
     stats: StatsStore,
-    momentum: MomentumStrategy,
+    momentum: MomentumStrategy | None,
     scalp_vwap: VwapCryptoStrategy | None,
     scalp_statarb: StatArbCryptoStrategy | None,
     scalp_funding: FundingScalpStrategy | None,
@@ -208,15 +252,16 @@ def _run_cycle(
         scalp_statarb=scalp_statarb,
     )
 
-    _process_momentum(
-        signals=signals,
-        settings=settings,
-        stats=stats,
-        momentum=momentum,
-        client=client,
-        executor=executor,
-        killswitch=killswitch,
-    )
+    if momentum:
+        _process_momentum(
+            signals=signals,
+            settings=settings,
+            stats=stats,
+            momentum=momentum,
+            client=client,
+            executor=executor,
+            killswitch=killswitch,
+        )
 
     if scalp_vwap and client:
         _update_htf_slopes(scalp_vwap, client, settings)

@@ -9,47 +9,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DEFAULT_SYMBOLS = (
-    # Majors (BTCUSDT убран: 12% WR, -$33 за 24 сделки)
-    "ETHUSDT",
-    "SOLUSDT",
-    "XRPUSDT",
-    "BNBUSDT",
-    # Large-cap alts (DOGEUSDT убран: 13% WR, -$16; AAVEUSDT убран: 0% WR, -$17)
-    "ADAUSDT",
-    "LINKUSDT",
-    "AVAXUSDT",
-    "LTCUSDT",
-    "DOTUSDT",
-    "NEARUSDT",
-    "APTUSDT",
-    "ARBUSDT",
-    "SUIUSDT",
-    "UNIUSDT",
-    "ATOMUSDT",
-    "TRXUSDT",
-    # Mid-cap alts (HBARUSDT убран: 0% WR, -$6)
-    "FILUSDT",
-    "INJUSDT",
-    "FETUSDT",
-    "RENDERUSDT",
-    "TONUSDT",
-    "SEIUSDT",
-    "TIAUSDT",
-    "ONDOUSDT",
-    "PENDLEUSDT",
-    "WLDUSDT",
-    "OPUSDT",
-    "RUNEUSDT",
-    "ALGOUSDT",
-    # Stat-Arb (legacy PoW forks, corr 0.75+)
-    "ETCUSDT",
-    "BCHUSDT",
-    # Meme
-    "SHIBUSDT",
-    "PEPEUSDT",
-    "WIFUSDT",
-    "BONKUSDT",
-    "FLOKIUSDT",
+    # 8 символов по статистике 315 сделок (Bybit API, 2026-04-13).
+    # Убраны 27 убыточных: ETH(-$72), BTC(-$33), NEAR(-$14), INJ(-$11) и др.
+    "SOLUSDT",    # StatArb +$10.83, WR 44% — прибылен в парном трейдинге
+    "ADAUSDT",    # +$3.95, WR 57%
+    "LINKUSDT",   # StatArb +$7.60, WR 48% — прибылен в парном трейдинге
+    "SUIUSDT",    # +$4.37, WR 57%
+    "TONUSDT",    # +$3.66, WR 100% (2 сделки)
+    "WIFUSDT",    # +$0.75, WR 67%
+    "TIAUSDT",    # +$0.63, WR 100% (2 сделки)
+    "DOTUSDT",    # closed -$38 НО open +$38 = нетто $0; прибыль не фиксировалась
 )
 
 DISPLAY_NAMES: dict[str, str] = {
@@ -216,6 +185,7 @@ class Settings(BaseSettings):
     )
     max_positions: int = Field(default=3, validation_alias="BYBIT_BOT_MAX_POSITIONS")
     min_ensemble_votes: int = Field(default=3, validation_alias="BYBIT_BOT_MIN_VOTES")
+    momentum_enabled: bool = Field(default=False, validation_alias="BYBIT_BOT_MOMENTUM_ENABLED")
 
     # Скальпинг
     scalping_vwap_enabled: bool = Field(
@@ -225,7 +195,7 @@ class Settings(BaseSettings):
         default=True, validation_alias="BYBIT_BOT_SCALP_STATARB_ENABLED",
     )
     scalping_funding_enabled: bool = Field(
-        default=True, validation_alias="BYBIT_BOT_SCALP_FUNDING_ENABLED",
+        default=False, validation_alias="BYBIT_BOT_SCALP_FUNDING_ENABLED",
     )
     scalping_volume_enabled: bool = Field(
         default=True, validation_alias="BYBIT_BOT_SCALP_VOLUME_ENABLED",

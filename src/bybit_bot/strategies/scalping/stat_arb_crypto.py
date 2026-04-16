@@ -28,24 +28,10 @@ from bybit_bot.strategies.scalping.indicators import (
 log = logging.getLogger(__name__)
 
 DEFAULT_PAIRS: list[tuple[str, str]] = [
-    # --- Оригинальные пары (работали в проде) ---
-    ("BTCUSDT", "ETHUSDT"),      # corr 0.82 (Springer Nature 2024)
-    ("SOLUSDT", "ETHUSDT"),      # L1 sector, corr 0.68-0.74
-    ("LINKUSDT", "ETHUSDT"),     # cointegrated (Springer copula study)
-    ("LTCUSDT", "BTCUSDT"),     # legacy PoW, corr 0.75+
-    ("AVAXUSDT", "ETHUSDT"),    # L1 sector, corr 0.80+
-    ("DOTUSDT", "ETHUSDT"),     # infra, corr 0.70+
-    ("ATOMUSDT", "ETHUSDT"),    # cosmos/L1, corr 0.70+
-    ("NEARUSDT", "SOLUSDT"),    # L1 sector, corr ~0.70
-    ("ARBUSDT", "OPUSDT"),      # L2 sector, corr 0.80+
-    # --- Новые из исследований (FullSwing AI, TradingEconomics 2025) ---
-    ("ADAUSDT", "DOTUSDT"),     # corr 0.98 (TradingEconomics)
-    ("ETHUSDT", "BNBUSDT"),     # corr 0.78 (FullSwing AI)
-    ("AAVEUSDT", "UNIUSDT"),    # DeFi blue-chips, corr 0.75+
-    ("APTUSDT", "SUIUSDT"),     # Move-based L1, corr 0.80+
-    ("ETCUSDT", "BCHUSDT"),     # legacy PoW forks, corr 0.75+
-    ("DOGEUSDT", "XRPUSDT"),    # payment/meme crossover, corr 0.65+
-    ("INJUSDT", "SOLUSDT"),     # high-perf L1, corr 0.70+
+    # Только ADF-подтверждённые пары (p < 0.05, 5d/5m, 2026-04-13).
+    # Остальные 14 пар убраны: спреды нестационарны на текущих данных.
+    ("SOLUSDT", "LINKUSDT"),    # corr 0.82, ADF p=0.0012
+    ("SOLUSDT", "WIFUSDT"),     # corr 0.68, ADF p=0.0055
 ]
 
 Z_ENTRY = 2.5
