@@ -139,11 +139,10 @@ class VwapCryptoStrategy:
             htf_slope = self._htf_slopes.get(symbol)
 
             if deviation < -DEVIATION_THRESHOLD and rsi_val < RSI_CONFIRM_LOW:
-                if slope < 0:
-                    continue
-                if htf_slope is not None and htf_slope < 0:
-                    log.debug("%s: HTF slope=%.6f < 0, long заблокирован", symbol, htf_slope)
-                    continue
+                # Slope-фильтры отключены на демо: чистый mean reversion без
+                # оглядки на локальный и старший тренд.
+                # if slope < 0: continue
+                # if htf_slope is not None and htf_slope < 0: continue
                 signals.append(VwapSignal(
                     symbol=symbol,
                     direction=Direction.LONG,
@@ -155,11 +154,9 @@ class VwapCryptoStrategy:
                 ))
 
             elif deviation > DEVIATION_THRESHOLD and rsi_val > RSI_CONFIRM_HIGH:
-                if slope > 0:
-                    continue
-                if htf_slope is not None and htf_slope > 0:
-                    log.debug("%s: HTF slope=%.6f > 0, short заблокирован", symbol, htf_slope)
-                    continue
+                # Slope-фильтры отключены на демо (см. комментарий выше).
+                # if slope > 0: continue
+                # if htf_slope is not None and htf_slope > 0: continue
                 signals.append(VwapSignal(
                     symbol=symbol,
                     direction=Direction.SHORT,
