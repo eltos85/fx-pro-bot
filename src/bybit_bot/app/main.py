@@ -243,6 +243,8 @@ def _run_cycle(
         log.info("Торговля отключена — только сигналы")
         return
 
+    _reconcile_pending_sync(client=client, stats=stats, killswitch=killswitch)
+
     _process_exits(
         client=client,
         stats=stats,
@@ -351,6 +353,60 @@ def _close_pair_legs(
         _close_and_record(client, stats, killswitch, pp, pnl, "pair_close")
 
 
+def _reconcile_pending_sync(
+    *,
+    client: BybitClient,
+    stats: StatsStore,
+    killswitch: KillSwitch,
+) -> None:
+    """Дозаполнить реальный PnL для позиций со статусом sync_pending.
+
+    Закрытия, где closed-pnl API сразу не успел отдать запись, откладываются
+    с close_reason='sync_pending'. Здесь повторно запрашиваем API не ранее чем
+    через 30 секунд и обновляем pnl_usd + close_reason='sync_closed'. Если
+    трижды подряд не удалось — пометим sync_orphan (закрыт вручную / истёк).
+    """
+    pending = stats.get_pending_sync_positions(older_than_sec=30)
+    if not pending:
+        return
+
+    for db_pos in pending:
+        try:
+            opened_dt = datetime.fromisoformat(db_pos.opened_at)
+            if opened_dt.tzinfo is None:
+                opened_dt = opened_dt.replace(tzinfo=UTC)
+            since_ms = int(opened_dt.timestamp() * 1000)
+        except (ValueError, TypeError):
+            since_ms = int((datetime.now(tz=UTC) - timedelta(hours=24)).timestamp() * 1000)
+
+        cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms, retries=1, retry_delay_sec=0)
+        if not cpnl:
+            closed_age_min = 0.0
+            try:
+                if db_pos.closed_at:
+                    closed_dt = datetime.fromisoformat(db_pos.closed_at)
+                    if closed_dt.tzinfo is None:
+                        closed_dt = closed_dt.replace(tzinfo=UTC)
+                    closed_age_min = (datetime.now(tz=UTC) - closed_dt).total_seconds() / 60
+            except (ValueError, TypeError):
+                pass
+            # Если прошло >30 минут и API всё ещё пусто — закрываем как orphan
+            if closed_age_min > 30:
+                stats.update_closed_pnl(db_pos.id, exit_price=0.0, pnl_usd=0.0,
+                                        close_reason="sync_orphan")
+                log.warning("RECONCILE %s: closed >%.0fмин, API пусто → sync_orphan",
+                            db_pos.symbol, closed_age_min)
+            continue
+
+        real_pnl = float(cpnl["closedPnl"])
+        exit_price = float(cpnl.get("avgExitPrice", 0))
+        stats.update_closed_pnl(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl,
+                                close_reason="sync_closed")
+        killswitch.record_trade_close(real_pnl)
+        log.info("RECONCILE %s: real PnL=%.4f exit=%.4f (from API, was sync_pending)",
+                 db_pos.symbol, real_pnl, exit_price)
+
+
 def _process_exits(
     *,
     client: BybitClient,
@@ -375,6 +431,8 @@ def _process_exits(
 
     # Синхронизация: закрыть в БД позиции, которых уже нет на бирже.
     # Подтягиваем реальный PnL из Bybit closed-pnl API.
+    # Если API не вернул запись (закрытие <1-2с назад) — помечаем позицию
+    # close_reason="sync_pending" и возвращаемся к ней в следующем цикле.
     for db_pos in db_open:
         if db_pos.symbol not in api_map:
             real_pnl = 0.0
@@ -393,11 +451,13 @@ def _process_exits(
                 exit_price = float(cpnl.get("avgExitPrice", 0))
                 log.info("SYNC %s: real PnL=%.4f exit=%.4f (from API)",
                          db_pos.symbol, real_pnl, exit_price)
+                stats.close_position(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl,
+                                     close_reason="sync_closed")
             else:
-                log.warning("SYNC %s: closed-pnl не найден в API, pnl=0", db_pos.symbol)
-
-            stats.close_position(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl,
-                                 close_reason="sync_closed")
+                log.warning("SYNC %s: closed-pnl API пусто — помечаем sync_pending, повтор в след. цикле",
+                            db_pos.symbol)
+                stats.close_position(db_pos.id, exit_price=0.0, pnl_usd=0.0,
+                                     close_reason="sync_pending")
 
     db_open = [p for p in db_open if p.symbol in api_map]
     if not db_open:

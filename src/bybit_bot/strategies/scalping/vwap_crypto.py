@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from bybit_bot.analysis.signals import Direction, atr, ema, ema_bounce, rsi
+from bybit_bot.analysis.signals import Direction, atr, ema, rsi
 from bybit_bot.market_data.models import Bar
 from bybit_bot.strategies.scalping.indicators import ema_slope, vwap
 
@@ -24,6 +24,14 @@ TP_ATR_MULT = 1.5
 # ADX < 25 = допустимо для mean reversion (PyQuantLab 2025: 108 конфигураций).
 # Крипта редко даёт ADX < 20, зона 20-25 приемлема. > 25 = сильный тренд.
 ADX_MAX = 25.0
+
+# Мягкий HTF slope-фильтр: блокируем вход только против СИЛЬНОГО старшего тренда.
+# |slope| < HTF_SLOPE_FLAT → считаем боковиком, mean-reversion работает в обе стороны.
+# |slope| >= HTF_SLOPE_FLAT → запрещаем контр-трендовое направление.
+# 0.0005 ≈ 0.05% за 1h бар → мягче, чем полный запрет. Локальный 5m slope
+# отключён — он слишком шумный и режет почти все MR-сигналы на трендовых
+# участках, хотя именно там MR часто отрабатывает.
+HTF_SLOPE_FLAT = 0.0005
 
 
 def _compute_adx(bars: list[Bar], period: int = 14) -> float:
@@ -139,10 +147,12 @@ class VwapCryptoStrategy:
             htf_slope = self._htf_slopes.get(symbol)
 
             if deviation < -DEVIATION_THRESHOLD and rsi_val < RSI_CONFIRM_LOW:
-                # Slope-фильтры отключены на демо: чистый mean reversion без
-                # оглядки на локальный и старший тренд.
-                # if slope < 0: continue
-                # if htf_slope is not None and htf_slope < 0: continue
+                # Мягкий HTF-фильтр: не открываем LONG, если 1h тренд сильно вниз.
+                # Локальный 5m slope отключён — он слишком шумный.
+                if htf_slope is not None and htf_slope < -HTF_SLOPE_FLAT:
+                    log.debug("%s LONG: HTF slope=%.6f < -%.6f (сильный down), пропуск",
+                              symbol, htf_slope, HTF_SLOPE_FLAT)
+                    continue
                 signals.append(VwapSignal(
                     symbol=symbol,
                     direction=Direction.LONG,
@@ -154,9 +164,11 @@ class VwapCryptoStrategy:
                 ))
 
             elif deviation > DEVIATION_THRESHOLD and rsi_val > RSI_CONFIRM_HIGH:
-                # Slope-фильтры отключены на демо (см. комментарий выше).
-                # if slope > 0: continue
-                # if htf_slope is not None and htf_slope > 0: continue
+                # Не открываем SHORT, если 1h тренд сильно вверх.
+                if htf_slope is not None and htf_slope > HTF_SLOPE_FLAT:
+                    log.debug("%s SHORT: HTF slope=%.6f > +%.6f (сильный up), пропуск",
+                              symbol, htf_slope, HTF_SLOPE_FLAT)
+                    continue
                 signals.append(VwapSignal(
                     symbol=symbol,
                     direction=Direction.SHORT,

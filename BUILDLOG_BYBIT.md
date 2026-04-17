@@ -1,5 +1,44 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-17
+
+### Реальный PnL из closed-pnl API + мягкий HTF slope-фильтр VWAP
+
+Сверка БД с Bybit API за 17 сделок с 17:00 UTC 16.04:
+- DB total: -16.58 USD
+- API total: -23.33 USD
+- **Разница ~6.75 USD**: комиссии + 3 сделки с `pnl_usd=0` (API не успел зафиксировать closed-pnl к моменту sync).
+
+Исправления:
+
+**1. `fetch_realized_pnl` с retry:**
+Было — один запрос сразу после закрытия, при неуспехе 0. Стало — 3 попытки
+по 2 сек паузы (всего до 6 сек ожидания). Закрывает большинство случаев
+API-лага Bybit.
+
+**2. sync_pending + reconcile в следующих циклах:**
+Если после retry API всё ещё пусто — позиция закрывается с
+`close_reason='sync_pending'` и `pnl_usd=0` (временное значение).
+Новая функция `_reconcile_pending_sync` в начале каждого цикла проверяет
+такие записи (с задержкой ≥30 сек) и обновляет реальным `closedPnl`.
+Через 30 минут безрезультатных попыток → `sync_orphan` (ручное закрытие
+на бирже / истёк таймаут API).
+
+**3. Разовый фикс прошлых записей:**
+`scripts/fix_missing_pnl.py` — пересчитывает PnL для закрытых сделок
+с `pnl_usd=0` или `close_reason='sync_pending'` начиная с cutoff.
+Выбирает ближайшую по времени запись из closed-pnl API.
+
+**4. VWAP: мягкий HTF slope-фильтр:**
+Полное отключение обоих slope-фильтров не помогло — VWAP SHORT дал убытки
+(SOL -4.48). Локальный 5m slope остался отключённым (слишком шумный).
+HTF (1h) slope вернули с порогом `HTF_SLOPE_FLAT = 0.0005` — блокируем
+вход только против СИЛЬНОГО старшего тренда (>0.05%/бар ≈ 2.4%/час).
+Боковик `|slope| < 0.0005` → mean reversion работает в обе стороны.
+
+**Файлы:** trading/client.py, app/main.py, stats/store.py,
+strategies/scalping/vwap_crypto.py, scripts/fix_missing_pnl.py
+
 ## 2026-04-16
 
 ### VWAP: отключены slope-фильтры на демо

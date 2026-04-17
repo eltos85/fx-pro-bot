@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -185,6 +185,35 @@ class StatsStore:
             "SELECT * FROM positions WHERE closed_at IS NULL ORDER BY opened_at",
         ).fetchall()
         return [self._row_to_position(r) for r in rows]
+
+    def get_pending_sync_positions(self, older_than_sec: int = 0) -> list[PositionRow]:
+        """Закрытые с close_reason='sync_pending' — ждут уточнения PnL из API.
+
+        older_than_sec: вернуть только те, что закрылись раньше указанных секунд назад
+        (чтобы дать API время зафиксировать closed-pnl).
+        """
+        cutoff = (datetime.now(tz=UTC) - timedelta(seconds=older_than_sec)).isoformat()
+        rows = self.conn.execute(
+            "SELECT * FROM positions WHERE close_reason='sync_pending' AND closed_at <= ? "
+            "ORDER BY closed_at",
+            (cutoff,),
+        ).fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    def update_closed_pnl(
+        self,
+        position_id: int,
+        exit_price: float,
+        pnl_usd: float,
+        close_reason: str,
+    ) -> None:
+        """Обновить pnl_usd / exit_price / close_reason у уже закрытой позиции
+        (нужно для дозаполнения sync_pending после получения closedPnl из API)."""
+        self.conn.execute(
+            "UPDATE positions SET exit_price=?, pnl_usd=?, close_reason=? WHERE id=?",
+            (exit_price, pnl_usd, close_reason, position_id),
+        )
+        self.conn.commit()
 
     def get_open_position_by_symbol(self, symbol: str) -> PositionRow | None:
         row = self.conn.execute(

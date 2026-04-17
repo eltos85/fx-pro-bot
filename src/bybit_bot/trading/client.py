@@ -309,15 +309,30 @@ class BybitClient:
             log.warning("get_closed_pnl error: %s", e)
             return []
 
-    def fetch_realized_pnl(self, symbol: str, since_ms: int) -> dict | None:
+    def fetch_realized_pnl(
+        self,
+        symbol: str,
+        since_ms: int,
+        *,
+        retries: int = 3,
+        retry_delay_sec: float = 2.0,
+    ) -> dict | None:
         """Найти последнюю запись closed-pnl для символа после since_ms.
 
-        Возвращает dict с ключами closedPnl, avgEntryPrice, avgExitPrice
-        или None если не найдено.
+        Bybit обновляет closed-pnl с задержкой 1-5 секунд после закрытия,
+        поэтому делаем retry: API может ещё не успеть зафиксировать запись.
+
+        Возвращает dict с ключами closedPnl, avgEntryPrice, avgExitPrice,
+        updatedTime, qty или None если не найдено после всех попыток.
         """
-        records = self.get_closed_pnl(symbol=symbol, limit=5, start_time=since_ms)
-        if records:
-            return records[0]
+        import time
+        for attempt in range(retries):
+            records = self.get_closed_pnl(symbol=symbol, limit=10, start_time=since_ms)
+            if records:
+                # API возвращает в порядке от новых к старым -> берём самую свежую
+                return records[0]
+            if attempt < retries - 1:
+                time.sleep(retry_delay_sec)
         return None
 
     def get_instruments(self, symbols: tuple[str, ...] | list[str] | None = None) -> dict[str, InstrumentInfo]:
