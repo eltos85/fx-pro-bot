@@ -17,7 +17,8 @@
   а не время открытия позиции, поэтому использовать его для hold нельзя).
 - Инкрементальный sync: тянем только новое (по last_fetched_end_ms).
 - Bybit v5 get_closed_pnl: окно между startTime и endTime ≤ 7 дней,
-  пагинация по cursor, limit=100.
+  пагинация по cursor, limit=100. API хранит ~7 дней истории,
+  поэтому при первом запуске (пустая БД) старт = now − 7d.
 
 Запуск (VPS, внутри контейнера):
     docker exec fx-pro-bot-bybit-bot-1 python3 -m scripts.ab_test_snapshot \\
@@ -35,15 +36,27 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger("ab_test_snapshot")
 
-# Старт bybit-бота (первая сделка ~14:22 UTC 2026-04-11).
-DEFAULT_EPOCH_MS = int(datetime(2026, 4, 11, 13, 0, tzinfo=UTC).timestamp() * 1000)
+# Bybit API closed-pnl хранит только последние ~7 дней. Запрашивать глубже
+# бессмысленно — вернётся пусто. При первом запуске с пустой БД тянем
+# максимум доступного окна = сейчас − 7 дней.
+INITIAL_LOOKBACK_DAYS = 7
 WINDOW_MS = 7 * 24 * 3600 * 1000  # Bybit ограничение окна closed-pnl
 SYNC_RECENT_OVERLAP_MS = 60 * 60 * 1000  # при sync пересматриваем последний час — страховка от лага API
+
+
+def initial_epoch_ms() -> int:
+    """Точка старта sync при пустой БД — максимум назад, что отдаёт API (7 дней)."""
+    return int((datetime.now(tz=UTC) - timedelta(days=INITIAL_LOOKBACK_DAYS)).timestamp() * 1000)
+
+
+# Для обратной совместимости с тестами: вычисляем один раз при import.
+# В sync_closed_pnl используем initial_epoch_ms() — свежее значение.
+DEFAULT_EPOCH_MS = initial_epoch_ms()
 
 
 # ============================================================================
@@ -220,8 +233,9 @@ def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_d
     Возвращает количество добавленных (новых) сделок.
     """
     last_ms_raw = meta_get(conn, "last_fetched_end_ms")
-    last_ms = int(last_ms_raw) if last_ms_raw else DEFAULT_EPOCH_MS
-    start_ms = max(DEFAULT_EPOCH_MS, last_ms - SYNC_RECENT_OVERLAP_MS)
+    floor_ms = initial_epoch_ms()
+    last_ms = int(last_ms_raw) if last_ms_raw else floor_ms
+    start_ms = max(floor_ms, last_ms - SYNC_RECENT_OVERLAP_MS)
     now_ms = int(time.time() * 1000)
 
     added = 0
