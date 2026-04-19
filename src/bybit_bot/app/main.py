@@ -21,6 +21,7 @@ from bybit_bot.market_data.models import Bar
 from bybit_bot.stats.store import PositionRow, StatsStore
 from bybit_bot.strategies.momentum import MomentumStrategy
 from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
+from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
 from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
 from bybit_bot.strategies.scalping.volume_spike import VolumeSpikeStrategy
 from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
@@ -110,6 +111,7 @@ def run_bot() -> None:
 
     scalp_statarb = StatArbCryptoStrategy() if settings.scalping_statarb_enabled else None
     scalp_volume = VolumeSpikeStrategy() if settings.scalping_volume_enabled else None
+    scalp_orb = SessionOrbStrategy() if settings.scalping_orb_enabled else None
 
     client: BybitClient | None = None
     executor: TradeExecutor | None = None
@@ -176,6 +178,7 @@ def run_bot() -> None:
                 scalp_statarb=scalp_statarb,
                 scalp_funding=scalp_funding,
                 scalp_volume=scalp_volume,
+                scalp_orb=scalp_orb,
                 client=client,
                 executor=executor,
                 killswitch=killswitch,
@@ -201,6 +204,7 @@ def _run_cycle(
     scalp_statarb: StatArbCryptoStrategy | None,
     scalp_funding: FundingScalpStrategy | None,
     scalp_volume: VolumeSpikeStrategy | None,
+    scalp_orb: SessionOrbStrategy | None,
     client: BybitClient | None,
     executor: TradeExecutor | None,
     killswitch: KillSwitch | None,
@@ -276,6 +280,7 @@ def _run_cycle(
         scalp_statarb=scalp_statarb,
         scalp_funding=scalp_funding,
         scalp_volume=scalp_volume,
+        scalp_orb=scalp_orb,
         cycle_counter=cycle,
         tradeable_symbols=tradeable_symbols,
     )
@@ -711,6 +716,7 @@ def _process_scalping(
     scalp_statarb: StatArbCryptoStrategy | None,
     scalp_funding: FundingScalpStrategy | None,
     scalp_volume: VolumeSpikeStrategy | None,
+    scalp_orb: SessionOrbStrategy | None,
     cycle_counter: int = 0,
     tradeable_symbols: set[str] | None = None,
 ) -> None:
@@ -728,7 +734,9 @@ def _process_scalping(
         return
 
     open_symbols = {p.symbol for p in positions}
-    scalp_strategies = {"scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume"}
+    scalp_strategies = {
+        "scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume", "scalp_orb",
+    }
     db_open = stats.get_open_positions()
     scalp_opened = sum(1 for dp in db_open if dp.strategy in scalp_strategies)
 
@@ -793,6 +801,21 @@ def _process_scalping(
                 )
                 scalp_trades.append((vs.symbol, sig, bars_map[vs.symbol], "scalp_volume"))
 
+    if scalp_orb and bars_map:
+        for orb in scalp_orb.scan(bars_map):
+            if orb.symbol in open_symbols:
+                continue
+            # TP привязан к размеру коробки: TP_BOX_MULT × box_range в ATR.
+            tp_atr_mult = (orb.box_range * 2.0) / orb.atr_value if orb.atr_value > 0 else 2.0
+            tp_atr_mult = max(1.0, min(tp_atr_mult, 4.0))
+            sig = Signal(
+                direction=orb.direction, strength=0.75,
+                reasons=(f"orb_{orb.session}_vol={orb.volume_ratio:.1f}x",),
+                sl_atr_mult=2.0, tp_atr_mult=tp_atr_mult,
+                strategy_name="scalp_orb",
+            )
+            scalp_trades.append((orb.symbol, sig, bars_map[orb.symbol], "scalp_orb"))
+
     log.info("Скальпинг: найдено %d сигналов (max позиций=%d, открыто=%d)",
              len(scalp_trades), settings.scalping_max_positions, scalp_opened)
 
@@ -846,6 +869,8 @@ def _log_scalping_config(settings: Settings) -> None:
         active.append("Funding")
     if settings.scalping_volume_enabled:
         active.append("VolSpike")
+    if settings.scalping_orb_enabled:
+        active.append("ORB")
     log.info("Скальпинг: %s", ", ".join(active) if active else "отключён")
 
 

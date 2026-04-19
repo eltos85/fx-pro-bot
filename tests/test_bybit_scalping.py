@@ -222,6 +222,173 @@ class TestVolumeSpike:
         assert strat._max_signals == 2
 
 
+# ── Session ORB Strategy ─────────────────────────────────────
+
+def _make_orb_session(
+    *,
+    session_hour: int = 8,
+    box_high: float = 60_100.0,
+    box_low: float = 59_900.0,
+    pre_bars: int = 120,
+    post_orb_bars: int = 1,
+    breakout: str | None = "up",
+    breakout_delta: float = 50.0,
+    spike_volume: float = 200.0,
+    normal_volume: float = 100.0,
+    symbol: str = "BTCUSDT",
+) -> list[Bar]:
+    """Сгенерировать последовательность баров для теста ORB.
+
+    - 120 пре-сессионных баров с EMA-трендом вверх или вниз (управляется
+      параметром breakout: 'up' -> растущий тренд, 'down' -> падающий).
+    - 3 бара коробки (первые 15 мин сессии, session_hour:00..session_hour:15)
+      формируют диапазон [box_low, box_high].
+    - post_orb_bars пробойных баров, последний — либо пробой вверх/вниз
+      с объёмом spike_volume, либо сидит в коробке.
+    """
+    from datetime import timedelta
+
+    bars: list[Bar] = []
+    session_start = datetime(2026, 4, 17, session_hour, 0, tzinfo=UTC)
+    pre_start = session_start - timedelta(minutes=5 * pre_bars)
+
+    # Пре-сессия: лёгкий дрейф к центру коробки + рыночный шум, чтобы
+    # ADX остался ниже 25 (иначе ORB-фильтр «ADX > 25 = уже тренд»
+    # отсечёт всё). EMA-slope при этом остаётся положительным/отрицательным
+    # благодаря направленному дрейфу.
+    center = (box_high + box_low) / 2
+    drift = 0.05 if breakout == "up" else (-0.05 if breakout == "down" else 0.0)
+    for i in range(pre_bars):
+        # Осцилляция (синус) + лёгкий тренд — ADX останется ~10-20
+        noise = ((i * 7) % 11) - 5  # детерминированный псевдо-шум
+        price = center - drift * (pre_bars - i) + noise
+        bars.append(Bar(
+            symbol=symbol,
+            ts=pre_start + timedelta(minutes=5 * i),
+            open=price - 2,
+            high=price + 5,
+            low=price - 5,
+            close=price,
+            volume=normal_volume,
+        ))
+
+    # 3 бара коробки — осциллируют внутри [box_low, box_high]
+    for i in range(3):
+        bars.append(Bar(
+            symbol=symbol,
+            ts=session_start + timedelta(minutes=5 * i),
+            open=box_low + (box_high - box_low) * 0.3,
+            high=box_high,
+            low=box_low,
+            close=box_low + (box_high - box_low) * 0.6,
+            volume=normal_volume,
+        ))
+
+    # post_orb_bars пробойных баров
+    for i in range(post_orb_bars):
+        is_last = i == post_orb_bars - 1
+        if is_last and breakout == "up":
+            o, h, l_, c = box_high - 5, box_high + breakout_delta, box_high - 10, box_high + breakout_delta - 5
+            v = spike_volume
+        elif is_last and breakout == "down":
+            o, h, l_, c = box_low + 5, box_low + 10, box_low - breakout_delta, box_low - breakout_delta + 5
+            v = spike_volume
+        else:
+            # Сидит внутри коробки
+            o = box_low + (box_high - box_low) * 0.4
+            h = box_high - 10
+            l_ = box_low + 10
+            c = box_low + (box_high - box_low) * 0.5
+            v = normal_volume
+        bars.append(Bar(
+            symbol=symbol,
+            ts=session_start + timedelta(minutes=5 * (3 + i)),
+            open=o, high=h, low=l_, close=c, volume=v,
+        ))
+    return bars
+
+
+class TestSessionOrb:
+    def test_breakout_up_detected(self):
+        from bybit_bot.strategies.scalping.session_orb import (
+            SessionOrbStrategy, OrbSignal,
+        )
+        from bybit_bot.analysis.signals import Direction
+
+        bars = _make_orb_session(breakout="up")
+        signals = SessionOrbStrategy().scan({"BTCUSDT": bars})
+        assert len(signals) == 1
+        sig = signals[0]
+        assert isinstance(sig, OrbSignal)
+        assert sig.symbol == "BTCUSDT"
+        assert sig.direction == Direction.LONG
+        assert sig.session == "london"
+        assert sig.volume_ratio >= 1.3
+
+    def test_breakout_down_detected(self):
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+        from bybit_bot.analysis.signals import Direction
+
+        bars = _make_orb_session(breakout="down")
+        signals = SessionOrbStrategy().scan({"BTCUSDT": bars})
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.SHORT
+
+    def test_no_signal_inside_box(self):
+        """Цена внутри коробки → нет пробоя → нет сигнала."""
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+
+        bars = _make_orb_session(breakout=None)
+        assert SessionOrbStrategy().scan({"BTCUSDT": bars}) == []
+
+    def test_no_signal_low_volume(self):
+        """Пробой есть, но объём ниже 1.3× → отсекаем."""
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+
+        bars = _make_orb_session(breakout="up", spike_volume=100.0)  # == normal
+        assert SessionOrbStrategy().scan({"BTCUSDT": bars}) == []
+
+    def test_no_signal_out_of_session(self):
+        """Текущий бар вне сессионных окон → коробку не строим."""
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+
+        # 05:00 UTC — никакая сессия не активна (asia 00-01, london 08-09, ny 14-15)
+        bars = _make_orb_session(session_hour=5, breakout="up")
+        assert SessionOrbStrategy().scan({"BTCUSDT": bars}) == []
+
+    def test_no_signal_after_earlier_breakout(self):
+        """Если пробой уже случился раньше в post_orb — второй раз не входим."""
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+
+        # 5 post-orb баров: 1-й пробойный, 5-й тоже пробойный
+        bars = _make_orb_session(breakout="up", post_orb_bars=5)
+        # Вручную сделаем первый post-orb бар тоже пробойным
+        # (индекс 120 + 3 = 123 — первый после коробки)
+        first_post = bars[123]
+        bars[123] = Bar(
+            symbol=first_post.symbol, ts=first_post.ts,
+            open=60_095.0, high=60_200.0, low=60_090.0, close=60_190.0,
+            volume=first_post.volume,
+        )
+        # Теперь пробой был раньше → последний бар тоже пробойный,
+        # но earlier_broke_up=True → должен быть отсечён
+        assert SessionOrbStrategy().scan({"BTCUSDT": bars}) == []
+
+    def test_insufficient_bars(self):
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+        assert SessionOrbStrategy().scan({"BTCUSDT": _make_bars(n=10)}) == []
+
+    def test_max_signals_limit(self):
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+        strat = SessionOrbStrategy(max_signals_per_scan=1)
+        bars_a = _make_orb_session(breakout="up")
+        bars_b = _make_orb_session(breakout="up", symbol="ETHUSDT",
+                                   box_high=3000.0, box_low=2990.0,
+                                   spike_volume=300.0)
+        signals = strat.scan({"BTCUSDT": bars_a, "ETHUSDT": bars_b})
+        assert len(signals) == 1
+
+
 # ── Integration: imports ─────────────────────────────────────
 
 def test_all_scalping_imports():
@@ -230,3 +397,4 @@ def test_all_scalping_imports():
     from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
     from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
     from bybit_bot.strategies.scalping.volume_spike import VolumeSpikeStrategy
+    from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy

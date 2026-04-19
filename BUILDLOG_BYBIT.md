@@ -2,6 +2,55 @@
 
 ## 2026-04-19
 
+### Стратегия A: Session ORB 15m (код, без деплоя)
+
+**Идея:** первые 15 минут после открытия торговой сессии (Asia 00-01,
+London 08-09, NY 14-15 UTC) формируют коробку high/low на 3 барах M5.
+Пробой коробки с подтверждением по объёму и EMA-фильтру = вход в сторону
+пробоя. Цель — ловить выход из ночной консолидации, когда открывается
+ликвидный час.
+
+**Параметры** (`strategies/scalping/session_orb.py`):
+
+- `ORB_BARS = 3` (15 мин коробки).
+- `BREAKOUT_FILTER_ATR = 0.3` — отсекает ложные тычки.
+- `VOLUME_MULT = 1.3` — пробой без объёма часто откатывается.
+- `ADX_MAX = 25` — выше = уже тренд, ORB не работает.
+- EMA(50) slope совпадает с направлением пробоя.
+- «Первый пробой в сессии» — если до этого post-ORB-бары уже сидели
+  выше/ниже коробки, не входим (поздно, волатильность съелась).
+- `SL = 2.0×ATR`, `TP_atr_mult = 2.0×box_range/ATR` (TP пропорционален
+  размеру коробки, clamped 1.0..4.0).
+
+**Принципиальная изоляция от FxPro:** модуль импортирует только
+`bybit_bot.*`. Общих зависимостей с `src/fx_pro_bot/` нет, стратегии
+живут в разных экосистемах.
+
+**Интеграция:**
+
+- `settings.scalping_orb_enabled: bool = False` (выключено по умолчанию,
+  env `BYBIT_BOT_SCALP_ORB_ENABLED`).
+- Регистрация в `main.py`: `SessionOrbStrategy()`, проброс через
+  `_run_cycle` → `_process_scalping`, сигналы складываются в общий
+  `scalp_trades` с `strategy_name="scalp_orb"`.
+- Включён в `scalp_strategies` set для корректного счётчика позиций.
+
+**Тесты** (`tests/test_bybit_scalping.py::TestSessionOrb`): 8 новых тестов:
+
+- `breakout_up/down_detected` — корректное распознавание обеих сторон.
+- `no_signal_inside_box` — без пробоя нет сигнала.
+- `no_signal_low_volume` — volume filter работает.
+- `no_signal_out_of_session` — вне сессионных окон коробку не строим.
+- `no_signal_after_earlier_breakout` — второй пробой в той же сессии
+  игнорится.
+- `insufficient_bars`, `max_signals_limit` — edge cases.
+
+Общий набор тестов: **244/244** зелёные.
+
+**Статус:** код готов, на VPS не деплоится пока не созреют две
+другие новые стратегии + апгрейды (Волна 4 — единый merge).
+
+
 ### AB-snapshots: cumulative store с первым окном 7 дней
 
 **Зачем:** API Bybit `/v5/position/closed-pnl` хранит только последние ~7 дней
