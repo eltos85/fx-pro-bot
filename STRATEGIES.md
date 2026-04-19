@@ -327,6 +327,135 @@ relative = Round(distance, symbol.Digits) * 100_000
 
 ---
 
+## 3e. Bybit Crypto Bot — Scalping Strategies
+
+**Путь:** `src/bybit_bot/strategies/scalping/`
+**Изоляция:** модули импортируют только `bybit_bot.*`, не пересекаются с FxPro кодом.
+
+Все стратегии имеют research-обоснование параметров. **Любая правка параметров
+должна ссылаться на источник (paper/реферальный код) — см. правило
+`.cursor/rules/strategy-guard.mdc`.**
+
+### Каноничные исследования по стратегиям
+
+| Стратегия | Research source | Ключевые параметры из research |
+|---|---|---|
+| VWAP Mean-Reversion | Bouchaud et al. «Trades, Quotes & Prices» (2018) — VWAP-reversion эффект на HFT | deviation ≥ 2 ATR |
+| Stat-Arb Cross-Pair | Engle-Granger cointegration; Gatev-Goetzmann «Pairs Trading» (2006) | Z-entry 2.5σ, Z-exit 0.5σ |
+| Funding Rate | Perpetual futures basis literature, Bybit API docs | 8h funding > 0.05% |
+| Volume Spike | On-balance volume literature (Granville 1963, modern crypto adaptation) | vol ≥ 2× 20-period avg |
+| **Session ORB (15m)** | FMZQuant «Volume-Confirmed ORB» (2024); TradingView OptionFlows community | ORB=15min, vol≥1.3×, EMA trend, ATR-based SL/TP |
+| **Turtle Soup fade** | Connors & Raschke «Street Smarts» (1995); Turtle Soup Enhanced (Sword Red / Medium 2024) | lookback=20, RSI extreme confirmation |
+| **BTC Lead-Lag → Alt** | «Price Transmission from BTC to Altcoins» (Asia-Pacific Financial Markets, Springer 2026, DOI 10.1007/s10690-026-09589-z); «High-Frequency Lead-Lag in The Bitcoin Market» (kryptografen 2019) | **corr(log-returns)** 50-bar window ≥ 0.5, BTC move ≥1%, ≥1.5 ATR |
+
+### Параметры стратегий
+
+#### VWAP Mean-Reversion Micro-Scalper (crypto)
+**Файл:** `vwap_crypto.py`
+
+| Параметр | Значение | Research |
+|---|---|---|
+| DEVIATION_THRESHOLD | 2.0 ATR | 95% boundary, стандарт HFT |
+| RSI filter | <30 / >70 | Confirmation (Wilder) |
+| SL / TP | 2.0 / 1.5 ATR | RR 0.75 — агрессивный scalp |
+
+#### Stat-Arb Cross-Pair (crypto)
+**Файл:** `stat_arb_crypto.py`
+
+| Параметр | Значение | Research |
+|---|---|---|
+| Z_ENTRY / Z_EXIT | 2.5 / 0.5 | Gatev-Goetzmann threshold |
+| ADF_CRITICAL | -2.86 (5% level) | Стандарт коинтеграции |
+| LOOKBACK | 100 баров | ≥ 2 × z-window |
+
+#### Funding Rate Scalp
+**Файл:** `funding_scalp.py`
+
+| Параметр | Значение | Research |
+|---|---|---|
+| FUNDING_THRESHOLD | 0.05% (8h) | Bybit docs: «extreme funding регион» |
+| Entry direction | Против funding | Funding = премия, возвращается к 0 |
+
+#### Volume Spike (moderate size)
+**Файл:** `volume_spike.py`
+
+| Параметр | Значение | Research |
+|---|---|---|
+| VOLUME_MULT | 2.0× 20-bar avg | Granville volume confirmation |
+| Direction | Continuation (not fade) | HFT bias on positive lag |
+
+#### Session ORB 15m (Wave 4, не деплой)
+**Файл:** `session_orb.py`
+
+| Параметр | Значение | Research |
+|---|---|---|
+| ORB_BARS | 3 (15 мин M5) | FMZQuant: «first 15 minutes after market open» |
+| VOLUME_MULT | 1.3× 20-period avg | FMZQuant: «1.3× … to verify breakout validity» |
+| BREAKOUT_FILTER | 0.3 ATR | Filter false wicks |
+| EMA(50) slope | направление | FMZQuant trend filter (в оригинале EMA 20/50) |
+| ADX_MAX | 25 | Optional filter (FMZQuant: «VWAP/MACD optional toggles») |
+| SL / TP | 2.0 ATR / 2.0× box_range | ATR-based dynamic (FMZQuant) |
+| Сессии UTC | Asia 00-01, London 08-09, NY 14-15 | Ликвидные открытия трад. рынков |
+
+#### Turtle Soup fade (Wave 4, не деплой)
+**Файл:** `turtle_soup.py`
+
+| Параметр | Значение | Research |
+|---|---|---|
+| LOOKBACK | 20 | Connors & Raschke: «20-period low/high» |
+| BREAK_DEPTH | 0.3 ATR | Адаптация «5 ticks above prev low» под крипту |
+| RECLAIM_WINDOW | 4 бара M5 (20 мин) | Время поглощения stop-hunt wick |
+| RSI filter | <30 / >70 | Enhanced version (Sword Red 2024) — «multiple confirmations» |
+| ADX_MAX | 30 | Отсекает сильный тренд (sweep = continuation, не ловушка) |
+| SL / TP | 1.5 / 2.5 ATR | RR 1.67 |
+
+#### BTC Lead-Lag → Altcoin (Wave 4, не деплой)
+**Файл:** `btc_leadlag.py`
+**Reference symbol:** BTCUSDT (грузится, но НЕ торгуется — был убыточен в скальпе).
+
+| Параметр | Значение | Research |
+|---|---|---|
+| BTC_LOOKBACK | 3 × M5 (15 мин) | Springer 2026: «lag 5-15 минут» |
+| BTC_MOVE_PCT | ≥ 1% за 15 мин | HF Lead-Lag paper: «>1σ BTC returns» |
+| BTC_MOVE_MIN_ATR | ≥ 1.5 ATR | Двойной фильтр (%и ATR), отсекает микро-шум |
+| BTC_ADX_MIN | ≥ 15 | «Clear trend regime» для lead-lag эффекта |
+| CORR_WINDOW | 50 баров ≈ 4 ч | Short rolling window (research recommended) |
+| CORR_MIN | 0.5 на **log-returns** | После BTC ETF decoupling: 0.5-0.7 на returns |
+| ALT_LAG_MAX_PCT | 0.3% абсолютно | Альт ещё не догнал BTC — входим первыми |
+| SL / TP | 1.5 / 2.0 ATR | RR 1.33; research: directional accuracy до 70% → EV+ |
+
+**Критическое уточнение из research (Asia-Pacific FinMarkets 2026, CXO Advisory):
+корреляция считается по LOG-RETURNS, не по ценам.** Price-level Pearson ловит
+фантомные зависимости на общих трендах. Returns-Pearson показывает истинное
+ко-движение, которое и является основой Lead-Lag эффекта.
+
+### Изоляция от FxPro кода
+
+Правило **обязательно к соблюдению** при любых правках:
+
+- ✅ `from bybit_bot.analysis.signals import ...` — OK
+- ❌ `from fx_pro_bot.strategies.scalping.session_orb import ...` — ЗАПРЕЩЕНО
+- ❌ Любые импорты `fx_pro_bot.*` в `bybit_bot.*` — ЗАПРЕЩЕНО
+
+FxPro ORB (`src/fx_pro_bot/strategies/scalping/session_orb.py`) и Bybit ORB
+(`src/bybit_bot/strategies/scalping/session_orb.py`) — **разные файлы**,
+параметры совпадают по идее (research-canonical), но эволюционируют независимо.
+
+### Настройки Bybit скальпинга (.env)
+
+```
+BYBIT_BOT_SCALP_VWAP_ENABLED=true
+BYBIT_BOT_SCALP_STATARB_ENABLED=true
+BYBIT_BOT_SCALP_FUNDING_ENABLED=true
+BYBIT_BOT_SCALP_VOLUME_ENABLED=true
+BYBIT_BOT_SCALP_ORB_ENABLED=false       # Wave 4 pending
+BYBIT_BOT_SCALP_TURTLE_ENABLED=false    # Wave 4 pending
+BYBIT_BOT_SCALP_LEADLAG_ENABLED=false   # Wave 4 pending
+BYBIT_BOT_LEADLAG_REF_SYMBOL=BTCUSDT    # reference-only, не торгуется
+```
+
+---
+
 ## 4. Paper Exit-Стратегии (4 параллельных)
 
 **Файл:** `strategies/exits.py`

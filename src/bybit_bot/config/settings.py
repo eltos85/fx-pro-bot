@@ -202,6 +202,15 @@ class Settings(BaseSettings):
     scalping_turtle_enabled: bool = Field(
         default=False, validation_alias="BYBIT_BOT_SCALP_TURTLE_ENABLED",
     )
+    scalping_leadlag_enabled: bool = Field(
+        default=False, validation_alias="BYBIT_BOT_SCALP_LEADLAG_ENABLED",
+    )
+    # BTC нужен только как REFERENCE для BTC-Lead-Lag: грузим бары,
+    # но в торговых стратегиях НЕ открываем позиции (убыточен в скальпе).
+    leadlag_reference_symbol: str = Field(
+        default="BTCUSDT",
+        validation_alias="BYBIT_BOT_LEADLAG_REF_SYMBOL",
+    )
     scalping_max_positions: int = Field(
         default=3, validation_alias="BYBIT_BOT_SCALP_MAX_POSITIONS",
     )

@@ -21,6 +21,7 @@ from bybit_bot.market_data.models import Bar
 from bybit_bot.stats.store import PositionRow, StatsStore
 from bybit_bot.strategies.momentum import MomentumStrategy
 from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
+from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
 from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
 from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
 from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
@@ -114,6 +115,7 @@ def run_bot() -> None:
     scalp_volume = VolumeSpikeStrategy() if settings.scalping_volume_enabled else None
     scalp_orb = SessionOrbStrategy() if settings.scalping_orb_enabled else None
     scalp_turtle = TurtleSoupStrategy() if settings.scalping_turtle_enabled else None
+    scalp_leadlag = BtcLeadLagStrategy() if settings.scalping_leadlag_enabled else None
 
     client: BybitClient | None = None
     executor: TradeExecutor | None = None
@@ -182,6 +184,7 @@ def run_bot() -> None:
                 scalp_volume=scalp_volume,
                 scalp_orb=scalp_orb,
                 scalp_turtle=scalp_turtle,
+                scalp_leadlag=scalp_leadlag,
                 client=client,
                 executor=executor,
                 killswitch=killswitch,
@@ -209,6 +212,7 @@ def _run_cycle(
     scalp_volume: VolumeSpikeStrategy | None,
     scalp_orb: SessionOrbStrategy | None,
     scalp_turtle: TurtleSoupStrategy | None,
+    scalp_leadlag: BtcLeadLagStrategy | None,
     client: BybitClient | None,
     executor: TradeExecutor | None,
     killswitch: KillSwitch | None,
@@ -217,9 +221,15 @@ def _run_cycle(
     now = datetime.now(tz=UTC)
     log.info("─── Цикл %d │ %s ───", cycle, now.strftime("%H:%M:%S UTC"))
 
-    # Batch-загрузка: один запрос yfinance.download() вместо 38 отдельных
+    # Batch-загрузка: один запрос yfinance.download() вместо 38 отдельных.
+    # Если включён BTC Lead-Lag — добавляем reference-символ (BTC) в список загрузки,
+    # даже если он не в scan_symbols (BTC используется только как ЛИДЕР, не торгуется).
+    fetch_symbols = list(settings.scan_symbols)
+    ref_symbol = settings.leadlag_reference_symbol
+    if scalp_leadlag and ref_symbol not in fetch_symbols:
+        fetch_symbols.append(ref_symbol)
     bars_map = fetch_bars_batch(
-        settings.scan_symbols,
+        tuple(fetch_symbols),
         period=settings.yfinance_period,
         interval=settings.yfinance_interval,
     )
@@ -286,6 +296,7 @@ def _run_cycle(
         scalp_volume=scalp_volume,
         scalp_orb=scalp_orb,
         scalp_turtle=scalp_turtle,
+        scalp_leadlag=scalp_leadlag,
         cycle_counter=cycle,
         tradeable_symbols=tradeable_symbols,
     )
@@ -723,6 +734,7 @@ def _process_scalping(
     scalp_volume: VolumeSpikeStrategy | None,
     scalp_orb: SessionOrbStrategy | None,
     scalp_turtle: TurtleSoupStrategy | None,
+    scalp_leadlag: BtcLeadLagStrategy | None,
     cycle_counter: int = 0,
     tradeable_symbols: set[str] | None = None,
 ) -> None:
@@ -742,7 +754,7 @@ def _process_scalping(
     open_symbols = {p.symbol for p in positions}
     scalp_strategies = {
         "scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume",
-        "scalp_orb", "scalp_turtle",
+        "scalp_orb", "scalp_turtle", "scalp_leadlag",
     }
     db_open = stats.get_open_positions()
     scalp_opened = sum(1 for dp in db_open if dp.strategy in scalp_strategies)
@@ -835,6 +847,22 @@ def _process_scalping(
             )
             scalp_trades.append((ts.symbol, sig, bars_map[ts.symbol], "scalp_turtle"))
 
+    if scalp_leadlag and bars_map:
+        ref_symbol = settings.leadlag_reference_symbol
+        for ll in scalp_leadlag.scan(bars_map):
+            if ll.symbol in open_symbols:
+                continue
+            # Reference-символ (BTC) — только ЛИДЕР, НЕ торгуем его.
+            if ll.symbol == ref_symbol:
+                continue
+            sig = Signal(
+                direction=ll.direction, strength=0.7,
+                reasons=(f"leadlag_btc={ll.btc_move_pct:+.2f}% corr={ll.correlation:.2f}",),
+                sl_atr_mult=1.5, tp_atr_mult=2.0,
+                strategy_name="scalp_leadlag",
+            )
+            scalp_trades.append((ll.symbol, sig, bars_map[ll.symbol], "scalp_leadlag"))
+
     log.info("Скальпинг: найдено %d сигналов (max позиций=%d, открыто=%d)",
              len(scalp_trades), settings.scalping_max_positions, scalp_opened)
 
@@ -892,6 +920,8 @@ def _log_scalping_config(settings: Settings) -> None:
         active.append("ORB")
     if settings.scalping_turtle_enabled:
         active.append("Turtle")
+    if settings.scalping_leadlag_enabled:
+        active.append(f"LeadLag(ref={settings.leadlag_reference_symbol})")
     log.info("Скальпинг: %s", ", ".join(active) if active else "отключён")
 
 

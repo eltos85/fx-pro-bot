@@ -561,6 +561,194 @@ class TestTurtleSoup:
         assert len(signals) == 1
 
 
+# ── BTC Lead-Lag Strategy ────────────────────────────────────
+
+
+def _make_leadlag_bars(
+    *,
+    symbol: str,
+    base_price: float,
+    tail_move_pct: float = 0.0,      # движение за последние 3 бара в %
+    correlated_with: list[Bar] | None = None,  # база для корреляции по log-returns
+    n: int = 100,
+) -> list[Bar]:
+    """Генерирует бары альта с контролируемой корреляцией log-returns с correlated_with.
+
+    По research (Asia-Pacific FM 2026) стратегия считает corr на log-returns,
+    а не на ценах. Чтобы тест был реалистичным, альт реплицирует returns BTC
+    со scale-фактором (≈1.5× beta для small-cap), но в последних 3 барах
+    ведёт собственное движение tail_move_pct (имитируя лаг).
+    """
+    from datetime import timedelta
+    import math as _m
+    ts_base = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    bars: list[Bar] = []
+
+    if correlated_with is not None and len(correlated_with) >= n:
+        ref_closes = [b.close for b in correlated_with[-n:]]
+        # ref returns
+        ref_returns = [_m.log(ref_closes[i] / ref_closes[i - 1]) for i in range(1, n)]
+
+        # Первые n-3 returns альта = returns BTC × beta (high corr)
+        # Последние 3 — собственный линейный шаг для tail_move_pct
+        beta = 1.0  # идеальная корреляция по log-returns
+        alt_closes = [base_price]
+        for i in range(n - 1):
+            if i < (n - 3) - 1:
+                r = ref_returns[i] * beta
+            else:
+                # Последние 3 шага: каждый шаг = tail_move_pct / 3 (линейно)
+                r = _m.log(1 + (tail_move_pct / 100) / 3)
+            alt_closes.append(alt_closes[-1] * _m.exp(r))
+
+        for i, p in enumerate(alt_closes):
+            bars.append(Bar(
+                symbol=symbol, ts=ts_base + timedelta(minutes=5 * i),
+                open=p, high=p * 1.001, low=p * 0.999,
+                close=p, volume=100.0,
+            ))
+    else:
+        for i in range(n):
+            noise = ((i * 7) % 11 - 5) * 0.0005
+            price = base_price * (1 + noise)
+            bars.append(Bar(
+                symbol=symbol, ts=ts_base + timedelta(minutes=5 * i),
+                open=price, high=price * 1.001, low=price * 0.999,
+                close=price, volume=100.0,
+            ))
+        anchor = bars[-4].close
+        target = anchor * (1 + tail_move_pct / 100)
+        for j in range(3):
+            frac = (j + 1) / 3
+            p = anchor + (target - anchor) * frac
+            bars[n - 3 + j] = Bar(
+                symbol=symbol, ts=ts_base + timedelta(minutes=5 * (n - 3 + j)),
+                open=p, high=p * 1.002, low=p * 0.998, close=p, volume=150.0,
+            )
+    return bars
+
+
+def _make_btc_impulse_bars(direction: str = "up") -> list[Bar]:
+    """BTC-бары: 100 баров случайного движения, финальные 3 — импульс ≥1.2% ≥1.5 ATR.
+
+    Амплитуда 1.2% подобрана так, чтобы:
+    - проходил фильтр BTC_MOVE_PCT=1%;
+    - проходил фильтр BTC_MOVE_MIN_ATR=1.5;
+    - не ломалась корреляция log-returns с альтом, двигающимся на 0.15%
+      (по research такой дифференциал характерен для real lead-lag).
+    """
+    from datetime import timedelta
+    ts_base = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    bars: list[Bar] = []
+
+    base = 60000.0
+    for i in range(97):
+        trend = (i - 48) * 1.5
+        noise = ((i * 13) % 17 - 8) * 5
+        price = base + trend + noise
+        bars.append(Bar(
+            symbol="BTCUSDT",
+            ts=ts_base + timedelta(minutes=5 * i),
+            open=price - 5, high=price + 15, low=price - 15, close=price,
+            volume=1000.0,
+        ))
+    start = bars[-1].close
+    mult = 1.012 if direction == "up" else 0.988
+    end = start * mult
+    for i in range(3):
+        frac = (i + 1) / 3
+        price = start + (end - start) * frac
+        bars.append(Bar(
+            symbol="BTCUSDT", ts=ts_base + timedelta(minutes=5 * (97 + i)),
+            open=price - 5, high=price + 10, low=price - 10, close=price,
+            volume=1500.0,
+        ))
+    return bars
+
+
+class TestBtcLeadLag:
+    def test_long_alt_follows_btc_up(self):
+        """BTC +1.2%, alt +0.15% (есть лаг, корр returns >0.5) → long alt."""
+        from bybit_bot.strategies.scalping.btc_leadlag import (
+            BtcLeadLagStrategy, LeadLagSignal,
+        )
+        from bybit_bot.analysis.signals import Direction
+
+        btc = _make_btc_impulse_bars("up")
+        alt = _make_leadlag_bars(
+            symbol="SOLUSDT", base_price=150.0,
+            tail_move_pct=0.15,
+            correlated_with=btc,
+        )
+        signals = BtcLeadLagStrategy().scan({"BTCUSDT": btc, "SOLUSDT": alt})
+        assert len(signals) == 1
+        sig = signals[0]
+        assert isinstance(sig, LeadLagSignal)
+        assert sig.symbol == "SOLUSDT"
+        assert sig.direction == Direction.LONG
+        assert sig.correlation >= 0.5
+
+    def test_short_alt_follows_btc_down(self):
+        """BTC -1.2%, alt -0.15% → short alt."""
+        from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+        from bybit_bot.analysis.signals import Direction
+
+        btc = _make_btc_impulse_bars("down")
+        alt = _make_leadlag_bars(
+            symbol="SOLUSDT", base_price=150.0,
+            tail_move_pct=-0.15, correlated_with=btc,
+        )
+        signals = BtcLeadLagStrategy().scan({"BTCUSDT": btc, "SOLUSDT": alt})
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.SHORT
+
+    def test_no_signal_without_btc(self):
+        """Нет BTC в bars_map → нет сигналов."""
+        from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+        alt = _make_leadlag_bars(symbol="SOLUSDT", base_price=150.0)
+        assert BtcLeadLagStrategy().scan({"SOLUSDT": alt}) == []
+
+    def test_no_signal_weak_btc_move(self):
+        """BTC движется слабо (<1%) → нет сигналов."""
+        from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+        from datetime import timedelta
+        ts_base = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+        btc = [
+            Bar(symbol="BTCUSDT", ts=ts_base + timedelta(minutes=5 * i),
+                open=60000 + (i % 5), high=60010, low=59990,
+                close=60000 + (i % 5), volume=1000.0)
+            for i in range(100)
+        ]
+        alt = _make_leadlag_bars(symbol="SOLUSDT", base_price=150.0, correlated_with=btc)
+        assert BtcLeadLagStrategy().scan({"BTCUSDT": btc, "SOLUSDT": alt}) == []
+
+    def test_no_signal_alt_already_followed(self):
+        """Альт уже догнал BTC (движение >ALT_LAG_MAX_PCT в ту же сторону) → нет лага."""
+        from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+        btc = _make_btc_impulse_bars("up")
+        alt = _make_leadlag_bars(
+            symbol="SOLUSDT", base_price=150.0,
+            tail_move_pct=1.0,  # >ALT_LAG_MAX_PCT=0.3% и >70% BTC 1.2% → догнал
+            correlated_with=btc,
+        )
+        assert BtcLeadLagStrategy().scan({"BTCUSDT": btc, "SOLUSDT": alt}) == []
+
+    def test_no_signal_low_correlation(self):
+        """Альт слабо коррелирует с BTC → нет сигналов."""
+        from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+        btc = _make_btc_impulse_bars("up")
+        # Альт с рандомным движением (не скоррелирован)
+        alt = _make_leadlag_bars(symbol="SOLUSDT", base_price=150.0, tail_move_pct=0.1)
+        assert BtcLeadLagStrategy().scan({"BTCUSDT": btc, "SOLUSDT": alt}) == []
+
+    def test_insufficient_btc_bars(self):
+        """Мало BTC-баров (<MIN_BARS) → нет сигналов."""
+        from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+        short_btc = _make_btc_impulse_bars("up")[:30]
+        alt = _make_leadlag_bars(symbol="SOLUSDT", base_price=150.0)
+        assert BtcLeadLagStrategy().scan({"BTCUSDT": short_btc, "SOLUSDT": alt}) == []
+
+
 # ── Integration: imports ─────────────────────────────────────
 
 def test_all_scalping_imports():
@@ -571,3 +759,4 @@ def test_all_scalping_imports():
     from bybit_bot.strategies.scalping.volume_spike import VolumeSpikeStrategy
     from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
     from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
+    from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy

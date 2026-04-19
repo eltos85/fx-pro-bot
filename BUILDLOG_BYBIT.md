@@ -2,6 +2,55 @@
 
 ## 2026-04-19
 
+### Стратегия D: BTC Lead-Lag → Altcoin + research-verified параметры всех стратегий Wave 4
+
+**Стратегия D: `btc_leadlag.py`** — межсимвольный моментум: при резком движении
+BTC (>1%, ≥1.5 ATR, ADX>15) в scan-list ищем альты с высокой корреляцией
+log-returns с BTC (≥0.5 на окне 50 баров), где альт ещё не догнал BTC
+(|alt_move| < 0.3% за 15 мин). Вход в альт в сторону BTC-движения.
+
+**Критический фикс на базе research:**
+- Asia-Pacific Financial Markets 2026 (Springer, DOI 10.1007/s10690-026-09589-z)
+  и HF Lead-Lag paper (kryptografen 2019) указывают: **корреляция для
+  lead-lag стратегий считается на log-returns**, не на ценах.
+- Изначально в коде была corr(prices) — заменено на `_log_returns` + `_pearson_corr`.
+- Price-level Pearson ловит фантомные зависимости на общих трендах.
+
+**Интеграция:**
+- `settings.scalping_leadlag_enabled` + `leadlag_reference_symbol=BTCUSDT`.
+- `main.py`: BTC догружается в `bars_map` если LeadLag включён, но
+  **НЕ торгуется** (BTC был убыточен в скальпе ранее) — только reference.
+- `_process_scalping` блокирует вход на reference-символе явно.
+- Включён в `scalp_strategies` set как `"scalp_leadlag"`.
+
+**Research-верификация всех стратегий Wave 4:**
+
+Проверены параметры по каноническим источникам:
+
+| Стратегия | Source | Ключевой параметр |
+|---|---|---|
+| Session ORB | FMZQuant «Volume-Confirmed ORB» 2024 | 15 мин коробка, vol≥1.3× 20-bar, EMA trend, ATR SL/TP |
+| Turtle Soup | Connors & Raschke «Street Smarts» 1995; Enhanced Sword Red 2024 | lookback=20, RSI-extreme confirmation |
+| BTC Lead-Lag | Asia-Pacific FM 2026 (Springer); HF Lead-Lag 2019 | **corr(log-returns)**, BTC≥1%, alt-lag<0.3% |
+
+Все параметры каждой стратегии документированы в:
+- `STRATEGIES.md` (секция **3e. Bybit Crypto Bot — Scalping Strategies**) с
+  таблицей research-источников.
+- Docstring каждого модуля — блок `─── Research basis ───`.
+- `.cursor/rules/strategy-guard.mdc` — обновлённое правило: запрет менять
+  параметры без ссылки на research + список research-инвариантов.
+
+**Символы на Bybit** — все 9 проверены через `v5/market/instruments-info`,
+status=`Trading`: BTCUSDT (reference), SOLUSDT, ADAUSDT, LINKUSDT, SUIUSDT,
+TONUSDT, WIFUSDT, TIAUSDT, DOTUSDT. По research Springer 2026 small-cap
+(WIF, TIA, SUI) показывают наибольший lag-эффект — идеальны для стратегии.
+
+**Тесты** (`tests/test_bybit_scalping.py::TestBtcLeadLag`): 7 тестов:
+- long/short follows BTC, no-signal без BTC, weak move, already followed,
+  low correlation, insufficient bars.
+
+Общий набор: **256/256** зелёные.
+
 ### Стратегия B: Turtle Soup fade (код, без деплоя)
 
 **Идея** (Larry Connors «Street Smarts», 1995): ловим **ложный пробой**

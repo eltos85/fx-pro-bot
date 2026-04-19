@@ -4,19 +4,33 @@
 формируют "коробку" — диапазон high/low за 3 бара M5. Пробой коробки
 с подтверждением по объёму и EMA-фильтру = вход в сторону пробоя.
 
-Источник рабочих параметров (после ресёрча 30+ backtests, 2024-2025):
-- ORB_BARS = 3 (15 мин при M5) — стандарт, дальше диапазон «смазывается».
-- BREAKOUT_FILTER_ATR = 0.3 — отсекает ложные тычки за уровень.
-- VOLUME_MULT = 1.3 — пробой без объёма часто откатывается.
-- ADX_MAX = 25 — если тренд уже сильный, пробой = продолжение, а не
-  выход из консолидации; рабочая зона ORB — ADX 15-25.
-- Одна сделка на символ × сессию — после первого пробоя не пытаемся
-  брать второй (волатильность уже съелась, часто разворот).
+─── Research basis ───────────────────────────────────────────────
+Параметры стратегии соответствуют канонической Volume-Confirmed ORB
+implementation (FMZQuant 2024-2025, TradingView OptionFlows community):
 
-Принципиальное отличие от FxPro ORB: этот модуль живёт исключительно в
-экосистеме bybit_bot (импорты только из `bybit_bot.*`), сессии
-подобраны под 24/7-крипто рынок (Asia/London/NY), и нет news-fade
-подмодуля — для крипты экономический календарь не релевантен.
+- **Opening range = 15 минут** (3 × M5): «establishes the opening range
+  using the first 15 minutes after market open, recording the high and
+  low as key reference levels» (FMZQuant, 2024).
+- **VOLUME_MULT = 1.3×** 20-period average: «Volume at breakout must
+  significantly exceed average levels — typically 1.3 times the 20-period
+  average volume — to verify breakout validity» (FMZQuant).
+- **EMA trend filter** (в оригинале EMA 20/50, у нас EMA50 slope как
+  эквивалент direction-filter): «Price above both EMAs + volume
+  confirmation → Long Signal».
+- **ATR-based SL/TP**: «ATR-based dynamic stop-loss and take-profit
+  levels automatically adjust based on market volatility».
+
+Дополнительные фильтры у нас (не противоречат research):
+- **ADX < 25** — отсекает сильный тренд, когда пробой = продолжение
+  (research: «Optional Filters — VWAP and MACD conditions can be
+  toggled to add additional confirmation layers»).
+- **Первый пробой в сессии** — не берём повторные breakouts, т.к.
+  волатильность уже отыграна.
+
+Принципиальное отличие от FxPro ORB: модуль живёт исключительно в
+экосистеме bybit_bot (импорты только `bybit_bot.*`), сессии подобраны
+под 24/7-крипто рынок (Asia/London/NY), и нет news-fade подмодуля —
+для крипты экономический календарь не релевантен.
 """
 
 from __future__ import annotations

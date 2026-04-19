@@ -2,24 +2,42 @@
 
 Идея: ловим **ложный пробой** 20-барного экстремума. Если цена сделала
 новый 20-барный low/high, но через 1-4 бара вернулась обратно внутрь
-диапазона — это stop-hunt/sweep ликвидности. Входим **против пробоя**:
+диапазона — это stop-hunt / liquidity grab. Входим **против пробоя**:
 long после провала и возврата снизу, short после всплеска и возврата
-сверху. RSI-экстремум подтверждает «вымывание слабых рук».
+сверху.
 
-Классическая стратегия из книги Larry Connors «Street Smarts» (1995),
-на крипте работает как mean-reversion после wick-манипуляций whales
+─── Research basis ───────────────────────────────────────────────
+Оригинальная стратегия разработана Larry Connors и Linda Bradford Raschke
+(«Street Smarts», 1995). Developed to fade the 20-day breakout system
+used by Richard Dennis's Turtle traders (отсюда «Turtle Soup» = поедание
+Turtle-трейдеров, торгующих пробой).
+
+Параметры из оригинала (Traders.com, Forex Academy, ICT 2024):
+- **LOOKBACK = 20 периодов** — «Market must make a 20-period low/high»
+  (Connors & Raschke).
+- **RECLAIM_WINDOW** — у нас 4 бара (в оригинале right after break):
+  адаптировано под M5 (≈20 мин) для крипты с её wick-спайками.
+- **SL = 1.5×ATR** — в оригинале «stop-loss placed under the current
+  period low». Мы используем ATR-based как более универсальный вариант
+  (криптовалютная волатильность сильно меняется во времени).
+
+Дополнительные фильтры у нас (из Enhanced версии, Medium/Sword Red 2024):
+- **RSI-экстремум** (<30 long, >70 short) — «Multiple Price Action
+  Confirmations» из Turtle Soup Enhanced. Играет роль original правила
+  «previous low must have occurred 4 periods earlier» — подтверждает
+  «вымывание слабых рук» перед входом.
+- **ADX < 30** — отсекает сильный тренд, где sweep = продолжение, а
+  не ловушка.
+
+Работает на крипте как mean-reversion после wick-манипуляций whales
 (ловля ликвидности вокруг круглых уровней / предыдущих экстремумов).
 
-Принципиальная изоляция от FxPro: модуль импортирует только
-`bybit_bot.*`, параметры подобраны под крипто M5 таймфрейм.
+Принципиальная изоляция от FxPro: модуль импортирует только `bybit_bot.*`.
 
 Антикорреляция с другими скальпинг-стратегиями:
 - ORB: пробой + продолжение (тренд).
 - Volume Spike: моментум от объёма.
 - Turtle Soup: анти-пробой — ловим **разворот** после ложного движения.
-
-После ресёрча ~30 backtests (Connors 2020, Crypto Research 2024-2025)
-оптимум параметров: LOOKBACK=20, RECLAIM_WINDOW=4, RSI-confirm, ADX<30.
 """
 
 from __future__ import annotations
