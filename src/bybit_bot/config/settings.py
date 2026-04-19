@@ -199,6 +199,9 @@ class Settings(BaseSettings):
     scalping_orb_enabled: bool = Field(
         default=False, validation_alias="BYBIT_BOT_SCALP_ORB_ENABLED",
     )
+    scalping_turtle_enabled: bool = Field(
+        default=False, validation_alias="BYBIT_BOT_SCALP_TURTLE_ENABLED",
+    )
     scalping_max_positions: int = Field(
         default=3, validation_alias="BYBIT_BOT_SCALP_MAX_POSITIONS",
     )

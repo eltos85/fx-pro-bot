@@ -23,6 +23,7 @@ from bybit_bot.strategies.momentum import MomentumStrategy
 from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
 from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
 from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
+from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
 from bybit_bot.strategies.scalping.volume_spike import VolumeSpikeStrategy
 from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
 from bybit_bot.trading.client import BybitClient, InstrumentInfo
@@ -112,6 +113,7 @@ def run_bot() -> None:
     scalp_statarb = StatArbCryptoStrategy() if settings.scalping_statarb_enabled else None
     scalp_volume = VolumeSpikeStrategy() if settings.scalping_volume_enabled else None
     scalp_orb = SessionOrbStrategy() if settings.scalping_orb_enabled else None
+    scalp_turtle = TurtleSoupStrategy() if settings.scalping_turtle_enabled else None
 
     client: BybitClient | None = None
     executor: TradeExecutor | None = None
@@ -179,6 +181,7 @@ def run_bot() -> None:
                 scalp_funding=scalp_funding,
                 scalp_volume=scalp_volume,
                 scalp_orb=scalp_orb,
+                scalp_turtle=scalp_turtle,
                 client=client,
                 executor=executor,
                 killswitch=killswitch,
@@ -205,6 +208,7 @@ def _run_cycle(
     scalp_funding: FundingScalpStrategy | None,
     scalp_volume: VolumeSpikeStrategy | None,
     scalp_orb: SessionOrbStrategy | None,
+    scalp_turtle: TurtleSoupStrategy | None,
     client: BybitClient | None,
     executor: TradeExecutor | None,
     killswitch: KillSwitch | None,
@@ -281,6 +285,7 @@ def _run_cycle(
         scalp_funding=scalp_funding,
         scalp_volume=scalp_volume,
         scalp_orb=scalp_orb,
+        scalp_turtle=scalp_turtle,
         cycle_counter=cycle,
         tradeable_symbols=tradeable_symbols,
     )
@@ -717,6 +722,7 @@ def _process_scalping(
     scalp_funding: FundingScalpStrategy | None,
     scalp_volume: VolumeSpikeStrategy | None,
     scalp_orb: SessionOrbStrategy | None,
+    scalp_turtle: TurtleSoupStrategy | None,
     cycle_counter: int = 0,
     tradeable_symbols: set[str] | None = None,
 ) -> None:
@@ -735,7 +741,8 @@ def _process_scalping(
 
     open_symbols = {p.symbol for p in positions}
     scalp_strategies = {
-        "scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume", "scalp_orb",
+        "scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume",
+        "scalp_orb", "scalp_turtle",
     }
     db_open = stats.get_open_positions()
     scalp_opened = sum(1 for dp in db_open if dp.strategy in scalp_strategies)
@@ -816,6 +823,18 @@ def _process_scalping(
             )
             scalp_trades.append((orb.symbol, sig, bars_map[orb.symbol], "scalp_orb"))
 
+    if scalp_turtle and bars_map:
+        for ts in scalp_turtle.scan(bars_map):
+            if ts.symbol in open_symbols:
+                continue
+            sig = Signal(
+                direction=ts.direction, strength=0.7,
+                reasons=(f"turtle_depth={ts.break_depth_atr:.2f}ATR rsi={ts.rsi_at_break:.0f}",),
+                sl_atr_mult=1.5, tp_atr_mult=2.5,
+                strategy_name="scalp_turtle",
+            )
+            scalp_trades.append((ts.symbol, sig, bars_map[ts.symbol], "scalp_turtle"))
+
     log.info("Скальпинг: найдено %d сигналов (max позиций=%d, открыто=%d)",
              len(scalp_trades), settings.scalping_max_positions, scalp_opened)
 
@@ -871,6 +890,8 @@ def _log_scalping_config(settings: Settings) -> None:
         active.append("VolSpike")
     if settings.scalping_orb_enabled:
         active.append("ORB")
+    if settings.scalping_turtle_enabled:
+        active.append("Turtle")
     log.info("Скальпинг: %s", ", ".join(active) if active else "отключён")
 
 

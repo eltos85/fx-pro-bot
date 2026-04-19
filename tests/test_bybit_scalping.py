@@ -389,6 +389,178 @@ class TestSessionOrb:
         assert len(signals) == 1
 
 
+# ── Turtle Soup Strategy ─────────────────────────────────────
+
+def _make_turtle_bars(
+    *,
+    trap_direction: str | None = "down",  # "down" → long-setup; "up" → short-setup; None → neutral
+    symbol: str = "BTCUSDT",
+    n_history: int = 100,
+    center: float = 60000.0,
+    range_half: float = 100.0,
+) -> list[Bar]:
+    """Сгенерировать бары для теста Turtle Soup.
+
+    - n_history баров колеблются в [center-range_half, center+range_half]
+      (образует 20-барный диапазон).
+    - trap_bar (индекс -3): пробивает 20-барный экстремум (low/high).
+    - bars[-2]: промежуточный.
+    - last_bar: возвращается ВНУТРЬ диапазона с буфером.
+    - trap_direction=None → нет пробоя.
+    """
+    from datetime import timedelta
+
+    ts_base = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    bars: list[Bar] = []
+
+    # History: детерминированный шум с амплитудой range_half
+    for i in range(n_history):
+        noise = ((i * 13) % 21) - 10  # -10..+10
+        price = center + noise * (range_half / 10.0) * 0.6
+        bars.append(Bar(
+            symbol=symbol,
+            ts=ts_base + timedelta(minutes=5 * i),
+            open=price - 1,
+            high=price + 5,
+            low=price - 5,
+            close=price,
+            volume=100.0,
+        ))
+
+    atr_est = 10.0  # приблизительный ATR нашей синтетики
+
+    # Для long-setup нужен RSI<30 на пробое, для short-setup RSI>70.
+    # Добавим 16 «bias»-баров почти без откатов, чтобы RSI(14) ушёл в экстремум.
+    # Эти бары НЕ должны менять 20-барный экстремум, который увидит стратегия
+    # в момент пробоя — поэтому держим их значения внутри истории.
+    bias_len = 16
+    if trap_direction == "down":
+        # Снижение внутри верхней половины диапазона, чтобы не создать новый low
+        for i in range(bias_len):
+            price = center + 60 - i * 4  # center+60..center+0
+            bars.append(Bar(
+                symbol=symbol, ts=ts_base + timedelta(minutes=5 * (n_history + i)),
+                open=price + 2, high=price + 3, low=price - 1, close=price,
+                volume=100.0,
+            ))
+    elif trap_direction == "up":
+        # Рост внутри нижней половины диапазона
+        for i in range(bias_len):
+            price = center - 60 + i * 4  # center-60..center+0
+            bars.append(Bar(
+                symbol=symbol, ts=ts_base + timedelta(minutes=5 * (n_history + i)),
+                open=price - 2, high=price + 1, low=price - 3, close=price,
+                volume=100.0,
+            ))
+    else:
+        for i in range(bias_len):
+            bars.append(Bar(
+                symbol=symbol, ts=ts_base + timedelta(minutes=5 * (n_history + i)),
+                open=center - 1, high=center + 3, low=center - 3, close=center,
+                volume=100.0,
+            ))
+
+    # Пересчёт экстремума ПОСЛЕ bias. Стратегия для trap_bar = bars[-3]
+    # (после добавления ещё 3 баров ниже) берёт history = bars[-3-20 : -3].
+    # Сейчас это последние 20 добавленных баров.
+    ref_history = bars[-20:]
+    hist_low = min(b.low for b in ref_history)
+    hist_high = max(b.high for b in ref_history)
+
+    last_ts = bars[-1].ts + timedelta(minutes=5)
+    if trap_direction == "down":
+        trap_price = hist_low - atr_est * 0.8
+        bars.append(Bar(
+            symbol=symbol, ts=last_ts,
+            open=hist_low + 1, high=hist_low + 2,
+            low=trap_price, close=trap_price + 1,
+            volume=150.0,
+        ))
+        bars.append(Bar(
+            symbol=symbol, ts=last_ts + timedelta(minutes=5),
+            open=trap_price + 2, high=hist_low + 5, low=trap_price + 1,
+            close=hist_low + 4, volume=120.0,
+        ))
+        bars.append(Bar(
+            symbol=symbol, ts=last_ts + timedelta(minutes=10),
+            open=hist_low + 4, high=hist_low + 15, low=hist_low + 3,
+            close=hist_low + 12, volume=130.0,
+        ))
+    elif trap_direction == "up":
+        trap_price = hist_high + atr_est * 0.8
+        bars.append(Bar(
+            symbol=symbol, ts=last_ts,
+            open=hist_high - 1, high=trap_price, low=hist_high - 2,
+            close=trap_price - 1, volume=150.0,
+        ))
+        bars.append(Bar(
+            symbol=symbol, ts=last_ts + timedelta(minutes=5),
+            open=trap_price - 2, high=trap_price - 1, low=hist_high - 5,
+            close=hist_high - 4, volume=120.0,
+        ))
+        bars.append(Bar(
+            symbol=symbol, ts=last_ts + timedelta(minutes=10),
+            open=hist_high - 4, high=hist_high - 3, low=hist_high - 15,
+            close=hist_high - 12, volume=130.0,
+        ))
+    else:
+        for i in range(3):
+            bars.append(Bar(
+                symbol=symbol, ts=last_ts + timedelta(minutes=5 * i),
+                open=center - 1, high=center + 3, low=center - 3, close=center,
+                volume=100.0,
+            ))
+
+    return bars
+
+
+class TestTurtleSoup:
+    def test_long_on_fake_breakdown(self):
+        """Ложный пробой вниз + RSI<30 + возврат → long."""
+        from bybit_bot.strategies.scalping.turtle_soup import (
+            TurtleSoupStrategy, TurtleSoupSignal,
+        )
+        from bybit_bot.analysis.signals import Direction
+
+        bars = _make_turtle_bars(trap_direction="down")
+        signals = TurtleSoupStrategy().scan({"BTCUSDT": bars})
+        assert len(signals) == 1
+        sig = signals[0]
+        assert isinstance(sig, TurtleSoupSignal)
+        assert sig.direction == Direction.LONG
+        assert sig.rsi_at_break < 30.0
+        assert sig.break_depth_atr > 0
+
+    def test_short_on_fake_breakup(self):
+        """Ложный пробой вверх + RSI>70 + возврат → short."""
+        from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
+        from bybit_bot.analysis.signals import Direction
+
+        bars = _make_turtle_bars(trap_direction="up")
+        signals = TurtleSoupStrategy().scan({"BTCUSDT": bars})
+        assert len(signals) == 1
+        assert signals[0].direction == Direction.SHORT
+        assert signals[0].rsi_at_break > 70.0
+
+    def test_no_signal_without_breakout(self):
+        from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
+        bars = _make_turtle_bars(trap_direction=None)
+        assert TurtleSoupStrategy().scan({"BTCUSDT": bars}) == []
+
+    def test_insufficient_bars(self):
+        from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
+        assert TurtleSoupStrategy().scan({"BTCUSDT": _make_bars(n=30)}) == []
+
+    def test_max_signals_limit(self):
+        from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
+        strat = TurtleSoupStrategy(max_signals_per_scan=1)
+        bars_a = _make_turtle_bars(trap_direction="down")
+        bars_b = _make_turtle_bars(trap_direction="up", symbol="ETHUSDT",
+                                   center=3000.0, range_half=5.0)
+        signals = strat.scan({"BTCUSDT": bars_a, "ETHUSDT": bars_b})
+        assert len(signals) == 1
+
+
 # ── Integration: imports ─────────────────────────────────────
 
 def test_all_scalping_imports():
@@ -398,3 +570,4 @@ def test_all_scalping_imports():
     from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
     from bybit_bot.strategies.scalping.volume_spike import VolumeSpikeStrategy
     from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+    from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy

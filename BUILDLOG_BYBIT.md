@@ -2,6 +2,43 @@
 
 ## 2026-04-19
 
+### Стратегия B: Turtle Soup fade (код, без деплоя)
+
+**Идея** (Larry Connors «Street Smarts», 1995): ловим **ложный пробой**
+20-барного экстремума. Если цена сделала новый 20-барный low/high,
+но через 1-4 бара вернулась обратно внутрь диапазона — это stop-hunt
+/ sweep ликвидности. Входим **против пробоя**. На крипте это фактически
+реакция на wick-манипуляции whales вокруг круглых уровней.
+
+**Антикорреляция с другими скальперами:**
+- ORB — пробой + продолжение (тренд).
+- Volume Spike — моментум от объёма.
+- Turtle Soup — **анти-пробой** (разворот после ловушки).
+
+**Параметры** (`strategies/scalping/turtle_soup.py`):
+
+- `LOOKBACK = 20` — окно 20-барного экстремума.
+- `BREAK_DEPTH_ATR = 0.3` — пробой должен быть осязаемым.
+- `RECLAIM_WINDOW = 4` — сколько баров даём цене на возврат.
+- `RECLAIM_BUFFER_ATR = 0.1` — возврат внутрь на ATR-буфер.
+- `RSI < 30` для long (перепроданность на пробое вниз) / `> 70` для short.
+- `ADX_MAX = 30` — выше = тренд, sweep не ловушка, а продолжение.
+- `SL = 1.5×ATR`, `TP = 2.5×ATR` (RR ≈ 1.67).
+
+**Изоляция от FxPro:** импорты только `bybit_bot.*`.
+
+**Интеграция:**
+- `settings.scalping_turtle_enabled: bool = False` (env `BYBIT_BOT_SCALP_TURTLE_ENABLED`).
+- `main.py`: регистрация, проброс через `_run_cycle` → `_process_scalping`,
+  сигналы в общий `scalp_trades` как `strategy_name="scalp_turtle"`.
+- Включён в `scalp_strategies` set.
+
+**Тесты** (`tests/test_bybit_scalping.py::TestTurtleSoup`): 5 новых:
+- `long_on_fake_breakdown`, `short_on_fake_breakup` — обе стороны.
+- `no_signal_without_breakout`, `insufficient_bars`, `max_signals_limit`.
+
+Общий набор: **249/249** зелёные.
+
 ### Стратегия A: Session ORB 15m (код, без деплоя)
 
 **Идея:** первые 15 минут после открытия торговой сессии (Asia 00-01,
