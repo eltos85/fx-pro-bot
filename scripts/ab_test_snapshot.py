@@ -6,7 +6,15 @@
   Правило bybit-pnl.mdc: не вычитать комиссию повторно.
 - БД `ab_snapshots.sqlite` хранится вне docker volume, в bind-mount'е
   /root/fx-pro-bot-data (путь задан переменной AB_SNAPSHOTS_DB_PATH).
-- Маппинг стратегии — через JOIN с bybit_stats.sqlite.positions по order_id.
+- Маппинг стратегии — fuzzy match с bybit_stats.sqlite.positions.
+  Прямой JOIN по order_id невозможен: в closed-pnl `orderId` — это id
+  закрывающего reduceOnly ордера, а `positions.order_id` у бота — id
+  открывающего ордера (разные сущности). Fuzzy-ключ: symbol + инверсия
+  side + entry_price ±0.1% + qty ±5% + opened_at ∈ [updated_ms − 24h, updated_ms).
+- hold_minutes считаем как (updated_time_ms − opened_at_ms)/60000, где
+  opened_at_ms берётся из positions.opened_at ПОСЛЕ fuzzy-матча (поле
+  createdTime из closed-pnl — это время создания закрывающего ордера,
+  а не время открытия позиции, поэтому использовать его для hold нельзя).
 - Инкрементальный sync: тянем только новое (по last_fetched_end_ms).
 - Bybit v5 get_closed_pnl: окно между startTime и endTime ≤ 7 дней,
   пагинация по cursor, limit=100.
@@ -54,6 +62,7 @@ CREATE TABLE IF NOT EXISTS closed_trades (
     exec_type         TEXT,
     created_time_ms   INTEGER,
     updated_time_ms   INTEGER NOT NULL,
+    opened_at_ms      INTEGER,
     leverage          REAL,
     order_link_id     TEXT,
     strategy          TEXT,
@@ -83,12 +92,22 @@ CREATE TABLE IF NOT EXISTS sync_meta (
 """
 
 
+def _migrate_closed_trades(conn: sqlite3.Connection) -> None:
+    """Миграция существующей БД: добавить колонки, которые появились позже."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(closed_trades)").fetchall()}
+    if "opened_at_ms" not in cols:
+        conn.execute("ALTER TABLE closed_trades ADD COLUMN opened_at_ms INTEGER")
+        log.info("migration: closed_trades.opened_at_ms added")
+    conn.commit()
+
+
 def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    _migrate_closed_trades(conn)
     conn.commit()
     return conn
 
@@ -221,20 +240,20 @@ def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_d
             seen += 1
             if trade.updated_time_ms > max_updated:
                 max_updated = trade.updated_time_ms
-            hold_min = 0.0
-            if trade.created_time_ms and trade.updated_time_ms > trade.created_time_ms:
-                hold_min = (trade.updated_time_ms - trade.created_time_ms) / 60000.0
+            # hold_minutes, opened_at_ms проставятся в enrich_strategy после
+            # fuzzy-матча с positions (из closed-pnl их взять нельзя, см. docstring).
             result = conn.execute(
                 "INSERT OR IGNORE INTO closed_trades "
                 "(order_id, symbol, side, qty, avg_entry_price, avg_exit_price, "
                 " closed_pnl, exec_type, created_time_ms, updated_time_ms, "
-                " leverage, order_link_id, strategy, hold_minutes, raw_json, fetched_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " opened_at_ms, leverage, order_link_id, strategy, hold_minutes, "
+                " raw_json, fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     trade.order_id, trade.symbol, trade.side, trade.qty,
                     trade.avg_entry_price, trade.avg_exit_price, trade.closed_pnl,
                     trade.exec_type, trade.created_time_ms, trade.updated_time_ms,
-                    trade.leverage, trade.order_link_id, None, hold_min,
+                    None, trade.leverage, trade.order_link_id, None, None,
                     trade.raw_json, datetime.now(tz=UTC).isoformat(timespec="seconds"),
                 ),
             )
@@ -253,37 +272,111 @@ def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_d
     return added
 
 
-def enrich_strategy(conn: sqlite3.Connection, stats_db_path: Path | None) -> int:
-    """Проставить closed_trades.strategy через JOIN с bybit_stats.sqlite.positions.
+ENTRY_PRICE_REL_TOL = 0.001  # ±0.1% — допуск на расхождение entry price между Bybit и БД бота
+QTY_REL_TOL = 0.05           # ±5% — округление qty до qty_step
+MATCH_WINDOW_MS = 24 * 3600 * 1000  # позиция должна была открыться не раньше 24h до закрытия
 
-    Делает UPDATE только там, где strategy ещё NULL или 'unknown', чтобы не перетирать.
-    Возвращает число обновлённых записей.
+
+def enrich_strategy(conn: sqlite3.Connection, stats_db_path: Path | None) -> int:
+    """Fuzzy-match closed_trades ↔ positions для проставления strategy и opened_at_ms.
+
+    Причина fuzzy-матча: в `/v5/position/closed-pnl` поле `orderId` — это id
+    закрывающего reduceOnly ордера (не совпадает с `positions.order_id`, где
+    лежит id открывающего ордера). Прямой JOIN не работает.
+
+    Ключ: symbol + инверсия side (closed.side='Sell' → open.side='Buy') +
+    entry_price ±0.1% + qty ±5% + opened_at ∈ [updated_ms − 24h, updated_ms).
+    При нескольких кандидатах — ближайшая по |opened_ms − updated_ms|.
+
+    После матча пересчитывается hold_minutes = (updated_ms − opened_ms)/60000.
+
+    Обрабатывает только записи с strategy IS NULL или 'unknown', чтобы не
+    перетирать уже сматченное (идемпотентно при повторных запусках).
+
+    Возвращает: число новых записей, которые получили strategy из positions.
     """
     if stats_db_path is None or not stats_db_path.exists():
         log.info("enrich_strategy: %s не найден, маппинг пропущен", stats_db_path)
-        return 0
-
-    conn.execute("ATTACH DATABASE ? AS bot", (str(stats_db_path),))
-    try:
-        before = conn.execute(
-            "SELECT COUNT(*) AS n FROM closed_trades WHERE strategy IS NULL OR strategy='unknown'"
-        ).fetchone()["n"]
-        conn.execute(
-            "UPDATE closed_trades "
-            "SET strategy = COALESCE((SELECT p.strategy FROM bot.positions p "
-            "                          WHERE p.order_id = closed_trades.order_id "
-            "                          LIMIT 1), strategy) "
-            "WHERE strategy IS NULL OR strategy='unknown'"
-        )
         conn.execute(
             "UPDATE closed_trades SET strategy = 'unknown' WHERE strategy IS NULL"
         )
         conn.commit()
-        after = conn.execute(
+        return 0
+
+    conn.execute("ATTACH DATABASE ? AS bot", (str(stats_db_path),))
+    try:
+        pending = conn.execute(
+            "SELECT order_id, symbol, side, qty, avg_entry_price, updated_time_ms "
+            "FROM closed_trades "
+            "WHERE strategy IS NULL OR strategy='unknown'"
+        ).fetchall()
+
+        matched = 0
+        for ct in pending:
+            open_side = "Buy" if ct["side"] == "Sell" else "Sell"
+            entry = float(ct["avg_entry_price"] or 0)
+            qty = float(ct["qty"] or 0)
+            if entry <= 0 or qty <= 0:
+                continue
+            upd_ms = int(ct["updated_time_ms"])
+            lower_ms = upd_ms - MATCH_WINDOW_MS
+
+            # julianday в SQLite корректно парсит ISO-строки с суффиксом.
+            # opened_ms получаем в int: ((julianday − 2440587.5) * 86400) sec → *1000 ms.
+            match = conn.execute(
+                """
+                SELECT p.strategy AS strategy,
+                       CAST((julianday(p.opened_at) - 2440587.5) * 86400000 AS INTEGER) AS opened_ms
+                FROM bot.positions p
+                WHERE p.symbol = ?
+                  AND p.side = ?
+                  AND ABS(p.entry_price - ?) <= ? * ?
+                  AND ABS(CAST(p.qty AS REAL) - ?) <= ? * ?
+                  AND CAST((julianday(p.opened_at) - 2440587.5) * 86400000 AS INTEGER) < ?
+                  AND CAST((julianday(p.opened_at) - 2440587.5) * 86400000 AS INTEGER) >= ?
+                ORDER BY ABS(
+                    CAST((julianday(p.opened_at) - 2440587.5) * 86400000 AS INTEGER) - ?
+                ) ASC
+                LIMIT 1
+                """,
+                (
+                    ct["symbol"], open_side,
+                    entry, ENTRY_PRICE_REL_TOL, entry,
+                    qty, QTY_REL_TOL, qty,
+                    upd_ms, lower_ms, upd_ms,
+                ),
+            ).fetchone()
+
+            if match is not None and match["strategy"]:
+                conn.execute(
+                    "UPDATE closed_trades "
+                    "SET strategy = ?, opened_at_ms = ? "
+                    "WHERE order_id = ?",
+                    (match["strategy"], match["opened_ms"], ct["order_id"]),
+                )
+                matched += 1
+
+        # Для записей, которым не нашли пару — явно 'unknown'.
+        conn.execute(
+            "UPDATE closed_trades SET strategy = 'unknown' WHERE strategy IS NULL"
+        )
+
+        # Пересчёт hold_minutes только там, где есть opened_at_ms.
+        conn.execute(
+            "UPDATE closed_trades "
+            "SET hold_minutes = CAST((updated_time_ms - opened_at_ms) AS REAL) / 60000.0 "
+            "WHERE opened_at_ms IS NOT NULL AND opened_at_ms > 0"
+        )
+        conn.commit()
+
+        unknown_after = conn.execute(
             "SELECT COUNT(*) AS n FROM closed_trades WHERE strategy='unknown'"
         ).fetchone()["n"]
-        log.info("enrich_strategy: before unknown/null=%d, after unknown=%d", before, after)
-        return max(0, before - after)
+        log.info(
+            "enrich_strategy: pending=%d, matched=%d, unknown_after=%d",
+            len(pending), matched, unknown_after,
+        )
+        return matched
     finally:
         conn.execute("DETACH DATABASE bot")
 
@@ -396,8 +489,9 @@ def _metrics_row(conn: sqlite3.Connection, where: str, params: list) -> dict:
             COALESCE(AVG(closed_pnl), 0)              AS avg_pnl,
             COALESCE(AVG(CASE WHEN closed_pnl > 0 THEN closed_pnl END), 0) AS avg_win,
             COALESCE(AVG(CASE WHEN closed_pnl < 0 THEN closed_pnl END), 0) AS avg_loss,
-            COALESCE(AVG(hold_minutes), 0)            AS avg_hold,
-            COALESCE(MAX(hold_minutes), 0)            AS max_hold,
+            AVG(hold_minutes)                         AS avg_hold,
+            MAX(hold_minutes)                         AS max_hold,
+            SUM(CASE WHEN hold_minutes IS NOT NULL THEN 1 ELSE 0 END) AS hold_known,
             MIN(updated_time_ms)                      AS first_ms,
             MAX(updated_time_ms)                      AS last_ms
         FROM closed_trades
@@ -408,24 +502,19 @@ def _metrics_row(conn: sqlite3.Connection, where: str, params: list) -> dict:
     return dict(row) if row else {}
 
 
-def _render_overall(conn: sqlite3.Connection, flt: ReportFilter) -> str:
-    where, params = _where_clause(flt)
-    m = _metrics_row(conn, where, params)
-    trades = m.get("trades") or 0
-    if trades == 0:
-        return "## Overall\n\n_Нет сделок в указанном окне._\n"
+def _format_metrics_rows(m: dict, trades: int) -> list[str]:
     wr = (m["wins"] / trades * 100) if trades else 0
-    pf = (m["gross_profit"] / -m["gross_loss"]) if m["gross_loss"] < 0 else float("inf")
-    first = _fmt_ms(m["first_ms"]) if m.get("first_ms") else "—"
-    last = _fmt_ms(m["last_ms"]) if m.get("last_ms") else "—"
+    gross_loss = m.get("gross_loss") or 0
+    gross_profit = m.get("gross_profit") or 0
+    pf = (gross_profit / -gross_loss) if gross_loss < 0 else float("inf")
     pf_str = "∞" if pf == float("inf") else f"{pf:.3f}"
-    lines = [
-        "## Overall",
-        "",
-        f"Окно: **{first} → {last}**",
-        "",
-        "| Метрика | Значение |",
-        "|---|---|",
+    avg_hold = m.get("avg_hold")
+    max_hold = m.get("max_hold")
+    hold_known = m.get("hold_known") or 0
+    hold_suffix = f" (по {hold_known}/{trades})" if hold_known < trades else ""
+    avg_hold_str = f"{avg_hold:.1f}" if avg_hold is not None else "—"
+    max_hold_str = f"{max_hold:.1f}" if max_hold is not None else "—"
+    return [
         f"| Сделок | {trades} |",
         f"| PnL total (NET) | `{_money(m['pnl'])}` |",
         f"| Win Rate | `{wr:.1f}%` ({m['wins']}/{trades}) |",
@@ -435,10 +524,43 @@ def _render_overall(conn: sqlite3.Connection, flt: ReportFilter) -> str:
         f"| Gross Profit | `{_money(m['gross_profit'])}` |",
         f"| Gross Loss | `{_money(m['gross_loss'])}` |",
         f"| Profit Factor | `{pf_str}` |",
-        f"| Avg Hold (min) | `{m['avg_hold']:.1f}` |",
-        f"| Max Hold (min) | `{m['max_hold']:.1f}` |",
+        f"| Avg Hold (min){hold_suffix} | `{avg_hold_str}` |",
+        f"| Max Hold (min) | `{max_hold_str}` |",
+    ]
+
+
+def _render_overall(conn: sqlite3.Connection, flt: ReportFilter) -> str:
+    where, params = _where_clause(flt)
+    m = _metrics_row(conn, where, params)
+    trades = m.get("trades") or 0
+    if trades == 0:
+        return "## Overall\n\n_Нет сделок в указанном окне._\n"
+    first = _fmt_ms(m["first_ms"]) if m.get("first_ms") else "—"
+    last = _fmt_ms(m["last_ms"]) if m.get("last_ms") else "—"
+    lines = [
+        "## Overall",
+        "",
+        f"Окно: **{first} → {last}**",
+        "",
+        "| Метрика | Значение |",
+        "|---|---|",
+        *_format_metrics_rows(m, trades),
         "",
     ]
+    # Срез без 'recovered' — чистая бот-логика (позиции, открытые самим ботом).
+    where_excl = where + (" AND " if where else " WHERE ") + "COALESCE(strategy,'') <> 'recovered'"
+    m_excl = _metrics_row(conn, where_excl, params)
+    trades_excl = m_excl.get("trades") or 0
+    recovered_cnt = trades - trades_excl
+    if recovered_cnt > 0 and trades_excl > 0:
+        lines.extend([
+            f"### Overall (excl. `recovered`) — {recovered_cnt} подхваченных позиций исключено",
+            "",
+            "| Метрика | Значение |",
+            "|---|---|",
+            *_format_metrics_rows(m_excl, trades_excl),
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -471,10 +593,11 @@ def _render_by_wave(conn: sqlite3.Connection) -> str:
         wr = m["wins"] / trades * 100
         pf = (m["gross_profit"] / -m["gross_loss"]) if m["gross_loss"] < 0 else float("inf")
         pf_str = "∞" if pf == float("inf") else f"{pf:.3f}"
+        avg_hold_str = f"{m['avg_hold']:.1f}" if m.get("avg_hold") is not None else "—"
         out.append(
             f"| {w['id']} | {w['name']} | {w['start_utc']} — {w['end_utc'] or 'now'} "
             f"| {trades} | `{_money(m['pnl'])}` | {wr:.1f}% | {pf_str} "
-            f"| `{_money(m['avg_pnl'], prec=3)}` | {m['avg_hold']:.1f} |"
+            f"| `{_money(m['avg_pnl'], prec=3)}` | {avg_hold_str} |"
         )
     out.append("")
     return "\n".join(out)
@@ -488,8 +611,11 @@ def _render_group(
     group_expr: str,
     order_by: str = "pnl ASC",
     header_label: str = "Ключ",
+    extra_where: str = "",
 ) -> str:
     where, params = _where_clause(flt)
+    if extra_where:
+        where = where + (" AND " if where else " WHERE ") + extra_where
     rows = conn.execute(
         f"""
         SELECT {group_expr} AS grp,
@@ -499,7 +625,7 @@ def _render_group(
                COALESCE(SUM(CASE WHEN closed_pnl > 0 THEN closed_pnl ELSE 0 END), 0) AS gp,
                COALESCE(SUM(CASE WHEN closed_pnl < 0 THEN closed_pnl ELSE 0 END), 0) AS gl,
                COALESCE(AVG(closed_pnl), 0) AS avg_pnl,
-               COALESCE(AVG(hold_minutes), 0) AS avg_hold
+               AVG(hold_minutes) AS avg_hold
         FROM closed_trades
         {where}
         GROUP BY grp
@@ -522,9 +648,10 @@ def _render_group(
         pf = (r["gp"] / -gl) if gl < 0 else float("inf")
         pf_str = "∞" if pf == float("inf") else f"{pf:.3f}"
         grp_val = r["grp"] if r["grp"] not in (None, "") else "(none)"
+        avg_hold_str = f"{r['avg_hold']:.1f}" if r["avg_hold"] is not None else "—"
         out.append(
             f"| {grp_val} | {t} | `{_money(r['pnl'])}` | {wr:.1f}% | {pf_str} "
-            f"| `{_money(r['avg_pnl'], prec=3)}` | {r['avg_hold']:.1f} |"
+            f"| `{_money(r['avg_pnl'], prec=3)}` | {avg_hold_str} |"
         )
     out.append("")
     return "\n".join(out)
@@ -550,6 +677,7 @@ def _render_by_hold(conn: sqlite3.Connection, flt: ReportFilter) -> str:
     return _render_group(
         conn, flt, title="По длительности удержания",
         group_expr=bucket_expr, order_by=order_expr, header_label="Bucket",
+        extra_where="hold_minutes IS NOT NULL",
     )
 
 

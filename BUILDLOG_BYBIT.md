@@ -2,6 +2,45 @@
 
 ## 2026-04-19
 
+### AB-test snapshot: fuzzy-match стратегии, честный hold, overall excl. recovered
+
+Базовый baseline-прогон показал, что JOIN через `order_id` не ловит 99.3%
+позиций (3/420 match). Причина — после сверки с официальной докой
+[v5/position/closed-pnl](https://bybit-exchange.github.io/docs/v5/position/close-pnl)
+и [v5/execution/list](https://bybit-exchange.github.io/docs/v5/order/execution):
+
+- `closedPnl.orderId` = id **закрывающего reduceOnly** ордера.
+- `positions.order_id` у бота = id **открывающего** ордера.
+  Разные сущности, прямой JOIN невозможен.
+- `closedPnl.side` = сторона **закрывающего** ордера (инверсия от открытия:
+  long → `side=Sell` в API).
+- `closedPnl.createdTime` = время создания закрывающего ордера (не открытия
+  позиции). Старый `hold = (updated − created)` измерял скорость fill'а
+  закрывающего ордера, а не реальное время удержания.
+- В `closedPnl` **нет** `orderLinkId` (он только в `/v5/execution/list`).
+
+**Фикс:**
+
+- В `closed_trades` добавлена колонка `opened_at_ms` (+ миграция через
+  `ALTER TABLE ADD COLUMN`, идемпотентна).
+- `enrich_strategy` переписан на fuzzy-match с инверсией side:
+  `symbol=symbol` ∧ `side=CASE Sell→Buy, Buy→Sell` ∧
+  `|entry_price − avgEntryPrice| ≤ 0.1%` ∧ `|qty − qty| ≤ 5%` ∧
+  `opened_at ∈ [updated_ms − 24h, updated_ms)`. При нескольких кандидатах —
+  ближайший по `|opened_ms − updated_ms|`.
+- `hold_minutes = (updated_time_ms − opened_at_ms) / 60000` пересчитывается
+  **после** матча; для `strategy='unknown'` остаётся NULL и в отчёте
+  показывается как `—`.
+- В Overall добавлен срез `Overall (excl. recovered)` — без позиций с
+  `strategy='recovered'` (подхваченных ботом при sync_on_startup).
+
+**Тесты:** 28 кейсов в `tests/test_ab_test_snapshot.py` (8 новых —
+fuzzy-match: инверсия side для long/short, tolerance entry_price,
+выбор ближайшего opened_at, отсечение позиций, открытых после закрытия,
+идемпотентность, миграция старой БД). 233 PASSED в общем suite.
+
+**Файлы:** `scripts/ab_test_snapshot.py`, `tests/test_ab_test_snapshot.py`.
+
 ### AB-test snapshot: инкрементальный sync closedPnl → SQLite → markdown
 
 Инструмент для быстрых срезов статистики перед внедрением новых стратегий.
