@@ -227,19 +227,33 @@ def _fetch_window(session, category: str, start_ms: int, end_ms: int) -> list[di
     return out
 
 
-def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_db_path: Path | None) -> int:
+def sync_closed_pnl(
+    conn: sqlite3.Connection,
+    *,
+    session,
+    category: str,
+    stats_db_path: Path | None,
+    sync_from_ms: int | None = None,
+) -> int:
     """Подтянуть новые сделки из Bybit, обогатить strategy JOIN'ом с stats_db.
+
+    Args:
+        sync_from_ms: явная нижняя граница (override initial_epoch_ms).
+            Bybit может игнорировать startTime для демо-аккаунта и отдавать
+            записи старше запрошенного окна, поэтому применяем ещё и
+            client-side фильтр по updated_time_ms.
 
     Возвращает количество добавленных (новых) сделок.
     """
     last_ms_raw = meta_get(conn, "last_fetched_end_ms")
-    floor_ms = initial_epoch_ms()
+    floor_ms = sync_from_ms if sync_from_ms is not None else initial_epoch_ms()
     last_ms = int(last_ms_raw) if last_ms_raw else floor_ms
     start_ms = max(floor_ms, last_ms - SYNC_RECENT_OVERLAP_MS)
     now_ms = int(time.time() * 1000)
 
     added = 0
     seen = 0
+    filtered = 0
     max_updated = last_ms
 
     cur_start = start_ms
@@ -250,6 +264,11 @@ def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_d
         for raw in items:
             trade = _parse_trade(raw)
             if trade is None:
+                continue
+            # Client-side фильтр: Bybit иногда игнорит startTime и возвращает
+            # старые записи (эмпирически на demo). Отсекаем их явно.
+            if trade.updated_time_ms < floor_ms:
+                filtered += 1
                 continue
             seen += 1
             if trade.updated_time_ms > max_updated:
@@ -282,7 +301,10 @@ def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_d
 
     enrich_strategy(conn, stats_db_path)
 
-    log.info("sync: seen=%d, added=%d, last_updated=%s", seen, added, _fmt_ms(max_updated))
+    log.info(
+        "sync: seen=%d, added=%d, filtered_before_floor=%d, last_updated=%s",
+        seen, added, filtered, _fmt_ms(max_updated),
+    )
     return added
 
 
@@ -819,6 +841,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wave", type=int, help="Ограничить отчёт волной с этим ID")
     p.add_argument("--no-sync", action="store_true", help="Не ходить в Bybit API, работать по БД")
     p.add_argument("--no-report", action="store_true", help="Только sync/манипуляции, без markdown")
+    p.add_argument(
+        "--sync-from",
+        help="ISO-дата нижней границы для sync (отсекает записи старше, даже если API их вернул). Пример: 2026-04-16T06:30",
+    )
     p.add_argument("--output", help="Путь для записи markdown (помимо stdout)")
     p.add_argument("--add-wave", dest="add_wave", help="Добавить/обновить волну: 'name=...;start=...;[end=...;commit=...;desc=...]'")
     p.add_argument("--list-waves", action="store_true", help="Показать список волн и выйти")
@@ -880,7 +906,20 @@ def main(argv: list[str] | None = None) -> int:
             log.error("BYBIT_BOT_API_KEY/SECRET не заданы, sync невозможен")
             return 3
         session = HTTP(api_key=settings.api_key, api_secret=settings.api_secret, demo=settings.demo)
-        sync_closed_pnl(conn, session=session, category=settings.category, stats_db_path=stats_db)
+        sync_from_ms: int | None = None
+        if args.sync_from:
+            sync_from_ms = _parse_date_ms(args.sync_from)
+            if sync_from_ms is None:
+                log.error("Не смог разобрать --sync-from: %s", args.sync_from)
+                return 4
+            log.info("sync-from override: %s → %d", args.sync_from, sync_from_ms)
+        sync_closed_pnl(
+            conn,
+            session=session,
+            category=settings.category,
+            stats_db_path=stats_db,
+            sync_from_ms=sync_from_ms,
+        )
     else:
         enrich_strategy(conn, stats_db)
 
