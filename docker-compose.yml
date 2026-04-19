@@ -57,6 +57,11 @@ services:
       # /root/fx-pro-bot-data (bind mount ниже). Рестарт контейнера и
       # docker volume rm не трогают этот файл.
       AB_SNAPSHOTS_DB_PATH: /ab-data/ab_snapshots.sqlite
+      # Wave 4 strategies (по умолчанию false, включаются через .env на VPS)
+      BYBIT_BOT_SCALP_ORB_ENABLED: ${BYBIT_BOT_SCALP_ORB_ENABLED:-false}
+      BYBIT_BOT_SCALP_TURTLE_ENABLED: ${BYBIT_BOT_SCALP_TURTLE_ENABLED:-false}
+      BYBIT_BOT_SCALP_LEADLAG_ENABLED: ${BYBIT_BOT_SCALP_LEADLAG_ENABLED:-false}
+      BYBIT_BOT_LEADLAG_REF_SYMBOL: ${BYBIT_BOT_LEADLAG_REF_SYMBOL:-BTCUSDT}
     volumes:
       - bybit_data:/data
       - /root/fx-pro-bot-data:/ab-data
