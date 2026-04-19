@@ -373,3 +373,125 @@ def test_sync_positions_on_startup(tmp_path):
 
     _sync_positions_on_startup(mock_client, store)
     assert len(store.get_open_positions()) == 2
+
+
+def _make_exit_mocks(tmp_path, initial_positions, fresh_positions, fetch_realized_pnl_return=None):
+    """Вспомогательная фабрика для тестов _process_exits.
+
+    initial_positions / fresh_positions — что возвращает 1-й и 2-й вызовы get_positions.
+    fetch_realized_pnl_return — что возвращает fetch_realized_pnl (None = пусто).
+    """
+    from unittest.mock import MagicMock
+    from bybit_bot.stats.store import StatsStore
+    from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
+
+    store = StatsStore(tmp_path / "exit_test.sqlite")
+    mock_client = MagicMock()
+    mock_client.get_positions.side_effect = [initial_positions, fresh_positions]
+    mock_client.fetch_realized_pnl.return_value = fetch_realized_pnl_return
+    killswitch = KillSwitch(KillSwitchConfig(
+        max_daily_loss_usd=100.0,
+        max_drawdown_pct=50.0,
+        max_positions=5,
+    ))
+    return store, mock_client, killswitch
+
+
+def test_process_exits_race_guard_preserves_live_position(tmp_path):
+    """API race-guard: если позиция исчезает в 1-м запросе и появляется во 2-м,
+    бот не должен помечать её как sync_pending/orphan — это ложное срабатывание.
+
+    Регрессия: до фикса 9/104 позиций baseline получали sync_orphan с pnl=0,
+    хотя на бирже они оставались открытыми."""
+    from bybit_bot.app.main import _process_exits
+    from bybit_bot.config.settings import Settings
+    from bybit_bot.trading.client import PositionInfo
+
+    live_pos = PositionInfo(
+        symbol="TIAUSDT", side="Buy", size="1090.3",
+        entry_price=0.3911, unrealised_pnl=-1.5,
+        leverage="5", position_idx=0,
+    )
+
+    store, client, ks = _make_exit_mocks(
+        tmp_path,
+        initial_positions=[],
+        fresh_positions=[live_pos],
+    )
+    store.open_position(
+        symbol="TIAUSDT", side="Buy", qty="1090.3",
+        entry_price=0.3911, order_id="test_order_1",
+        strategy="scalp_vwap",
+    )
+    settings = Settings(api_key="k", api_secret="s", _env_file=None)
+
+    _process_exits(
+        client=client, stats=store, killswitch=ks,
+        settings=settings, bars_map={}, scalp_statarb=None,
+    )
+
+    open_after = store.get_open_positions()
+    assert len(open_after) == 1, "Живая позиция должна остаться открытой"
+    assert open_after[0].symbol == "TIAUSDT"
+    assert open_after[0].close_reason is None
+    assert client.get_positions.call_count == 2, "Ожидался повторный запрос (race guard)"
+    client.fetch_realized_pnl.assert_not_called()
+
+
+def test_process_exits_closes_truly_missing_position(tmp_path):
+    """Если позиция отсутствует и в 1-м, и во 2-м запросе — это реальное закрытие
+    на бирже. Бот должен подтянуть PnL из closed-pnl API и закрыть в БД."""
+    from bybit_bot.app.main import _process_exits
+    from bybit_bot.config.settings import Settings
+
+    store, client, ks = _make_exit_mocks(
+        tmp_path,
+        initial_positions=[],
+        fresh_positions=[],
+        fetch_realized_pnl_return={"closedPnl": "-2.50", "avgExitPrice": "0.3850"},
+    )
+    store.open_position(
+        symbol="TIAUSDT", side="Buy", qty="1090.3",
+        entry_price=0.3911, order_id="test_order_1",
+        strategy="scalp_vwap",
+    )
+    settings = Settings(api_key="k", api_secret="s", _env_file=None)
+
+    _process_exits(
+        client=client, stats=store, killswitch=ks,
+        settings=settings, bars_map={}, scalp_statarb=None,
+    )
+
+    open_after = store.get_open_positions()
+    assert len(open_after) == 0, "Позиция должна быть закрыта в БД"
+    client.fetch_realized_pnl.assert_called_once()
+
+
+def test_process_exits_pending_when_api_empty(tmp_path):
+    """Позиция отсутствует в обоих запросах + closed-pnl API пусто → sync_pending
+    (а не orphan сразу). Orphan выставится позже в _reconcile_pending_sync."""
+    from bybit_bot.app.main import _process_exits
+    from bybit_bot.config.settings import Settings
+
+    store, client, ks = _make_exit_mocks(
+        tmp_path,
+        initial_positions=[],
+        fresh_positions=[],
+        fetch_realized_pnl_return=None,
+    )
+    store.open_position(
+        symbol="TIAUSDT", side="Buy", qty="1090.3",
+        entry_price=0.3911, order_id="test_order_1",
+        strategy="scalp_vwap",
+    )
+    settings = Settings(api_key="k", api_secret="s", _env_file=None)
+
+    _process_exits(
+        client=client, stats=store, killswitch=ks,
+        settings=settings, bars_map={}, scalp_statarb=None,
+    )
+
+    pending = store.get_pending_sync_positions(older_than_sec=0)
+    assert len(pending) == 1
+    assert pending[0].close_reason == "sync_pending"
+    assert pending[0].pnl_usd == 0.0

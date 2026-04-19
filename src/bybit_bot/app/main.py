@@ -426,6 +426,27 @@ def _process_exits(
     if not db_open:
         return
 
+    # API race guard: иногда get_positions() возвращает неполный список
+    # (пропадают свежеоткрытые позиции). Если в db_open есть символы не из api_map —
+    # сделаем повторный запрос, и только позиции, отсутствующие ДВАЖДЫ, считаем
+    # реально закрытыми на бирже. Без этого бот фантомно закрывает живые позиции
+    # как sync_orphan (pnl=0) и теряет над ними контроль (time-stop не работает).
+    missing = [p.symbol for p in db_open if p.symbol not in api_map]
+    if missing:
+        try:
+            api_positions_2 = client.get_positions()
+            api_map_2 = {p.symbol: p for p in api_positions_2}
+        except Exception:
+            log.exception("API race guard: повторный get_positions() не удался")
+            api_map_2 = {}
+
+        recovered = [s for s in missing if s in api_map_2]
+        if recovered:
+            log.warning("SYNC race-guard: %d позиций восстановились во втором запросе: %s",
+                        len(recovered), recovered)
+            for sym in recovered:
+                api_map[sym] = api_map_2[sym]
+
     # Синхронизация: закрыть в БД позиции, которых уже нет на бирже.
     # Подтягиваем реальный PnL из Bybit closed-pnl API.
     # Если API не вернул запись (закрытие <1-2с назад) — помечаем позицию
