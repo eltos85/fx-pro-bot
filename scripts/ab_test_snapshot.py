@@ -274,7 +274,10 @@ def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_d
 
 ENTRY_PRICE_REL_TOL = 0.001  # ±0.1% — допуск на расхождение entry price между Bybit и БД бота
 QTY_REL_TOL = 0.05           # ±5% — округление qty до qty_step
-MATCH_WINDOW_MS = 24 * 3600 * 1000  # позиция должна была открыться не раньше 24h до закрытия
+# Позиции могут удерживаться неделями (напр. stat-arb до сходимости Z-score),
+# поэтому окно — 14 дней. Жёсткие фильтры по entry_price ±0.1% и qty ±5%
+# страхуют от неверных матчей с другой позицией того же символа.
+MATCH_WINDOW_MS = 14 * 24 * 3600 * 1000
 
 
 def enrich_strategy(conn: sqlite3.Connection, stats_db_path: Path | None) -> int:
@@ -305,10 +308,13 @@ def enrich_strategy(conn: sqlite3.Connection, stats_db_path: Path | None) -> int
 
     conn.execute("ATTACH DATABASE ? AS bot", (str(stats_db_path),))
     try:
+        # Кандидаты на обогащение: либо strategy не проставлена, либо
+        # opened_at_ms пуст (после миграции старой БД). Во втором случае
+        # хотим получить opened_at_ms, чтобы правильно посчитать hold.
         pending = conn.execute(
-            "SELECT order_id, symbol, side, qty, avg_entry_price, updated_time_ms "
+            "SELECT order_id, symbol, side, qty, avg_entry_price, updated_time_ms, strategy "
             "FROM closed_trades "
-            "WHERE strategy IS NULL OR strategy='unknown'"
+            "WHERE strategy IS NULL OR strategy='unknown' OR opened_at_ms IS NULL"
         ).fetchall()
 
         matched = 0
@@ -348,13 +354,18 @@ def enrich_strategy(conn: sqlite3.Connection, stats_db_path: Path | None) -> int
             ).fetchone()
 
             if match is not None and match["strategy"]:
+                # Если strategy уже стояла (например recovered) — оставляем её,
+                # только дозаполняем opened_at_ms.
+                keep_existing = ct["strategy"] not in (None, "", "unknown")
+                new_strategy = ct["strategy"] if keep_existing else match["strategy"]
                 conn.execute(
                     "UPDATE closed_trades "
                     "SET strategy = ?, opened_at_ms = ? "
                     "WHERE order_id = ?",
-                    (match["strategy"], match["opened_ms"], ct["order_id"]),
+                    (new_strategy, match["opened_ms"], ct["order_id"]),
                 )
-                matched += 1
+                if not keep_existing:
+                    matched += 1
 
         # Для записей, которым не нашли пару — явно 'unknown'.
         conn.execute(
@@ -366,6 +377,11 @@ def enrich_strategy(conn: sqlite3.Connection, stats_db_path: Path | None) -> int
             "UPDATE closed_trades "
             "SET hold_minutes = CAST((updated_time_ms - opened_at_ms) AS REAL) / 60000.0 "
             "WHERE opened_at_ms IS NOT NULL AND opened_at_ms > 0"
+        )
+        # Зануляем hold для unmatched записей (в старых снимках могли
+        # остаться значения из кривой формулы updated − created).
+        conn.execute(
+            "UPDATE closed_trades SET hold_minutes = NULL WHERE opened_at_ms IS NULL"
         )
         conn.commit()
 
