@@ -2,6 +2,48 @@
 
 ## 2026-04-19
 
+### AB-test snapshot: инкрементальный sync closedPnl → SQLite → markdown
+
+Инструмент для быстрых срезов статистики перед внедрением новых стратегий.
+JSON отвергли — с ростом истории файл распух бы неконтролируемо; берём SQLite
+с инкрементальным sync.
+
+**Хранение БД:** `/root/fx-pro-bot-data/ab_snapshots.sqlite` на хосте VPS,
+через bind mount `/ab-data` в контейнер `bybit-bot`. Вне docker volume —
+рестарт контейнера, `git reset --hard` и `docker volume rm` её не трогают.
+Прямой `scp` для локального анализа.
+
+**Схема БД (3 таблицы):**
+- `closed_trades` — сырые записи Bybit closedPnl API (PK = `order_id`,
+  `closed_pnl` = NET, `hold_minutes` computed, плюс `strategy`,
+  `order_link_id`, `raw_json`).
+- `waves` — границы значимых изменений (name, start/end UTC, commit_hash,
+  description). Заполняется вручную через `--add-wave`.
+- `sync_meta` — `last_fetched_end_ms` для инкрементального sync.
+
+**Скрипт `scripts/ab_test_snapshot.py`:**
+- Одна команда: sync (окна по 7 дней, пагинация по cursor) → enrich strategy
+  через ATTACH JOIN с `bybit_stats.sqlite.positions.order_id` → markdown-отчёт
+  из 7 срезов (overall / by_wave / by_day / by_symbol / by_strategy /
+  by_hour_utc / by_hold_bucket).
+- Флаги: `--since`, `--until`, `--wave N`, `--no-sync`, `--no-report`,
+  `--output PATH`, `--add-wave "name=...;start=...;..."`, `--list-waves`.
+- Страховка от API-лага: при sync отступаем на 1 час назад от
+  `last_fetched_end_ms`, `INSERT OR IGNORE` обеспечивает дедуп.
+
+**Запуск (VPS):**
+```
+docker exec fx-pro-bot-bybit-bot-1 python3 -m scripts.ab_test_snapshot
+```
+
+**Тесты:** `tests/test_ab_test_snapshot.py` (20 кейсов) — схема, парсинг дат
+и сделок, инкрементальный sync с FakeSession, маппинг стратегий, CRUD волн,
+рендер отчёта. Общий suite — 225 PASSED.
+
+**Файлы:** `scripts/ab_test_snapshot.py`, `scripts/__init__.py`,
+`tests/test_ab_test_snapshot.py`, `docker-compose.yml` (bind mount +
+env `AB_SNAPSHOTS_DB_PATH`).
+
 ### Аудит и уборка мёртвого кода в `bybit_bot`
 
 Полная ревизия кодовой базы перед внедрением новых стратегий и A/B-фреймворка.

@@ -53,8 +53,13 @@ services:
       - .env
     environment:
       BYBIT_BOT_DATA_DIR: /data
+      # AB-test snapshot БД хранится вне docker volume, в хостовой папке
+      # /root/fx-pro-bot-data (bind mount ниже). Рестарт контейнера и
+      # docker volume rm не трогают этот файл.
+      AB_SNAPSHOTS_DB_PATH: /ab-data/ab_snapshots.sqlite
     volumes:
       - bybit_data:/data
+      - /root/fx-pro-bot-data:/ab-data
 
 volumes:
   bybit_data:
