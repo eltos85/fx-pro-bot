@@ -272,7 +272,11 @@ def sync_closed_pnl(conn: sqlite3.Connection, *, session, category: str, stats_d
     return added
 
 
-ENTRY_PRICE_REL_TOL = 0.001  # ±0.1% — допуск на расхождение entry price между Bybit и БД бота
+ENTRY_PRICE_REL_TOL = 0.005  # ±0.5% — допуск на расхождение entry price между Bybit и БД бота.
+# Bybit closedPnl возвращает avgEntryPrice с округлением до tickSize, а
+# positions.entry_price хранит float32 конверсию в REAL — расхождение до
+# 0.2% для дешёвых токенов. 0.5% — компромисс: больше точности чем 0.2%,
+# но всё ещё защищает от ложного матча с другой позицией того же символа.
 QTY_REL_TOL = 0.05           # ±5% — округление qty до qty_step
 # Позиции могут удерживаться неделями (напр. stat-arb до сходимости Z-score),
 # поэтому окно — 14 дней. Жёсткие фильтры по entry_price ±0.1% и qty ±5%
