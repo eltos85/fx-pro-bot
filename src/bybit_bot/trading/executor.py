@@ -215,9 +215,6 @@ class TradeExecutor:
             params.symbol, params.side, params.qty, sl=sl, tp=tp,
         )
 
-    def close_position(self, symbol: str, side: str, qty: str) -> OrderResult:
-        return self._client.close_position(symbol, side, qty)
-
     def set_leverage(self, symbol: str) -> bool:
         if self._instruments and symbol not in self._instruments:
             return False

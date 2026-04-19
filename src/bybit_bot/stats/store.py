@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+
 log = logging.getLogger(__name__)
 
 
@@ -31,17 +32,6 @@ class PositionRow:
     close_reason: str | None = None
     pair_tag: str = ""
     opened_bar_idx: int = 0
-
-
-@dataclass
-class SignalRow:
-    id: int
-    symbol: str
-    direction: str
-    strength: float
-    reasons: str
-    price: float
-    created_at: str
 
 
 class StatsStore:
@@ -215,13 +205,6 @@ class StatsStore:
         )
         self.conn.commit()
 
-    def get_open_position_by_symbol(self, symbol: str) -> PositionRow | None:
-        row = self.conn.execute(
-            "SELECT * FROM positions WHERE symbol=? AND closed_at IS NULL LIMIT 1",
-            (symbol,),
-        ).fetchone()
-        return self._row_to_position(row) if row else None
-
     def get_open_by_pair_tag(self, pair_tag: str) -> list[PositionRow]:
         """Все открытые позиции с данным pair_tag (для парного закрытия Stat-Arb)."""
         rows = self.conn.execute(
@@ -244,38 +227,6 @@ class StatsStore:
             "SELECT COALESCE(SUM(pnl_usd), 0) as total FROM positions WHERE closed_at IS NOT NULL",
         ).fetchone()
         return float(row["total"]) if row else 0.0
-
-    def get_daily_pnl(self, date_str: str | None = None) -> float:
-        if date_str is None:
-            date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-        row = self.conn.execute(
-            "SELECT COALESCE(SUM(pnl_usd), 0) as total FROM positions "
-            "WHERE closed_at IS NOT NULL AND closed_at >= ?",
-            (date_str,),
-        ).fetchone()
-        return float(row["total"]) if row else 0.0
-
-    def get_total_stats(self) -> dict:
-        row = self.conn.execute("""
-            SELECT
-                COUNT(*) as total_trades,
-                SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
-                SUM(CASE WHEN pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
-                COALESCE(SUM(pnl_usd), 0) as total_pnl,
-                COALESCE(AVG(pnl_usd), 0) as avg_pnl
-            FROM positions WHERE closed_at IS NOT NULL
-        """).fetchone()
-        if not row:
-            return {"total_trades": 0, "wins": 0, "losses": 0, "total_pnl": 0, "avg_pnl": 0}
-        total = row["total_trades"]
-        return {
-            "total_trades": total,
-            "wins": row["wins"] or 0,
-            "losses": row["losses"] or 0,
-            "total_pnl": round(row["total_pnl"], 2),
-            "avg_pnl": round(row["avg_pnl"], 2),
-            "win_rate": round((row["wins"] or 0) / total * 100, 1) if total > 0 else 0,
-        }
 
     @staticmethod
     def _row_to_position(row: sqlite3.Row) -> PositionRow:

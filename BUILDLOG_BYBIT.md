@@ -1,5 +1,73 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-19
+
+### Аудит и уборка мёртвого кода в `bybit_bot`
+
+Полная ревизия кодовой базы перед внедрением новых стратегий и A/B-фреймворка.
+Торговая логика не затронута, только удаление неиспользуемых полей/методов/
+констант. Все 205 существующих тестов проходят.
+
+**Удалено из `config/settings.py` / `.env.example`:**
+- `max_positions` (неактуальное поле, активный лимит — `killswitch_max_positions`).
+- `strategy_trail_atr_mult` (trailing stop не реализован).
+- `killswitch_max_loss_per_trade` (уже не использовался в `check_allowed`;
+  биржевой SL выполняет ту же функцию).
+
+**Удалено из `trading/killswitch.py`:**
+- Поле `KillSwitchConfig.max_loss_per_trade_usd`; docstring обновлён, чтобы
+  явно отметить, что per-trade защита делегирована exchange SL.
+
+**Удалено из `trading/client.py`:**
+- `BybitClient.is_demo` (never read).
+- `amend_sl_tp()` и `cancel_sl_tp()` — использовались только в `fx_pro_bot`;
+  в `bybit_bot` SL/TP ставятся при открытии ордера и больше не меняются.
+
+**Удалено из `trading/executor.py`:**
+- `TradeExecutor.close_position()` — тонкая обёртка над `client.close_position`,
+  в `app/main.py` вызывается напрямую через `client`.
+
+**Удалено из `stats/store.py`:**
+- Датакласс `SignalRow` (нигде не читался).
+- Методы `get_open_position_by_symbol`, `get_daily_pnl`, `get_total_stats`
+  (не использовались; агрегация идёт через `get_cumulative_pnl` и
+  `get_open_positions`).
+
+**Удалено из `strategies/scalping/indicators.py`:**
+- `vwap_series`, `z_score_series` — серии-аналоги точечных функций,
+  использовавшиеся только в `fx_pro_bot`.
+
+**Удалено из `strategies/scalping/vwap_crypto.py`:**
+- Дубликат `_compute_adx()` — теперь используется `compute_adx` из `indicators.py`.
+- Параметры `max_positions`, `max_per_symbol` в `__init__` (лимит живёт в
+  `app/main.py`).
+- Константы `SL_ATR_MULT`, `TP_ATR_MULT` (хардкод остаётся в `app/main.py`,
+  константы в модулях стратегий вводили в заблуждение).
+
+**Удалено из `strategies/scalping/stat_arb_crypto.py`:**
+- Параметр `max_pairs` (не использовался).
+- Поля `atr_a/atr_b/price_a/price_b` в `StatArbSignal` (нигде не читались).
+- Константа `SL_ATR_MULT` + неиспользуемый импорт `atr`.
+
+**Удалено из `strategies/scalping/volume_spike.py` и `funding_scalp.py`:**
+- Константы `SL_ATR_MULT`, `TP_ATR_MULT`, `FUNDING_BUFFER_SECONDS`
+  (ATR-мультипликаторы для SL/TP применяются хардкодом в `app/main.py`).
+
+**Прочее:**
+- `app/main.py`: удалён мёртвый импорт `fetch_bars` (используется только
+  `fetch_bars_batch`); убран аргумент `max_loss_per_trade_usd` при создании
+  `KillSwitchConfig`.
+- `tests/test_bybit_bot.py`: подправлены assert'ы под удалённые поля.
+
+`FundingScalpStrategy.should_exit_after_funding()` и `MomentumStrategy`
+**оставлены** (dormant, но могут понадобиться — по решению пользователя).
+
+**Файлы:** `config/settings.py`, `.env.example`, `trading/killswitch.py`,
+`trading/client.py`, `trading/executor.py`, `stats/store.py`,
+`strategies/scalping/indicators.py`, `strategies/scalping/vwap_crypto.py`,
+`strategies/scalping/stat_arb_crypto.py`, `strategies/scalping/volume_spike.py`,
+`strategies/scalping/funding_scalp.py`, `app/main.py`, `tests/test_bybit_bot.py`.
+
 ## 2026-04-17
 
 ### Реальный PnL из closed-pnl API + мягкий HTF slope-фильтр VWAP

@@ -27,10 +27,9 @@ log = logging.getLogger(__name__)
 FUNDING_RATE_THRESHOLD = 0.0003  # 0.03%
 FUNDING_RATE_STRONG = 0.0008  # 0.08% — сильный перекос
 ENTRY_MINUTES_BEFORE = 30
-# Из документации Bybit: не входить за 5 секунд до/после funding timestamp.
-FUNDING_BUFFER_SECONDS = 10
-SL_ATR_MULT = 1.5
-TP_ATR_MULT = 1.0
+# SL/TP ATR-мультипликаторы (1.5 / 1.0 ATR) задаются хардкодом в app/main.py
+# для этой стратегии. Буфер ±5-10 с вокруг funding timestamp соблюдается через
+# should_exit_after_funding() / ENTRY_MINUTES_BEFORE.
 
 # Bybit funding: 00:00, 08:00, 16:00 UTC (стандарт для USDT perp).
 FUNDING_HOURS_UTC = (0, 8, 16)

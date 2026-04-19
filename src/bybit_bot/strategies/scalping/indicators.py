@@ -24,19 +24,6 @@ def vwap(bars: list[Bar]) -> float:
     return total_vp / total_vol
 
 
-def vwap_series(bars: list[Bar]) -> list[float]:
-    """Кумулятивный VWAP — значение для каждого бара."""
-    result: list[float] = []
-    cum_vp = 0.0
-    cum_vol = 0.0
-    for b in bars:
-        typical = (b.high + b.low + b.close) / 3.0
-        cum_vp += typical * b.volume
-        cum_vol += b.volume
-        result.append(cum_vp / cum_vol if cum_vol > 0 else b.close)
-    return result
-
-
 def rolling_z_score(values: list[float], window: int) -> float:
     """Z-score последнего значения относительно скользящего окна."""
     if len(values) < window or window < 2:
@@ -48,21 +35,6 @@ def rolling_z_score(values: list[float], window: int) -> float:
     if std == 0:
         return 0.0
     return (values[-1] - mean) / std
-
-
-def z_score_series(values: list[float], window: int) -> list[float]:
-    """Серия z-score для каждого элемента."""
-    result: list[float] = []
-    for i in range(len(values)):
-        if i < window - 1:
-            result.append(0.0)
-            continue
-        segment = values[i - window + 1 : i + 1]
-        mean = sum(segment) / window
-        variance = sum((v - mean) ** 2 for v in segment) / (window - 1)
-        std = math.sqrt(variance) if variance > 0 else 0.0
-        result.append((values[i] - mean) / std if std > 0 else 0.0)
-    return result
 
 
 def ema_slope(ema_values: list[float], lookback: int = 5) -> float:

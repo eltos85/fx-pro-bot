@@ -180,10 +180,6 @@ class Settings(BaseSettings):
     strategy_tp_atr_mult: float = Field(
         default=3.0, validation_alias="BYBIT_BOT_STRATEGY_TP_ATR",
     )
-    strategy_trail_atr_mult: float = Field(
-        default=1.0, validation_alias="BYBIT_BOT_STRATEGY_TRAIL_ATR",
-    )
-    max_positions: int = Field(default=3, validation_alias="BYBIT_BOT_MAX_POSITIONS")
     min_ensemble_votes: int = Field(default=3, validation_alias="BYBIT_BOT_MIN_VOTES")
     momentum_enabled: bool = Field(default=False, validation_alias="BYBIT_BOT_MOMENTUM_ENABLED")
 
@@ -213,7 +209,8 @@ class Settings(BaseSettings):
     # Kill Switch — лимиты для демо-торговли.
     # Daily loss 7.5% = $37.50 при $500 (больше свободы на демо).
     # Drawdown 25% = $125 от пика (при переходе на реал — снизить до 10%).
-    # Max loss per trade 2.5% = $12.50 (буфер для проскальзывания).
+    # Per-trade loss не ограничен отдельно: биржевой SL = 2 ATR уже даёт
+    # структурный лимит, дублирующий ks-проверка только мешала exit-логике.
     killswitch_max_daily_loss: float = Field(
         default=37.50, validation_alias="BYBIT_BOT_KS_MAX_DAILY_LOSS",
     )
@@ -222,9 +219,6 @@ class Settings(BaseSettings):
     )
     killswitch_max_positions: int = Field(
         default=5, validation_alias="BYBIT_BOT_KS_MAX_POSITIONS",
-    )
-    killswitch_max_loss_per_trade: float = Field(
-        default=12.50, validation_alias="BYBIT_BOT_KS_MAX_LOSS_PER_TRADE",
     )
 
     @property

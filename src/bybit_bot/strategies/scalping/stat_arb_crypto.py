@@ -16,7 +16,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from bybit_bot.analysis.signals import Direction, atr
+from bybit_bot.analysis.signals import Direction
 from bybit_bot.market_data.models import Bar
 from bybit_bot.strategies.scalping.indicators import (
     adf_pvalue,
@@ -43,7 +43,6 @@ Z_ENTRY = 2.0
 Z_EXIT = 0.5
 LOOKBACK = 100
 ZSCORE_WINDOW = 50
-SL_ATR_MULT = 2.0
 # Минимальная корреляция для входа в пару.
 # При корреляции < 0.5 коинтеграция нестабильна (Crypto Economy, 2025).
 MIN_CORRELATION = 0.5
@@ -58,10 +57,6 @@ class StatArbSignal:
     beta: float
     direction_a: Direction
     direction_b: Direction
-    atr_a: float
-    atr_b: float
-    price_a: float
-    price_b: float
 
 
 class StatArbCryptoStrategy:
@@ -71,10 +66,8 @@ class StatArbCryptoStrategy:
         self,
         *,
         pairs: list[tuple[str, str]] | None = None,
-        max_pairs: int = 4,
     ) -> None:
         self._pairs = pairs or DEFAULT_PAIRS
-        self._max_pairs = max_pairs
 
     def scan(self, bars_map: dict[str, list[Bar]]) -> list[StatArbSignal]:
         signals: list[StatArbSignal] = []
@@ -115,9 +108,6 @@ class StatArbCryptoStrategy:
             if abs(z) < Z_ENTRY:
                 continue
 
-            atr_a = atr(bars_a)
-            atr_b = atr(bars_b)
-
             if z > Z_ENTRY:
                 dir_a = Direction.SHORT
                 dir_b = Direction.LONG
@@ -134,10 +124,6 @@ class StatArbCryptoStrategy:
                 beta=round(beta, 4),
                 direction_a=dir_a,
                 direction_b=dir_b,
-                atr_a=atr_a,
-                atr_b=atr_b,
-                price_a=bars_a[-1].close,
-                price_b=bars_b[-1].close,
             ))
 
         return signals

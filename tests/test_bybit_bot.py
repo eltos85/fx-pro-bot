@@ -34,11 +34,9 @@ def test_settings_defaults():
     assert len(s.scan_symbols) == 8
     assert s.leverage == 5
     assert s.account_balance == 500.0
-    assert s.max_positions == 3
     assert s.max_margin_per_trade_pct == 0.25
     assert s.killswitch_max_daily_loss == 37.50
     assert s.killswitch_max_drawdown_pct == 25.0
-    assert s.killswitch_max_loss_per_trade == 12.50
     assert s.scalping_max_positions == 3
     assert s.momentum_enabled is False
     assert s.scalping_funding_enabled is False
@@ -73,8 +71,7 @@ def test_rsi_insufficient_data():
 
 def _ks_cfg(**overrides) -> "KillSwitchConfig":
     from bybit_bot.trading.killswitch import KillSwitchConfig
-    defaults = dict(max_daily_loss_usd=37.50, max_drawdown_pct=25.0,
-                    max_positions=5, max_loss_per_trade_usd=12.50)
+    defaults = dict(max_daily_loss_usd=37.50, max_drawdown_pct=25.0, max_positions=5)
     defaults.update(overrides)
     return KillSwitchConfig(**defaults)
 
@@ -121,10 +118,7 @@ def test_stats_store(tmp_path):
     store.close_position(pos_id, exit_price=61000.0, pnl_usd=10.0, close_reason="tp_hit")
     assert len(store.get_open_positions()) == 0
 
-    stats = store.get_total_stats()
-    assert stats["total_trades"] == 1
-    assert stats["wins"] == 1
-    assert stats["total_pnl"] == 10.0
+    assert store.get_cumulative_pnl() == pytest.approx(10.0)
 
 
 def test_executor_round_qty():

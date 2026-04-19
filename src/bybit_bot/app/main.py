@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from bybit_bot.analysis.scanner import ScanResult, active_signals, scan_instruments
 from bybit_bot.analysis.signals import Direction, atr as compute_atr
 from bybit_bot.config.settings import Settings, display_name
-from bybit_bot.market_data.feed import fetch_bars, fetch_bars_batch
+from bybit_bot.market_data.feed import fetch_bars_batch
 from bybit_bot.market_data.models import Bar
 from bybit_bot.stats.store import PositionRow, StatsStore
 from bybit_bot.strategies.momentum import MomentumStrategy
@@ -106,9 +106,7 @@ def run_bot() -> None:
     stats = StatsStore(settings.stats_db_path)
     momentum = MomentumStrategy(min_votes=settings.min_ensemble_votes) if settings.momentum_enabled else None
 
-    scalp_vwap = VwapCryptoStrategy(
-        max_positions=settings.scalping_max_positions,
-    ) if settings.scalping_vwap_enabled else None
+    scalp_vwap = VwapCryptoStrategy() if settings.scalping_vwap_enabled else None
 
     scalp_statarb = StatArbCryptoStrategy() if settings.scalping_statarb_enabled else None
     scalp_volume = VolumeSpikeStrategy() if settings.scalping_volume_enabled else None
@@ -142,7 +140,6 @@ def run_bot() -> None:
                     max_daily_loss_usd=settings.killswitch_max_daily_loss,
                     max_drawdown_pct=settings.killswitch_max_drawdown_pct,
                     max_positions=settings.killswitch_max_positions,
-                    max_loss_per_trade_usd=settings.killswitch_max_loss_per_trade,
                 ),
                 initial_equity=settings.account_balance,
             )

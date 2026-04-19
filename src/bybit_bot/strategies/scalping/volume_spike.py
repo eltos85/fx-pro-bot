@@ -24,10 +24,8 @@ VOLUME_SPIKE_MULT = 2.0
 PRICE_MOVE_ATR_MIN = 0.5
 RSI_FILTER_LOW = 20
 RSI_FILTER_HIGH = 80
-# SL = 2.0 ATR — оптимальный по бэктесту 9,433 сделок (Quant Signals):
-# profit factor 1.72 для BTC, drawdown 4.6%.
-SL_ATR_MULT = 2.0
-TP_ATR_MULT = 2.0
+# SL/TP ATR-мультипликаторы захардкожены в app/main.py (2.0 ATR SL, 2.0 ATR TP),
+# оптимум по бэктесту 9,433 сделок Quant Signals (profit factor 1.72, DD 4.6%).
 # Не торговать если за последние N баров уже был спайк (first test only).
 COOLDOWN_BARS = 5
 ADX_MIN = 20.0

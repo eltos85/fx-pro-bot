@@ -71,10 +71,6 @@ class BybitClient:
         mode = "DEMO" if demo else "LIVE"
         log.info("BybitClient: подключение (%s), category=%s", mode, category)
 
-    @property
-    def is_demo(self) -> bool:
-        return self._demo
-
     def get_balance(self) -> AccountBalance:
         """Получить баланс Unified Trading Account."""
         resp = self._session.get_wallet_balance(accountType="UNIFIED")
@@ -228,30 +224,6 @@ class BybitClient:
             log.warning("Не удалось установить leverage %s: %s", symbol, e)
             return False
 
-    def amend_sl_tp(
-        self,
-        symbol: str,
-        *,
-        sl: float | None = None,
-        tp: float | None = None,
-    ) -> bool:
-        """Обновить SL/TP для позиции."""
-        params: dict = {
-            "category": self._category,
-            "symbol": symbol,
-            "positionIdx": 0,
-        }
-        if sl is not None:
-            params["stopLoss"] = str(sl)
-        if tp is not None:
-            params["takeProfit"] = str(tp)
-        try:
-            resp = self._session.set_trading_stop(**params)
-            return resp.get("retCode", -1) == 0
-        except Exception as e:
-            log.warning("Не удалось обновить SL/TP %s: %s", symbol, e)
-            return False
-
     def set_trailing_stop(
         self,
         symbol: str,
@@ -281,10 +253,6 @@ class BybitClient:
                 return True
             log.warning("Trailing stop %s error: %s", symbol, e)
             return False
-
-    def cancel_sl_tp(self, symbol: str) -> bool:
-        """Отменить SL/TP для позиции (для Stat-Arb ног)."""
-        return self.amend_sl_tp(symbol, sl=0.0, tp=0.0)
 
     def get_closed_pnl(
         self,
