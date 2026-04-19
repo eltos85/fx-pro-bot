@@ -2,6 +2,40 @@
 
 ## 2026-04-19
 
+### AB-test snapshot: итоговый baseline с правильным матчингом и волнами
+
+**Итог на VPS:** 402/420 match rate = **95.7%** (было 3/420 = 0.7%). Оставшиеся
+18 `unknown` — pyramid-закрытия в первые дни работы бота, когда Bybit
+агрегировал несколько позиций в один `closedPnl` (qty=0.56 = 2×0.28); не
+ловятся fuzzy-match по qty ±5%. Edge-case, 4.3% выборки.
+
+**Волны в БД** (таблица `waves`):
+
+| # | Name | Период UTC | Суть |
+|---|---|---|---|
+| 1 | wave1_exit_logic | 04-16 06:30 → 17:00 | max_loss_per_trade убран, STATARB_EMERGENCY_LOSS 15→25 |
+| 2 | wave2_filter_loosening | 04-16 17:00 → 04-17 12:00 | Z_ENTRY 2.5→2.0, Z_EXIT 0.0→0.5, VOL_MULT 3→2, ADX_MAX 20→25, TIME_STOP 24h |
+| 3 | wave3_pnl_retry_htf_slope | 04-17 12:00 → now | fetch_realized_pnl retries 1→3, VWAP HTF slope мягкий |
+
+**Baseline для A/B теста = с 2026-04-16 06:30 UTC** (начало Волны 1). Данные
+до этой даты (316 сделок, "paper-like" период без маркеров версий) хранятся
+в `ab_snapshots.sqlite` как исторический контекст, но не учитываются в A/B.
+
+**Отчёт запускается:**
+
+```
+docker exec fx-pro-bot-bybit-bot-1 python3 -m scripts.ab_test_snapshot \
+    --since 2026-04-16T06:30 --output /ab-data/report.md
+```
+
+**Открытие, которое было невидимо до фикса матчинга:** в текущем baseline
+(104 сделки, 16-19 апреля) **scalp_vwap тянет 69% сделок с PF 0.34**
+(72 сделки, -$70.80). Stat-Arb после ослабления фильтров (Волна 2) почти
+безубыточен (PF 0.87 на 24 сделках). По `sample-size.mdc` отключать ничего
+нельзя (n<100 для стратегии, <2 недель), но это фокус мониторинга к 04-22.
+
+Подробно — `BYBIT_AB_TEST.md` (блок "СТАЛО").
+
 ### AB-test snapshot: fuzzy-match стратегии, честный hold, overall excl. recovered
 
 Базовый baseline-прогон показал, что JOIN через `order_id` не ловит 99.3%
