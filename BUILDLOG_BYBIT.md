@@ -2,6 +2,33 @@
 
 ## 2026-04-19
 
+### API race guard против sync_orphan + recovery 10 записей
+
+**Проблема, найденная при анализе baseline 16-19.04:** 9 из 104 позиций
+(8.7%) имели `close_reason='sync_orphan'` с `pnl_usd=0`, хотя на бирже они
+продолжали жить. Паттерн — через ~5 мин (1 poll cycle = 300 сек) после
+открытия `get_positions()` возвращал неполный список, бот считал позицию
+закрытой, переставал её отслеживать. Итог: time-stop 24ч **не работал**
+(Max Hold по baseline = **2256 мин = 37.6 ч**), Killswitch недооценивал
+дневной убыток (10 позиций писались с pnl=0, а реально принесли **-$11.10**).
+
+Страдает только scalp_vwap/volume (одиночные позиции). scalp_statarb не
+страдает — открывает пару позиций одновременно, обе стабильно в API.
+
+**Фикс** (`src/bybit_bot/app/main.py`): перед sync_pending делаем повторный
+`get_positions()`. Если позиция появилась во втором запросе — это race
+condition, не трогаем её. Лишний запрос только когда есть candidates for
+closing, обычно не каждый цикл.
+
+**Recovery** (`scripts/fix_sync_orphans.py`): разовая прошивка существующих
+orphan-записей в `/data/bybit_stats.sqlite` из `/ab-data/ab_snapshots.sqlite`
+(fuzzy-match: инвертированный side, qty±5%, entry_price±0.5%, updated_time
+после opened_at). Идемпотентно (close_reason='sync_orphan_recovered').
+На VPS запущено 2026-04-19 07:59 UTC — 10/10 восстановлено.
+
+**Тесты** (`tests/test_bybit_bot.py`): 3 новых — race-guard preserves live
+position, truly missing closes, API empty → sync_pending (не orphan сразу).
+
 ### AB-test snapshot: итоговый baseline с правильным матчингом и волнами
 
 **Итог на VPS:** 402/420 match rate = **95.7%** (было 3/420 = 0.7%). Оставшиеся
