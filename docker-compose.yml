@@ -62,6 +62,9 @@ services:
       BYBIT_BOT_SCALP_TURTLE_ENABLED: ${BYBIT_BOT_SCALP_TURTLE_ENABLED:-false}
       BYBIT_BOT_SCALP_LEADLAG_ENABLED: ${BYBIT_BOT_SCALP_LEADLAG_ENABLED:-false}
       BYBIT_BOT_LEADLAG_REF_SYMBOL: ${BYBIT_BOT_LEADLAG_REF_SYMBOL:-BTCUSDT}
+      # KillSwitch: на demo отключаем (demo equity $177k, 25% drawdown = $45k
+      # триггерится от шума). На реале (account $500) включать обязательно.
+      BYBIT_BOT_KS_ENABLED: ${BYBIT_BOT_KS_ENABLED:-true}
     volumes:
       - bybit_data:/data
       - /root/fx-pro-bot-data:/ab-data

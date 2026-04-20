@@ -146,9 +146,12 @@ def run_bot() -> None:
                     max_daily_loss_usd=settings.killswitch_max_daily_loss,
                     max_drawdown_pct=settings.killswitch_max_drawdown_pct,
                     max_positions=settings.killswitch_max_positions,
+                    enabled=settings.killswitch_enabled,
                 ),
                 initial_equity=settings.account_balance,
             )
+            if not settings.killswitch_enabled:
+                log.warning("KillSwitch ОТКЛЮЧЁН (BYBIT_BOT_KS_ENABLED=false)")
             if settings.scalping_funding_enabled:
                 scalp_funding = FundingScalpStrategy(client)
             balance = client.get_balance()

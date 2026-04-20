@@ -97,6 +97,38 @@ def test_killswitch_trips_on_daily_loss():
     assert ks.is_tripped is True
 
 
+def test_killswitch_disabled_bypasses_all_checks():
+    """enabled=False → check_allowed всегда True даже при triggered лимитах."""
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(
+        max_daily_loss_usd=10.0,
+        max_drawdown_pct=5.0,
+        max_positions=1,
+        enabled=False,
+    ), initial_equity=1000)
+    ks.record_trade_close(-100.0)
+    assert ks.check_allowed(10, 500) is True
+
+
+def test_killswitch_rotate_day_clears_trip_flag():
+    """После смены UTC-суток _tripped должен сбрасываться на следующем check_allowed.
+
+    Регрессия: раньше проверка _tripped стояла до _rotate_day, и флаг висел вечно.
+    """
+    from datetime import timedelta
+    from bybit_bot.trading.killswitch import KillSwitch
+    ks = KillSwitch(_ks_cfg(max_drawdown_pct=10.0), initial_equity=1000)
+
+    ks.check_allowed(0, 1000)
+    assert ks.check_allowed(0, 880) is False
+    assert ks.is_tripped is True
+
+    ks._today.date = ks._today.date - timedelta(days=1)
+
+    assert ks.check_allowed(0, 880) is True
+    assert ks.is_tripped is False
+
+
 def test_stats_store(tmp_path):
     from bybit_bot.stats.store import StatsStore
     store = StatsStore(tmp_path / "test.sqlite")

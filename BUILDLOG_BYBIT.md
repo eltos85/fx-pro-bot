@@ -1,6 +1,86 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-20
+
+### Фикс: KillSwitch бесконечно блокировал демо-торговлю + флаг отключения
+
+**Симптом:** 2026-04-19 17:55 UTC — последняя сделка. Контейнер работает,
+но все циклы логируют `KillSwitch: drawdown — закрываю все позиции!` →
+`Закрыто 0/0 позиций`. Новые входы заблокированы почти 14 часов.
+
+**Причины (две):**
+
+1. **Несоответствие demo-equity и KS-порогов.** На demo `equity ≈ $177k`,
+   `max_drawdown_pct = 25%` = просадка $45k. Любой микро-убыток от серии
+   неудачных входов (вчера scalp_vwap отминусил ~$27) при "пике" equity
+   после старта триггерит стоп, хотя торгуем копейками. На демо KS нужен
+   только как оповещение, не как стоп.
+
+2. **Баг в `_rotate_day` в `killswitch.py`.** Проверка `if self._tripped:
+   return False` стояла **ДО** `_rotate_day(current_equity)`. После
+   UTC-полуночи (2026-04-20 00:00 UTC) флаг `_tripped` не сбрасывался,
+   потому что функция выходила раньше. Бот держал triggered-state вечно.
+
+**Исправления:**
+
+- `settings.killswitch_enabled: bool` (default `True`, env
+  `BYBIT_BOT_KS_ENABLED`) → прокинут в `KillSwitchConfig.enabled`.
+- `check_allowed()` теперь вызывает `_rotate_day()` **до** проверки
+  `_tripped`, чтобы флаг сбрасывался в полночь UTC.
+- Два новых теста: `test_killswitch_disabled_bypasses_all_checks`,
+  `test_killswitch_rotate_day_clears_trip_flag` (регрессия).
+- `docker-compose.yml`: `BYBIT_BOT_KS_ENABLED: ${BYBIT_BOT_KS_ENABLED:-true}`.
+- На VPS `.env`: `BYBIT_BOT_KS_ENABLED=false` для demo.
+
+**Почему безопасно отключить KS на demo:**
+
+- Биржевой SL = 2 ATR на каждой позиции даёт структурный лимит убытка.
+- `max_positions` (и per-strategy `max_positions=3`) всё ещё ограничивает
+  одновременный риск.
+- Margin-lock `max_margin_per_trade_pct = 25%` продолжает работать.
+- На реале (account=$500) KS остаётся включённым и порог $37.50/25%
+  превращается в реальный защитный слой.
+
+**Файлы:** `src/bybit_bot/config/settings.py`,
+`src/bybit_bot/trading/killswitch.py`, `src/bybit_bot/app/main.py`,
+`tests/test_bybit_bot.py`, `docker-compose.yml`, VPS `.env`.
+
+---
+
 ## 2026-04-19
+
+### Deploy Wave 4 на VPS
+`ручной деплой — GH Actions workflow отсутствует`
+
+Волна 4 (ORB + Turtle Soup + BTC Lead-Lag) выкачена на demo.
+
+**Шаги:**
+1. `git fetch && git reset --hard origin/main` на VPS → commit `1bbbdbc`.
+2. `.env` дополнен флагами:
+   - `BYBIT_BOT_SCALP_ORB_ENABLED=true`
+   - `BYBIT_BOT_SCALP_TURTLE_ENABLED=true`
+   - `BYBIT_BOT_SCALP_LEADLAG_ENABLED=true`
+   - `BYBIT_BOT_LEADLAG_REF_SYMBOL=BTCUSDT`
+3. `docker compose up -d --build --no-deps bybit-bot` (образ из кэша) +
+   `docker compose restart bybit-bot` — **advisor не тронут** (Up 2 days).
+
+**Верификация логов (цикл 1 после рестарта):**
+```
+Скальпинг: VWAP, StatArb, VolSpike, ORB, Turtle, LeadLag(ref=BTCUSDT)
+Batch: загружено 9/9 тикеров   ← 8 торговых + BTCUSDT reference
+Торгуемые символы: 8/8
+Bybit баланс: equity=177244.54 (demo)
+```
+
+Все 6 скальп-стратегий активны, BTCUSDT подгружается как reference для
+LeadLag, но не торгуется (явный `continue` в `_process_scalping`).
+
+**Следующий шаг:** T+24h срез (snapshot до/после деплоя) через
+`scripts/ab_test_snapshot.py`, затем анализ первых сделок Волны 4.
+
+**Файлы:** `docker-compose.yml`, `.env` (VPS), `BUILDLOG_BYBIT.md`
+
+---
 
 ### Стратегия D: BTC Lead-Lag → Altcoin + research-verified параметры всех стратегий Wave 4
 

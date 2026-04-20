@@ -62,6 +62,11 @@ class KillSwitch:
         if not self._config.enabled:
             return True
 
+        # Ротация суток ДО проверки _tripped: иначе после UTC-полуночи флаг
+        # никогда не сбрасывается и бот не торгует следующий день.
+        if current_equity > 0:
+            self._rotate_day(current_equity)
+
         if self._tripped:
             return False
 
@@ -70,8 +75,6 @@ class KillSwitch:
             if open_positions >= self._config.max_positions:
                 return False
             return True
-
-        self._rotate_day(current_equity)
 
         if self._today.peak_equity > 0:
             self._today.peak_equity = max(self._today.peak_equity, current_equity)

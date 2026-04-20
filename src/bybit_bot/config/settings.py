@@ -226,6 +226,13 @@ class Settings(BaseSettings):
     # Drawdown 25% = $125 от пика (при переходе на реал — снизить до 10%).
     # Per-trade loss не ограничен отдельно: биржевой SL = 2 ATR уже даёт
     # структурный лимит, дублирующий ks-проверка только мешала exit-логике.
+    #
+    # На demo KS отключаем: demo-баланс $177k, просадка $45k = 25% триггерит
+    # стоп даже при микро-убытках по стратегиям. KS нужен только на реале,
+    # где account_balance=500 и лимиты имеют смысл.
+    killswitch_enabled: bool = Field(
+        default=True, validation_alias="BYBIT_BOT_KS_ENABLED",
+    )
     killswitch_max_daily_loss: float = Field(
         default=37.50, validation_alias="BYBIT_BOT_KS_MAX_DAILY_LOSS",
     )
