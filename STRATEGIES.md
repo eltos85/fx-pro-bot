@@ -94,15 +94,15 @@ LEADERS_TRAIL_ATR=0.7
 
 **Лимиты:** макс 50 позиций, макс 3 на один инструмент.
 
-**Исключения outsiders/ensemble:** EURJPY не торгуется через outsiders/ensemble из-за неблагоприятного R:R. Доступна только в Leaders.
+**Исключения outsiders/ensemble:** EURJPY возвращён в outsiders (ранее исключался на 5 сделках — нарушение правила `sample-size.mdc` ≥100 сделок).
 
-**Исключения скальпинга:** EURJPY и GBPJPY исключены из VWAP/ORB/StatArb (0-40% WR за 9-часовой анализ). Доступны только в Leaders. Крипта полностью убрана из FxPro advisor — нерентабельна (отрицательный P&L по всем крипто-инструментам за период 07-12.04.2026).
+**Исключения скальпинга:** GBPJPY исключён из VWAP/ORB/StatArb (слабый WR за 9-часовой анализ). XAUUSD/GC=F возвращены (исключались на 2 сделках — overfitting). Крипта полностью убрана из FxPro advisor — нерентабельна.
 
-**ADX-фильтр скальпинга:** вход VWAP разрешён только при ADX(14) ≤ 20 **и ADX убывает** (ADX_cur < ADX_prev). ORB — при ADX ≤ 25. При сильном тренде mean-reversion скальпинг опасен.
+**ADX-фильтр скальпинга:** вход VWAP разрешён при ADX(14) ≤ **25** (источник: [PyQuantLab «ADX Trend Strength»](https://pyquantlab.medium.com/adx-trend-strength-with-vwap-flow-filter-precision-entries-disciplined-exit-9cd559e3319b) — «typical threshold is 25»). ORB — при ADX ≤ 25. Требование «ADX убывает» снято — не подтверждено research. При сильном тренде mean-reversion скальпинг опасен.
 
-**HTF-фильтр тренда:** все скальпинг-стратегии используют EMA(200) на H1 (ресемплированные из M5). Лонг запрещён при нисходящем H1 тренде, шорт — при восходящем. Это предотвращает вход против глобального движения по шумному M5 slope.
+**HTF-фильтр тренда (warning-only для mean reversion):** EMA(200) на H1 используется как **предупреждение** в VWAP reversion и news_fade, но не блокирует сигнал. Канонические mean-reversion стратегии (BB+RSI, VWAP) в исследованиях не требуют HTF confirmation ([Grokipedia «BB+RSI Mean Reversion»](https://grokipedia.com/page/Bollinger_Bands_and_RSI_Mean_Reversion_Strategy)). Для ORB breakout (trend-following) HTF-фильтр сохранён как блокирующий.
 
-**News-fade — только в активные сессии:** news_fade срабатывает только в London (08:00–12:00 UTC) и NY (14:30–17:00 UTC). В тихие часы нет реальных новостных спайков — ложные сигналы.
+**News-fade — без часовых ограничений:** news_fade срабатывает в любой сессии, включая Asian/Tokyo (источник: [Finveroo «Asian Range Fade»](https://www.finveroo.com/trading-academy/strategies/session/asian-range-fade/) — признанная mean-reversion стратегия для Asian hours). Фильтр по величине спайка (≥ NEWS_SPIKE_ATR × ATR) остаётся.
 
 **Stat-Arb ADF-фильтр:** перед входом проверяется стационарность spread через ADF-тест. Если t-stat > -2.86 (5% критическое значение) — коинтеграция сомнительна, пара не торгуется. Z_ENTRY поднят с 2.0 до 2.5 для снижения ложных срабатываний.
 
@@ -126,7 +126,7 @@ LEADERS_TRAIL_ATR=0.7
 
 | Параметр | Classic | Confirmed | Описание |
 |----------|---------|-----------|----------|
-| Stop-Loss | **3 ATR** | **1.5 ATR** | Ближе в confirmed, т.к. вход подтверждён |
+| Stop-Loss | **3 ATR** | **2.0 ATR** | Оптимум для mean-reversion: [Quant Signals 9433-trade backtest](https://quant-signals.com/atr-stop-loss-take-profit/) — 2.0× ATR = profit factor 1.26 |
 | Aggressive TP | **+10 пипсов** | **+10 пипсов** | Серверный TP на cTrader |
 | Time Stop 1ч | -90 пипсов | — | В confirmed нет 1ч стопа |
 | Time Stop 2ч | -60 пипсов | -60 пипсов | |
@@ -158,8 +158,8 @@ OUTSIDERS_MODE=classic
 |----------|----------|----------|
 | DEVIATION_THRESHOLD | **2.0 ATR** | Минимальное отклонение от VWAP для входа (95% boundary) |
 | RSI_CONFIRM | **< 30** (LONG), **> 70** (SHORT) | RSI-фильтр подтверждения (ужесточён) |
-| ADX_MAX | **20** (было 25) | Вход только в боковике; ADX также должен **убывать** |
-| HTF тренд-фильтр | EMA(200) на H1 | Лонг запрещён при нисходящем H1, шорт при восходящем |
+| ADX_MAX | **25** | Порог боковика по [PyQuantLab Medium](https://pyquantlab.medium.com/adx-trend-strength-with-vwap-flow-filter-precision-entries-disciplined-exit-9cd559e3319b): «typical threshold 25». Ранее 20 + «ADX убывает» — overfit, снято |
+| HTF тренд-фильтр | EMA(200) на H1 — **warning-only** | Логируется как предупреждение, не блокирует. Mean-reversion research не требует HTF confirmation |
 | EMA Slope | EMA(50) M5 | Дополнительно не торговать против M5 тренда |
 | Stop-Loss | **2.0 ATR** | Оптимум по бэктестам (9433 трейда, 6 активов) |
 | Take-Profit | **1.5 ATR** | Частичный возврат к VWAP, с учётом комиссии FxPro |
@@ -211,8 +211,8 @@ OUTSIDERS_MODE=classic
 |----------|----------|----------|
 | NEWS_SPIKE_ATR | **2.0** | Минимальный спайк за 3 бара |
 | Условие | Спайк против EMA(50) | Вход против спайка на откат |
-| Часы работы | **London 08:00–12:00, NY 14:30–17:00 UTC** | Только в активные сессии с реальными новостями |
-| HTF тренд-фильтр | EMA(200) на H1 | Fade запрещён в направлении H1 тренда |
+| Часы работы | **24/7** (кроме выходных) | Ограничение сессий снято — Asian Range Fade признан research ([Finveroo](https://www.finveroo.com/trading-academy/strategies/session/asian-range-fade/)) |
+| HTF тренд-фильтр | EMA(200) на H1 — **warning-only** | Логируется, не блокирует fade (mean-reversion) |
 | TP | **50%** отката спайка | |
 | SL | **За экстремумом** спайка | |
 

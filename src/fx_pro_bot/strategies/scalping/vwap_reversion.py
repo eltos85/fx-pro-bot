@@ -26,7 +26,7 @@ RSI_CONFIRM_LOW = 30
 RSI_CONFIRM_HIGH = 70
 SL_ATR_MULT = 2.0
 TP_ATR_MULT = 1.5
-ADX_MAX = 20.0
+ADX_MAX = 25.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,10 +79,6 @@ class VwapReversionStrategy:
             if adx > ADX_MAX:
                 continue
 
-            adx_prev = compute_adx(bars[:-1]) if len(bars) > 30 else adx
-            if adx > adx_prev:
-                continue
-
             htf_slope = htf_ema_trend(bars)
 
             vwap_val = vwap(bars[-50:])
@@ -97,7 +93,10 @@ class VwapReversionStrategy:
                 if slope < 0:
                     continue
                 if htf_slope is not None and htf_slope < 0:
-                    continue
+                    log.debug(
+                        "%s: LONG VWAP signal against H1 trend (htf_slope=%.6f) — proceeding (warning-only)",
+                        symbol, htf_slope,
+                    )
                 signals.append(VwapSignal(
                     instrument=symbol,
                     direction=TrendDirection.LONG,
@@ -111,7 +110,10 @@ class VwapReversionStrategy:
                 if slope > 0:
                     continue
                 if htf_slope is not None and htf_slope > 0:
-                    continue
+                    log.debug(
+                        "%s: SHORT VWAP signal against H1 trend (htf_slope=%.6f) — proceeding (warning-only)",
+                        symbol, htf_slope,
+                    )
                 signals.append(VwapSignal(
                     instrument=symbol,
                     direction=TrendDirection.SHORT,

@@ -228,17 +228,6 @@ class SessionOrbStrategy:
         if len(bars) < 4:
             return None
 
-        last_ts = bars[-1].ts
-        if last_ts.tzinfo is None:
-            from datetime import timezone
-            last_ts = last_ts.replace(tzinfo=timezone.utc)
-        cur_time = last_ts.time()
-
-        in_london = LONDON_OPEN <= cur_time <= LONDON_CLOSE
-        in_ny = NY_OPEN <= cur_time <= NY_CLOSE
-        if not in_london and not in_ny:
-            return None
-
         recent = bars[-3:]
         move = recent[-1].close - recent[0].open
         abs_move = abs(move)
@@ -258,7 +247,10 @@ class SessionOrbStrategy:
 
         if spike_up:
             if htf_slope is not None and htf_slope > 0:
-                return None
+                log.debug(
+                    "%s: SHORT news_fade against H1 trend (htf_slope=%.6f) — proceeding (warning-only)",
+                    symbol, htf_slope,
+                )
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.SHORT,
@@ -270,7 +262,10 @@ class SessionOrbStrategy:
             )
         else:
             if htf_slope is not None and htf_slope < 0:
-                return None
+                log.debug(
+                    "%s: LONG news_fade against H1 trend (htf_slope=%.6f) — proceeding (warning-only)",
+                    symbol, htf_slope,
+                )
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.LONG,

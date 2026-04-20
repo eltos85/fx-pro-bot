@@ -6,6 +6,70 @@
 
 ## 2026-04-20
 
+### refactor(strategies): откат overfit-правок, параметры приведены к research
+
+**Контекст:** аудит BUILDLOG показал, что часть параметров и исключений была
+подобрана эмпирически на выборках **2–9 сделок** — грубое нарушение нашего
+правила `sample-size.mdc` (≥100 сделок для data-driven изменений). Каждая
+правка ниже подтверждена внешним источником.
+
+**Правки и ссылки на источники:**
+
+1. **Outsiders `CONFIRMED_SL_ATR` 1.5 → 2.0 ATR.**
+   Источник: [Quant Signals: ATR Stop Loss Strategy — 9433-trade backtest across 6 assets](https://quant-signals.com/atr-stop-loss-take-profit/).
+   Вывод: «2.0× ATR delivered the best overall performance with 1.26 average
+   profit factor». Также подтверждено [Grokipedia «BB+RSI Mean Reversion»](https://grokipedia.com/page/Bollinger_Bands_and_RSI_Mean_Reversion_Strategy)
+   (SL = 2× ATR, TP = 3× ATR — канонический setup).
+
+2. **Outsiders EXCLUDE: убраны `GC=F` и `EURJPY=X`.**
+   Исключались на 2 и 5 закрытых сделках соответственно — нарушение
+   `sample-size.mdc`. Возвращаем в сканирование.
+
+3. **VWAP `ADX_MAX` 20 → 25.**
+   Источник: [PyQuantLab «ADX Trend Strength with VWAP Flow Filter»](https://pyquantlab.medium.com/adx-trend-strength-with-vwap-flow-filter-precision-entries-disciplined-exit-9cd559e3319b).
+   Вывод: «ADX must exceed a threshold (typically 25) to confirm trend
+   conditions» — т.е. ниже 25 — боковик, ОК для mean reversion. 20 —
+   эмпирически подобранное ужесточение, не в research.
+
+4. **VWAP: убран фильтр «ADX убывает» (`adx > adx_prev` → `continue`).**
+   Ни один канонический источник (PyQuantLab, TradingView R-VWAP/W-VWAP,
+   MQL5 BB+RSI ensemble) не требует «ADX decreasing». Наше ad-hoc
+   ужесточение, блокировавшее значительную долю сигналов.
+
+5. **HTF-фильтр EMA(200) H1 → warning-only для VWAP и news_fade.**
+   Канонические mean-reversion исследования (Grokipedia, Medium Sword Red)
+   используют только BB/RSI + ATR, HTF confirmation не требуют. Блокировка
+   против H1 тренда — наше эмпирическое добавление. Теперь логируется в
+   debug, но не блокирует вход. Для ORB breakout (trend-following) HTF
+   остаётся блокирующим — research ([tradingstats.net NQ breakout study](https://tradingstats.net/london-breakout-strategy/))
+   подтверждает: breakout работает в направлении тренда.
+
+6. **News Fade: убрано ограничение сессионных часов (London/NY only).**
+   Источник: [Finveroo «Asian Range Fade»](https://www.finveroo.com/trading-academy/strategies/session/asian-range-fade/).
+   Asian/Tokyo session fade — признанная mean-reversion стратегия
+   на USDJPY/AUDUSD/EURJPY/XAUUSD. Ограничение часов было нашим
+   предположением без research.
+
+**НЕ изменены (нужен research, пока оставляем как есть):**
+
+- ORB сессионные окна `LONDON_CLOSE=12:00`, `NY_CLOSE=17:00` UTC.
+  Research ([tradingstats.net](https://tradingstats.net/london-breakout-strategy/),
+  [tttmarkets](https://tttmarkets.com/2025/06/30/how-to-use-opening-range-breakouts-in-forex/))
+  говорит: ORB edge концентрируется в **первые 1–3 часа** после open.
+  Наши 4-часовые окна уже на верхней границе — расширять нельзя.
+- `SCALPING_MAX_POSITIONS=15`. Research даёт risk-per-trade 0.25–0.5% для
+  скальпинга, но **не даёт** конкретного числа concurrent positions.
+  Без подтверждения оставляем текущее значение.
+- Outsiders BB 3σ (вместо канонических 2σ). 3σ = более консервативный
+  entry; не относится к overfitting (строже, а не слабее). Оставляем.
+
+**Тесты:** 271 passed.
+
+**Файлы:** `src/fx_pro_bot/strategies/outsiders.py`,
+`src/fx_pro_bot/strategies/scalping/vwap_reversion.py`,
+`src/fx_pro_bot/strategies/scalping/session_orb.py`,
+`STRATEGIES.md`.
+
 ### fix(ctrader_feed): декодинг trendbars для JPY-пар (цены × 100)
 `339a30e`
 
