@@ -49,10 +49,21 @@ INTERVAL_TO_MINUTES: dict[str, int] = {
 
 MIN_BARS_FOR_OK = 51
 
+# cTrader Open API: ProtoOATrendbar.low/deltas приходят как целые в единицах 10⁻⁵,
+# НЕЗАВИСИМО от digits символа. Для EURUSD (digits=5) это совпадает с нативной
+# ценой / 10⁵; для USDJPY (digits=3) raw=15884200 → 158.842 (не 15884.2!).
+# Проверено на live API: EURUSD raw=117693 → 1.17693; USDJPY raw=15884200 → 158.842.
+TRENDBAR_SCALE = 100_000
+
 
 def _decode_trendbar(tb, digits: int, instrument: InstrumentId) -> Bar:
-    """cTrader encodes trendbars as low + deltas. Восстанавливаем OHLC."""
-    scale = 10 ** digits
+    """cTrader encodes trendbars as low + deltas. Восстанавливаем OHLC.
+
+    Параметр digits оставлен для обратной совместимости, но не используется:
+    trendbars всегда в precision 10⁻⁵.
+    """
+    del digits
+    scale = TRENDBAR_SCALE
     low_abs = tb.low
     low = low_abs / scale
     open_ = (low_abs + tb.deltaOpen) / scale

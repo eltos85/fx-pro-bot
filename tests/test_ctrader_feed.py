@@ -71,6 +71,43 @@ class TestDecodeTrendbar:
         assert b.volume == 350.0
         assert b.ts == datetime(2026, 4, 20, 8, 0, tzinfo=UTC)
 
+    def test_bars_from_ctrader_decodes_jpy_pair_correctly(self):
+        """USDJPY digits=3, но cTrader trendbars всё равно в precision 10⁻⁵.
+
+        Regression: раньше делили на 10^digits → получали 15884.2 вместо 158.842.
+        """
+        cache = SymbolCache()
+        cache.populate([
+            SymbolInfo(
+                symbol_id=4, name="USDJPY",
+                min_volume=100_000, max_volume=5_000_000_000, step_volume=100_000,
+                digits=3, contract_size=10_000_000,
+            ),
+        ])
+        client = MagicMock()
+        tb = _make_trendbar(
+            low_abs=15_884_200,
+            dopen=500,
+            dhigh=1500,
+            dclose=1000,
+            ts_min=int(datetime(2026, 4, 20, 11, 40, tzinfo=UTC).timestamp() // 60),
+            volume=500,
+        )
+        client.get_trendbars.return_value = [tb]
+
+        bars = bars_from_ctrader(
+            "USDJPY=X", client=client, symbol_cache=cache,
+            period="5d", interval="5m",
+        )
+
+        assert len(bars) == 1
+        b = bars[0]
+        # Raw 15884200 / 10⁵ = 158.842
+        assert abs(b.low - 158.842) < 1e-6
+        assert abs(b.open - 158.847) < 1e-6
+        assert abs(b.high - 158.857) < 1e-6
+        assert abs(b.close - 158.852) < 1e-6
+
     def test_bars_from_ctrader_unknown_symbol_returns_empty(self):
         """Если yfinance-символ не замапен — пустой список, без вызова API."""
         cache = _make_symbol_cache()
