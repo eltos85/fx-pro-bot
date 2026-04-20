@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 from fx_pro_bot.analysis.ensemble import STRATEGY_NAMES, ensemble_signal
 from fx_pro_bot.analysis.signals import Signal, TrendDirection
@@ -15,6 +16,8 @@ log = logging.getLogger(__name__)
 
 MIN_STRENGTH = 0.6
 
+BarFetcher = Callable[[str, str, str], list[Bar]]
+
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
@@ -25,6 +28,10 @@ class ScanResult:
     bars: list[Bar]
 
 
+def _default_fetcher(symbol: str, period: str, interval: str) -> list[Bar]:
+    return bars_from_yfinance(symbol, period=period, interval=interval)
+
+
 def scan_instruments(
     symbols: tuple[str, ...],
     *,
@@ -32,12 +39,20 @@ def scan_instruments(
     interval: str = "5m",
     fast: int = 10,
     slow: int = 30,
+    bar_fetcher: BarFetcher | None = None,
 ) -> list[ScanResult]:
+    """Перебрать символы, собрать сигналы ансамбля.
+
+    bar_fetcher: опциональная функция (symbol, period, interval) -> list[Bar].
+    По умолчанию — yfinance. Основной цикл передаёт сюда cTrader-fetcher
+    с fallback на yfinance для надёжности.
+    """
+    fetcher = bar_fetcher or _default_fetcher
     results: list[ScanResult] = []
 
     for symbol in symbols:
         try:
-            bars = bars_from_yfinance(symbol, period=period, interval=interval)
+            bars = fetcher(symbol, period, interval)
         except Exception:
             log.warning("Не удалось загрузить %s, пропускаю", symbol)
             continue

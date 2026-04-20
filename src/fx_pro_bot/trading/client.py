@@ -400,6 +400,61 @@ class CTraderClient:
         req.maxRows = max_rows
         return self._send_and_wait(req, ProtoOADealListRes().payloadType, timeout=30)
 
+    def get_trendbars(
+        self,
+        symbol_id: int,
+        period_minutes: int,
+        from_ts_ms: int,
+        to_ts_ms: int,
+    ) -> list[Any]:
+        """Получить исторические OHLCV-бары (trendbars) за период.
+
+        Возвращает raw ProtoOATrendbar — для декодирования см. ctrader_feed.
+        period_minutes: 1, 2, 3, 4, 5, 10, 15, 30, 60, 240, 720, 1440, 10080, 43200.
+        """
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOAGetTrendbarsReq,
+            ProtoOAGetTrendbarsRes,
+        )
+        from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
+            ProtoOATrendbarPeriod,
+        )
+
+        period_map = {
+            1: ProtoOATrendbarPeriod.M1,
+            2: ProtoOATrendbarPeriod.M2,
+            3: ProtoOATrendbarPeriod.M3,
+            4: ProtoOATrendbarPeriod.M4,
+            5: ProtoOATrendbarPeriod.M5,
+            10: ProtoOATrendbarPeriod.M10,
+            15: ProtoOATrendbarPeriod.M15,
+            30: ProtoOATrendbarPeriod.M30,
+            60: ProtoOATrendbarPeriod.H1,
+            240: ProtoOATrendbarPeriod.H4,
+            720: ProtoOATrendbarPeriod.H12,
+            1440: ProtoOATrendbarPeriod.D1,
+            10080: ProtoOATrendbarPeriod.W1,
+            43200: ProtoOATrendbarPeriod.MN1,
+        }
+        period = period_map.get(period_minutes)
+        if period is None:
+            raise ValueError(
+                f"cTrader: неподдерживаемый период {period_minutes} минут. "
+                f"Доступно: {sorted(period_map)}"
+            )
+
+        req = ProtoOAGetTrendbarsReq()
+        req.ctidTraderAccountId = self._account_id
+        req.symbolId = symbol_id
+        req.period = period
+        req.fromTimestamp = from_ts_ms
+        req.toTimestamp = to_ts_ms
+
+        res = self._send_and_wait(
+            req, ProtoOAGetTrendbarsRes().payloadType, timeout=30,
+        )
+        return list(res.trendbar)
+
     def amend_position_sl_tp(
         self,
         position_id: int,

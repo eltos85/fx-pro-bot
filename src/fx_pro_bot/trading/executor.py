@@ -60,6 +60,14 @@ class TradeExecutor:
         self._symbols = symbols
         self._lot_size = lot_size
 
+    @property
+    def client(self) -> CTraderClient:
+        return self._client
+
+    @property
+    def symbols(self) -> SymbolCache:
+        return self._symbols
+
     def load_symbols(self) -> int:
         """Загрузить и закешировать символы с cTrader. Вернуть количество."""
         resp = self._client.get_symbols()

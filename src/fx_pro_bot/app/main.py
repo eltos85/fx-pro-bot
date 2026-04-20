@@ -175,6 +175,35 @@ def _log_scalping_stats(store: StatsStore, settings: Settings) -> None:
     pass
 
 
+def _make_bar_fetcher(executor):
+    """Создать bar_fetcher для scan_instruments: cTrader с fallback на yfinance.
+
+    Если cTrader не инициализирован (executor=None) — вернуть None, сканер
+    использует дефолтный yfinance-fetcher.
+    """
+    if executor is None:
+        return None
+
+    from fx_pro_bot.market_data.ctrader_feed import bars_with_fallback
+
+    try:
+        client = executor.client
+        symbols = executor.symbols
+    except AttributeError:
+        return None
+
+    def _fetcher(symbol: str, period: str, interval: str):
+        return bars_with_fallback(
+            symbol,
+            client=client,
+            symbol_cache=symbols,
+            period=period,
+            interval=interval,
+        )
+
+    return _fetcher
+
+
 def _init_trading(settings: Settings, store: StatsStore):
     """Инициализация модуля автоторговли (cTrader). Возвращает (executor, killswitch) или (None, None)."""
     from fx_pro_bot.trading.client import CTraderClient
@@ -352,12 +381,14 @@ def _run_cycle(
     statarb_strat: StatArbStrategy | None = None,
     orb_strat: SessionOrbStrategy | None = None,
 ) -> None:
-    # 1. Сканирование ансамблем
+    bar_fetcher = _make_bar_fetcher(executor)
+
     log.info("── Сканирование (ансамбль 5 стратегий) ──")
     results = scan_instruments(
         settings.scan_symbols,
         period=settings.yfinance_period,
         interval=settings.yfinance_interval,
+        bar_fetcher=bar_fetcher,
     )
 
     active = active_signals(results)
@@ -506,6 +537,7 @@ def _run_cycle(
                     tuple(extra),
                     period=settings.yfinance_period,
                     interval=settings.yfinance_interval,
+                    bar_fetcher=bar_fetcher,
                 )
                 for r in extra_results:
                     scalping_bars[r.symbol] = r.bars

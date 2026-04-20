@@ -4,6 +4,47 @@
 
 ---
 
+## 2026-04-20
+
+### fix: переход с yfinance на cTrader Open API для OHLCV-баров
+
+**Симптом:** с утра понедельника 20.04 не открывалась ни одна сделка, хотя
+бот работал и на прошлой неделе исправно торговал.
+
+**Причина:** yfinance (Yahoo) отдал форекс-бары с **дырой 200 минут**
+(06:10–09:30 UTC) — ровно период открытия London session. Session ORB не мог
+построить box (нужно минимум 4 M5-бара после 08:00 UTC), outsiders-индикаторы
+считались по устаревшим данным, ensemble/VWAP/Stat-Arb возвращали 0 сигналов.
+Все 4 пары (EURUSD, GBPUSD, USDJPY, AUDUSD) имели одинаковую дыру одновременно.
+
+**Решение:** реализована миграция основного источника баров на cTrader
+Open API (`ProtoOAGetTrendbarsReq`). На том же периоде cTrader отдаёт
+**48 баров в окне 06:00–10:00 UTC** (у yfinance было 0), volume настоящий
+(у yfinance для форекса = 0), ответ за 1.04 сек. Архитектура:
+
+- `CTraderClient.get_trendbars(symbol_id, period_minutes, from_ts, to_ts)` — raw
+  proto-trendbars через существующий `_send_and_wait` паттерн.
+- `market_data/ctrader_feed.py` — декодинг low + deltaOpen/High/Close через
+  `digits` символа, плюс `bars_with_fallback()` с автоматическим откатом на
+  yfinance если cTrader недоступен или вернул < 51 бара. Для крипты, которой
+  нет в каталоге cTrader, — сразу yfinance.
+- `scan_instruments(bar_fetcher=...)` — опциональный параметр, обратная
+  совместимость 100% (тесты используют дефолтный yfinance).
+- `app/main.py` — `_make_bar_fetcher(executor)` создаёт cTrader-fetcher при
+  активной торговле, иначе None → дефолт (yfinance).
+
+Торговая логика (стратегии, пороги, SL/TP) не тронута — меняется только
+источник данных.
+
+**Тесты:** +9 новых (`tests/test_ctrader_feed.py`) — декодинг OHLC, маппинг
+таймфреймов, 4 сценария fallback, интеграция с сканером. Итого 270 passed.
+
+**Файлы:** `trading/client.py`, `trading/executor.py` (публичные `client`/
+`symbols`), `market_data/ctrader_feed.py` (новый), `analysis/scanner.py`,
+`app/main.py`, `tests/test_ctrader_feed.py`
+
+---
+
 ## 2026-04-16
 
 ### revert: откат OUTSIDERS_ALLOW_SYMBOLS — защита от оверфита
