@@ -2,6 +2,75 @@
 
 ## 2026-04-20
 
+### Защита от проскальзывания: параллельное закрытие ног exit-ов
+
+**Симптом:** Stat-arb пара ADA/TIA закрылась суммарно в минус. ADA ушла с
+прибылью, TIA — с убытком, общая пара ~-$0.80. Расследование логов: между
+закрытием первой ноги и второй — **~6 секунд gap** (market close → `time.sleep(1.5)` →
+`fetch_realized_pnl` → ~4с на ожидание API + сетевой RT → только потом вторая
+нога). За эти 6с цена второй ноги успевает отъехать → slippage.
+
+**Причина:** `_close_and_record` в `main.py` обрабатывал ноги последовательно:
+
+```
+for pp in pair_positions:
+    _close_and_record(...)          # market close
+        ↳ time.sleep(1.5)           # блокирует главный цикл
+        ↳ fetch_realized_pnl(...)   # +~4с network RT
+```
+
+На каждую ногу приходилось ~6 секунд до отправки следующей.
+
+**Исправления:**
+
+- `BybitClient.close_positions_parallel(legs)` — новый метод: шлёт
+  market+reduceOnly параллельно через `ThreadPoolExecutor` (max_workers=5).
+  HTTP-запросы pybit thread-safe, Bybit V5 rate-limit ~10 req/s на аккаунт
+  позволяет 2-3 параллельных безопасно.
+- `_close_and_record` разделён на две функции:
+  - `_close_only` — только отправляет ордер, сразу возвращается;
+  - `_reconcile_close` — вызывается после общего sleep, подтягивает real-PnL
+    и пишет в БД + KillSwitch.
+- `_close_batch_with_reconcile(items)` — новая универсальная функция батч-
+  закрытия: параллельный submit всех ног → ОДИН `time.sleep(2.0)` → последо-
+  вательный `fetch_realized_pnl` для каждой ноги.
+- Все stat-arb exit-пути переведены на батч: `zscore_exit`, `pair_tp`,
+  `emergency`. Также одиночные `time_stop` собираются в общий батч — время
+  exit-обработки цикла с N позициями теперь ~3с независимо от N (было N × 6с).
+- 3 новых теста:
+  - `test_close_positions_parallel_returns_all_results` — 3 ноги, 3 OrderResult.
+  - `test_close_positions_parallel_handles_partial_failure` — одна нога падает,
+    остальные всё равно идут.
+  - `test_process_exits_statarb_closes_pair_atomically` — stat-arb пара должна
+    закрываться одним батч-вызовом, НЕ двумя последовательными close_position.
+
+**Ожидаемый эффект:**
+
+- Gap между ногами stat-arb: **~6с → <0.5с**.
+- Slippage на парах в волатильные моменты: **~$0.30 → ~$0.05** (оценка по
+  middle-spread крипты на 1-минутном таймфрейме).
+- PnL stat-arb на том же числе сделок: улучшение ~$0.20-0.30/пара. На текущей
+  выборке n=4 это $0.80-1.20, статистический вес появится при n≥100.
+- Верификация: на следующем statarb-exit в логах должно быть
+  `Parallel close: SYM1, SYM2 → 2/2 ok за 0.XXs`, и `REAL PnL` для обеих ног
+  с разницей по времени <1 секунды.
+
+**Что НЕ делали (осознанно):**
+
+- Bybit V5 batch-order API (`/v5/order/create-batch`) — эффект <100мс против
+  нашего ~400мс через threads. Volatility за 300мс <0.01%, не значимо. Оставили
+  как опциональный апгрейд если gap всё ещё виден в логах.
+- Limit `reduceOnly` exit — риск недофилла одной ноги stat-arb перевешивает
+  экономию на spread ~0.02%. Останемся с голой спот-позицией на быстром рынке.
+- Пороги (pair_tp $2, emergency $25, z-score) не трогали: по правилу
+  sample-size нужно ≥100 сделок для значимых изменений. Сейчас только
+  инфраструктурный фикс исполнения.
+
+**Файлы:** `src/bybit_bot/trading/client.py`,
+`src/bybit_bot/app/main.py`, `tests/test_bybit_bot.py`.
+
+---
+
 ### Фикс: KillSwitch бесконечно блокировал демо-торговлю + флаг отключения
 
 **Симптом:** 2026-04-19 17:55 UTC — последняя сделка. Контейнер работает,

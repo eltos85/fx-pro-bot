@@ -527,3 +527,144 @@ def test_process_exits_pending_when_api_empty(tmp_path):
     assert len(pending) == 1
     assert pending[0].close_reason == "sync_pending"
     assert pending[0].pnl_usd == 0.0
+
+
+def _make_client_with_mock_session(place_order_responses):
+    """Создать BybitClient с моком pybit-сессии.
+
+    place_order_responses: list[dict] | callable — ответы для place_order
+    в порядке вызовов, либо callable(symbol, side, qty) -> dict.
+    """
+    from unittest.mock import MagicMock, patch
+    from bybit_bot.trading.client import BybitClient
+
+    mock_session = MagicMock()
+    if callable(place_order_responses):
+        def _place(**kwargs):
+            return place_order_responses(kwargs)
+        mock_session.place_order.side_effect = _place
+    else:
+        mock_session.place_order.side_effect = place_order_responses
+
+    with patch("bybit_bot.trading.client.HTTP", return_value=mock_session):
+        client = BybitClient(api_key="k", api_secret="s")
+    return client, mock_session
+
+
+def test_close_positions_parallel_returns_all_results():
+    """Параллельное закрытие 3 ног возвращает 3 OrderResult в правильном порядке."""
+
+    def _resp(kwargs):
+        return {
+            "retCode": 0,
+            "result": {"orderId": f"oid_{kwargs['symbol']}"},
+        }
+
+    client, mock_session = _make_client_with_mock_session(_resp)
+
+    legs = [
+        ("ADAUSDT", "Sell", "1000"),
+        ("TIAUSDT", "Buy", "500"),
+        ("LINKUSDT", "Buy", "50"),
+    ]
+    results = client.close_positions_parallel(legs)
+
+    assert len(results) == 3
+    assert mock_session.place_order.call_count == 3
+    assert all(r.success for r in results)
+    assert [r.symbol for r in results] == ["ADAUSDT", "TIAUSDT", "LINKUSDT"]
+    assert [r.order_id for r in results] == ["oid_ADAUSDT", "oid_TIAUSDT", "oid_LINKUSDT"]
+    assert results[0].side == "Buy"
+    assert results[1].side == "Sell"
+    assert results[2].side == "Sell"
+
+
+def test_close_positions_parallel_handles_partial_failure():
+    """Если одна нога фейлится — остальные всё равно отправляются (не блокирует пакет)."""
+
+    def _resp(kwargs):
+        if kwargs["symbol"] == "TIAUSDT":
+            return {"retCode": 110001, "retMsg": "position size mismatch", "result": {}}
+        return {"retCode": 0, "result": {"orderId": f"oid_{kwargs['symbol']}"}}
+
+    client, mock_session = _make_client_with_mock_session(_resp)
+
+    legs = [
+        ("ADAUSDT", "Sell", "1000"),
+        ("TIAUSDT", "Buy", "500"),
+        ("LINKUSDT", "Buy", "50"),
+    ]
+    results = client.close_positions_parallel(legs)
+
+    assert len(results) == 3
+    assert mock_session.place_order.call_count == 3
+    assert results[0].success is True
+    assert results[1].success is False
+    assert "position size mismatch" in results[1].message
+    assert results[2].success is True
+
+
+def test_process_exits_statarb_closes_pair_atomically(tmp_path):
+    """STAT-ARB zscore_exit должен идти одним батч-вызовом, а не двумя
+    последовательными close_position. Это ключевое для slippage-protection."""
+    from unittest.mock import MagicMock
+    from bybit_bot.app.main import _process_exits
+    from bybit_bot.config.settings import Settings
+    from bybit_bot.trading.client import PositionInfo
+
+    pos_ada = PositionInfo(
+        symbol="ADAUSDT", side="Sell", size="1000",
+        entry_price=0.2481, unrealised_pnl=1.4,
+        leverage="5", position_idx=0,
+    )
+    pos_tia = PositionInfo(
+        symbol="TIAUSDT", side="Buy", size="500",
+        entry_price=0.3892, unrealised_pnl=-1.3,
+        leverage="5", position_idx=0,
+    )
+
+    store, client, ks = _make_exit_mocks(
+        tmp_path,
+        initial_positions=[pos_ada, pos_tia],
+        fresh_positions=[pos_ada, pos_tia],
+        fetch_realized_pnl_return={"closedPnl": "0.0", "avgExitPrice": "0.0"},
+    )
+    client.close_positions_parallel = MagicMock(return_value=[
+        type("OR", (), {"success": True, "symbol": "ADAUSDT", "side": "Buy",
+                        "qty": "1000", "order_id": "x1", "message": ""})(),
+        type("OR", (), {"success": True, "symbol": "TIAUSDT", "side": "Sell",
+                        "qty": "500", "order_id": "x2", "message": ""})(),
+    ])
+    client.close_position = MagicMock(side_effect=AssertionError(
+        "stat-arb pair should NOT use sequential close_position — must use parallel batch"
+    ))
+
+    pair_tag = "sa_ADAUSDT_TIAUSDT_test"
+    store.open_position(
+        symbol="ADAUSDT", side="Sell", qty="1000",
+        entry_price=0.2481, order_id="o1",
+        strategy="scalp_statarb", pair_tag=pair_tag,
+    )
+    store.open_position(
+        symbol="TIAUSDT", side="Buy", qty="500",
+        entry_price=0.3892, order_id="o2",
+        strategy="scalp_statarb", pair_tag=pair_tag,
+    )
+
+    fake_statarb = MagicMock()
+    fake_statarb.check_exits.return_value = [pair_tag]
+
+    settings = Settings(api_key="k", api_secret="s", _env_file=None)
+
+    _process_exits(
+        client=client, stats=store, killswitch=ks,
+        settings=settings, bars_map={"ADAUSDT": [], "TIAUSDT": []},
+        scalp_statarb=fake_statarb,
+    )
+
+    assert client.close_positions_parallel.call_count == 1, \
+        "Ожидался ровно один батч-вызов parallel close для пары"
+    legs_arg = client.close_positions_parallel.call_args[0][0]
+    assert len(legs_arg) == 2
+    symbols = sorted(leg[0] for leg in legs_arg)
+    assert symbols == ["ADAUSDT", "TIAUSDT"]

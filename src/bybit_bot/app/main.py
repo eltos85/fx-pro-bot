@@ -317,29 +317,39 @@ def _fetch_entry_price(client: BybitClient, symbol: str, fallback: float) -> flo
     return fallback
 
 
-def _close_and_record(
+_PNL_RECONCILE_SLEEP_SEC = 2.0
+
+
+def _close_only(client: BybitClient, db_pos: PositionRow) -> bool:
+    """Отправить market+reduceOnly close для позиции, без ожидания PnL.
+
+    Возвращает True если ордер принят биржей. Real-PnL подтягивается
+    отдельно через `_reconcile_close` после небольшой паузы.
+    """
+    result = client.close_position(db_pos.symbol, db_pos.side, db_pos.qty)
+    if not result.success:
+        log.error("Не удалось закрыть %s: %s", db_pos.symbol, result.message)
+        return False
+    return True
+
+
+def _reconcile_close(
     client: BybitClient,
     stats: StatsStore,
     killswitch: KillSwitch,
     db_pos: PositionRow,
     api_pnl: float,
     reason: str,
-) -> bool:
-    """Закрыть позицию на бирже и записать результат в БД + KillSwitch.
+) -> None:
+    """Подтянуть real-PnL из API и записать в БД + KillSwitch.
 
-    После закрытия ордера запрашивает реальный PnL из Bybit closed-pnl API
-    (включая комиссии и проскальзывание). Если API не вернул данные —
-    фоллбэк на unrealisedPnl.
+    Должна вызываться ПОСЛЕ паузы (~2с) чтобы Bybit closed-pnl API успел
+    отдать запись. Без паузы fetch_realized_pnl часто возвращает пусто и
+    мы фоллбэчимся на uPnL, теряя точность.
     """
     since_ms = int((datetime.now(tz=UTC) - timedelta(minutes=5)).timestamp() * 1000)
-    result = client.close_position(db_pos.symbol, db_pos.side, db_pos.qty)
-    if not result.success:
-        log.error("Не удалось закрыть %s: %s", db_pos.symbol, result.message)
-        return False
-
     real_pnl = api_pnl
     exit_price = 0.0
-    time.sleep(1.5)
     cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms)
     if cpnl:
         real_pnl = float(cpnl["closedPnl"])
@@ -353,7 +363,73 @@ def _close_and_record(
     stats.close_position(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl, close_reason=reason)
     killswitch.record_trade_close(real_pnl)
     log.info("ЗАКРЫТА: %s %s pnl=%.4f [%s]", db_pos.side, db_pos.symbol, real_pnl, reason)
+
+
+def _close_and_record(
+    client: BybitClient,
+    stats: StatsStore,
+    killswitch: KillSwitch,
+    db_pos: PositionRow,
+    api_pnl: float,
+    reason: str,
+) -> bool:
+    """Закрыть одну позицию синхронно (legacy-обёртка над _close_only + reconcile).
+
+    Используется только в случаях, где нужно закрыть строго одну позицию
+    (например, time-stop одиночного scalp_vwap). Для пакетных закрытий
+    (stat-arb пары, batch exit одиночных) использовать
+    `_close_batch_with_reconcile` — он экономит до 3-6 секунд за счёт
+    параллельного исполнения и единого sleep.
+    """
+    if not _close_only(client, db_pos):
+        return False
+    time.sleep(_PNL_RECONCILE_SLEEP_SEC)
+    _reconcile_close(client, stats, killswitch, db_pos, api_pnl, reason)
     return True
+
+
+def _close_batch_with_reconcile(
+    client: BybitClient,
+    stats: StatsStore,
+    killswitch: KillSwitch,
+    items: list[tuple[PositionRow, float, str]],
+) -> set[str]:
+    """Параллельно закрыть несколько позиций и единым sleep подтянуть real-PnL.
+
+    items: список (db_pos, api_pnl, reason).
+    Возвращает: set символов которые успешно закрылись (для already_closed).
+
+    Стратегия:
+    1. Шлём все market+reduceOnly параллельно через ThreadPool — gap <500мс.
+    2. Один sleep на все ноги (вместо N × 1.5с).
+    3. Последовательный fetch_realized_pnl + запись в БД для каждой ноги.
+
+    Если одна нога зафейлится при отправке — остальные всё равно идут,
+    повисшие позиции попадут в обычный sync_pending механизм.
+    """
+    if not items:
+        return set()
+
+    legs = [(it[0].symbol, it[0].side, it[0].qty) for it in items]
+    results = client.close_positions_parallel(legs)
+
+    submitted: list[tuple[PositionRow, float, str]] = []
+    for (db_pos, api_pnl, reason), order_result in zip(items, results, strict=True):
+        if order_result.success:
+            submitted.append((db_pos, api_pnl, reason))
+        else:
+            log.error("Не удалось закрыть %s: %s", db_pos.symbol, order_result.message)
+
+    if not submitted:
+        return set()
+
+    time.sleep(_PNL_RECONCILE_SLEEP_SEC)
+
+    closed: set[str] = set()
+    for db_pos, api_pnl, reason in submitted:
+        _reconcile_close(client, stats, killswitch, db_pos, api_pnl, reason)
+        closed.add(db_pos.symbol)
+    return closed
 
 
 def _close_pair_legs(
@@ -364,14 +440,20 @@ def _close_pair_legs(
     exclude_symbol: str,
     api_positions: dict[str, object],
 ) -> None:
-    """Закрыть все ноги Stat-Arb пары кроме уже закрытого символа."""
+    """Закрыть все ноги Stat-Arb пары кроме уже закрытого символа.
+
+    Использует _close_batch_with_reconcile для синхронной отправки, чтобы
+    при экстренном закрытии второй ноги не было дополнительного gap.
+    """
     pair_positions = stats.get_open_by_pair_tag(pair_tag)
+    items: list[tuple[PositionRow, float, str]] = []
     for pp in pair_positions:
         if pp.symbol == exclude_symbol:
             continue
         api_pos = api_positions.get(pp.symbol)
         pnl = api_pos.unrealised_pnl if api_pos else 0.0
-        _close_and_record(client, stats, killswitch, pp, pnl, "pair_close")
+        items.append((pp, pnl, "pair_close"))
+    _close_batch_with_reconcile(client, stats, killswitch, items)
 
 
 def _reconcile_pending_sync(
@@ -508,22 +590,26 @@ def _process_exits(
     already_closed: set[str] = set()
     trailing_set: set[str] = set()
 
-    # 1. Stat-Arb z-score exit
+    # 1. Stat-Arb z-score exit (батч-параллель: gap между ногами <500мс)
     if scalp_statarb and bars_map:
         open_pair_tags = stats.get_open_pair_tags()
         if open_pair_tags:
             tags_to_close = scalp_statarb.check_exits(bars_map, open_pair_tags)
             for tag in tags_to_close:
                 pair_positions = stats.get_open_by_pair_tag(tag)
+                items: list[tuple[PositionRow, float, str]] = []
                 for pp in pair_positions:
                     if pp.symbol in already_closed:
                         continue
                     api_pos = api_map.get(pp.symbol)
                     pnl = api_pos.unrealised_pnl if api_pos else 0.0
-                    if _close_and_record(client, stats, killswitch, pp, pnl, "statarb_zscore_exit"):
-                        already_closed.add(pp.symbol)
+                    items.append((pp, pnl, "statarb_zscore_exit"))
+                if items:
+                    log.info("STAT-ARB EXIT: %s → закрываю %d ног параллельно", tag, len(items))
+                    closed_now = _close_batch_with_reconcile(client, stats, killswitch, items)
+                    already_closed |= closed_now
 
-    # 1b. Stat-Arb pair take-profit: суммарный uPnL пары >= порог
+    # 1b. Stat-Arb pair take-profit: суммарный uPnL пары >= порог (батч-параллель)
     checked_tags: set[str] = set()
     for db_pos in db_open:
         tag = db_pos.pair_tag
@@ -539,14 +625,24 @@ def _process_exits(
         if pair_upnl >= STATARB_PAIR_TP_USD:
             log.info("PAIR-TP: %s суммарный uPnL=$%.2f >= $%.2f, фиксирую прибыль",
                      tag, pair_upnl, STATARB_PAIR_TP_USD)
+            items = []
             for pp in pair_positions:
                 if pp.symbol in already_closed:
                     continue
                 pp_pnl = api_map[pp.symbol].unrealised_pnl if pp.symbol in api_map else 0.0
-                if _close_and_record(client, stats, killswitch, pp, pp_pnl, "statarb_pair_tp"):
-                    already_closed.add(pp.symbol)
+                items.append((pp, pp_pnl, "statarb_pair_tp"))
+            if items:
+                closed_now = _close_batch_with_reconcile(client, stats, killswitch, items)
+                already_closed |= closed_now
 
     now = datetime.now(tz=UTC)
+
+    # Собираем все одиночные закрытия (time-stop, emergency) в батч,
+    # чтобы потом одним вызовом параллельно закрыть и единым sleep
+    # подтянуть real-PnL. Это сокращает общее время exit-обработки
+    # с N × 6с до ~3с независимо от N.
+    single_items: list[tuple[PositionRow, float, str]] = []
+    pair_legs_to_close: list[tuple[str, str]] = []  # (pair_tag, exclude_symbol)
 
     for db_pos in db_open:
         if db_pos.symbol in already_closed:
@@ -573,7 +669,7 @@ def _process_exits(
             db_pos.strategy, db_pos.pair_tag or "-",
         )
 
-        # 2. Stat-Arb emergency: суммарный uPnL пары < -$25
+        # 2. Stat-Arb emergency: суммарный uPnL пары < -$25 (батч-параллель)
         if db_pos.pair_tag and db_pos.strategy == "scalp_statarb":
             pair_positions = stats.get_open_by_pair_tag(db_pos.pair_tag)
             pair_upnl = sum(
@@ -583,22 +679,25 @@ def _process_exits(
             )
             if pair_upnl <= -STATARB_EMERGENCY_LOSS:
                 log.warning("STAT-ARB EMERGENCY: pair %s uPnL=%.2f", db_pos.pair_tag, pair_upnl)
+                items: list[tuple[PositionRow, float, str]] = []
                 for pp in pair_positions:
                     if pp.symbol in already_closed:
                         continue
                     pp_pnl = api_map[pp.symbol].unrealised_pnl if pp.symbol in api_map else 0.0
-                    if _close_and_record(client, stats, killswitch, pp, pp_pnl, "statarb_emergency"):
-                        already_closed.add(pp.symbol)
+                    items.append((pp, pp_pnl, "statarb_emergency"))
+                if items:
+                    closed_now = _close_batch_with_reconcile(client, stats, killswitch, items)
+                    already_closed |= closed_now
                 continue
 
         # 3. Time-stop 24ч: убирает "dead money" трейды (Finaur/TrendRider 2026)
         if age_sec >= TIME_STOP_SECONDS:
             log.info("TIME-STOP: %s held %.0f min (limit %.0f min) uPnL=%.2f",
                      db_pos.symbol, age_min, TIME_STOP_SECONDS / 60, upnl)
-            if _close_and_record(client, stats, killswitch, db_pos, upnl, "time_stop"):
-                already_closed.add(db_pos.symbol)
-                if db_pos.pair_tag:
-                    _close_pair_legs(client, stats, killswitch, db_pos.pair_tag, db_pos.symbol, api_map)
+            single_items.append((db_pos, upnl, "time_stop"))
+            already_closed.add(db_pos.symbol)
+            if db_pos.pair_tag:
+                pair_legs_to_close.append((db_pos.pair_tag, db_pos.symbol))
             continue
 
         # 4. Trailing stop: при прибыли > 0.7 ATR подтянуть через Bybit API (один раз за цикл)
@@ -613,6 +712,14 @@ def _process_exits(
                         distance = atr_val * TRAILING_DISTANCE_ATR
                         client.set_trailing_stop(db_pos.symbol, distance)
                         trailing_set.add(db_pos.symbol)
+
+    # Финальный батч: одиночные закрытия (time-stop) + парные ноги
+    # которые нужно закрыть симметрично с time-stop.
+    if single_items:
+        _close_batch_with_reconcile(client, stats, killswitch, single_items)
+
+    for pair_tag, exclude_symbol in pair_legs_to_close:
+        _close_pair_legs(client, stats, killswitch, pair_tag, exclude_symbol, api_map)
 
     closed_count = len(already_closed)
     if closed_count > 0:
