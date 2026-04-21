@@ -142,8 +142,13 @@ LEADERS_TRAIL_ATR=0.7
 OUTSIDERS_ENABLED=true
 OUTSIDERS_MAX_POSITIONS=50
 OUTSIDERS_CAPITAL_PCT=0.33
-OUTSIDERS_MODE=classic
+OUTSIDERS_MODE=confirmed
 ```
+
+**Defense-in-depth фильтры (обязательные для обоих modes):**
+1. **ADX ≤ 25** — не торговать mean-reversion в сильном тренде.
+2. **Liquid session filter** — вход только London 07:00–16:00 UTC или NY 12:00–21:00 UTC. В Asian session (23:00–07:00 UTC) тонкая ликвидность превращает mean-reversion в ловлю падающего ножа.
+3. **HTF EMA200 H1 alignment** — LONG (fade oversold) блокируется при downtrend H1, SHORT (fade overbought) — при uptrend H1. Research: [Asness, Moskowitz, Pedersen «Value and Momentum Everywhere» (JF 2013)](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021) — mean reversion успешен только когда не противонаправлен momentum старшего ТФ.
 
 ---
 

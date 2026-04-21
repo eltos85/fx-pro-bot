@@ -22,6 +22,7 @@ from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.strategies.exits import create_paper_positions
+from fx_pro_bot.strategies.scalping.indicators import htf_ema_trend
 
 log = logging.getLogger(__name__)
 
@@ -86,14 +87,51 @@ def detect_extreme_setups(
         if adx > ADX_MAX_FOR_MEAN_REVERSION:
             continue
 
+        # Liquid session filter — применяется в обоих modes.
+        # Outsiders classic раньше торговал 24/7 и в Asian session (тонкая
+        # ликвидность + USD/JPY rally) систематически лузил mean-reversion
+        # setups: 20 SL из 22 сделок за ночь 20-21.04. См. BUILDLOG 2026-04-21.
+        if not _is_liquid_session(bars[-1]):
+            continue
+
+        # HTF EMA200 H1 alignment — не fade против трендa старшего ТФ.
+        # Классический случай "value & momentum" ([Asness et al. JF 2013]):
+        # mean-reversion выигрывает когда H1 тренд не противонаправлен сигналу.
+        htf_slope = htf_ema_trend(bars)
+
+        raw: list[OutsiderSignal] = []
         if mode == "confirmed":
-            if not _is_liquid_session(bars[-1]):
-                continue
-            _scan_confirmed(symbol, bars, closes, atr, events, now, signals)
+            _scan_confirmed(symbol, bars, closes, atr, events, now, raw)
         else:
-            _scan_classic(symbol, bars, closes, atr, events, now, signals)
+            _scan_classic(symbol, bars, closes, atr, events, now, raw)
+
+        for sig in raw:
+            if _blocked_by_htf(sig, htf_slope):
+                log.debug(
+                    "%s: %s signal %s blocked by H1 trend (htf_slope=%.6f)",
+                    symbol, sig.direction.value, sig.source, htf_slope,
+                )
+                continue
+            signals.append(sig)
 
     return signals
+
+
+def _blocked_by_htf(sig: OutsiderSignal, htf_slope: float | None) -> bool:
+    """Отфильтровать mean-reversion сигналы против тренда H1.
+
+    LONG (fade oversold) блокируется при H1 downtrend (slope < 0):
+    ловля падающего ножа.
+    SHORT (fade overbought) блокируется при H1 uptrend (slope > 0):
+    шорт растущего рынка.
+    """
+    if htf_slope is None:
+        return False
+    if sig.direction == TrendDirection.LONG and htf_slope < 0:
+        return True
+    if sig.direction == TrendDirection.SHORT and htf_slope > 0:
+        return True
+    return False
 
 
 def _is_liquid_session(bar: Bar) -> bool:

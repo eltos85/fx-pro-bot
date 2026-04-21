@@ -27,9 +27,11 @@ from fx_pro_bot.whales.sentiment import SentimentSignal
 
 def _make_bars(
     closes: list[float], instrument: str = "EURUSD=X",
+    base: datetime | None = None,
 ) -> list[Bar]:
     inst = InstrumentId(symbol=instrument)
-    base = datetime(2026, 3, 1, tzinfo=UTC)
+    if base is None:
+        base = datetime(2026, 3, 2, 9, 0, tzinfo=UTC)
     return [
         Bar(
             instrument=inst,

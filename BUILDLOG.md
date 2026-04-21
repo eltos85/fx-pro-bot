@@ -4,6 +4,63 @@
 
 ---
 
+## 2026-04-21
+
+### fix(outsiders): +HTF EMA200 H1 фильтр и session filter в обоих modes
+
+**Симптом (диагностический срез 21.04 07:20 UTC):** за 13.1 ч после baseline
+20.04 18:15 UTC закрылось 22 сделки на новых параметрах, 20 из них — по
+**stop-loss**, WR=5% (1 из 21 outsiders). NET за окно: **−$9.32**.
+
+**Диагностика:** все лузеры — outsiders mean-reversion, направление входа
+против H1 тренда в Asian session USD-rally:
+- USDCAD SHORT ×7 (цена шла ↑)
+- EURUSD SHORT ×3 (цена шла ↑)
+- USDJPY SHORT ×3 (цена шла ↑)
+- AUDUSD SHORT ×2 (цена шла ↑)
+- GBPUSD LONG ×3 (цена шла ↓)
+
+Моя правка SL 1.5 → 2.0 ATR **не причина** (шире стоп — должно улучшать).
+Корень проблемы обнажился после того как снят HTF warning-only в scalping:
+**outsiders classic никогда не имел HTF-фильтра**, а confirmed mode имел
+только session filter — но RSI-recovery на 5 пунктов недостаточно для
+подтверждения разворота в сильном USD-трендe.
+
+**Решение (defense-in-depth, применяется в обоих modes):**
+
+1. **Liquid session filter перенесён из `confirmed` в общий блок** —
+   не торговать в Asian session (23:00–07:00 UTC) и выходные ни в каком режиме.
+2. **HTF EMA200 H1 filter добавлен** — блокирует mean-reversion сигналы
+   против H1 тренда:
+   - LONG (fade oversold) → блок при H1 downtrend (slope < 0).
+   - SHORT (fade overbought) → блок при H1 uptrend (slope > 0).
+   Источник: [Asness, Moskowitz, Pedersen «Value and Momentum Everywhere»
+   (Journal of Finance, 2013)](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021)
+   — mean reversion успешен только когда не противонаправлен momentum
+   старшего таймфрейма.
+3. **Default `OUTSIDERS_MODE=confirmed`** в settings.py / .env.example /
+   docker-compose.yml. На VPS уже был confirmed (ENV override), теперь
+   source-of-truth в коде совпадает с реальным деплоем.
+
+**Чего НЕ трогал:** Outsiders RSI 10/90, BB 3σ, ADX ≤ 25, CONFIRMED_SL_ATR=2.0
+ATR — всё по research (Quant Signals / Grokipedia). Только добавлены
+защитные фильтры по сессиям и HTF.
+
+**Действия по операционке:**
+- Закрыты принудительно все открытые позиции (старая логика без HTF).
+- Обновлён baseline статы на момент рестарта контейнера с новой логикой.
+
+**Тесты:** 271 passed. Обновлён `_make_bars` в test_strategies: default
+`base` сдвинут с 2026-03-01 00:00 UTC (воскресенье / Asian) на
+2026-03-02 09:00 UTC (понедельник / London), чтобы тесты не попадали
+под новый session filter.
+
+**Файлы:** `src/fx_pro_bot/strategies/outsiders.py`,
+`src/fx_pro_bot/config/settings.py`, `.env.example`, `docker-compose.yml`,
+`STRATEGIES.md`, `tests/test_strategies.py`, `.cursor/rules/stats-baseline.mdc`.
+
+---
+
 ## 2026-04-20
 
 ### refactor(strategies): откат overfit-правок, параметры приведены к research

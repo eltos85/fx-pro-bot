@@ -287,7 +287,7 @@ class Settings(BaseSettings):
     outsiders_enabled: bool = Field(default=True, validation_alias="OUTSIDERS_ENABLED")
     outsiders_max_positions: int = Field(default=50, validation_alias="OUTSIDERS_MAX_POSITIONS")
     outsiders_capital_pct: float = Field(default=0.33, validation_alias="OUTSIDERS_CAPITAL_PCT")
-    outsiders_mode: str = Field(default="classic", validation_alias="OUTSIDERS_MODE")
+    outsiders_mode: str = Field(default="confirmed", validation_alias="OUTSIDERS_MODE")
 
     shadow_enabled: bool = Field(default=True, validation_alias="SHADOW_ENABLED")
 
