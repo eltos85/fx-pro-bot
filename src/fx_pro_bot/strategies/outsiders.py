@@ -42,7 +42,6 @@ CLASSIC_SL_ATR = 3.0
 OUTSIDERS_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
     "ADA-USD", "LINK-USD", "AVAX-USD", "LTC-USD", "BNB-USD", "DOT-USD",
-    "USDJPY=X",
 })
 
 ADX_MAX_FOR_MEAN_REVERSION = 25.0

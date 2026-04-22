@@ -94,9 +94,9 @@ LEADERS_TRAIL_ATR=0.7
 
 **Лимиты:** макс 50 позиций, макс 3 на один инструмент.
 
-**Исключения outsiders/ensemble:** EURJPY возвращён в outsiders (ранее исключался на 5 сделках — нарушение правила `sample-size.mdc` ≥100 сделок). **USDJPY** исключён 22.04.2026 (26 сделок за 20.5 ч, WR=35%, NET −$3.45; проигрывает во всех сессиях кроме одной — системная слабость mean-reversion на USD-rally трендах, см. BUILDLOG 2026-04-22).
+**Исключения outsiders/ensemble:** EURJPY возвращён в outsiders (ранее исключался на 5 сделках — нарушение правила `sample-size.mdc` ≥100 сделок). **USDJPY вернулся в торговлю 22.04.2026 11:30 UTC** — исключение от 04:36 было преждевременным (выборка 26 сделок <100, сделано без работающего HTF фильтра; после фикса HTF симуляция показала NET −$0.60 на 19 оставшихся сделках — почти ноль, см. BUILDLOG 2026-04-22).
 
-**Исключения скальпинга:** EURJPY, GBPJPY, **USDJPY** исключены из VWAP/ORB/News Fade/StatArb. XAUUSD/GC=F возвращены (исключались на 2 сделках — overfitting). Крипта полностью убрана из FxPro advisor — нерентабельна.
+**Исключения скальпинга:** EURJPY, GBPJPY исключены из VWAP/ORB/News Fade/StatArb. XAUUSD/GC=F возвращены (исключались на 2 сделках — overfitting). Крипта полностью убрана из FxPro advisor — нерентабельна.
 
 **ADX-фильтр скальпинга:** вход VWAP разрешён при ADX(14) ≤ **25** (источник: [PyQuantLab «ADX Trend Strength»](https://pyquantlab.medium.com/adx-trend-strength-with-vwap-flow-filter-precision-entries-disciplined-exit-9cd559e3319b) — «typical threshold is 25»). ORB — при ADX ≤ 25. Требование «ADX убывает» снято — не подтверждено research. При сильном тренде mean-reversion скальпинг опасен.
 
@@ -153,6 +153,8 @@ OUTSIDERS_MODE=confirmed
 1. **ADX ≤ 25** — не торговать mean-reversion в сильном тренде.
 2. **Liquid session filter** — вход только London 07:00–15:59 UTC или NY 12:00–20:59 UTC. В Asian session и в час NY close тонкая ликвидность превращает mean-reversion в ловлю падающего ножа.
 3. **HTF EMA200 H1 alignment** — LONG (fade oversold) блокируется при downtrend H1, SHORT (fade overbought) — при uptrend H1. Research: [Asness, Moskowitz, Pedersen «Value and Momentum Everywhere» (JF 2013)](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021) — mean reversion успешен только когда не противонаправлен momentum старшего ТФ.
+
+> **⚠️ Требование данных:** `htf_ema_trend()` ресемплирует M5 в H1 и требует ≥205 H1 баров для EMA(200). При `YFINANCE_PERIOD=5d` (по умолчанию до 22.04) получалось только ~73 H1 баров → фильтр всегда возвращал `None` и не блокировал. Начиная с 22.04.2026 `YFINANCE_PERIOD=1mo` (≥500 H1 баров per request, cTrader API лимит 14k баров). См. BUILDLOG 2026-04-22.
 
 ---
 

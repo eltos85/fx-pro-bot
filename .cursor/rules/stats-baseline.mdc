@@ -5,9 +5,12 @@ alwaysApply: true
 
 # Статистика: точка отсчёта
 
-Статистика по стратегиям считается **с 22.04.2026 04:36 UTC** — момент
-рестарта advisor с USDJPY exclude + News Fade session filter + NY close
-cutoff (`t < NY_END` 21:00 UTC).
+Статистика по стратегиям считается **с 22.04.2026 11:30 UTC** — момент
+рестарта advisor после фикса HTF EMA200 H1 фильтра: `YFINANCE_PERIOD`
+увеличен с `5d` до `1mo`, чтобы `htf_ema_trend()` имел ≥205 H1 баров
+(раньше `resample_m5_to_h1(5d)` давал ~73 H1 бара → `htf_ema_trend`
+всегда возвращал `None` → **фильтр вообще не работал с момента внедрения
+21.04**).
 
 ## История baseline-дат (для контекста)
 
@@ -22,31 +25,41 @@ cutoff (`t < NY_END` 21:00 UTC).
   confirmed mode). HTF EMA200 H1 filter — блок fade против H1 тренда
   ([Asness et al. «Value and Momentum Everywhere», JF 2013](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021)).
   `OUTSIDERS_MODE=confirmed` как default.
-- **22.04.2026 04:36 UTC** — **текущий baseline.** Диагностика среза
-  21.04 07:45 → 22.04 04:16 UTC показала три системные дыры (−$10.79
-  за 20.5 ч): USDJPY −$3.45 / 26 сделок WR 35%, Late-NY 21:00 UTC
-  outsiders −$7.54 / 10 сделок WR 20%, Asian News Fade −$1.40 /
-  4 сделки WR 0%. Правки (коммит `0c8c758`):
-  - USDJPY в `SCALPING_EXCLUDE_SYMBOLS` и `OUTSIDERS_EXCLUDE_SYMBOLS`.
-  - `_check_news_fade` теперь требует `is_liquid_session` —
-    больше никаких fade в Asian (источник:
-    [BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm)).
-  - `is_liquid_session`: `t <= NY_END` → `t < NY_END` — бары ровно в
-    21:00 UTC (NY close) исключены.
+- **22.04.2026 04:36 UTC** — правки на выборке без HTF (коммит `0c8c758`):
+  USDJPY exclude, News Fade session filter, NY close cutoff 21:00 UTC.
+- **22.04.2026 11:30 UTC** — **текущий baseline.** Retrospective
+  (`/tmp/retro_htf.py`, 177 сделок с 21.04 07:45) показало что HTF
+  EMA200 H1 **вообще не работал**: `YFINANCE_PERIOD=5d` давал только 73
+  H1 бара при нужных 205. С симуляцией работающего HTF:
+  - 59 сделок из 177 были бы заблокированы (NET −$6.61), общий NET
+    изменился бы с +$0.61 → +$7.22.
+  - Late-NY 21:00 outsiders: HTF блокирует 6 из 9 убытков (−$7.71);
+    3 оставшихся сделки WR 66.7% / +$1.39.
+  - USDJPY: HTF блокирует 7 из 26 (−$2.07); 19 оставшихся — NET −$0.60
+    (почти ноль, выборка <100 недостаточна per sample-size.mdc).
 
-Все данные до 22.04.2026 04:36 UTC — **не репрезентативны** для текущей
+  Правки (коммит `TBD`):
+  - **`YFINANCE_PERIOD` 5d → 1mo** (главное) — чтобы HTF фильтр работал.
+  - **USDJPY возвращён в торговлю** — исключение было на выборке без HTF
+    и 26 сделках (<100); с работающим HTF убыток нивелируется.
+  - **Late-NY cutoff 21:00 UTC оставлен** — research-backed avoidance
+    low-liquidity transition window перед Asian open
+    ([BabyPips — NY close](https://www.babypips.com/)); HTF + cutoff =
+    defence-in-depth.
+  - **News Fade session filter оставлен** — правка здравая (mean-reversion
+    в Asian = низкая ликвидность, волатильность flash-move).
+
+Все данные до 22.04.2026 11:30 UTC — **не репрезентативны** для текущей
 торговой логики:
 - JPY-цены были искажены до 20.04 (фантомные лоссы).
-- 20.04 → 21.04 — outsiders без HTF-фильтра фейдил H1 тренд.
-- 21.04 → 22.04 — News Fade торговал в Asian, USDJPY лузил системно,
-  outsiders брал входы в час NY close.
-- Все открытые позиции перед сдвигом baseline закрыты (брокер: 0 открытых
-  на момент рестарта).
+- 20.04 → 22.04 11:30 — HTF EMA200 H1 всегда возвращал None
+  (`YFINANCE_PERIOD=5d` → 73 H1 баров при нужных 205).
+- Все открытые позиции перед сдвигом baseline закрыты.
 
 ## Фильтрация
 
 При анализе P&L, win-rate, сравнении стратегий — фильтровать по
-`created_at >= '2026-04-22 04:36:00'` **или** по актуальному baseline
+`created_at >= '2026-04-22 11:30:00'` **или** по актуальному baseline
 из этого файла.
 
 ## Депозит

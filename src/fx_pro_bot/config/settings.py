@@ -19,7 +19,6 @@ DEFAULT_SYMBOLS = (
 SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "EURJPY=X",
     "GBPJPY=X",
-    "USDJPY=X",
 })
 
 SCALPING_CRYPTO_ALLOWED: frozenset[str] = frozenset()
@@ -252,7 +251,7 @@ class Settings(BaseSettings):
         validation_alias="SCAN_SYMBOLS",
     )
 
-    yfinance_period: str = Field(default="5d", validation_alias="YFINANCE_PERIOD")
+    yfinance_period: str = Field(default="1mo", validation_alias="YFINANCE_PERIOD")
     yfinance_interval: str = Field(default="5m", validation_alias="YFINANCE_INTERVAL")
 
     poll_interval_sec: int = Field(default=300, validation_alias="POLL_INTERVAL_SEC")

@@ -6,6 +6,75 @@
 
 ## 2026-04-22
 
+### fix(config): YFINANCE_PERIOD 5d → 1mo — HTF EMA200 H1 фильтр не работал
+`TBD`
+
+**Симптом.** Срез 22.04 04:36 → 10:48 UTC (6.2 ч, 13 сделок): NET −$4.38, WR
+30.8%. GBPUSD: 4 сделки, WR 0%, −$3.21. 9 открытых позиций, 8 из которых
+`outsiders LONG` на EUR/GBP-парах — несмотря на HTF EMA200 H1 filter,
+добавленный 21.04 для блокировки fade против H1 тренда.
+
+**Диагностика.** Скрипт `/tmp/diag_htf.py` показал для всех ключевых пар
+(EUR/GBP/JPY/AUD/CAD) `htf_ema_trend() = None`. Причина: функция
+ресемплирует M5 в H1 и требует `≥ ema_period + 5 = 205` H1 баров для
+EMA(200). При `YFINANCE_PERIOD=5d` получалось:
+
+- 5 календарных × ~70% торговых = ~3.5 торговых дней
+- 3.5 × 24 = ~84 H1 баров (реально 73 с учётом weekend)
+- Нужно 205 → `htf_ema_trend()` **всегда возвращала `None`**.
+
+→ Фильтр HTF EMA200 H1 **не работал с момента внедрения 21.04.2026 07:45**
+(~26 часов и 177 сделок на неработающем фильтре).
+
+**Ретроспектива (`/tmp/retro_htf.py`).** Симуляция работающего HTF на
+всех 177 сделках с 21.04:
+
+| Группа | Факт (без HTF) | С HTF (симуляция) | HTF блокировал бы |
+|---|---|---|---|
+| ВСЕ | 177 / WR 53.1% / **+$0.61** | 118 / WR 55.1% / **+$7.22** | 59 / WR 49.2% / **−$6.61** |
+| USDJPY | 26 / WR 34.6% / −$2.67 | 19 / WR 36.8% / **−$0.60** | 7 / −$2.07 |
+| Late-NY 21:00 outsiders | 9 / WR 22.2% / −$6.32 | 3 / WR 66.7% / **+$1.39** | 6 / −$7.71 |
+
+HTF сам по себе закрывает 86% Late-NY проблем и 78% USDJPY проблем.
+
+**Правки:**
+
+1. **`YFINANCE_PERIOD` 5d → 1mo** (`settings.py`, `docker-compose.yml`,
+   `.env.example`, `README.md`). 30 календарных дней даёт 6300+ M5 и
+   500+ H1 баров (cTrader API лимит 14000 баров per request —
+   [cTrader forum](https://community.ctrader.com/forum/connect-api-support/24731/)).
+   Запрос увеличивается с ~1.5k до ~6k M5 баров — ~+50ms на символ,
+   негативный impact не существен.
+
+2. **Откат USDJPY exclude** (`SCALPING_EXCLUDE_SYMBOLS`,
+   `OUTSIDERS_EXCLUDE_SYMBOLS`). Причины отката:
+   - Исходная выборка 26 сделок — ниже порога 100 из `sample-size.mdc`.
+   - Анализ делался на неработающем HTF. С HTF NET на 19 оставшихся
+     сделках = −$0.60 за 20 ч (ничтожно).
+   - USDJPY — 3-я по объёму пара на FX рынке
+     ([BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm)),
+     нет структурных причин для исключения.
+
+3. **Late-NY cutoff оставлен** (`is_liquid_session`: `t < NY_END` 21:00
+   UTC). Research: NY close = 17:00 ET = 21:00 UTC (DST), за 15-30 мин
+   до close и в первые часы после — liquidity transition window
+   ([BabyPips — FX Session Analysis](https://www.babypips.com/learn/forex/london-session)).
+   Из ретроспективы: 3 неблокированных HTF'ом сделки дали бы +$1.39 —
+   малая выборка, не основание для отмены research-backed защиты.
+   HTF + cutoff = defence-in-depth.
+
+4. **News Fade session filter оставлен** (session_orb). Mean-reversion
+   в Asian session = flash-move ловля. Правка здравая.
+
+**Baseline сдвинут:** 22.04.2026 04:36 → **11:30 UTC**. Старые данные
+нерепрезентативны (HTF не работал).
+
+**Файлы:** `src/fx_pro_bot/config/settings.py`,
+`src/fx_pro_bot/strategies/outsiders.py`, `docker-compose.yml`,
+`.env.example`, `README.md`, `STRATEGIES.md`, `.cursor/rules/stats-baseline.mdc`.
+
+---
+
 ### fix(scalping+outsiders): USDJPY exclude, News Fade session filter, NY close cutoff
 
 **Срез 22.04 04:16 UTC (baseline 21.04 07:45):** 155 сделок за 20.5 ч,
