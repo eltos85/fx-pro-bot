@@ -137,6 +137,14 @@ class TestLiquidSession:
     def test_weekend_illiquid(self):
         assert not _is_liquid_session(self._bar_at(10, weekday=5))
 
+    def test_ny_close_excluded(self):
+        """21:00 UTC ровно — NY close; ликвидность резко падает, блокируем."""
+        assert not _is_liquid_session(self._bar_at(21, minute=0, weekday=1))
+
+    def test_ny_pre_close_liquid(self):
+        """20:55 UTC — ещё в NY session."""
+        assert _is_liquid_session(self._bar_at(20, minute=55, weekday=1))
+
 
 # ── Confirmed detectors ──────────────────────────────────────
 

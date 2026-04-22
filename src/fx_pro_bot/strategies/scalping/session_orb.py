@@ -18,7 +18,7 @@ from fx_pro_bot.config.settings import SCALPING_CRYPTO_ALLOWED, display_name, is
 from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
-from fx_pro_bot.strategies.scalping.indicators import avg_volume, ema_slope, htf_ema_trend, session_range
+from fx_pro_bot.strategies.scalping.indicators import avg_volume, ema_slope, htf_ema_trend, is_liquid_session, session_range
 
 log = logging.getLogger(__name__)
 
@@ -226,6 +226,16 @@ class SessionOrbStrategy:
         htf_slope: float | None = None,
     ) -> OrbSignal | None:
         if len(bars) < 4:
+            return None
+
+        # Liquid session filter — News Fade это mean-reversion, в Asian (23-07 UTC)
+        # тонкий рынок не абсорбирует спайк, а продлевает тренд. Диагностика
+        # 22.04.2026: 4 входа 23:23-02:50 UTC, WR=0%, NET −$1.40 (см. BUILDLOG).
+        # Research: [BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm)
+        # пик FX-ликвидности = London-NY overlap; [Dacorogna et al. «High-Frequency
+        # Finance» 2001] — spreads и volatility после NY close становятся токсичными
+        # для mean-reversion.
+        if not is_liquid_session(bars[-1]):
             return None
 
         recent = bars[-3:]

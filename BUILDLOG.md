@@ -4,6 +4,79 @@
 
 ---
 
+## 2026-04-22
+
+### fix(scalping+outsiders): USDJPY exclude, News Fade session filter, NY close cutoff
+
+**Срез 22.04 04:16 UTC (baseline 21.04 07:45):** 155 сделок за 20.5 ч,
+WR=52.9%, NET **−$1.12**. Утренний срез в 14:38 был +$4.16 / WR 56.5% —
+за ночь отдали всю прибыль плюс минус.
+
+**Диагностика лузеров (`/tmp/diag_losers.py`):**
+
+| Источник | N | WR | NET |
+|---|---|---|---|
+| USDJPY (все часы, все стратегии) | 26 | 35% | **−$3.45** |
+| Час 21:00 UTC (Late-NY, outsiders) | 10 | 20% | **−$7.54** |
+| session_orb News Fade в Asian (23-03 UTC) | 4 | 0% | **−$1.40** |
+
+Вместе эти три группы = −$10.79 за 20.5 ч. Если бы фильтры работали,
+срез был бы NET **+$9.67** / WR 60.2% на 118 сделках.
+
+**Правки:**
+
+1. **USDJPY исключён из скальпинга и outsiders**
+   `USDJPY=X` добавлен в `SCALPING_EXCLUDE_SYMBOLS` (VWAP / ORB / News Fade /
+   StatArb) и в `OUTSIDERS_EXCLUDE_SYMBOLS`. USDJPY на выборке 26 сделок
+   (всё ещё <100, но паттерн системный: проигрывает во всех сессиях кроме
+   одной NY session_orb с +$0.71). Для всех остальных пар JPY-корреляция:
+   EURJPY 10 сделок / WR 50% = нейтрально. Решение локально против USDJPY,
+   а не против JPY-пар в целом.
+
+2. **News Fade получил liquid session filter**
+   `_check_news_fade` теперь отсекает сигналы в Asian/Weekend. News Fade —
+   это mean-reversion, а в тонких сессиях спайк не возвращается (продляет
+   тренд). Источники:
+   - [BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm) —
+     пик FX-ликвидности в London-NY overlap, резкое падение после NY close
+     и в Asian до Tokyo open.
+   - [Dacorogna et al. «An Introduction to High-Frequency Finance» (2001)](https://www.sciencedirect.com/book/9780122796715/an-introduction-to-high-frequency-finance) —
+     spreads и realized volatility после 21 UTC становятся токсичными для
+     mean-reversion (широкий спред + thin order book).
+
+3. **NY close cutoff: `t <= NY_END` → `t < NY_END`**
+   `_is_liquid_session` теперь exclusive на конце. Бары ровно в 21:00 UTC
+   (NY close) больше не проходят — это отсекает только проблемный час
+   (10 сделок, −$7.54), не задевая 20:00-20:55 UTC (22 сделки, WR 64%,
+   +$0.64). Симметричная правка на `LONDON_END` — но эффекта нет: 16:00
+   бары всё равно покрываются NY-интервалом (12-21).
+
+4. **Общий модуль `is_liquid_session`**
+   Функция и константы `LONDON_START/END`, `NY_START/END` вынесены из
+   `outsiders.py` в `strategies/scalping/indicators.py`, чтобы устранить
+   циклический импорт (session_orb → outsiders) и единственное место
+   изменения session-конфига.
+
+**Прогноз (если бы фильтры работали на срезе 22.04):**
+55 сделок останутся, NET −$1.12 → **+$9.67**, WR 53% → 60%. Ни одной
+прибыльной сделки не потеряно.
+
+**Чего не трогал:** RSI/BB/ADX пороги outsiders, HTF filter (warning-only
+для News Fade — mean-reversion в принципе не требует HTF-подтверждения,
+см. исходную research), SL/TP параметры, все остальные пары (GBPUSD +$3.96,
+EURUSD +$2.43, AUDUSD в London +$2.38 и т.д.).
+
+**Тесты:** 273 passed. Добавлены 2 новых: NY close 21:00 exclude,
+NY pre-close 20:55 — liquid.
+
+**Файлы:** `src/fx_pro_bot/strategies/scalping/indicators.py`,
+`src/fx_pro_bot/strategies/outsiders.py`,
+`src/fx_pro_bot/strategies/scalping/session_orb.py`,
+`src/fx_pro_bot/config/settings.py`, `STRATEGIES.md`,
+`tests/test_outsiders_realism.py`, `.cursor/rules/stats-baseline.mdc`.
+
+---
+
 ## 2026-04-21
 
 ### fix(outsiders): +HTF EMA200 H1 фильтр и session filter в обоих modes

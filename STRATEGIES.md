@@ -94,15 +94,15 @@ LEADERS_TRAIL_ATR=0.7
 
 **Лимиты:** макс 50 позиций, макс 3 на один инструмент.
 
-**Исключения outsiders/ensemble:** EURJPY возвращён в outsiders (ранее исключался на 5 сделках — нарушение правила `sample-size.mdc` ≥100 сделок).
+**Исключения outsiders/ensemble:** EURJPY возвращён в outsiders (ранее исключался на 5 сделках — нарушение правила `sample-size.mdc` ≥100 сделок). **USDJPY** исключён 22.04.2026 (26 сделок за 20.5 ч, WR=35%, NET −$3.45; проигрывает во всех сессиях кроме одной — системная слабость mean-reversion на USD-rally трендах, см. BUILDLOG 2026-04-22).
 
-**Исключения скальпинга:** GBPJPY исключён из VWAP/ORB/StatArb (слабый WR за 9-часовой анализ). XAUUSD/GC=F возвращены (исключались на 2 сделках — overfitting). Крипта полностью убрана из FxPro advisor — нерентабельна.
+**Исключения скальпинга:** EURJPY, GBPJPY, **USDJPY** исключены из VWAP/ORB/News Fade/StatArb. XAUUSD/GC=F возвращены (исключались на 2 сделках — overfitting). Крипта полностью убрана из FxPro advisor — нерентабельна.
 
 **ADX-фильтр скальпинга:** вход VWAP разрешён при ADX(14) ≤ **25** (источник: [PyQuantLab «ADX Trend Strength»](https://pyquantlab.medium.com/adx-trend-strength-with-vwap-flow-filter-precision-entries-disciplined-exit-9cd559e3319b) — «typical threshold is 25»). ORB — при ADX ≤ 25. Требование «ADX убывает» снято — не подтверждено research. При сильном тренде mean-reversion скальпинг опасен.
 
 **HTF-фильтр тренда (warning-only для mean reversion):** EMA(200) на H1 используется как **предупреждение** в VWAP reversion и news_fade, но не блокирует сигнал. Канонические mean-reversion стратегии (BB+RSI, VWAP) в исследованиях не требуют HTF confirmation ([Grokipedia «BB+RSI Mean Reversion»](https://grokipedia.com/page/Bollinger_Bands_and_RSI_Mean_Reversion_Strategy)). Для ORB breakout (trend-following) HTF-фильтр сохранён как блокирующий.
 
-**News-fade — без часовых ограничений:** news_fade срабатывает в любой сессии, включая Asian/Tokyo (источник: [Finveroo «Asian Range Fade»](https://www.finveroo.com/trading-academy/strategies/session/asian-range-fade/) — признанная mean-reversion стратегия для Asian hours). Фильтр по величине спайка (≥ NEWS_SPIKE_ATR × ATR) остаётся.
+**News-fade — только liquid sessions:** 22.04.2026 выявлено, что fade без session-фильтра даёт WR=0% в Asian (4 сделки 23-03 UTC, NET −$1.40). Исходная идея «Asian Range Fade» [Finveroo](https://www.finveroo.com/trading-academy/strategies/session/asian-range-fade/) — это range-trading **внутри Asian range** на фиксе границ, а не fade спайков во время самой Asian session. Применяем `is_liquid_session` (London 07-15:59 UTC + NY 12-20:59 UTC). Research: [BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm) — thin book после NY close и в Asian до Tokyo open не абсорбирует 2×ATR спайк, mean-reversion ломается.
 
 **Stat-Arb ADF-фильтр:** перед входом проверяется стационарность spread через ADF-тест. Если t-stat > -2.86 (5% критическое значение) — коинтеграция сомнительна, пара не торгуется. Z_ENTRY поднят с 2.0 до 2.5 для снижения ложных срабатываний.
 
@@ -110,13 +110,17 @@ LEADERS_TRAIL_ATR=0.7
 
 **ADX-фильтр (outsiders):** вход разрешён только при ADX(14) ≤ 25. При сильном тренде (ADX > 25) mean reversion опасен — сигнал пропускается.
 
-### Фильтр ликвидности (confirmed mode)
+### Фильтр ликвидности (оба modes — defense-in-depth)
 
-Вход разрешён только в часы высокой ликвидности:
-- **Лондон:** 07:00-16:00 UTC
-- **Нью-Йорк:** 12:00-21:00 UTC
+Вход разрешён только в часы высокой ликвидности (end-интервалы exclusive):
+- **Лондон:** 07:00-15:59 UTC
+- **Нью-Йорк:** 12:00-20:59 UTC
 
-Запрещён вход: Азиатская сессия (23:00-07:00 UTC), выходные.
+Запрещён вход: Азиатская сессия (21:00-06:59 UTC), выходные. Час ровно 21:00
+UTC (NY close) исключён с 22.04.2026 — диагностика показала WR=20% и NET
+−$7.54 за 10 сделок в этом часе, см. BUILDLOG 2026-04-22. Research: [BIS
+Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm) — резкое
+падение ликвидности после NY close.
 
 ### Лимитный вход (confirmed mode)
 
@@ -147,7 +151,7 @@ OUTSIDERS_MODE=confirmed
 
 **Defense-in-depth фильтры (обязательные для обоих modes):**
 1. **ADX ≤ 25** — не торговать mean-reversion в сильном тренде.
-2. **Liquid session filter** — вход только London 07:00–16:00 UTC или NY 12:00–21:00 UTC. В Asian session (23:00–07:00 UTC) тонкая ликвидность превращает mean-reversion в ловлю падающего ножа.
+2. **Liquid session filter** — вход только London 07:00–15:59 UTC или NY 12:00–20:59 UTC. В Asian session и в час NY close тонкая ликвидность превращает mean-reversion в ловлю падающего ножа.
 3. **HTF EMA200 H1 alignment** — LONG (fade oversold) блокируется при downtrend H1, SHORT (fade overbought) — при uptrend H1. Research: [Asness, Moskowitz, Pedersen «Value and Momentum Everywhere» (JF 2013)](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021) — mean reversion успешен только когда не противонаправлен momentum старшего ТФ.
 
 ---
@@ -216,7 +220,7 @@ OUTSIDERS_MODE=confirmed
 |----------|----------|----------|
 | NEWS_SPIKE_ATR | **2.0** | Минимальный спайк за 3 бара |
 | Условие | Спайк против EMA(50) | Вход против спайка на откат |
-| Часы работы | **24/7** (кроме выходных) | Ограничение сессий снято — Asian Range Fade признан research ([Finveroo](https://www.finveroo.com/trading-academy/strategies/session/asian-range-fade/)) |
+| Часы работы | **Liquid session only** (London 07-15:59, NY 12-20:59 UTC) | Диагностика 22.04.2026: 4 fade-сделки в Asian 23-03 UTC, WR=0%, NET −$1.40. Research: [BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm) — пик ликвидности в London/NY overlap; [Dacorogna et al. 2001] — thin book после NY close не абсорбирует спайк, mean-reversion ломается |
 | HTF тренд-фильтр | EMA(200) на H1 — **warning-only** | Логируется, не блокирует fade (mean-reversion) |
 | TP | **50%** отката спайка | |
 | SL | **За экстремумом** спайка | |

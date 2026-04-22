@@ -19,6 +19,7 @@ DEFAULT_SYMBOLS = (
 SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "EURJPY=X",
     "GBPJPY=X",
+    "USDJPY=X",
 })
 
 SCALPING_CRYPTO_ALLOWED: frozenset[str] = frozenset()

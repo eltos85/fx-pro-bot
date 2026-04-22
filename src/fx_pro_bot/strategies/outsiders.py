@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime
 
 from fx_pro_bot.analysis.signals import TrendDirection, _atr, _rsi, _sma, compute_adx
 from fx_pro_bot.config.settings import display_name, pip_size
@@ -22,7 +22,10 @@ from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.strategies.exits import create_paper_positions
-from fx_pro_bot.strategies.scalping.indicators import htf_ema_trend
+from fx_pro_bot.strategies.scalping.indicators import (
+    htf_ema_trend,
+    is_liquid_session as _is_liquid_session,
+)
 
 log = logging.getLogger(__name__)
 
@@ -39,14 +42,10 @@ CLASSIC_SL_ATR = 3.0
 OUTSIDERS_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
     "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD",
     "ADA-USD", "LINK-USD", "AVAX-USD", "LTC-USD", "BNB-USD", "DOT-USD",
+    "USDJPY=X",
 })
 
 ADX_MAX_FOR_MEAN_REVERSION = 25.0
-
-LONDON_START = time(7, 0)
-LONDON_END = time(16, 0)
-NY_START = time(12, 0)
-NY_END = time(21, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,18 +131,6 @@ def _blocked_by_htf(sig: OutsiderSignal, htf_slope: float | None) -> bool:
     if sig.direction == TrendDirection.SHORT and htf_slope > 0:
         return True
     return False
-
-
-def _is_liquid_session(bar: Bar) -> bool:
-    """Проверить, что бар попадает в ликвидную торговую сессию (London / NY)."""
-    ts = bar.ts
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-
-    t = ts.time()
-    if ts.weekday() >= 5:
-        return False
-    return LONDON_START <= t <= LONDON_END or NY_START <= t <= NY_END
 
 
 def _scan_classic(

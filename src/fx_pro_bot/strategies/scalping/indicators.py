@@ -7,8 +7,29 @@ VWAP, z-score, session range, EMA slope, OLS hedge ratio.
 from __future__ import annotations
 
 import math
+from datetime import time, timezone
 
 from fx_pro_bot.market_data.models import Bar
+
+# Границы ликвидных FX-сессий в UTC. End-интервалы exclusive — бары ровно
+# в момент закрытия сессии исключаются, т.к. ликвидность схлопывается
+# после NY close ([BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm)).
+LONDON_START = time(7, 0)
+LONDON_END = time(16, 0)
+NY_START = time(12, 0)
+NY_END = time(21, 0)
+
+
+def is_liquid_session(bar: Bar) -> bool:
+    """Проверить, что бар попадает в ликвидную сессию (London / NY)."""
+    ts = bar.ts
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    t = ts.time()
+    if ts.weekday() >= 5:
+        return False
+    return LONDON_START <= t < LONDON_END or NY_START <= t < NY_END
 
 
 def vwap(bars: list[Bar]) -> float:
