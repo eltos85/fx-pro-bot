@@ -5,9 +5,9 @@ alwaysApply: true
 
 # Статистика: точка отсчёта
 
-Статистика по стратегиям считается **с 21.04.2026 07:45 UTC** — момент
-рестарта advisor с HTF EMA200 H1 + session filter в outsiders (оба modes),
-`OUTSIDERS_MODE=confirmed` по умолчанию.
+Статистика по стратегиям считается **с 22.04.2026 04:36 UTC** — момент
+рестарта advisor с USDJPY exclude + News Fade session filter + NY close
+cutoff (`t < NY_END` 21:00 UTC).
 
 ## История baseline-дат (для контекста)
 
@@ -17,28 +17,36 @@ alwaysApply: true
   Outsiders SL 1.5→2.0 ATR, возврат GC=F/EURJPY, VWAP ADX 20→25, снят
   «ADX убывает», HTF→warning-only, News Fade без часовых ограничений.
   Также fix декодинга JPY-trendbars (`339a30e`, scale 10⁵ vs digits).
-- **21.04.2026 07:45 UTC** — **текущий baseline.** Диагностика среза
-  20.04 18:15 → 21.04 07:20 UTC показала WR=5% (20 SL из 22) на outsiders
-  в Asian session USD-rally. Усиление (коммит `76a8306`):
-  - Session filter `_is_liquid_session` вынесен в общий блок (был только
-    в confirmed mode). Asian session 23-07 UTC и выходные — запрет входа
-    в обоих modes.
-  - HTF EMA200 H1 filter добавлен в outsiders (источник:
-    [Asness et al. «Value and Momentum Everywhere», JF 2013](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021)):
-    LONG блок при H1 downtrend, SHORT блок при H1 uptrend.
-  - `OUTSIDERS_MODE=confirmed` как default (на VPS уже было через ENV).
+- **21.04.2026 07:45 UTC** — HTF EMA200 H1 + session filter в outsiders
+  (коммит `76a8306`). Session filter вынесен в общий блок (был только в
+  confirmed mode). HTF EMA200 H1 filter — блок fade против H1 тренда
+  ([Asness et al. «Value and Momentum Everywhere», JF 2013](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021)).
+  `OUTSIDERS_MODE=confirmed` как default.
+- **22.04.2026 04:36 UTC** — **текущий baseline.** Диагностика среза
+  21.04 07:45 → 22.04 04:16 UTC показала три системные дыры (−$10.79
+  за 20.5 ч): USDJPY −$3.45 / 26 сделок WR 35%, Late-NY 21:00 UTC
+  outsiders −$7.54 / 10 сделок WR 20%, Asian News Fade −$1.40 /
+  4 сделки WR 0%. Правки (коммит `0c8c758`):
+  - USDJPY в `SCALPING_EXCLUDE_SYMBOLS` и `OUTSIDERS_EXCLUDE_SYMBOLS`.
+  - `_check_news_fade` теперь требует `is_liquid_session` —
+    больше никаких fade в Asian (источник:
+    [BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm)).
+  - `is_liquid_session`: `t <= NY_END` → `t < NY_END` — бары ровно в
+    21:00 UTC (NY close) исключены.
 
-Все данные до 21.04.2026 07:45 UTC — **не репрезентативны** для текущей
+Все данные до 22.04.2026 04:36 UTC — **не репрезентативны** для текущей
 торговой логики:
 - JPY-цены были искажены до 20.04 (фантомные лоссы).
-- 20.04 18:15 → 21.04 07:45 — outsiders без HTF-фильтра фейдил H1 тренд.
+- 20.04 → 21.04 — outsiders без HTF-фильтра фейдил H1 тренд.
+- 21.04 → 22.04 — News Fade торговал в Asian, USDJPY лузил системно,
+  outsiders брал входы в час NY close.
 - Все открытые позиции перед сдвигом baseline закрыты (брокер: 0 открытых
   на момент рестарта).
 
 ## Фильтрация
 
 При анализе P&L, win-rate, сравнении стратегий — фильтровать по
-`created_at >= '2026-04-21 07:45:00'` **или** по актуальному baseline
+`created_at >= '2026-04-22 04:36:00'` **или** по актуальному baseline
 из этого файла.
 
 ## Депозит
