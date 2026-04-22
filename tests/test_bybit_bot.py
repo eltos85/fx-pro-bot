@@ -668,3 +668,158 @@ def test_process_exits_statarb_closes_pair_atomically(tmp_path):
     assert len(legs_arg) == 2
     symbols = sorted(leg[0] for leg in legs_arg)
     assert symbols == ["ADAUSDT", "TIAUSDT"]
+
+
+def test_statarb_pair_tp_threshold_is_one_dollar():
+    """Порог STATARB_PAIR_TP_USD снижен с $2 до $1 (2026-04-21).
+
+    Обоснование (см. BUILDLOG_BYBIT.md): за Wave 5 (6 закрытых пар) порог
+    $2 не сработал ни разу, max pair uPnL был ~$1.12. Тюнинг мёртвого
+    порога, не изменение логики. Тест защищает от случайного отката."""
+    from bybit_bot.app import main as main_mod
+    assert main_mod.STATARB_PAIR_TP_USD == 1.00, (
+        "Pair TP должен быть $1.00 (снижено с $2 — порог не срабатывал)."
+    )
+
+
+def test_process_exits_pair_tp_triggers_at_one_dollar(tmp_path):
+    """Pair take-profit должен срабатывать при суммарном uPnL ≥ $1.00.
+
+    Сценарий: пара ADA/TIA, z-score ещё не вернулся к 0.5, но суммарный
+    uPnL пары = $1.05 (ADA +$1.30, TIA -$0.25). До правки $2 — не закроется,
+    после правки $1 — должен закрыться через parallel batch с reason=statarb_pair_tp.
+    """
+    from unittest.mock import MagicMock
+    from bybit_bot.app.main import _process_exits
+    from bybit_bot.config.settings import Settings
+    from bybit_bot.trading.client import PositionInfo
+
+    pos_ada = PositionInfo(
+        symbol="ADAUSDT", side="Sell", size="1000",
+        entry_price=0.2481, unrealised_pnl=1.30,
+        leverage="5", position_idx=0,
+    )
+    pos_tia = PositionInfo(
+        symbol="TIAUSDT", side="Buy", size="500",
+        entry_price=0.3892, unrealised_pnl=-0.25,
+        leverage="5", position_idx=0,
+    )
+
+    store, client, ks = _make_exit_mocks(
+        tmp_path,
+        initial_positions=[pos_ada, pos_tia],
+        fresh_positions=[pos_ada, pos_tia],
+        fetch_realized_pnl_return={"closedPnl": "0.0", "avgExitPrice": "0.0"},
+    )
+    client.close_positions_parallel = MagicMock(return_value=[
+        type("OR", (), {"success": True, "symbol": "ADAUSDT", "side": "Buy",
+                        "qty": "1000", "order_id": "x1", "message": ""})(),
+        type("OR", (), {"success": True, "symbol": "TIAUSDT", "side": "Sell",
+                        "qty": "500", "order_id": "x2", "message": ""})(),
+    ])
+    client.close_position = MagicMock(side_effect=AssertionError(
+        "pair_tp must close via parallel batch, not sequential close_position"
+    ))
+
+    pair_tag = "sa_ADAUSDT_TIAUSDT_tp_test"
+    store.open_position(
+        symbol="ADAUSDT", side="Sell", qty="1000",
+        entry_price=0.2481, order_id="o1",
+        strategy="scalp_statarb", pair_tag=pair_tag,
+    )
+    store.open_position(
+        symbol="TIAUSDT", side="Buy", qty="500",
+        entry_price=0.3892, order_id="o2",
+        strategy="scalp_statarb", pair_tag=pair_tag,
+    )
+
+    fake_statarb = MagicMock()
+    fake_statarb.check_exits.return_value = []  # z-score НЕ триггерит exit
+
+    settings = Settings(api_key="k", api_secret="s", _env_file=None)
+
+    _process_exits(
+        client=client, stats=store, killswitch=ks,
+        settings=settings, bars_map={"ADAUSDT": [], "TIAUSDT": []},
+        scalp_statarb=fake_statarb,
+    )
+
+    assert client.close_positions_parallel.call_count == 1, (
+        "При pair_upnl=$1.05 >= $1.00 должен сработать pair_tp"
+    )
+    legs_arg = client.close_positions_parallel.call_args[0][0]
+    assert len(legs_arg) == 2
+    symbols = sorted(leg[0] for leg in legs_arg)
+    assert symbols == ["ADAUSDT", "TIAUSDT"]
+
+    closed = store.conn.execute(
+        "SELECT symbol, close_reason FROM positions WHERE pair_tag=? AND closed_at IS NOT NULL",
+        (pair_tag,),
+    ).fetchall()
+    assert len(closed) == 2, f"Обе ноги должны быть закрыты, got {closed}"
+    reasons = {row[1] for row in closed}
+    assert reasons == {"statarb_pair_tp"}, (
+        f"Обе ноги должны иметь reason=statarb_pair_tp, получено: {reasons}"
+    )
+
+
+def test_process_exits_pair_tp_does_not_trigger_below_threshold(tmp_path):
+    """Pair TP НЕ должен срабатывать при pair_upnl < $1.00.
+
+    Защита от ложных срабатываний и от нестабильности, когда z-score ещё
+    не дал сигнал, а пара только-только чуть в плюсе.
+    """
+    from unittest.mock import MagicMock
+    from bybit_bot.app.main import _process_exits
+    from bybit_bot.config.settings import Settings
+    from bybit_bot.trading.client import PositionInfo
+
+    pos_ada = PositionInfo(
+        symbol="ADAUSDT", side="Sell", size="1000",
+        entry_price=0.2481, unrealised_pnl=0.60,
+        leverage="5", position_idx=0,
+    )
+    pos_tia = PositionInfo(
+        symbol="TIAUSDT", side="Buy", size="500",
+        entry_price=0.3892, unrealised_pnl=0.25,
+        leverage="5", position_idx=0,
+    )
+
+    store, client, ks = _make_exit_mocks(
+        tmp_path,
+        initial_positions=[pos_ada, pos_tia],
+        fresh_positions=[pos_ada, pos_tia],
+        fetch_realized_pnl_return={"closedPnl": "0.0", "avgExitPrice": "0.0"},
+    )
+    client.close_positions_parallel = MagicMock()
+    client.close_position = MagicMock()
+
+    pair_tag = "sa_ADAUSDT_TIAUSDT_notp_test"
+    store.open_position(
+        symbol="ADAUSDT", side="Sell", qty="1000",
+        entry_price=0.2481, order_id="o1",
+        strategy="scalp_statarb", pair_tag=pair_tag,
+    )
+    store.open_position(
+        symbol="TIAUSDT", side="Buy", qty="500",
+        entry_price=0.3892, order_id="o2",
+        strategy="scalp_statarb", pair_tag=pair_tag,
+    )
+
+    fake_statarb = MagicMock()
+    fake_statarb.check_exits.return_value = []
+
+    settings = Settings(api_key="k", api_secret="s", _env_file=None)
+
+    _process_exits(
+        client=client, stats=store, killswitch=ks,
+        settings=settings, bars_map={"ADAUSDT": [], "TIAUSDT": []},
+        scalp_statarb=fake_statarb,
+    )
+
+    assert client.close_positions_parallel.call_count == 0, (
+        "При pair_upnl=$0.85 < $1.00 pair_tp НЕ должен триггериться"
+    )
+    assert client.close_position.call_count == 0, (
+        "Никакие single close не должны вызываться (пара не в emergency, не в time-stop)"
+    )

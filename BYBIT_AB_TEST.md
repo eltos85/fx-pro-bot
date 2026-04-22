@@ -61,6 +61,52 @@ docker exec fx-pro-bot-bybit-bot-1 python3 -m scripts.ab_test_snapshot \
     --since 2026-04-20T08:48 --output /ab-data/report_wave5.md
 ```
 
+### OPEN ISSUE (ждём данных): наложение позиций
+
+На T+28.7h (04-21 13:34) в Wave 5 зафиксировано **2 эпизода наложения** на
+биржевом уровне (2+ open до close на одной позиции Bybit): 1 WIN LINK +$5.12
+и 1 LOSS ADA −$7.69 (56% всех убытков Wave 5 из одного кейса).
+
+**НЕ чиним до T+14d** — n=2 ниже порога `sample-size.mdc`. Полный
+контекст бага, три варианта решения и метрики для принятия решения
+см. `BUILDLOG_BYBIT.md` → "OPEN ISSUE: наложение позиций..." (2026-04-21).
+
+При каждом следующем срезе **обязательно** считать долю эпизодов с
+наложением и их PnL отдельно:
+
+```bash
+docker exec fx-pro-bot-bybit-bot-1 python3 /tmp/overlap_exchange.py
+```
+
+### OPEN ISSUE (ждём данных): stat-arb exit-логика
+
+На T+35h в Wave 5 закрыто **6 stat-arb пар**, нетто pair PnL **+$1.78**
+(break-even). Разборка показала **асимметрию ног**: SUI-нога в 5/6 случаев
+систематически проигрывала (WR Sell SUI = 0%, Buy SUI = 33%), тогда как
+LINK-нога и ADA-нога выигрывали в 100% случаев. Гросс-прибыль LINK
+съедена SUI-ногой — реальный edge пары ≈ 0.
+
+**Сравнение со стандартом индустрии (Brenndoerfer, Accelar, Hudson&Thames,
+академ. Song&Zhang, Leung&Li) показало**: у нас реализовано только 1 из 3
+обязательных exit-правил — mean-reversion `|z|<0.5`. Отсутствуют:
+hard z-stop (`|z|>3.5`) и time-stop (`2×half_life`).
+
+**НЕ чиним до T+14d** — n=6 пар (`sample-size.mdc` требует ≥100).
+Выборка доминирована одной парой LINK/SUI (5/6). Полный контекст,
+4 варианта фикса, гипотезы и метрики для решения см.
+`BUILDLOG_BYBIT.md` → "OPEN ISSUE: stat-arb exit-логика..." (2026-04-21).
+
+При каждом следующем срезе **отдельно** считать метрики stat-arb:
+
+```bash
+docker exec fx-pro-bot-bybit-bot-1 python3 /tmp/statarb_deep.py
+```
+
+Если на T+14d частота <5% и WR наложений ≥ WR бота → вариант 1 (жёсткая
+дедупликация). Если частота 5-15% → вариант 2 (virtual attribution). Если
+>15% или LOSS-наложения дают >30% убытков → вариант 3 (software-managed
+exits).
+
 ---
 
 ## АРХИВ: предыдущие baseline'ы

@@ -370,12 +370,17 @@ relative = Round(distance, symbol.Digits) * 100_000
 
 #### Stat-Arb Cross-Pair (crypto)
 **Файл:** `stat_arb_crypto.py`
+**Exit-ы (в порядке проверки):** (1) z-score revert `|z|<0.5` → close; (2) pair TP — суммарный uPnL пары ≥ `$1.00` → close; (3) emergency — суммарный uPnL пары ≤ `-$25` → close.
 
-| Параметр | Значение | Research |
+| Параметр | Значение | Research / Обоснование |
 |---|---|---|
-| Z_ENTRY / Z_EXIT | 2.5 / 0.5 | Gatev-Goetzmann threshold |
-| ADF_CRITICAL | -2.86 (5% level) | Стандарт коинтеграции |
-| LOOKBACK | 100 баров | ≥ 2 × z-window |
+| Z_ENTRY / Z_EXIT | 2.0 / 0.5 | Gatev-Goetzmann threshold, Brenndoerfer 2025 |
+| ADF p-value | < 0.05 | Engle-Granger cointegration (Accelar 2026) |
+| LOOKBACK | 100 баров 5m | ≥ 2 × z-window |
+| ZSCORE_WINDOW | 50 баров 5m | Rolling z-score |
+| MIN_CORRELATION | 0.5 | Cutoff Crypto Economy 2025 |
+| STATARB_PAIR_TP_USD | **$1.00** (**снижено** с $2.00, 2026-04-21) | Wave 5: max pair uPnL был $1.12, порог $2 не срабатывал ни разу. Тюнинг мёртвого параметра, не изменение логики |
+| STATARB_EMERGENCY_LOSS | $25 | Hard cap pair loss |
 
 #### Funding Rate Scalp
 **Файл:** `funding_scalp.py`

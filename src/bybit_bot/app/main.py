@@ -35,7 +35,10 @@ TIME_STOP_SECONDS = 24 * 3600  # 24 часа (Finaur/TrendRider 2026: time-exit 
 TRAILING_ACTIVATION_ATR = 0.7
 TRAILING_DISTANCE_ATR = 0.5
 STATARB_EMERGENCY_LOSS = 25.0
-STATARB_PAIR_TP_USD = 2.00  # take-profit по суммарному uPnL пары (с запасом на комиссии ~$0.70)
+# Pair TP снижен 2.00 → 1.00 (2026-04-21): за Wave 5 (6 пар) порог $2 не
+# сработал ни разу, max pair uPnL был ~$1.12. Тюнинг "мёртвого" порога —
+# не изменение логики, не curve-fitting. Подробнее см. BUILDLOG_BYBIT.md.
+STATARB_PAIR_TP_USD = 1.00  # take-profit по суммарному uPnL пары (комиссии пары ~$0.70 → нетто ~$0.30)
 
 log = logging.getLogger(__name__)
 
