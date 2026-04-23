@@ -475,6 +475,12 @@ class CTraderClient:
         if take_profit is not None:
             req.takeProfit = take_profit
 
+        log.info(
+            "cTrader AMEND wire: pos=%d stopLoss=%s takeProfit=%s",
+            position_id,
+            f"{stop_loss:.5f}" if stop_loss is not None else "—",
+            f"{take_profit:.5f}" if take_profit is not None else "—",
+        )
         return self._send_and_wait(req, ProtoOAExecutionEvent().payloadType, timeout=30)
 
     # -- internal -----------------------------------------------------------------

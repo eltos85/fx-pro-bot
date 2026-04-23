@@ -6,6 +6,30 @@
 
 ## 2026-04-23
 
+### fix(critical): авто-закрытие при неудачном amend + детальный лог wire
+`TBD`
+
+Дополнение к `9b45b3e`. После деплоя увидели: для NG=F LONG `amend_sl_tp`
+отправляет SL=2.875 (корректный), но cTrader отклоняет с `SL: 2.895` —
+расхождение в самом протоколе. Нужно логировать точное значение на входе
+в wire.
+
+1. **Авто-закрытие при неудачном amend** (`executor.open_position`):
+   если `amend_sl_tp` вернул False (включая наш `_validate_sl_tp_side`
+   или cTrader `TRADING_BAD_STOPS`) — закрываем позицию сразу.
+   Лучше потерять 1-2 pip на закрытии, чем «голая» позиция без SL.
+
+2. **Детальный лог на входе в wire** (`client.amend_position_sl_tp`):
+   `AMEND wire: pos=... stopLoss=... takeProfit=...` — чтобы видеть
+   что реально уходит по протоколу и сравнить с ERROR-ответом.
+   Это диагностический шаг — после сбора данных решим, нужно ли
+   патчить `_to_relative` или `amend` для digits<5.
+
+3. **Детальный лог перед amend** (`executor.open_position`):
+   `amend SEND: pos=... entry=... sl=... tp=... sl_dist=... digits=...`.
+
+**Файлы:** `src/fx_pro_bot/trading/executor.py`, `src/fx_pro_bot/trading/client.py`
+
 ### fix(critical): ложный FORCE CLOSE на commodities + sanity check amend SL/TP + MAX_LOT 0.20→0.05
 `9b45b3e`
 

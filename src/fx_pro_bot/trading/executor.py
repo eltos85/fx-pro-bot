@@ -204,6 +204,14 @@ class TradeExecutor:
                         sl_price = price_for_amend - sl_distance if is_long else price_for_amend + sl_distance
                         amend_sl = round(sl_price, sym.digits)
 
+                    log.info(
+                        "cTrader SL/TP amend SEND: pos %d %s entry=%.5f sl=%s tp=%s sl_dist=%.5f tp_dist=%.5f digits=%d",
+                        pos_id, direction.upper(), price_for_amend,
+                        f"{amend_sl:.5f}" if amend_sl else "None",
+                        f"{amend_tp:.5f}" if amend_tp else "None",
+                        sl_distance or 0.0, tp_distance or 0.0, sym.digits,
+                    )
+
                     ok = self.amend_sl_tp(
                         pos_id,
                         sl_price=amend_sl,
@@ -217,6 +225,23 @@ class TradeExecutor:
                             f"SL={amend_sl:.5f} " if amend_sl else "",
                             f"TP={amend_tp:.5f} " if amend_tp else "",
                             price_for_amend,
+                        )
+                    else:
+                        # SL/TP не поставлен — закрываем позицию сразу, чтобы
+                        # не оставлять «голую» позицию без защиты на брокере.
+                        # Лучше потерять 1-2 pip на закрытии, чем получить
+                        # неконтролируемый убыток.
+                        log.error(
+                            "cTrader SL/TP amend FAILED → закрываем pos %d (%s %s)",
+                            pos_id, yf_symbol, direction,
+                        )
+                        try:
+                            self.close_position(pos_id, volume)
+                        except Exception as exc:
+                            log.error("Ошибка аварийного закрытия pos %d: %s", pos_id, exc)
+                        return OrderResult(
+                            success=False,
+                            error=f"SL/TP amend failed, position {pos_id} closed",
                         )
                 else:
                     log.warning("cTrader: no price for SL/TP amend on pos %d", pos_id)
