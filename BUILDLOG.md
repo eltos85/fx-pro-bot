@@ -7,7 +7,7 @@
 ## 2026-04-24
 
 ### chore(rules): аудит .cursor/rules на пересечение ботов
-`f603a4b`
+`4300adc`
 
 Cross-cutting правка IDE-правил. Причина: правила применялись одновременно
 к обоим ботам (fx_pro_bot и bybit_bot), и bot-specific контекст (baseline
