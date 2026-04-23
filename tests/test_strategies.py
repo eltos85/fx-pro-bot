@@ -304,6 +304,48 @@ def test_calc_lot_size_max_cap() -> None:
     assert lot == MAX_LOT_SIZE
 
 
+# ── Slippage guard ───────────────────────────────────────────
+
+
+def test_max_slippage_pips_commodity() -> None:
+    """Commodities: более широкий допуск (10pip)."""
+    from fx_pro_bot.config.settings import max_slippage_pips
+    assert max_slippage_pips("NG=F") == 10.0
+    assert max_slippage_pips("CL=F") == 10.0
+    assert max_slippage_pips("GC=F") == 10.0
+
+
+def test_max_slippage_pips_fx_major() -> None:
+    """FX мажоры: 5pip."""
+    from fx_pro_bot.config.settings import max_slippage_pips
+    assert max_slippage_pips("EURUSD=X") == 5.0
+    assert max_slippage_pips("GBPUSD=X") == 5.0
+    assert max_slippage_pips("USDJPY=X") == 5.0
+
+
+def test_max_slippage_pips_crypto() -> None:
+    """Крипта: 20pip (высокая волатильность)."""
+    from fx_pro_bot.config.settings import max_slippage_pips
+    assert max_slippage_pips("BTC-USD") == 20.0
+    assert max_slippage_pips("ETH-USD") == 20.0
+
+
+def test_order_result_has_slippage_fields() -> None:
+    """OrderResult поддерживает strategic_price и slippage_pips."""
+    from fx_pro_bot.trading.executor import OrderResult
+    r = OrderResult(
+        success=True,
+        broker_position_id=1,
+        fill_price=2.908,
+        strategic_price=2.891,
+        slippage_pips=17.0,
+        volume=50000,
+    )
+    assert r.strategic_price == 2.891
+    assert r.slippage_pips == 17.0
+    assert r.fill_price == 2.908
+
+
 # ── Store positions ──────────────────────────────────────────
 
 

@@ -28,6 +28,8 @@ class OrderResult:
     success: bool
     broker_position_id: int = 0
     fill_price: float = 0.0
+    strategic_price: float = 0.0
+    slippage_pips: float = 0.0
     volume: int = 0
     error: str = ""
 
@@ -174,10 +176,61 @@ class TradeExecutor:
                 0.0
             )
 
+            # Достоверно получаем реальный fill (не fallback на strategic).
+            # cTrader для MARKET часто возвращает executionPrice=0 в первом
+            # событии, FILLED приходит асинхронно. Делаем reconcile для правды.
+            if pos_id and not fill_price:
+                import time as _time
+                _time.sleep(0.3)
+                try:
+                    resp = self._client.reconcile()
+                    for p in resp.position:
+                        if p.positionId == pos_id:
+                            fill_price = p.price if hasattr(p, "price") and p.price else 0.0
+                            break
+                except Exception:
+                    pass
+
+            # ── Slippage guard ──
+            # Strategic price = entry_price_hint (цена в момент сигнала).
+            # Если |fill - strategic| > max_slippage — закрываем позицию:
+            # R:R уже разрушен, лучше выйти с -1 pip spread, чем торговать
+            # с отрицательным expectancy.
+            slippage_pips = 0.0
+            if pos_id and fill_price > 0 and entry_price_hint > 0:
+                from fx_pro_bot.config.settings import (
+                    max_slippage_pips as _max_slip,
+                    pip_size as _pip_size,
+                )
+                ps = _pip_size(yf_symbol)
+                slippage_pips = abs(fill_price - entry_price_hint) / ps if ps > 0 else 0.0
+                max_slip = _max_slip(yf_symbol)
+                if slippage_pips > max_slip:
+                    log.warning(
+                        "cTrader SLIPPAGE GUARD: %s %s #%d strat=%.5f fill=%.5f slip=%.1fpip > max %.1fpip → закрываем",
+                        yf_symbol, direction.upper(), pos_id,
+                        entry_price_hint, fill_price, slippage_pips, max_slip,
+                    )
+                    try:
+                        self.close_position(pos_id, volume)
+                    except Exception as exc:
+                        log.error("Slippage-guard close pos %d failed: %s", pos_id, exc)
+                    return OrderResult(
+                        success=False,
+                        broker_position_id=pos_id,
+                        fill_price=fill_price,
+                        strategic_price=entry_price_hint,
+                        slippage_pips=slippage_pips,
+                        volume=volume,
+                        error=f"slippage {slippage_pips:.1f}pip > max {max_slip:.1f}pip",
+                    )
+
             if pos_id and (tp_distance or sl_distance):
                 import time as _time
-                _time.sleep(0.5)
+                _time.sleep(0.3)
 
+                # Используем реальный fill_price (уже уточнён выше) как base
+                # для TP. SL не трогаем — он атомарно установлен в order.
                 price_for_amend = fill_price
                 if not price_for_amend:
                     try:
@@ -219,6 +272,8 @@ class TradeExecutor:
                             success=True,
                             broker_position_id=pos_id,
                             fill_price=fill_price or entry_price_hint,
+                            strategic_price=entry_price_hint,
+                            slippage_pips=slippage_pips,
                             volume=volume,
                         )
 
@@ -259,6 +314,11 @@ class TradeExecutor:
                             log.error("Ошибка аварийного закрытия pos %d: %s", pos_id, exc)
                         return OrderResult(
                             success=False,
+                            broker_position_id=pos_id,
+                            fill_price=fill_price,
+                            strategic_price=entry_price_hint,
+                            slippage_pips=slippage_pips,
+                            volume=volume,
                             error=f"SL/TP amend failed, position {pos_id} closed",
                         )
                 else:
@@ -268,6 +328,8 @@ class TradeExecutor:
                 success=True,
                 broker_position_id=pos_id,
                 fill_price=fill_price or entry_price_hint,
+                strategic_price=entry_price_hint,
+                slippage_pips=slippage_pips,
                 volume=volume,
             )
         except Exception as exc:

@@ -854,17 +854,31 @@ def _open_broker_for_new(
 
             if result.success and result.broker_position_id:
                 store.set_broker_position_id(pos.id, result.broker_position_id, result.volume)
+                strat = result.strategic_price or pos.entry_price
+                slip_str = f"slip=+{result.slippage_pips:.1f}pip" if result.slippage_pips > 0 else "slip=0"
                 log.info(
-                    "  cTrader OPEN: %s %s → broker #%d @ %.5f (vol=%d, lot=%.2f) TP±%.5f SL±%s",
+                    "  cTrader OPEN: %s %s → broker #%d strat=%.5f fill=%.5f %s (vol=%d, lot=%.2f) TP±%.5f SL±%s",
                     pos.instrument, pos.direction,
-                    result.broker_position_id, result.fill_price, result.volume, lot,
+                    result.broker_position_id, strat, result.fill_price, slip_str,
+                    result.volume, lot,
                     tp_dist or 0, f"{sl_dist:.5f}" if sl_dist else "—",
                 )
             elif not result.success:
                 if "NOT_ENOUGH_MONEY" in result.error:
                     log.warning("cTrader: недостаточно средств, стоп")
                     break
-                log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
+                if "slippage" in result.error:
+                    # Slippage guard сам закрыл позицию — удаляем из БД, чтобы
+                    # не синхронизировалось как orphan. broker_position_id
+                    # не был сохранён (success=False), но DB-запись есть.
+                    store.close_position(pos.id, "slippage_guard")
+                    log.warning(
+                        "  cTrader SLIPPAGE CANCEL: %s %s — %s (strat=%.5f fill=%.5f)",
+                        pos.instrument, pos.direction, result.error,
+                        result.strategic_price, result.fill_price,
+                    )
+                else:
+                    log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
             log.exception("  cTrader OPEN error: %s", pos.instrument)
 
@@ -970,8 +984,20 @@ def _ensure_broker_sl_tp(
         new_tp: float | None = None
 
         if not has_sl:
-            if db_pos.stop_loss_price and db_pos.stop_loss_price > 0:
-                new_sl = db_pos.stop_loss_price
+            # Пересчитываем SL от РЕАЛЬНОГО entry из cTrader (bp.price),
+            # используя SL-distance из стратегического расчёта, а не
+            # абсолютное db_pos.stop_loss_price (которое от strategic price
+            # и может быть на неверной стороне после slippage).
+            # Пример 23.04.2026 NG=F #149970122: strategic=2.891, SL=2.88282,
+            # real_fill=2.908. Если бы брали абсолютный SL=2.88282 — риск
+            # был бы 26pip вместо запланированных 7pip.
+            if (
+                db_pos.stop_loss_price
+                and db_pos.stop_loss_price > 0
+                and db_pos.entry_price > 0
+            ):
+                strat_sl_dist = abs(db_pos.entry_price - db_pos.stop_loss_price)
+                new_sl = (entry - strat_sl_dist) if is_buy else (entry + strat_sl_dist)
             else:
                 pos_atr = atrs.get(db_pos.instrument, 0.0)
                 if is_crypto(db_pos.instrument) and pos_atr > 0:

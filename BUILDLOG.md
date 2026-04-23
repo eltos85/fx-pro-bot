@@ -6,6 +6,63 @@
 
 ## 2026-04-23
 
+### feat: точность входа (slippage guard + честный лог + SL от real entry)
+`TBD`
+
+Три связанных фикса по запросу «главное чтобы время входа было чётким
+и выставление TP/SL»:
+
+**A. Честный лог OPEN** (`app/main.py::_open_broker_for_new`)
+
+Раньше лог показывал стратегическую цену как fill:
+```
+cTrader OPEN: NG=F long → broker #149970122 @ 2.89000
+```
+Теперь — разделяем strategic и fill + slippage:
+```
+cTrader OPEN: NG=F long → broker #149970122 strat=2.89000 fill=2.90800 slip=+17.0pip
+```
+В `OrderResult` добавлены поля `strategic_price` и `slippage_pips`.
+
+**B. Slippage guard** (`config/settings.py::max_slippage_pips`,
+`trading/executor.py::open_position`)
+
+Лимиты по классам:
+- FX major / JPY: 5 pip
+- Commodities (NG/CL/GC): 10 pip
+- Indices (ES/NQ): 5 pt
+- Crypto: 20 pip
+
+При `|fill - strategic| > max_slippage`:
+1. `close_position()` — закрытие немедленно
+2. `OrderResult(success=False, error="slippage ...")`
+3. DB запись закрывается `slippage_guard`
+4. Лог `SLIPPAGE CANCEL: ...`
+
+Инцидент-триггер: NG=F #149970122, strategic=2.891, fill=2.908,
+slippage 17 pip. Планировали R:R 2:1 (риск 7pip/прибыль 17pip).
+Реально получили R:R 0.65 (риск 26pip/прибыль 17pip = отрицательный
+expectancy). С guard такая сделка отклонилась бы сразу.
+
+**C. SL от реального entry в `_ensure_broker_sl_tp`** (`app/main.py`)
+
+Раньше при доустановке SL использовалось абсолютное значение
+`db_pos.stop_loss_price` (рассчитано от strategic price). После
+slippage оно оказывалось на неверной стороне или слишком далеко.
+
+Теперь: `strat_sl_dist = abs(entry - SL)` (из стратегии), затем
+`new_sl = real_entry - strat_sl_dist` (для LONG). То есть сохраняется
+**дистанция риска** от реального fill, а не абсолютная отметка.
+
+**Файлы:**
+- `src/fx_pro_bot/config/settings.py` (+max_slippage_pips)
+- `src/fx_pro_bot/trading/executor.py` (OrderResult+3 поля, slippage guard)
+- `src/fx_pro_bot/app/main.py` (honest log + SL dist в audit)
+- `STRATEGIES.md` (раздел 3d Slippage guard)
+- `tests/test_strategies.py` (+4 теста)
+
+**Тесты:** 289 passed (было 285, +4 новых).
+
 ### deposit: +$500 (итого внесено $2000)
 
 Пользователь пополнил депозит на $500 после инцидента 09:28-10:33 UTC

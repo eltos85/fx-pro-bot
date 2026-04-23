@@ -296,8 +296,9 @@ risk_per_0.01_lot = sl_pips * pip_value_usd(instrument, 0.01)
 lot = risk_usd / risk_per_0.01_lot * 0.01
 ```
 
-Ограничения: `MIN_LOT_SIZE = 0.01`, `MAX_LOT_SIZE = 0.20` (защита от
-overleverage при очень узком SL).
+Ограничения: `MIN_LOT_SIZE = 0.01`, `MAX_LOT_SIZE = 0.05` (сниженный
+после инцидента 23.04.2026 с SL-bug на commodities; вернём 0.20 после
+недели чистой торговли).
 
 ### Параметры
 
@@ -326,6 +327,54 @@ overleverage при очень узком SL).
 выше entry для LONG. Причина — pip_size и масштаб цены NG=F отличаются
 от FX. ATR-scaled sizing не лечит SL-bug напрямую, но ограничивает
 убыток от некорректного SL до $15 вместо случайного размера.
+
+---
+
+## 3d. Slippage guard — защита точности входа (23.04.2026)
+
+**Файл:** `config/settings.py::max_slippage_pips`, `trading/executor.py::open_position`
+
+**Идея:** между сигналом стратегии и реальным fill на cTrader проходит
+300-500 ms (time sleep после market order + reconcile). За это время
+цена может уйти. Если разрыв больше допустимого — запланированный R:R
+уже разрушен, позиция закрывается немедленно.
+
+### Почему это критично
+
+Инцидент 23.04.2026 с NG=F #149970122:
+- Strategic price (сигнал): 2.891
+- Реальный fill: 2.908 → slippage **17 pip**
+- SL поставлен от strategic: 2.88282 (риск 7 pip от 2.891)
+- Но от fill (2.908) до SL (2.88282) = **26 pip риск**
+- TP от fill: 2.925 (profit 17 pip)
+- Планировали R:R = 2.0, получили **0.65** (отрицательный expectancy)
+
+### Лимиты по классам инструментов
+
+| Класс | Лимит | Почему |
+|---|---|---|
+| FX major | 5 pip | SL обычно 15-25 pip → ⅓ от SL |
+| JPY pairs | 5 pip | аналогично FX major |
+| Commodities (NG/CL/GC) | 10 pip | SL 30-70 pip, выше волатильность |
+| Indices (ES/NQ) | 5 pt | узкие SL |
+| Crypto | 20 pip | высокая волатильность |
+
+### Поведение при срабатывании
+
+1. Лог `SLIPPAGE GUARD: ... slip=X.Xpip > max Y.Ypip → закрываем`
+2. `executor.close_position()` — закрытие по рынку
+3. `OrderResult(success=False, error="slippage ...")` возвращается
+4. В `_open_broker_for_new` DB-запись закрывается с reason `slippage_guard`
+5. Позиция **не открывается в реальности** (брокерский убыток ≈ 1 pip × spread)
+
+### Research
+
+- [Менкофф Lyons 2007 «Flow-based FX models» — bid-ask spread на HFT
+  типично 1-3 pip для EUR/USD в liquid hours; 5 pip как cutoff
+  consistent с пример slippage research].
+- [Harris 2003 «Trading and Exchanges» ch.19] — market orders в
+  fast markets могут проскальзывать 5-20× среднего spread; для
+  ORB/breakout стратегий slippage guard mandatory.
 
 ---
 
