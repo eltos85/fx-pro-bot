@@ -6,20 +6,34 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_SYMBOLS = (
-    # Forex
+    # FX majors (7)
     "EURUSD=X",
     "GBPUSD=X",
     "USDJPY=X",
     "AUDUSD=X",
     "USDCAD=X",
+    "NZDUSD=X",
+    "USDCHF=X",
+    # FX crosses (3) — ORB-совместимые при ликвидных сессиях
     "EURJPY=X",
     "GBPJPY=X",
+    "EURGBP=X",
+    # Commodities (4) — возвращены для ORB/news_fade на NY-сессии
+    # По данным 09-22.04 выборка <30 → правило sample-size запрещает
+    # делать вывод об убыточности. Собираем статистику.
+    "GC=F",   # Gold
+    "CL=F",   # WTI Crude
+    "BZ=F",   # Brent
+    "NG=F",   # Natural Gas
+    # Indices (2) — классические ORB-инструменты на US open 14:30 UTC
+    "ES=F",   # S&P 500 futures
+    "NQ=F",   # Nasdaq 100 futures
 )
 
-SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset({
-    "EURJPY=X",
-    "GBPJPY=X",
-})
+# Инструменты, которые явно исключаются из скальпинга.
+# Пусто: все инструменты из DEFAULT_SYMBOLS участвуют в скальпинге.
+# JPY/EUR-crosses вернулись — они работали на ORB (GBPJPY PF 1.25 за 29 сделок).
+SCALPING_EXCLUDE_SYMBOLS: frozenset[str] = frozenset()
 
 SCALPING_CRYPTO_ALLOWED: frozenset[str] = frozenset()
 

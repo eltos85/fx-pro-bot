@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
+from fx_pro_bot.strategies.scalping.session_orb import ORB_TP_ATR_MULT
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +188,14 @@ class PositionMonitor:
                     return "crypto_scalp_time_4h"
             else:
                 atr_pips_sc = atr / ps if ps > 0 else 0
-                scalp_tp = max(SCALPING_TP_ATR_MULT * atr_pips_sc, SCALPING_TP_PIPS)
+                # session_orb — breakout-стратегия, нужен TP ≥ 2R для edge.
+                # [John Carter «Mastering the Trade» (2nd ed.) ch.7: ORB TP ≥ 2R].
+                # vwap/stat_arb — mean-reversion, быстрый TP = 1.5 ATR ОК.
+                if pos.strategy == "session_orb":
+                    tp_mult = ORB_TP_ATR_MULT
+                else:
+                    tp_mult = SCALPING_TP_ATR_MULT
+                scalp_tp = max(tp_mult * atr_pips_sc, SCALPING_TP_PIPS)
                 if pips >= scalp_tp:
                     return "scalp_tp"
                 scalp_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_TRIGGER_PIPS)

@@ -226,8 +226,9 @@ OUTSIDERS_MODE=confirmed
 | BREAKOUT_FILTER | **0.3 ATR** | Фильтр ложных пробоев |
 | Volume | **> 1.3x** среднего за 20 баров | Подтверждение объёмом |
 | EMA(50) | В направлении тренда | Фильтр направления |
-| SL | **2.0 ATR** | |
-| TP | **2.0x** высоты коробки (R:R = 1:2) | |
+| **Confirm bar** | **Close пробойной свечи вне коробки** | Новое 23.04: ложные пробои <30мин давали 295 сделок -3027 pips (09-22.04). Al Brooks «Reading Price Action»: breakout confirmed by bar close beyond range |
+| SL | **1.5 ATR** (было 2.0) | Tighter stop. Lance Beggs «YTC Price Action Trader» + Tradingsim ORB: 1-1.5×ATR |
+| TP (через monitor) | **3.0 × ATR** (было 1.5) | R:R 2:1. John Carter «Mastering the Trade» 2nd ed. ch.7 «Opening Range Breakout»: TP ≥ 2R для edge |
 
 **News Fade логика:**
 
@@ -236,9 +237,19 @@ OUTSIDERS_MODE=confirmed
 | NEWS_SPIKE_ATR | **2.0** | Минимальный спайк за 3 бара |
 | Условие | Спайк против EMA(50) | Вход против спайка на откат |
 | Часы работы | **Liquid session only** (London 07-15:59, NY 12-20:59 UTC) | Диагностика 22.04.2026: 4 fade-сделки в Asian 23-03 UTC, WR=0%, NET −$1.40. Research: [BIS Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm) — пик ликвидности в London/NY overlap; [Dacorogna et al. 2001] — thin book после NY close не абсорбирует спайк, mean-reversion ломается |
-| HTF тренд-фильтр | EMA(200) на H1 — **warning-only** | Логируется, не блокирует fade (mean-reversion) |
+| HTF тренд-фильтр | **EMA(200) на H1 — БЛОКИРУЮЩИЙ** (было warning-only) | 23.04: SHORT PF 0.36 vs LONG PF 0.62 (09-22.04) — warning-only не работал. Murphy J. «Technical Analysis» ch.9: mean-reversion против H1-тренда имеет отрицательный edge |
 | TP | **50%** отката спайка | |
 | SL | **За экстремумом** спайка | |
+
+**Whitelist инструментов (23.04.2026):** 10 FX + 4 commodities + 2 индекса = 16 инструментов:
+
+| Категория | Инструменты | Обоснование |
+|-----------|-------------|-------------|
+| FX majors | EURUSD, GBPUSD, USDJPY, AUDUSD, USDCAD, NZDUSD, USDCHF | Самые ликвидные; BIS Triennial 2022 |
+| FX crosses | EURJPY, GBPJPY, EURGBP | GBPJPY показал PF 1.25 за 29 сделок (09-22.04) |
+| Commodities | GC=F (Gold), CL=F (WTI), BZ=F (Brent), NG=F (NatGas) | Возвращены — ранее отключены на выборке <30 сделок (нарушение правила sample-size). BZ=F показал PF 1.56 |
+| Indices | ES=F (S&P500), NQ=F (Nasdaq100) | Классические ORB-инструменты на NYSE open 14:30 UTC |
+| **Crypto** | **Исключена** | Статзначимо: 332 сделки, PF 0.49, WR 20%. 24/7 торговля ломает концепцию opening range |
 
 ### Общие параметры скальпинга (monitor.py)
 
@@ -289,7 +300,7 @@ relative = Round(distance, symbol.Digits) * 100_000
 |-----------|:-------------------:|:-----------------:|:----------:|
 | vwap_reversion | **max(1.5×ATR, 8 pips, 3×cost)** | **2.0×ATR** | с +0.6×ATR, дистанция 0.3×ATR |
 | stat_arb | **max(1.5×ATR, 8 pips, 3×cost)** | **2.0×ATR** | с +0.6×ATR, дистанция 0.3×ATR |
-| session_orb | **max(1.5×ATR, 8 pips, 3×cost)** | **2.0×ATR** | с +0.6×ATR, дистанция 0.3×ATR |
+| session_orb | **max(3.0×ATR, 8 pips, 3×cost)** | **1.5×ATR** | с +0.6×ATR, дистанция 0.3×ATR |
 | outsiders | **max(0.75×ATR, 10 pips)** | 1.5×ATR | с max(0.4×ATR, 5) pips, дистанция max(0.2×ATR, 3) pips |
 | ensemble | **max(0.75×ATR, 10 pips)** | 1.5×ATR | с max(0.4×ATR, 5) pips, дистанция max(0.2×ATR, 3) pips |
 | leaders | **50 pips** | ATR-based | с 0.7×ATR от пика |

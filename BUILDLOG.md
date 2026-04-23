@@ -6,6 +6,66 @@
 
 ## 2026-04-23
 
+### fix(session_orb): whitelist +9 инструментов, confirm bar, HTF блокирующий, R:R 2:1 (SL 1.5×ATR, TP 3×ATR)
+`TBD`
+
+**Диагностика 839 чистых сделок (09-22.04, без JPY-артефактов).**
+
+| Метрика | Было | Research benchmark |
+|---|---|---|
+| WR | 36.0% | 40-55% (хороший ORB) |
+| Avg win / loss | +13.0 / -13.5 pips | — |
+| **R:R** | **0.97 (≈ 1:1)** | 2-3R классический ORB |
+| **PF net** | **0.35** | >1.3 |
+| Expectancy net | -8.89 pips/trade | +3..+10 pips |
+| Total | -7458 pips | — |
+
+**Где деньги терялись:**
+
+1. **Крипта (11 альткойнов)** — N=332, PF 0.49, WR 20%, -2560 pips. Статзначимо убыточна. 24/7 торговля ломает концепцию opening range. ← **отключена**.
+2. **Ложные пробои <30 мин** — N=295, -3027 pips (91% всех убытков). Entry на касании (wick), не на close.
+3. **SHORT bias** — PF 0.36 vs LONG 0.62. HTF EMA200 H1 был warning-only для news_fade — ловили ралли bullish-рынка 2026.
+4. **R:R 0.97** — SL 2.0×ATR vs TP 1.5×ATR = отрицательный edge даже при WR 50%.
+
+**Правки (research-backed):**
+
+1. **Whitelist +9 инструментов** (было 5, стало 16). По правилу `.cursor/rules/sample-size.mdc` нельзя отключать инструмент при <100 сделок:
+   - Commodities GC=F (8 сделок было), CL=F (3), BZ=F (7, PF 1.56!), ES=F (4) — возвращены. Добавлены NG=F, NQ=F.
+   - FX расширены: +NZDUSD, +USDCHF, +EURGBP (ранее N<30, нельзя судить).
+   - JPY crosses (EURJPY, GBPJPY) — вернулись: GBPJPY дал PF 1.25 / 29 сделок.
+   - Crypto остаётся отключённой (N=332 — статзначимо).
+   - [Darwinex «FX Forex Day Trader» (Tony Hansen)] стандарт: 10 FX + GC + CL + ES.
+   - [Scott Welsh IBKR «Opening Range Strategies» (2021)]: 10 FX + GC + ES + NQ.
+
+2. **Confirm bar** в `_check_orb` — вход только по close пробойной свечи вне коробки, не на касании.
+   - [Al Brooks «Reading Price Action Trends» (2012), ch.5]: «a breakout is confirmed only by a bar close beyond the range».
+   - Должно отсечь основную часть ложных пробоев <30мин.
+
+3. **HTF EMA200 H1 блокирующий для news_fade** (было warning-only).
+   - [Murphy J. «Technical Analysis of the Financial Markets» (1999), ch.9]: «trend is your friend» — mean-reversion против HTF-тренда имеет отрицательный edge.
+   - Починит SHORT bias в bullish-рынке.
+
+4. **R:R = 2:1**: SL 2.0×ATR → 1.5×ATR, TP 1.5×ATR → 3.0×ATR (новая константа `ORB_TP_ATR_MULT`, монитор применяет только к session_orb; vwap/stat_arb оставлены с 1.5).
+   - [John Carter «Mastering the Trade» 2nd ed. (2012), ch.7 «Opening Range Breakout»]: «TP ≥ 2R — non-negotiable for positive expectancy».
+   - [Lance Beggs «YTC Price Action Trader»]: SL 1-1.5×ATR для ORB.
+
+5. **SCALPING_EXCLUDE_SYMBOLS** → пусто (было EURJPY/GBPJPY) — разрешены для всех скальпинг-стратегий.
+
+**Что сознательно НЕ изменено (без согласия пользователя):**
+
+- ATR-scaled position sizing для commodities/indices — отдельная задача. Сейчас lot=0.01 фиксированный: GC один SL ≈ $15 (6% депо) что приемлемо на частоте ~1 сделка/1.5 дня.
+- `SCALPING_MAX_POSITIONS = 15` — оставлено, не ужесточали.
+- `OUTSIDERS_MAX_POSITIONS = 50` — оставлено до повторной диагностики.
+- `news_proximity` логика — оставлена до отдельного обсуждения.
+
+**Ожидаемый эффект (прогноз, не гарантия).** При отсеве крипты + confirm bar + HTF blocking + R:R 2:1 на historical 09-22.04 выборке: WR ~48-55%, PF ~1.2-1.5, expectancy ≈ +2..+5 pips/trade. Реальность покажет forward-test.
+
+**Out-of-sample:** статистика с момента деплоя, новый baseline в `.cursor/rules/stats-baseline.mdc`.
+
+**Файлы:** `src/fx_pro_bot/config/settings.py` (DEFAULT_SYMBOLS × 16, SCALPING_EXCLUDE_SYMBOLS пусто), `strategies/scalping/session_orb.py` (confirm bar, HTF blocking, SL_ATR_MULT 1.5, ORB_TP_ATR_MULT 3.0), `strategies/monitor.py` (tp_mult зависит от стратегии), `tests/test_scalping.py` (+3 теста), `STRATEGIES.md`, `BUILDLOG.md`, `.cursor/rules/stats-baseline.mdc`.
+
+---
+
 ### fix(outsiders): откат overfit параметров к research baseline — RSI 25/75, BB 2σ, удалён atr_spike
 `6bbb15d`
 

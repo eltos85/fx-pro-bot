@@ -459,3 +459,74 @@ class TestSessionOrbStrategy:
         bars = _make_bars([1.10] * 20, base_ts=base_off)
         result = SessionOrbStrategy._get_session_bars(bars)
         assert result == []
+
+    def test_confirm_bar_required_for_long(self, tmp_path):
+        """Confirm bar: LONG вход только если close закрытого бара > box_high + filt.
+
+        Касание wick не должно давать сигнал (ложные пробои <30мин = 295 сделок
+        -3027 pips за 09-22.04.2026, см. BUILDLOG).
+        """
+        store = _store(tmp_path)
+        strat = SessionOrbStrategy(store, max_positions=10)
+
+        # Базовые бары: формируем 3-барный бокс, потом wick (high >> box), но close внутри
+        base = datetime(2026, 3, 28, 8, 0, tzinfo=UTC)
+        closes = [1.1000] * 60
+        # ORB бокс: первые 3 бара после 8:00 = [1.1000, 1.1000, 1.1000]
+        # 4-й бар (post-ORB): close внутри бокса (ложный пробой)
+        bars = _make_bars(closes, base_ts=base, volumes=[200.0] * 60)
+        # Последний бар: high = пробой, но close внутри коробки
+        last = bars[-1]
+        bars[-1] = Bar(
+            instrument=last.instrument, ts=last.ts,
+            open=last.open, high=1.1100, low=last.low,
+            close=1.1000,  # close внутри коробки!
+            volume=400.0,
+        )
+
+        prices = {"EURUSD=X": 1.1100}  # текущий price вышел за коробку (wick)
+        signals = strat.scan({"EURUSD=X": bars}, prices)
+        orb_signals = [s for s in signals if s.source == "orb_breakout"]
+        assert orb_signals == [], "не должно быть сигнала без закрытия бара вне коробки"
+
+    def test_news_fade_htf_blocks_short(self, tmp_path):
+        """HTF EMA200 H1 БЛОКИРУЕТ SHORT news_fade при растущем H1 тренде.
+
+        Ранее был warning-only → SHORT PF 0.36 vs LONG PF 0.62 (09-22.04).
+        Research: Murphy J. «Technical Analysis», ch.9 — mean-reversion
+        против H1-тренда имеет отрицательный edge.
+        """
+        strat = SessionOrbStrategy(_store(tmp_path), max_positions=10)
+        base = datetime(2026, 3, 28, 9, 0, tzinfo=UTC)
+        closes = [1.1000] * 55
+        closes[-3] = 1.1000
+        closes[-2] = 1.1050
+        closes[-1] = 1.1100
+        bars = _make_bars(closes, base_ts=base)
+
+        # Симулируем восходящий H1 тренд (htf_slope > 0)
+        sig = strat._check_news_fade(
+            "EURUSD=X", bars, price=1.1100, atr=0.0020,
+            slope=0.0, htf_slope=0.001,
+        )
+        assert sig is None or sig.direction != TrendDirection.SHORT, (
+            "HTF up должен блокировать SHORT news_fade"
+        )
+
+    def test_news_fade_htf_blocks_long(self, tmp_path):
+        """HTF EMA200 H1 БЛОКИРУЕТ LONG news_fade при падающем H1 тренде."""
+        strat = SessionOrbStrategy(_store(tmp_path), max_positions=10)
+        base = datetime(2026, 3, 28, 9, 0, tzinfo=UTC)
+        closes = [1.1000] * 55
+        closes[-3] = 1.1000
+        closes[-2] = 1.0950
+        closes[-1] = 1.0900
+        bars = _make_bars(closes, base_ts=base)
+
+        sig = strat._check_news_fade(
+            "EURUSD=X", bars, price=1.0900, atr=0.0020,
+            slope=0.0, htf_slope=-0.001,
+        )
+        assert sig is None or sig.direction != TrendDirection.LONG, (
+            "HTF down должен блокировать LONG news_fade"
+        )

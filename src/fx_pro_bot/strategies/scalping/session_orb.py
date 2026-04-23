@@ -1,10 +1,30 @@
 """Session Opening Range Breakout + News Fade.
 
 ORB: первые 15 минут (3 бара M5) London/NY формируют "коробку".
-Пробой коробки с EMA-фильтром и volume-подтверждением = вход.
+Пробой коробки с EMA-фильтром, volume-подтверждением и **confirm bar**
+(закрытие свечи за пределами коробки) = вход.
 
 News Fade: если за 15 мин цена прошла > 2 ATR против EMA — вход
-против спайка на откат 50%.
+против спайка на откат 50%. HTF EMA200 H1 блокирует сигналы против тренда.
+
+## Обоснование параметров (23.04.2026, см. BUILDLOG.md)
+
+Диагностика 839 чистых сделок (09-22.04) показала:
+- **R:R ≈ 1:1** (avg win +13.0 pips ≈ avg loss -13.5) → PF net 0.35
+- Ложные пробои <30 мин → 295 сделок, -3027 pips (основная просадка)
+- SHORT bias без HTF-фильтра: PF 0.36 vs LONG PF 0.62
+- Крипта и ночные часы отрезаны на этом этапе
+
+Правки:
+- `SL_ATR_MULT 2.0 → 1.5` — tighter stop, меньше noise fills
+  (Lance Beggs «YTC Price Action Trader», Tradingsim ORB: 1-1.5 × ATR)
+- `ORB_TP_ATR_MULT = 3.0` — TP в monitor.py для session_orb (было 1.5)
+  даёт R:R 2:1 минимум (John Carter «Mastering the Trade», 2nd ed.,
+  Chapter 7 «Opening Range Breakout»: TP ≥ 2R для положительного edge)
+- **Confirm bar** — вход только по close пробойной свечи, не на touch
+  (Al Brooks «Reading Price Action»: breakout bar close beyond range)
+- **HTF EMA200 H1 блокирующий** для news_fade — было warning-only
+  (Research: Murphy J. «Technical Analysis», Chapter 9, «trend is your friend»)
 """
 
 from __future__ import annotations
@@ -25,8 +45,9 @@ log = logging.getLogger(__name__)
 ORB_BARS = 3
 BREAKOUT_FILTER_ATR = 0.3
 VOLUME_MULT = 1.3
-SL_ATR_MULT = 2.0
+SL_ATR_MULT = 1.5
 TP_RANGE_MULT = 2.0
+ORB_TP_ATR_MULT = 3.0
 NEWS_SPIKE_ATR = 2.0
 NEWS_SPIKE_ATR_CRYPTO = 3.0
 ADX_MAX = 25.0
@@ -188,7 +209,15 @@ class SessionOrbStrategy:
         if vol > 0 and cur_vol < VOLUME_MULT * vol:
             return None
 
-        if price > box_high + filt and slope > 0:
+        # Confirm bar: проверяем close последнего закрытого бара вне коробки
+        # (не текущий price внутри бара). Это отсекает ложные пробои (wicks),
+        # которые давали 295 убыточных сделок <30мин за 09-22.04.2026.
+        # [Al Brooks «Reading Price Action»: a breakout is confirmed only
+        # by a bar close beyond the trading range].
+        last_closed = bars[-1]
+        confirm_close = last_closed.close
+
+        if price > box_high + filt and confirm_close > box_high + filt and slope > 0:
             if htf_slope is not None and htf_slope < 0:
                 return None
             return OrbSignal(
@@ -198,10 +227,10 @@ class SessionOrbStrategy:
                 box_high=box_high,
                 box_low=box_low,
                 atr=atr,
-                detail=f"breakout above {box_high:.5f}",
+                detail=f"breakout above {box_high:.5f} (close={confirm_close:.5f})",
             )
 
-        if price < box_low - filt and slope < 0:
+        if price < box_low - filt and confirm_close < box_low - filt and slope < 0:
             if htf_slope is not None and htf_slope > 0:
                 return None
             return OrbSignal(
@@ -211,7 +240,7 @@ class SessionOrbStrategy:
                 box_high=box_high,
                 box_low=box_low,
                 atr=atr,
-                detail=f"breakout below {box_low:.5f}",
+                detail=f"breakout below {box_low:.5f} (close={confirm_close:.5f})",
             )
 
         return None
@@ -255,12 +284,13 @@ class SessionOrbStrategy:
         box_h = max(b.high for b in recent)
         box_l = min(b.low for b in recent)
 
+        # HTF EMA200 H1 — БЛОКИРУЮЩИЙ фильтр (было warning-only, см. BUILDLOG 23.04).
+        # По данным 09-22.04: SHORT PF 0.36 vs LONG PF 0.62 — отсутствие H1 тренд-фильтра
+        # ловил ралли в bullish рынке. Research: Murphy «Technical Analysis», ch.9 —
+        # "trend is your friend" — mean-reversion против H1-тренда имеет отрицательный edge.
         if spike_up:
             if htf_slope is not None and htf_slope > 0:
-                log.debug(
-                    "%s: SHORT news_fade against H1 trend (htf_slope=%.6f) — proceeding (warning-only)",
-                    symbol, htf_slope,
-                )
+                return None
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.SHORT,
@@ -272,10 +302,7 @@ class SessionOrbStrategy:
             )
         else:
             if htf_slope is not None and htf_slope < 0:
-                log.debug(
-                    "%s: LONG news_fade against H1 trend (htf_slope=%.6f) — proceeding (warning-only)",
-                    symbol, htf_slope,
-                )
+                return None
             return OrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.LONG,
