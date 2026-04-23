@@ -7,7 +7,7 @@
 ## 2026-04-24
 
 ### feat(strategies): отключены все старые live-стратегии, gold_orb → LIVE
-`<pending>`
+`92e739d`
 
 После 90d backtest (см. ниже) подтверждено: единственная прибыльная
 стратегия на FxPro за 90d — `gold_orb` (XAU/USD, +6146 pips). Все остальные
@@ -42,7 +42,7 @@ SL/TP/trail. Новые входы — только `gold_orb` по XAU в Londo
 **Файлы:** `src/fx_pro_bot/config/settings.py`, `src/fx_pro_bot/app/main.py`.
 
 ### feat: Gold ORB Isolated — новая стратегия после 90d backtest
-`<pending>`
+`92e739d`
 
 Полный процесс аналогично Bybit (`BYBIT_AB_TEST.md`): data → candidates →
 validate → choose winner → implement. Детали и таблицы —
