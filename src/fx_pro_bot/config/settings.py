@@ -235,6 +235,56 @@ def spread_cost_pips(symbol: str) -> float:
     return SPREAD_PIPS.get(symbol, 2.0)
 
 
+# ATR-scaled position sizing
+#
+# Research: Van K. Tharp «Trade Your Way to Financial Freedom» (2007), ch.11,
+# «Position sizing»; Ralph Vince «The Mathematics of Money Management» (1992).
+# Стандарт systematic trading — fixed fractional risk 0.5-1% на сделку.
+# При депозите $1500 → $15 = 1% per trade.
+MIN_LOT_SIZE = 0.01
+MAX_LOT_SIZE = 0.20  # предохранитель от overleveraged при очень tight SL
+
+
+def calc_lot_size(
+    instrument: str,
+    sl_distance: float,
+    risk_usd: float,
+    *,
+    min_lot: float = MIN_LOT_SIZE,
+    max_lot: float = MAX_LOT_SIZE,
+) -> float:
+    """Рассчитать лот, чтобы потенциальный убыток при SL равнялся `risk_usd`.
+
+    Формула: lot = risk_usd / (sl_pips × pip_value_per_lot).
+
+    Args:
+        instrument: yfinance-символ (e.g. "EURUSD=X", "GC=F", "NG=F")
+        sl_distance: расстояние от entry до SL в единицах цены
+            (например, 1.5 × ATR).
+        risk_usd: желаемый риск в USD (стандарт: 1% депозита).
+        min_lot / max_lot: ограничители (защита от нулевого ATR или extreme).
+
+    Returns:
+        Округлённый лот-сайз, шаг 0.01.
+    """
+    ps = pip_size(instrument)
+    if ps <= 0 or sl_distance <= 0 or risk_usd <= 0:
+        return min_lot
+
+    sl_pips = sl_distance / ps
+    pip_val_per_001 = pip_value_usd(instrument, lot_size=0.01)
+    if sl_pips <= 0 or pip_val_per_001 <= 0:
+        return min_lot
+
+    risk_per_001 = sl_pips * pip_val_per_001
+    if risk_per_001 <= 0:
+        return min_lot
+
+    lot = (risk_usd / risk_per_001) * 0.01
+    lot = round(lot * 100) / 100
+    return max(min_lot, min(lot, max_lot))
+
+
 def _parse_symbols(raw: str) -> tuple[str, ...]:
     return tuple(s.strip() for s in raw.split(",") if s.strip())
 
@@ -277,6 +327,10 @@ class Settings(BaseSettings):
 
     account_balance: float = Field(default=250.0, validation_alias="ACCOUNT_BALANCE")
     lot_size: float = Field(default=0.01, validation_alias="LOT_SIZE")
+    # ATR-scaled risk per trade (USD). 1% от $1500 депозита = $15.
+    # [Van K. Tharp «Trade Your Way to Financial Freedom» (2007) ch.11].
+    # При risk=0 → fallback на фиксированный lot_size (обратная совместимость).
+    risk_per_trade_usd: float = Field(default=15.0, validation_alias="RISK_PER_TRADE_USD")
 
     fxpro_enabled: bool = Field(default=False, validation_alias="FXPRO_ENABLED")
     fxpro_client_id: str = Field(default="", validation_alias="FXPRO_CLIENT_ID")
@@ -293,13 +347,17 @@ class Settings(BaseSettings):
     myfxbook_password: str = Field(default="", validation_alias="MYFXBOOK_PASSWORD")
 
     leaders_enabled: bool = Field(default=True, validation_alias="LEADERS_ENABLED")
-    leaders_max_positions: int = Field(default=20, validation_alias="LEADERS_MAX_POSITIONS")
+    # max_positions снижены 23.04.2026 (см. BUILDLOG):
+    # Research (Tharp, Vince) рекомендует 6-12 concurrent positions для
+    # контроля correlation risk. Ранее 20/50/15 создавали overleveraged book.
+    leaders_max_positions: int = Field(default=10, validation_alias="LEADERS_MAX_POSITIONS")
     leaders_capital_pct: float = Field(default=0.67, validation_alias="LEADERS_CAPITAL_PCT")
     leaders_sl_atr: float = Field(default=2.0, validation_alias="LEADERS_SL_ATR")
     leaders_trail_atr: float = Field(default=0.7, validation_alias="LEADERS_TRAIL_ATR")
 
     outsiders_enabled: bool = Field(default=True, validation_alias="OUTSIDERS_ENABLED")
-    outsiders_max_positions: int = Field(default=50, validation_alias="OUTSIDERS_MAX_POSITIONS")
+    outsiders_max_positions: int = Field(default=10, validation_alias="OUTSIDERS_MAX_POSITIONS")
+    outsiders_max_per_instrument: int = Field(default=1, validation_alias="OUTSIDERS_MAX_PER_INSTRUMENT")
     outsiders_capital_pct: float = Field(default=0.33, validation_alias="OUTSIDERS_CAPITAL_PCT")
     outsiders_mode: str = Field(default="confirmed", validation_alias="OUTSIDERS_MODE")
 
@@ -309,7 +367,7 @@ class Settings(BaseSettings):
     scalping_vwap_enabled: bool = Field(default=True, validation_alias="SCALPING_VWAP_ENABLED")
     scalping_statarb_enabled: bool = Field(default=True, validation_alias="SCALPING_STATARB_ENABLED")
     scalping_orb_enabled: bool = Field(default=True, validation_alias="SCALPING_ORB_ENABLED")
-    scalping_max_positions: int = Field(default=15, validation_alias="SCALPING_MAX_POSITIONS")
+    scalping_max_positions: int = Field(default=10, validation_alias="SCALPING_MAX_POSITIONS")
 
     # cTrader Open API (автоторговля)
     ctrader_trading_enabled: bool = Field(

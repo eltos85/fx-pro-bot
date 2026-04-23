@@ -5,18 +5,30 @@ alwaysApply: true
 
 # Статистика: точка отсчёта
 
-Статистика по стратегиям считается **с 23.04.2026 08:58 UTC** (commit
-`49861fe`, деплой на VPS) — ремонт `session_orb`:
-расширен whitelist (+9 инструментов, 5→16), добавлен confirm bar,
-HTF EMA200 H1 сделан блокирующим для news_fade, изменён R:R на 2:1
-(SL 2.0→1.5 ATR, TP 1.5→3.0 ATR). Плюс откат overfit параметров
-outsiders — см. ниже.
+Статистика по стратегиям считается **с 23.04.2026 XX:XX UTC** (commit `TBD`,
+деплой на VPS) — комплексный апгрейд risk management + `outsiders`:
 
-Основание: диагностика 839 чистых сделок 09-22.04 показала WR 36%,
-PF net 0.35, R:R 0.97 (≈1:1 вместо 2:1). Крипта (332 сделки, PF 0.49)
-отключена как единственная статзначимо убыточная категория.
+- **ATR-scaled position sizing**: фиксированный риск $15 на сделку
+  (1% от $1500), лот автоматически пересчитывается из SL-дистанции.
+  Ранее 0.01 лот для всех — несопоставимые риски по инструментам.
+  [Van K. Tharp «Trade Your Way to Financial Freedom» (2007) ch.11].
+- **Лимиты позиций**: `OUTSIDERS_MAX_POSITIONS` 50→10,
+  `OUTSIDERS_MAX_PER_INSTRUMENT` 3→1, `SCALPING_MAX_POSITIONS` 15→10,
+  `LEADERS_MAX_POSITIONS` 20→10. Correlation-aware portfolio по Tharp/Vince.
+- **News proximity → блокирующий фильтр** для `outsiders`: был источником
+  сигнала (вход вокруг news), стал скипом инструмента в ±4ч окне high-impact
+  events. [Andersen, Bollerslev, Diebold & Vega (2003) AER 93(1)]:
+  fat-tailed распределение вокруг macro releases ломает mean-reversion.
+
+Все предыдущие правки (session_orb whitelist, confirm bar, HTF блокирующий,
+R:R 2:1, outsiders RSI 25/75, BB 2σ, atr_spike удалён) остаются в силе.
 
 ## История baseline-дат (для контекста)
+
+- **23.04.2026 08:58 UTC (commit `49861fe`)** — ремонт `session_orb`:
+  whitelist 5→16, confirm bar, HTF блокирующий для news_fade, R:R 2:1
+  (SL 2.0→1.5 ATR, TP 1.5→3.0 ATR). Диагностика 839 сделок 09-22.04
+  показала WR 36%, PF 0.35, R:R 0.97.
 
 - **07.04.2026** — подключение демо cTrader. Старт реальной торговли.
 - **16.04.2026 17:05 UTC** — первый revert overfit-правок (коммит `9e851e1`).
@@ -31,7 +43,7 @@ PF net 0.35, R:R 0.97 (≈1:1 вместо 2:1). Крипта (332 сделки,
   `OUTSIDERS_MODE=confirmed` как default.
 - **22.04.2026 04:36 UTC** — правки на выборке без HTF (коммит `0c8c758`):
   USDJPY exclude, News Fade session filter, NY close cutoff 21:00 UTC.
-- **23.04.2026 08:58 UTC (commit `49861fe`)** — **текущий baseline.**
+- **23.04.2026 08:58 UTC (commit `49861fe`)** — предыдущий baseline.
   (суммарно 3 коммита: `0782a2c` основной рефактор session_orb,
   `753e2bc` обновление BUILDLOG, `49861fe` fix server-side TP для session_orb)
   Ремонт `session_orb` по диагностике 839 чистых сделок 09-22.04

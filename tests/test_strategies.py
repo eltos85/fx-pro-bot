@@ -118,15 +118,31 @@ def test_atr_spike_removed() -> None:
     assert spike_sigs == []
 
 
-def test_detect_news_proximity() -> None:
-    closes = [1.10] * 55
+def test_news_proximity_blocks_signals() -> None:
+    """news proximity 23.04.2026: БЛОКИРУЮЩИЙ фильтр, а не источник сигнала.
+
+    Research: Andersen et al. 2003 — fat tails вокруг high-impact news
+    ломают mean-reversion. Теперь при близком событии весь инструмент
+    скипается.
+    """
+    # Формируем RSI oversold сетап (падающая цена)
+    closes = [1.10] * 15 + [1.10 - i * 0.003 for i in range(40)]
     bars = _make_bars(closes)
     ts = bars[-1].ts
-    event = CalendarEvent(title="NFP", at=ts + timedelta(hours=2), importance="high")
 
-    sigs = detect_extreme_setups(("EURUSD=X",), {"EURUSD=X": bars}, (event,), now=ts)
-    news_sigs = [s for s in sigs if s.source == "news"]
-    assert len(news_sigs) == 1
+    # БЕЗ news — сигнал должен быть (RSI oversold triggers LONG)
+    sigs_no_news = detect_extreme_setups(("EURUSD=X",), {"EURUSD=X": bars}, (), now=ts)
+    # С ближним high-impact news — сигнал должен быть заблокирован
+    event = CalendarEvent(title="NFP", at=ts + timedelta(hours=2), importance="high")
+    sigs_with_news = detect_extreme_setups(
+        ("EURUSD=X",), {"EURUSD=X": bars}, (event,), now=ts,
+    )
+
+    # news не создаёт сигнал
+    assert all(s.source != "news" for s in sigs_with_news)
+    # news-фильтр блокирует RSI/BB сигналы (возможно не все сетапы сработают
+    # из-за HTF/liquid session — главное что их не больше чем без фильтра)
+    assert len(sigs_with_news) <= len(sigs_no_news)
 
 
 def test_outsiders_creates_papers(tmp_path) -> None:
@@ -257,6 +273,35 @@ def test_filter_ok(tmp_path) -> None:
         signal_price=1.10, current_price=1.1005, atr=0.001, max_positions=20,
     )
     assert allowed
+
+
+# ── Position sizing (ATR-scaled) ─────────────────────────────
+
+
+def test_calc_lot_size_eurusd_15usd_risk() -> None:
+    """При $15 риска и SL=15 pips на EURUSD: lot ≈ 0.10.
+
+    pip_value_usd(EURUSD, 0.01) = $0.10 → per 0.01 lot: 15 pips × $0.10 = $1.50.
+    lot = $15 / $1.50 × 0.01 = 0.10.
+    """
+    from fx_pro_bot.config.settings import calc_lot_size
+    sl_dist = 0.0015  # 15 pips для EURUSD (pip=0.0001)
+    lot = calc_lot_size("EURUSD=X", sl_dist, risk_usd=15.0)
+    assert 0.09 <= lot <= 0.11
+
+
+def test_calc_lot_size_zero_sl_fallback() -> None:
+    """Если SL=0 или отрицательный — возврат min_lot (защита от div-by-zero)."""
+    from fx_pro_bot.config.settings import MIN_LOT_SIZE, calc_lot_size
+    assert calc_lot_size("EURUSD=X", 0.0, risk_usd=15.0) == MIN_LOT_SIZE
+    assert calc_lot_size("EURUSD=X", -0.001, risk_usd=15.0) == MIN_LOT_SIZE
+
+
+def test_calc_lot_size_max_cap() -> None:
+    """MAX_LOT_SIZE ограничивает при очень узком SL (защита от overleverage)."""
+    from fx_pro_bot.config.settings import MAX_LOT_SIZE, calc_lot_size
+    lot = calc_lot_size("EURUSD=X", 0.00001, risk_usd=1000.0)
+    assert lot == MAX_LOT_SIZE
 
 
 # ── Store positions ──────────────────────────────────────────

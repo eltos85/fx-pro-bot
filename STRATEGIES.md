@@ -48,7 +48,7 @@
 
 - **Агрегация:** если 2+ источника согласны по направлению — открываем позицию
 - **Фильтр силы:** strength сигнала >= 0.5
-- **Лимиты:** макс 20 позиций, макс 3 на один инструмент
+- **Лимиты (23.04.2026):** макс **10** позиций, макс 3 на инструмент. Снижено с 20 по Tharp (2007) ch.11
 
 ### Управление рисками
 
@@ -63,7 +63,7 @@
 
 ```
 LEADERS_ENABLED=true
-LEADERS_MAX_POSITIONS=20
+LEADERS_MAX_POSITIONS=10
 LEADERS_CAPITAL_PCT=0.67
 LEADERS_SL_ATR=2.0
 LEADERS_TRAIL_ATR=0.7
@@ -105,7 +105,11 @@ LEADERS_TRAIL_ATR=0.7
   fade на нём противоречит mean-reversion природе. За 22-23.04 дал 100%
   убытков outsiders (20 из 20 сделок, WR 15%, NET −$8.22 за 19.5 ч).
 
-**Лимиты:** макс 50 позиций, макс 3 на один инструмент.
+**Лимиты (23.04.2026):** макс **10** позиций, макс **1** на инструмент.
+Снижены с 50/3 по research [Van K. Tharp «Trade Your Way to Financial Freedom»
+(2007) ch.11 «Position Sizing»]: 6-12 concurrent positions оптимум для
+correlation-aware portfolio, pyramiding на одном инструменте только при
+подтверждённом trend-following (не для mean-reversion).
 
 **Исключения outsiders/ensemble:** EURJPY возвращён в outsiders (ранее исключался на 5 сделках — нарушение правила `sample-size.mdc` ≥100 сделок). **USDJPY вернулся в торговлю 22.04.2026 11:30 UTC** — исключение от 04:36 было преждевременным (выборка 26 сделок <100, сделано без работающего HTF фильтра; после фикса HTF симуляция показала NET −$0.60 на 19 оставшихся сделках — почти ноль, см. BUILDLOG 2026-04-22).
 
@@ -157,15 +161,18 @@ Triennial FX Survey 2022](https://www.bis.org/publ/rpfx22.htm) — резкое
 
 ```
 OUTSIDERS_ENABLED=true
-OUTSIDERS_MAX_POSITIONS=50
+OUTSIDERS_MAX_POSITIONS=10
+OUTSIDERS_MAX_PER_INSTRUMENT=1
 OUTSIDERS_CAPITAL_PCT=0.33
 OUTSIDERS_MODE=confirmed
+RISK_PER_TRADE_USD=15.0
 ```
 
 **Defense-in-depth фильтры (обязательные для обоих modes):**
 1. **ADX ≤ 25** — не торговать mean-reversion в сильном тренде.
 2. **Liquid session filter** — вход только London 07:00–15:59 UTC или NY 12:00–20:59 UTC. В Asian session и в час NY close тонкая ликвидность превращает mean-reversion в ловлю падающего ножа.
 3. **HTF EMA200 H1 alignment** — LONG (fade oversold) блокируется при downtrend H1, SHORT (fade overbought) — при uptrend H1. Research: [Asness, Moskowitz, Pedersen «Value and Momentum Everywhere» (JF 2013)](https://onlinelibrary.wiley.com/doi/10.1111/jofi.12021) — mean reversion успешен только когда не противонаправлен momentum старшего ТФ.
+4. **News proximity БЛОКИРУЮЩИЙ** (23.04.2026) — если в окне ±4 часа от high-impact события есть новость, инструмент skip. Research: [Andersen, Bollerslev, Diebold & Vega (2003) «Micro Effects of Macro Announcements», AER 93(1)](https://www.aeaweb.org/articles?id=10.1257/000282803321455188) — ±2 часа от US macro releases содержат 30-50% суточной волатильности FX с fat-tailed распределением, что ломает mean-reversion edge. Ранее `news_proximity` был **источником** сигнала — удалено как overfit.
 
 > **⚠️ Требование данных:** `htf_ema_trend()` ресемплирует M5 в H1 и требует ≥205 H1 баров для EMA(200). При `YFINANCE_PERIOD=5d` (по умолчанию до 22.04) получалось только ~73 H1 баров → фильтр всегда возвращал `None` и не блокировал. Начиная с 22.04.2026 `YFINANCE_PERIOD=1mo` (≥500 H1 баров per request, cTrader API лимит 14k баров). См. BUILDLOG 2026-04-22.
 
@@ -187,7 +194,7 @@ OUTSIDERS_MODE=confirmed
 | EMA Slope | EMA(50) M5 | Дополнительно не торговать против M5 тренда |
 | Stop-Loss | **2.0 ATR** | Оптимум по бэктестам (9433 трейда, 6 активов) |
 | Take-Profit | **1.5 ATR** | Частичный возврат к VWAP, с учётом комиссии FxPro |
-| Макс позиций | **15** | Все скальпинг-стратегии |
+| Макс позиций | **10** (было 15 до 23.04) | Tharp (2007) ch.11: 6-12 оптимум |
 | Макс на инструмент | **3** | |
 
 ### Stat-Arb Cross-Pair Spread Scalping
@@ -261,7 +268,7 @@ OUTSIDERS_MODE=confirmed
 | Trail distance | **0.3 × ATR** (мин 3 pips) | Дистанция трейлинга |
 | Time-stop | **4 часа** | Скальп не висит полдня |
 | Commission floor | **3× round-trip cost** | TP ≥ 3× (спред + комиссия FxPro) |
-| Макс позиций | **15** | Фокус вместо размазывания |
+| Макс позиций | **10** (было 15 до 23.04) | Снижено для focus + correlation control |
 
 ### Скальпинг: настройки (.env)
 
@@ -269,8 +276,56 @@ OUTSIDERS_MODE=confirmed
 SCALPING_VWAP_ENABLED=true
 SCALPING_STATARB_ENABLED=true
 SCALPING_ORB_ENABLED=true
-SCALPING_MAX_POSITIONS=15
+SCALPING_MAX_POSITIONS=10
 ```
+
+---
+
+## 3b. ATR-scaled position sizing (23.04.2026)
+
+**Файл:** `config/settings.py::calc_lot_size`
+
+**Идея:** фиксированный USD-риск на сделку, лот автоматически подбирается
+так чтобы потенциальный убыток при срабатывании SL = `RISK_PER_TRADE_USD`.
+
+### Формула
+
+```
+sl_pips = sl_distance / pip_size(instrument)
+risk_per_0.01_lot = sl_pips * pip_value_usd(instrument, 0.01)
+lot = risk_usd / risk_per_0.01_lot * 0.01
+```
+
+Ограничения: `MIN_LOT_SIZE = 0.01`, `MAX_LOT_SIZE = 0.20` (защита от
+overleverage при очень узком SL).
+
+### Параметры
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| `RISK_PER_TRADE_USD` | **$15** | 1% от $1500 депозита |
+| Применение | Все стратегии (outsiders, leaders, scalping) | Единообразный риск вне зависимости от инструмента |
+| Fallback | `settings.lot_size = 0.01` | Если SL=0 или `RISK_PER_TRADE_USD=0` |
+
+### Обоснование
+
+- [Van K. Tharp «Trade Your Way to Financial Freedom» (2007), ch.11
+  «Position Sizing»] — fixed fractional risk = основа любого
+  systematic trading. 0.5-2% per trade по research.
+- [Ralph Vince «The Mathematics of Money Management» (1992)] —
+  optimal-f; при фиксированном risk % growth rate оптимизируется
+  автоматически.
+- **Практический эффект:** при SL 15 pips на EURUSD — lot 0.10
+  (риск $15); при SL 40 pips на NG=F — lot пересчитывается так чтобы
+  риск тоже был $15. Раньше был фиксированный 0.01 лот → риск $1.50
+  на EURUSD и $0.40 на NG=F — несопоставимые позиции.
+
+### Почему это критично для commodities
+
+Баг `TRADING_BAD_STOPS` на NG=F (23.04.2026 08:57): SL был выставлен
+выше entry для LONG. Причина — pip_size и масштаб цены NG=F отличаются
+от FX. ATR-scaled sizing не лечит SL-bug напрямую, но ограничивает
+убыток от некорректного SL до $15 вместо случайного размера.
 
 ---
 
@@ -691,7 +746,7 @@ src/fx_pro_bot/
     scanner.py         # Сканирование инструментов
   strategies/
     leaders.py         # Copy-trading за китами
-    outsiders.py       # Extreme setups (RSI/BB/ATR/news)
+    outsiders.py       # Extreme setups (RSI/BB). news = блокирующий фильтр
     exits.py           # 4 paper exit-стратегии
     monitor.py         # Мониторинг SL/trail/time-stops
     shadow.py          # ROI-аналитика

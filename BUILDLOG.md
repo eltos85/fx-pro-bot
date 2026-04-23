@@ -6,6 +6,68 @@
 
 ## 2026-04-23
 
+### feat(risk): ATR-scaled position sizing + лимиты 50→10, news фильтр блокирующий
+`TBD`
+
+**Контекст:** после фикса `outsiders` и `session_orb` остались 3 системных
+проблемы, не закрытых точечными правками. Привёл всё в соответствие с
+research (Tharp, Vince, Andersen et al., BIS FX Survey).
+
+**Что сделано:**
+
+1. **ATR-scaled position sizing** (`config/settings.py::calc_lot_size`).
+   Было: фиксированный `LOT_SIZE=0.01` для всех инструментов. Риск на
+   EURUSD при SL 15 pips = $1.50, на ES=F при SL 15 pts = $18.75 —
+   несопоставимые позиции. Стало: `RISK_PER_TRADE_USD = $15` (1% от $1500
+   депозита), лот пересчитывается из SL-дистанции. Формула:
+   `lot = risk_usd / (sl_pips × pip_value_per_0.01)`. Ограничения:
+   MIN_LOT=0.01, MAX_LOT=0.20 (защита от overleverage при очень узком SL).
+   Применяется в `_open_broker_for_new` и `_sync_broker_positions` в
+   `app/main.py`. Research: [Van K. Tharp «Trade Your Way to Financial
+   Freedom» (2007) ch.11]; [Ralph Vince «The Mathematics of Money
+   Management» (1992)].
+
+2. **Лимиты позиций снижены** (`config/settings.py`). Research (Tharp 2007,
+   Vince 1992) рекомендует 6-12 concurrent positions для контроля
+   correlation risk:
+   - `OUTSIDERS_MAX_POSITIONS`: 50 → **10**
+   - `OUTSIDERS_MAX_PER_INSTRUMENT`: 3 → **1** (pyramiding для
+     mean-reversion противоречит логике)
+   - `SCALPING_MAX_POSITIONS`: 15 → **10**
+   - `LEADERS_MAX_POSITIONS`: 20 → **10**
+
+3. **News proximity → блокирующий фильтр** (`strategies/outsiders.py`).
+   Было: `_check_news_proximity` и `_check_news_confirmed` создавали
+   сигналы НА БАЗЕ близких news events (вход вокруг новости). Стало:
+   `_near_high_impact_news()` как **блокирующий** фильтр в
+   `detect_extreme_setups` — если в окне ±4 часа от high-impact news
+   есть событие, инструмент skip. Research: [Andersen, Bollerslev,
+   Diebold & Vega (2003) «Micro Effects of Macro Announcements», AER
+   93(1)] — ±2 часа вокруг US macro releases содержат 30-50% суточной
+   волатильности FX с fat-tailed распределением, что ломает
+   mean-reversion edge.
+
+**Файлы:**
+- `src/fx_pro_bot/config/settings.py` (+calc_lot_size, +RISK_PER_TRADE_USD,
+  +MIN/MAX_LOT_SIZE, +outsiders_max_per_instrument, max_positions snap)
+- `src/fx_pro_bot/app/main.py` (+_resolve_lot_size, передача в executor,
+  передача max_per_instrument в OutsidersStrategy)
+- `src/fx_pro_bot/strategies/outsiders.py` (удалены _check_news_*,
+  +_near_high_impact_news, обновлён docstring, max_positions=10/1)
+- `tests/test_strategies.py` (+3 теста на calc_lot_size,
+  test_news_proximity_blocks_signals вместо старого)
+- `tests/test_outsiders_realism.py` (+TestNearHighImpactNews, удалён
+  TestNewsConfirmed)
+- `STRATEGIES.md` (+секция 3b «ATR-scaled position sizing», обновлены
+  лимиты, news как блокирующий фильтр)
+
+**Baseline:** статистика с 23.04.2026 23:XX UTC (момент деплоя). Старые
+данные по outsiders/session_orb/leaders не сопоставимы.
+
+**Что НЕ сделано (оставлено как TODO):**
+- Диагностика/фикс SL-bug для NG=F (и фьючерсов с `digits<5`). ATR-scaled
+  sizing ограничивает убыток от такого бага до $15, но не лечит причину.
+
 ### fix(session_orb): whitelist +9 инструментов, confirm bar, HTF блокирующий, R:R 2:1 (SL 1.5×ATR, TP 3×ATR)
 `0782a2c`
 

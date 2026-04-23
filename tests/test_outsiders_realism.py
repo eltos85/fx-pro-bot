@@ -16,13 +16,14 @@ from fx_pro_bot.strategies.monitor import PositionMonitor
 from fx_pro_bot.strategies.outsiders import (
     CLASSIC_SL_ATR,
     CONFIRMED_SL_ATR,
+    NEWS_HOURS,
     OutsiderSignal,
     OutsidersStrategy,
     _check_bb_confirmed,
-    _check_news_confirmed,
     _check_rsi_confirmed,
     _is_liquid_session,
     _limit_entry_price,
+    _near_high_impact_news,
     detect_extreme_setups,
 )
 
@@ -206,26 +207,46 @@ class TestBbConfirmed:
         assert sig is None
 
 
-class TestNewsConfirmed:
-    def test_post_news_reversal(self):
-        base_ts = datetime(2026, 3, 26, 10, 0, tzinfo=UTC)
-        closes = [1.1000] * 50 + [1.1010, 1.1030, 1.1020]
-        bars = _make_bars(closes, base_ts=base_ts)
+class TestNearHighImpactNews:
+    """news proximity БЛОКИРУЮЩИЙ фильтр (23.04).
+
+    Research: Andersen et al. 2003 — fat tails в окне ±NEWS_HOURS вокруг
+    high-impact macro событий убивают mean-reversion edge.
+    """
+
+    def test_blocks_when_within_window(self):
+        ts = datetime(2026, 3, 26, 12, 0, tzinfo=UTC)
         event = CalendarEvent(
-            at=base_ts + timedelta(hours=3),
+            at=ts + timedelta(hours=NEWS_HOURS - 0.5),
             title="CPI Release",
             currency="USD",
             importance="high",
         )
-        now = bars[-1].ts
-        sig = _check_news_confirmed("EURUSD=X", bars, (event,), 0.002, now)
-        pass
+        assert _near_high_impact_news(ts, (event,)) is True
 
-    def test_no_event_no_signal(self):
-        closes = [1.1000] * 55
-        bars = _make_bars(closes)
-        sig = _check_news_confirmed("EURUSD=X", bars, (), 0.002, bars[-1].ts)
-        assert sig is None
+    def test_allows_when_outside_window(self):
+        ts = datetime(2026, 3, 26, 12, 0, tzinfo=UTC)
+        event = CalendarEvent(
+            at=ts + timedelta(hours=NEWS_HOURS + 1),
+            title="CPI Release",
+            currency="USD",
+            importance="high",
+        )
+        assert _near_high_impact_news(ts, (event,)) is False
+
+    def test_ignores_low_importance(self):
+        ts = datetime(2026, 3, 26, 12, 0, tzinfo=UTC)
+        event = CalendarEvent(
+            at=ts,
+            title="Retail confidence",
+            currency="USD",
+            importance="medium",
+        )
+        assert _near_high_impact_news(ts, (event,)) is False
+
+    def test_no_events(self):
+        ts = datetime(2026, 3, 26, 12, 0, tzinfo=UTC)
+        assert _near_high_impact_news(ts, ()) is False
 
 
 # ── detect_extreme_setups mode parameter ──────────────────────

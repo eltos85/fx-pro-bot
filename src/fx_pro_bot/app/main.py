@@ -8,7 +8,7 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
-from fx_pro_bot.config.settings import SCALPING_EXCLUDE_SYMBOLS, SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, display_name, is_crypto, pip_size, pip_value_usd, spread_cost_pips
+from fx_pro_bot.config.settings import SCALPING_EXCLUDE_SYMBOLS, SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, calc_lot_size, display_name, is_crypto, pip_size, pip_value_usd, spread_cost_pips
 from fx_pro_bot.strategies.monitor import (
     SCALPING_TP_PIPS, SCALPING_TRAIL_TRIGGER_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
     OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
@@ -304,6 +304,7 @@ def run_advisor() -> None:
     outsiders_strat = OutsidersStrategy(
         store,
         max_positions=settings.outsiders_max_positions,
+        max_per_instrument=settings.outsiders_max_per_instrument,
         mode=settings.outsiders_mode,
     )
     monitor = PositionMonitor(store, outsiders_mode=settings.outsiders_mode, lot_size=settings.lot_size)
@@ -728,12 +729,13 @@ def _sync_unlinked_positions(
                 from fx_pro_bot.strategies.monitor import CRYPTO_SCALP_SL_ATR_MULT
                 sl_dist = CRYPTO_SCALP_SL_ATR_MULT * pos_atr
 
+            lot = _resolve_lot_size(pos.instrument, sl_dist, settings)
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
                 sl_distance=sl_dist,
                 tp_distance=tp_dist,
-                lot_size=settings.lot_size,
+                lot_size=lot,
                 comment=f"fx-pro-bot sync {pos.id[:8]}",
                 entry_price_hint=pos.entry_price,
             )
@@ -838,12 +840,14 @@ def _open_broker_for_new(
             pos_atr = (atrs or {}).get(pos.instrument, 0.0)
             tp_dist = _calc_tp_distance(pos.strategy, ps, pos_atr, pos.instrument, pos.entry_price)
 
+            lot = _resolve_lot_size(pos.instrument, sl_dist, settings)
+
             result = executor.open_position(
                 yf_symbol=pos.instrument,
                 direction=pos.direction,
                 sl_distance=sl_dist,
                 tp_distance=tp_dist,
-                lot_size=settings.lot_size,
+                lot_size=lot,
                 comment=f"fx-pro-bot {pos.id[:8]}",
                 entry_price_hint=pos.entry_price,
             )
@@ -851,9 +855,9 @@ def _open_broker_for_new(
             if result.success and result.broker_position_id:
                 store.set_broker_position_id(pos.id, result.broker_position_id, result.volume)
                 log.info(
-                    "  cTrader OPEN: %s %s → broker #%d @ %.5f (vol=%d) TP±%.5f SL±%s",
+                    "  cTrader OPEN: %s %s → broker #%d @ %.5f (vol=%d, lot=%.2f) TP±%.5f SL±%s",
                     pos.instrument, pos.direction,
-                    result.broker_position_id, result.fill_price, result.volume,
+                    result.broker_position_id, result.fill_price, result.volume, lot,
                     tp_dist or 0, f"{sl_dist:.5f}" if sl_dist else "—",
                 )
             elif not result.success:
@@ -863,6 +867,14 @@ def _open_broker_for_new(
                 log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
             log.exception("  cTrader OPEN error: %s", pos.instrument)
+
+
+def _resolve_lot_size(instrument: str, sl_distance: float | None, settings: Settings) -> float:
+    """Подобрать лот: ATR-scaled если есть SL и risk>0, иначе settings.lot_size."""
+    risk = getattr(settings, "risk_per_trade_usd", 0.0) or 0.0
+    if risk > 0 and sl_distance and sl_distance > 0:
+        return calc_lot_size(instrument, sl_distance, risk)
+    return settings.lot_size
 
 
 def _ensure_broker_sl_tp(

@@ -1,4 +1,4 @@
-"""Outsiders — extreme setups: RSI extreme, Bollinger 2σ, news proximity.
+"""Outsiders — extreme setups: RSI extreme, Bollinger 2σ.
 
 Аналог стратегии «Аутсайдеры» Polymarket-бота: вход на low-probability ситуациях.
 Каждый сигнал порождает 4 paper exit-стратегии для сравнения.
@@ -12,6 +12,14 @@
 - `atr_spike` setup **удалён**: 4× ATR range = capitulation move
   (trend continuation по Chande & Kroll 1994), fade на таком range противоречит
   mean-reversion логике и давал 100% убытков за 21-23.04.
+- `news_proximity` setup **удалён 23.04**: вход ВОКРУГ news = контринтуитивно
+  для mean-reversion. Research consensus: mean-reversion должна ИЗБЕГАТЬ
+  news events, потому что волатильность в окне news не является
+  нормально распределённой (fat tails, gap risk) — [Andersen, Bollerslev,
+  Diebold & Vega (2003) «Micro Effects of Macro Announcements», AER 93:1]
+  показали что ±2 часа от US macro releases содержат 30-50% суточной
+  волатильности FX. Теперь news события работают только как **блокирующий
+  фильтр** для RSI/BB сигналов.
 
 Два режима:
 - classic: немедленный вход при обнаружении экстрима (текущее поведение)
@@ -101,6 +109,14 @@ def detect_extreme_setups(
         if not _is_liquid_session(bars[-1]):
             continue
 
+        # News proximity filter (БЛОКИРУЮЩИЙ, 23.04.2026).
+        # Research: Andersen et al. (2003) — ±NEWS_HOURS вокруг high-impact
+        # US macro событий содержит fat-tailed волатильность, несовместимую
+        # с mean-reversion. Если событие близко — skip instrument целиком.
+        event_ts = now or bars[-1].ts
+        if _near_high_impact_news(event_ts, events):
+            continue
+
         # HTF EMA200 H1 alignment — не fade против трендa старшего ТФ.
         # Классический случай "value & momentum" ([Asness et al. JF 2013]):
         # mean-reversion выигрывает когда H1 тренд не противонаправлен сигналу.
@@ -158,10 +174,6 @@ def _scan_classic(
     if sig:
         out.append(sig)
 
-    sig = _check_news_proximity(symbol, bars, events, atr, now)
-    if sig:
-        out.append(sig)
-
 
 def _scan_confirmed(
     symbol: str,
@@ -184,9 +196,27 @@ def _scan_confirmed(
     if sig:
         out.append(sig)
 
-    sig = _check_news_confirmed(symbol, bars, events, atr, now)
-    if sig:
-        out.append(sig)
+
+def _near_high_impact_news(
+    ts: datetime | None,
+    events: tuple[CalendarEvent, ...],
+    window_hours: float = NEWS_HOURS,
+) -> bool:
+    """True если в окне ±window_hours от ts есть high-impact событие.
+
+    Используется как БЛОКИРУЮЩИЙ фильтр: выход mean-reversion вокруг news
+    = fat-tailed распределение ([Andersen et al. (2003)]), mean-reversion
+    edge пропадает.
+    """
+    if not events or ts is None:
+        return False
+    for ev in events:
+        if ev.importance != "high":
+            continue
+        diff_hours = abs((ev.at - ts).total_seconds()) / 3600
+        if diff_hours <= window_hours:
+            return True
+    return False
 
 
 # ── Classic checks (unchanged) ─────────────────────────────────
@@ -246,39 +276,6 @@ def _check_bollinger_extreme(
             detail=f"цена {cur:.5f} > BB upper {upper:.5f} ({BB_SIGMA}σ)",
             atr=atr,
         )
-    return None
-
-
-def _check_news_proximity(
-    symbol: str,
-    bars: list[Bar],
-    events: tuple[CalendarEvent, ...],
-    atr: float,
-    now: datetime | None = None,
-) -> OutsiderSignal | None:
-    if not events:
-        return None
-
-    ts = now or (bars[-1].ts if bars else None)
-    if ts is None:
-        return None
-
-    for ev in events:
-        if ev.importance != "high":
-            continue
-        diff_hours = abs((ev.at - ts).total_seconds()) / 3600
-        if diff_hours <= NEWS_HOURS:
-            closes = [b.close for b in bars]
-            rsi = _rsi(closes, 14)
-            direction = TrendDirection.LONG if rsi < 50 else TrendDirection.SHORT
-
-            return OutsiderSignal(
-                instrument=symbol,
-                direction=direction,
-                source="news",
-                detail=f"событие '{ev.title}' через {diff_hours:.1f}ч, RSI={rsi:.1f}",
-                atr=atr,
-            )
     return None
 
 
@@ -358,37 +355,6 @@ def _check_bb_confirmed(
     return None
 
 
-def _check_news_confirmed(
-    symbol: str,
-    bars: list[Bar],
-    events: tuple[CalendarEvent, ...],
-    atr: float,
-    now: datetime | None = None,
-) -> OutsiderSignal | None:
-    """Новость прошла (0.5-4ч назад), видим разворот на текущем баре."""
-    if not events or len(bars) < 3:
-        return None
-
-    ts = now or bars[-1].ts
-    for ev in events:
-        if ev.importance != "high":
-            continue
-        diff_sec = (ts - ev.at).total_seconds()
-        if 1800 < diff_sec < NEWS_HOURS * 3600:
-            move_prev = bars[-2].close - bars[-3].close
-            move_cur = bars[-1].close - bars[-2].close
-            if move_prev != 0 and (move_cur / abs(move_prev)) < -0.3:
-                direction = TrendDirection.LONG if move_cur > 0 else TrendDirection.SHORT
-                return OutsiderSignal(
-                    instrument=symbol,
-                    direction=direction,
-                    source="news",
-                    detail=f"confirmed post-news reversal ({ev.title}, {diff_sec/3600:.1f}ч назад)",
-                    atr=atr,
-                )
-    return None
-
-
 # ── Strategy ───────────────────────────────────────────────────
 
 
@@ -399,8 +365,8 @@ class OutsidersStrategy:
         self,
         store: StatsStore,
         *,
-        max_positions: int = 50,
-        max_per_instrument: int = 3,
+        max_positions: int = 10,
+        max_per_instrument: int = 1,
         mode: str = "classic",
     ) -> None:
         self._store = store
