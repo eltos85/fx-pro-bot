@@ -770,13 +770,16 @@ def _calc_tp_distance(
     from fx_pro_bot.strategies.monitor import (
         CRYPTO_SCALP_TP_ATR_MULT, CRYPTO_SCALP_TP_MIN_PCT,
     )
+    from fx_pro_bot.strategies.scalping.session_orb import ORB_TP_ATR_MULT
     scalping = ("vwap_reversion", "stat_arb", "session_orb")
     if strategy in scalping:
         if is_crypto(instrument) and entry_price > 0:
             atr_tp = CRYPTO_SCALP_TP_ATR_MULT * atr if atr > 0 else 0.0
             pct_tp = entry_price * CRYPTO_SCALP_TP_MIN_PCT
             return max(atr_tp, pct_tp)
-        atr_tp = SCALPING_TP_ATR_MULT * atr if atr > 0 else 0.0
+        # session_orb — breakout strategy, нужен TP ≥ 2R. vwap/stat_arb — mean-revert, 1.5×ATR.
+        tp_mult = ORB_TP_ATR_MULT if strategy == "session_orb" else SCALPING_TP_ATR_MULT
+        atr_tp = tp_mult * atr if atr > 0 else 0.0
         fixed_tp = SCALPING_TP_PIPS * ps
         commission_pips = broker_commission_usd() / pip_value_usd(instrument) if pip_value_usd(instrument) > 0 else 1.0
         cost_floor = (spread_cost_pips(instrument) + commission_pips) * 3.0 * ps
