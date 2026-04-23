@@ -73,6 +73,53 @@
 
 ---
 
+### DEPLOY FINALIZATION: закрытие сирот-позиций turtle, .env fix на VPS
+
+**Контекст:** после `docker compose up -d` выяснилось, что `.env` на VPS
+содержал `BYBIT_BOT_SCALP_TURTLE_ENABLED=true` и
+`BYBIT_BOT_SCALP_LEADLAG_ENABLED=true`, что перекрывало новые дефолты в
+`docker-compose.yml`. Также старый контейнер успел сделать последний скан
+за секунды до пересоздания и открыл 2 turtle-позиции.
+
+**Действия (с явного одобрения пользователя):**
+
+1. `.env` на VPS: `sed -i` заменил оба флага на `false`. Бэкап в
+   `.env.bak_YYYYMMDD_HHMMSS`. Не коммитим — `.env` в git не трекается.
+2. `docker compose up -d bybit-bot` — recreate контейнера. Стартовый лог
+   подтвердил: `Скальпинг: ORB/sess=london/syms=SOLUSDT,LINKUSDT,BNBUSDT/dir=long`
+   (единственная активная страта + правильные whitelist-ы).
+3. Закрытие позиций через `BybitClient.close_position` (market + reduceOnly):
+   - SOLUSDT Sell (turtle) → -$0.43 uPnL на момент закрытия
+   - TIAUSDT Sell (turtle) → -$1.58 uPnL
+   - SUIUSDT Sell (turtle, открыта ещё до рестарта) → -$0.29 uPnL
+
+**Closed PnL за 3 часа (Bybit API, net fee):**
+
+Всего 12 сделок, все в минус, Σ = **-$15.97**. Из них:
+- 3 закрытых вручную → -$3.46 (с учётом комиссий открытия)
+- 9 закрылись сами по SL/trailing → -$12.51
+
+Это ещё одно подтверждение backtest-вердикта по turtle: live-результаты
+кореллируют с историческими (PF < 1, отрицательное expectancy).
+
+**Результат:**
+- Open positions = 0
+- Единственная активная страта = `scalp_orb` / London / Long / SOL-LINK-BNB
+- London session сегодня уже прошла (08–09 UTC), ORB начнёт работу с
+  след. торгового дня.
+
+**Lessons learned:**
+- На live-деплое с изменением `_ENABLED`-флагов нужно проверять `.env`
+  на VPS ДО коммита — он имеет приоритет над `docker-compose.yml`
+  defaults.
+- При disable страт через compose остаются сироты-позиции, открытые
+  последним сканом старого контейнера. Нужно закрывать их отдельно.
+
+**Файлы:** VPS `.env` (не в git), операционные действия через
+`BybitClient.close_position`.
+
+---
+
 ### BACKTEST: все 6 стратегий на 90 днях истории — сводная таблица, ключевые выводы
 
 **Статус:** ИССЛЕДОВАНИЕ. Код НЕ менялся. Решения об отключении / переработке
