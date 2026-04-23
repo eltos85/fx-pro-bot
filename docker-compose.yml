@@ -8,6 +8,8 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
+    env_file:
+      - .env
     environment:
       DATA_DIR: /data
       YFINANCE_INTERVAL: ${YFINANCE_INTERVAL:-5m}
@@ -27,9 +29,15 @@ services:
       CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
       CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-https://openapi.ctrader.com/apps/token}
       OUTSIDERS_MODE: ${OUTSIDERS_MODE:-confirmed}
+      # Флаги стратегий (defaults = совместимость; реальное значение — в .env)
+      LEADERS_ENABLED: ${LEADERS_ENABLED:-true}
+      OUTSIDERS_ENABLED: ${OUTSIDERS_ENABLED:-true}
+      ENSEMBLE_ENABLED: ${ENSEMBLE_ENABLED:-true}
       SCALPING_VWAP_ENABLED: ${SCALPING_VWAP_ENABLED:-true}
       SCALPING_STATARB_ENABLED: ${SCALPING_STATARB_ENABLED:-true}
       SCALPING_ORB_ENABLED: ${SCALPING_ORB_ENABLED:-true}
+      SCALPING_GOLD_ORB_ENABLED: ${SCALPING_GOLD_ORB_ENABLED:-true}
+      SCALPING_GOLD_ORB_SHADOW: ${SCALPING_GOLD_ORB_SHADOW:-true}
       SCALPING_MAX_POSITIONS: ${SCALPING_MAX_POSITIONS:-50}
       KILLSWITCH_MAX_DAILY_LOSS: ${KILLSWITCH_MAX_DAILY_LOSS:-50.0}
       KILLSWITCH_MAX_DRAWDOWN_PCT: ${KILLSWITCH_MAX_DRAWDOWN_PCT:-20.0}
