@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-04-24
+
+### feat: dynamic slippage guard (30% TP-distance вместо static)
+`0778480`
+
+Переход от статических лимитов slippage (`max_slippage_pips(symbol)`) к
+динамическому порогу: `max_slip = tp_distance / pip_size × 0.30`.
+
+**Мотивация (вопрос «10 пипов не много?»):**
+
+Static commodities=10 pip не учитывал tp конкретной сделки:
+- ORB с TP=5 pip NG=F — static лимит 10 pip > весь TP → slippage на весь
+  TP пройдёт фильтр, но сделка откроется с отрицательным expectancy.
+- Outsiders с TP=30 pip — static 10 pip отбросит валидные сигналы при
+  умеренной волатильности (slippage 12 pip ≈ 40% TP, ещё приемлемо).
+
+**Математика 30% cutoff:**
+При R:R=2.0 и slip=30% TP реальный R падает до ~1.4 (ещё +expectancy при
+win-rate ≥40%). Больше 30% — expectancy уходит в минус, закрываем.
+
+**Поведение:**
+- Приоритет динамики: если `tp_distance` есть → `tp_pips × 0.30`
+- Fallback на static: если стратегия не передала `tp_distance`
+- Лог отмечает источник: `[dyn(30% TP)]` или `[static]`
+
+**Файлы:** `src/fx_pro_bot/trading/executor.py`,
+`src/fx_pro_bot/config/settings.py` (комментарий — функция стала fallback),
+`tests/test_strategies.py` (+3 теста динамической формулы),
+`STRATEGIES.md` (раздел 3d обновлён).
+
+---
+
 ## 2026-04-23
 
 ### feat: точность входа (slippage guard + честный лог + SL от real entry)

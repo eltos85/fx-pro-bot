@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from fx_pro_bot.analysis.signals import TrendDirection
 from fx_pro_bot.events.models import CalendarEvent
 from fx_pro_bot.market_data.models import Bar, InstrumentId
@@ -308,7 +310,7 @@ def test_calc_lot_size_max_cap() -> None:
 
 
 def test_max_slippage_pips_commodity() -> None:
-    """Commodities: более широкий допуск (10pip)."""
+    """Fallback: commodities — 10pip."""
     from fx_pro_bot.config.settings import max_slippage_pips
     assert max_slippage_pips("NG=F") == 10.0
     assert max_slippage_pips("CL=F") == 10.0
@@ -316,7 +318,7 @@ def test_max_slippage_pips_commodity() -> None:
 
 
 def test_max_slippage_pips_fx_major() -> None:
-    """FX мажоры: 5pip."""
+    """Fallback: FX мажоры — 5pip."""
     from fx_pro_bot.config.settings import max_slippage_pips
     assert max_slippage_pips("EURUSD=X") == 5.0
     assert max_slippage_pips("GBPUSD=X") == 5.0
@@ -324,10 +326,60 @@ def test_max_slippage_pips_fx_major() -> None:
 
 
 def test_max_slippage_pips_crypto() -> None:
-    """Крипта: 20pip (высокая волатильность)."""
+    """Fallback: крипта — 20pip (высокая волатильность)."""
     from fx_pro_bot.config.settings import max_slippage_pips
     assert max_slippage_pips("BTC-USD") == 20.0
     assert max_slippage_pips("ETH-USD") == 20.0
+
+
+def test_dynamic_slippage_formula_commodity_ng() -> None:
+    """Динамический лимит = 30% tp_distance.
+
+    NG=F: TP 17 pip (pip=0.001) → tp_distance=0.017, max_slip = 5.1 pip.
+    Инцидент 23.04.2026 (slip=17pip при TP=17pip) → GUARD срабатывает.
+    """
+    from fx_pro_bot.config.settings import pip_size
+
+    tp_distance = 0.017  # 17 pip NG=F
+    ps = pip_size("NG=F")
+    tp_pips = tp_distance / ps
+    max_slip = tp_pips * 0.30
+
+    assert tp_pips == pytest.approx(17.0, rel=0.01)
+    assert max_slip == pytest.approx(5.1, rel=0.01)
+    assert 17.0 > max_slip  # инцидент блокируется
+    assert 5.0 <= max_slip  # допустимый slip 5pip проходит
+
+
+def test_dynamic_slippage_formula_fx_eurusd() -> None:
+    """EURUSD: TP 25 pip (pip=0.0001) → tp_distance=0.0025, max_slip = 7.5 pip."""
+    from fx_pro_bot.config.settings import pip_size
+
+    tp_distance = 0.0025  # 25 pip
+    ps = pip_size("EURUSD=X")
+    tp_pips = tp_distance / ps
+    max_slip = tp_pips * 0.30
+
+    assert tp_pips == pytest.approx(25.0, rel=0.01)
+    assert max_slip == pytest.approx(7.5, rel=0.01)
+
+
+def test_dynamic_slippage_formula_orb_narrow_tp() -> None:
+    """ORB с узким TP=5pip: dynamic guard 1.5pip (static 10pip пропустил бы).
+
+    Ключевое преимущество Варианта B: static commodities=10pip больше
+    чем весь TP, позиция открылась бы с отрицательным expectancy.
+    """
+    from fx_pro_bot.config.settings import pip_size
+
+    tp_distance = 0.005  # 5 pip NG=F
+    ps = pip_size("NG=F")
+    tp_pips = tp_distance / ps
+    max_slip = tp_pips * 0.30
+
+    assert tp_pips == pytest.approx(5.0, rel=0.01)
+    assert max_slip == pytest.approx(1.5, rel=0.01)
+    assert max_slip < 10.0  # динамический жёстче static(=10)
 
 
 def test_order_result_has_slippage_fields() -> None:

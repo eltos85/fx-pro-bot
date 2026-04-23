@@ -191,25 +191,48 @@ class TradeExecutor:
                 except Exception:
                     pass
 
-            # ── Slippage guard ──
+            # ── Slippage guard (dynamic: 30% от TP-distance) ──
             # Strategic price = entry_price_hint (цена в момент сигнала).
-            # Если |fill - strategic| > max_slippage — закрываем позицию:
-            # R:R уже разрушен, лучше выйти с -1 pip spread, чем торговать
-            # с отрицательным expectancy.
+            # Вариант B: max_slippage привязан к tp_distance текущей сделки.
+            #
+            # Логика: при slippage = 30% TP реальный R:R падает с 2.0 до ~1.4
+            # (ещё рентабельно). При slippage > 30% TP expectancy становится
+            # отрицательным — закрываем немедленно, тёрая 1-2 pip spread.
+            #
+            # Пример NG=F (инцидент 23.04.2026):
+            #   TP=17pip, slippage=17pip (100% TP) → GUARD срабатывает
+            #   TP=17pip, slippage=5pip  (29% TP)  → пропускаем (R:R~1.7)
+            #
+            # Преимущество перед static-лимитом: адаптация к конкретной
+            # сделке. Узкая цель (5 pip ORB) допустит 1.5 pip slippage,
+            # широкая (30 pip outsiders) — 9 pip. Нет «дырок», когда static
+            # лимит больше самого TP.
+            #
+            # Fallback на static max_slippage_pips если tp_distance не задан
+            # (редкий кейс — на случай отсутствующей tp-логики у стратегии).
             slippage_pips = 0.0
             if pos_id and fill_price > 0 and entry_price_hint > 0:
                 from fx_pro_bot.config.settings import (
-                    max_slippage_pips as _max_slip,
+                    max_slippage_pips as _max_slip_static,
                     pip_size as _pip_size,
                 )
                 ps = _pip_size(yf_symbol)
                 slippage_pips = abs(fill_price - entry_price_hint) / ps if ps > 0 else 0.0
-                max_slip = _max_slip(yf_symbol)
+
+                if tp_distance and tp_distance > 0 and ps > 0:
+                    tp_pips = tp_distance / ps
+                    max_slip = tp_pips * 0.30
+                    slip_source = "dyn(30% TP)"
+                else:
+                    max_slip = _max_slip_static(yf_symbol)
+                    slip_source = "static"
+
                 if slippage_pips > max_slip:
                     log.warning(
-                        "cTrader SLIPPAGE GUARD: %s %s #%d strat=%.5f fill=%.5f slip=%.1fpip > max %.1fpip → закрываем",
+                        "cTrader SLIPPAGE GUARD: %s %s #%d strat=%.5f fill=%.5f slip=%.1fpip > max %.1fpip [%s] → закрываем",
                         yf_symbol, direction.upper(), pos_id,
                         entry_price_hint, fill_price, slippage_pips, max_slip,
+                        slip_source,
                     )
                     try:
                         self.close_position(pos_id, volume)

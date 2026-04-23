@@ -237,24 +237,23 @@ def spread_cost_pips(symbol: str) -> float:
 
 # Slippage guard
 #
-# Максимальное допустимое проскальзывание между strategic price (цена в
-# момент сигнала) и реальной fill price от cTrader. Если превышено —
-# позиция закрывается немедленно (мелкий минус от spread, но защита от
-# плохого R:R).
+# Максимальное допустимое проскальзывание (fallback для случая, когда
+# tp_distance недоступен). Основной механизм — динамический: 30% от
+# tp_distance текущей сделки (см. executor.open_position). Эта функция
+# используется только если стратегия не передала tp_distance.
 #
 # Инцидент 23.04.2026: NG=F LONG #149970122 — strategic 2.891, fill 2.908,
 # slippage 17 pip. Стратегия планировала R:R 2:1 (риск 7pip, цель 17pip).
 # Реальный R:R стал 0.65 (риск 24pip, цель 17pip = отрицательный expectancy).
 #
-# Значения подобраны как ~⅓ типичного SL-distance для данного класса,
-# чтобы проскальзывание не уносило больше трети «боковой дистанции»:
+# Значения подобраны как ~⅓ типичного SL-distance для данного класса:
 # - FX major (EURUSD, GBPUSD): SL обычно 15-25pip → max slip 5pip
 # - JPY pairs: SL 20-30pip (в pip=0.01) → 5pip
 # - Commodities: SL 30-70 pip (pip=0.001/0.01) → 10pip
 # - Indices (ES/NQ): SL 15-30pt → 5pt
 # - Crypto: SL 0.5-1% → 20pip
 def max_slippage_pips(symbol: str) -> float:
-    """Максимальное проскальзывание в pip для инструмента."""
+    """Fallback max slippage в pip. Используется когда tp_distance=None."""
     if symbol.endswith("-USD"):  # crypto
         return 20.0
     if symbol in ("ES=F", "NQ=F", "ZN=F"):  # indices/bonds

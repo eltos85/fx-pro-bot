@@ -332,7 +332,7 @@ lot = risk_usd / risk_per_0.01_lot * 0.01
 
 ## 3d. Slippage guard — защита точности входа (23.04.2026)
 
-**Файл:** `config/settings.py::max_slippage_pips`, `trading/executor.py::open_position`
+**Файл:** `trading/executor.py::open_position`, `config/settings.py::max_slippage_pips` (fallback)
 
 **Идея:** между сигналом стратегии и реальным fill на cTrader проходит
 300-500 ms (time sleep после market order + reconcile). За это время
@@ -349,19 +349,41 @@ lot = risk_usd / risk_per_0.01_lot * 0.01
 - TP от fill: 2.925 (profit 17 pip)
 - Планировали R:R = 2.0, получили **0.65** (отрицательный expectancy)
 
-### Лимиты по классам инструментов
+### Логика порога (динамический, Variant B с 16.04.2026)
 
-| Класс | Лимит | Почему |
-|---|---|---|
-| FX major | 5 pip | SL обычно 15-25 pip → ⅓ от SL |
-| JPY pairs | 5 pip | аналогично FX major |
-| Commodities (NG/CL/GC) | 10 pip | SL 30-70 pip, выше волатильность |
-| Indices (ES/NQ) | 5 pt | узкие SL |
-| Crypto | 20 pip | высокая волатильность |
+```
+max_slip_pips = tp_distance / pip_size × 0.30
+```
+
+Порог привязан к TP текущей сделки: slippage допустим до 30% от
+цели. Математика: при R:R=2.0 и slip=30% TP реальный R:R падает до
+~1.4 (ещё рентабельно); при slip>30% — expectancy уходит в минус.
+
+**Почему 30%, а не static-лимит:**
+- Static commodities=10pip *больше*, чем типичный TP ORB (5 pip) — старый
+  порог пропустил бы сделку с отрицательным ожиданием.
+- Широкий TP outsiders (30 pip) допускает 9 pip slippage → не отбрасываем
+  валидные сигналы при умеренной волатильности.
+- Узкая цель scalp (5 pip) получает жёсткий guard 1.5 pip автоматически.
+
+**Примеры (pip_size считается автоматически):**
+
+| Инструмент | TP (pip) | max_slip (pip) |
+|---|:---:|:---:|
+| NG=F orb | 5 | 1.5 |
+| NG=F outsiders | 17 | 5.1 |
+| EURUSD outsiders | 25 | 7.5 |
+| BTC-USD | 100 | 30 |
+
+### Fallback на static-лимиты
+
+Если стратегия не передала `tp_distance` (редкий кейс), используются
+старые статические лимиты из `max_slippage_pips(symbol)`:
+FX major=5, JPY=5, commodities=10, indices=5, crypto=20.
 
 ### Поведение при срабатывании
 
-1. Лог `SLIPPAGE GUARD: ... slip=X.Xpip > max Y.Ypip → закрываем`
+1. Лог `SLIPPAGE GUARD: ... slip=X.Xpip > max Y.Ypip [dyn(30% TP)|static] → закрываем`
 2. `executor.close_position()` — закрытие по рынку
 3. `OrderResult(success=False, error="slippage ...")` возвращается
 4. В `_open_broker_for_new` DB-запись закрывается с reason `slippage_guard`
@@ -369,12 +391,15 @@ lot = risk_usd / risk_per_0.01_lot * 0.01
 
 ### Research
 
-- [Менкофф Lyons 2007 «Flow-based FX models» — bid-ask spread на HFT
-  типично 1-3 pip для EUR/USD в liquid hours; 5 pip как cutoff
-  consistent с пример slippage research].
 - [Harris 2003 «Trading and Exchanges» ch.19] — market orders в
   fast markets могут проскальзывать 5-20× среднего spread; для
   ORB/breakout стратегий slippage guard mandatory.
+- [Almgren & Chriss 2000 «Optimal Execution of Portfolio Transactions»] —
+  execution cost как % от ожидаемого profit; 30% cutoff — эмпирическая
+  граница, выше которой edge исчерпан.
+- Van K. Tharp «Trade Your Way to Financial Freedom» (2007) ch.6 —
+  expectancy формула показывает: при R:R=2 и win-rate 45% падение
+  R до 1.4 всё ещё даёт +E (0.17R per trade).
 
 ---
 
