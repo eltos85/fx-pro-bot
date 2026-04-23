@@ -5,8 +5,9 @@ alwaysApply: true
 
 # Статистика: точка отсчёта
 
-Статистика по стратегиям считается **с 23.04.2026 после деплоя коммита
-`6bbb15d`** — откат overfit параметров outsiders к research baseline:
+Статистика по стратегиям считается **с 23.04.2026 07:31 UTC** (commit
+`6bbb15d`, деплой на VPS) — откат overfit параметров outsiders к research
+baseline:
 RSI 10/90 → 25/75, BB 3σ → 2σ, удалён `atr_spike` setup.
 Параметры были выставлены 02.04.2026 (commit `ce45440`) на paper trading
 и нарушали `sample-size.mdc` (≥100 сделок) и `stats-baseline.mdc`
@@ -29,8 +30,8 @@ outsiders сделок 22-23.04 (NET −$8.22, 19.5 ч) из `atr_spike`; RSI 10
   `OUTSIDERS_MODE=confirmed` как default.
 - **22.04.2026 04:36 UTC** — правки на выборке без HTF (коммит `0c8c758`):
   USDJPY exclude, News Fade session filter, NY close cutoff 21:00 UTC.
-- **23.04.2026 (commit `6bbb15d`)** — **текущий baseline.** Откат overfit
-  параметров outsiders к research baseline:
+- **23.04.2026 07:31 UTC (commit `6bbb15d`)** — **текущий baseline.**
+  Откат overfit параметров outsiders к research baseline:
   - **RSI 10/90 → 25/75** ([Chen, Yu & Wang 2024](https://www.sciencedirect.com/science/article/pii/S0169207022001273)
     для FX; Wilder 1978 canonical 30/70). 10/90 для RSI(14) — overfit из
     paper trading (commit `ce45440` 02.04, до демо).
