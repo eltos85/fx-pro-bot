@@ -31,6 +31,7 @@ from fx_pro_bot.strategies.shadow import ShadowTracker
 from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
 from fx_pro_bot.trading.symbols import SymbolCache
+from fx_pro_bot.strategies.scalping.gold_orb import GoldOrbStrategy
 from fx_pro_bot.strategies.scalping.session_orb import SessionOrbStrategy
 from fx_pro_bot.strategies.scalping.stat_arb import StatArbStrategy
 from fx_pro_bot.strategies.scalping.vwap_reversion import VwapReversionStrategy
@@ -322,12 +323,25 @@ def run_advisor() -> None:
         SessionOrbStrategy(store, max_positions=settings.scalping_max_positions)
         if settings.scalping_orb_enabled else None
     )
+    gold_orb_strat = (
+        GoldOrbStrategy(
+            store,
+            max_positions=2,
+            max_per_instrument=1,
+            shadow=settings.scalping_gold_orb_shadow,
+        )
+        if settings.scalping_gold_orb_enabled else None
+    )
 
     cycle_count = 0
 
     executor, killswitch = _init_trading(settings, store)
 
-    scalp_names = [n for n, s in [("VWAP", vwap_strat), ("StatArb", statarb_strat), ("ORB", orb_strat)] if s]
+    scalp_names = [n for n, s in [
+        ("VWAP", vwap_strat), ("StatArb", statarb_strat),
+        ("ORB", orb_strat),
+        (f"GoldORB{'[shadow]' if settings.scalping_gold_orb_shadow else ''}", gold_orb_strat),
+    ] if s]
     log.info(
         "Запуск v0.8: ансамбль + Leaders + Outsiders(%s) + Shadow + Scalping(%s)%s, "
         "%d инструментов, цикл %d сек",
@@ -352,6 +366,7 @@ def run_advisor() -> None:
                 vwap_strat=vwap_strat,
                 statarb_strat=statarb_strat,
                 orb_strat=orb_strat,
+                gold_orb_strat=gold_orb_strat,
             )
             cycle_count += 1
         except KeyboardInterrupt:
@@ -381,6 +396,7 @@ def _run_cycle(
     vwap_strat: VwapReversionStrategy | None = None,
     statarb_strat: StatArbStrategy | None = None,
     orb_strat: SessionOrbStrategy | None = None,
+    gold_orb_strat: GoldOrbStrategy | None = None,
 ) -> None:
     bar_fetcher = _make_bar_fetcher(executor)
 
@@ -400,7 +416,9 @@ def _run_cycle(
         if len(r.bars) > 14:
             atrs[r.symbol] = _atr(r.bars)
 
-    if not active:
+    if not settings.ensemble_enabled:
+        log.info("Ансамбль: отключён (ENSEMBLE_ENABLED=false)")
+    elif not active:
         log.info("Ансамбль: нет согласия")
     else:
         ensemble_before_ids = {p.id for p in store.get_open_positions()}
@@ -526,7 +544,7 @@ def _run_cycle(
             log.exception("Ошибка Outsiders")
 
     # 3b. Scalping strategies (отдельный bars_map, чтобы не затрагивать основные стратегии)
-    if vwap_strat or statarb_strat or orb_strat:
+    if vwap_strat or statarb_strat or orb_strat or gold_orb_strat:
         log.info("── Скальпинг ──")
         try:
             scalping_bars = dict(bars_map)
@@ -570,6 +588,18 @@ def _run_cycle(
                 o_opened = orb_strat.process_signals(o_sigs, scalping_prices) if o_sigs else 0
                 _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
                 log.info("  ORB: %d сигналов, %d открыто", len(o_sigs), o_opened)
+
+            if gold_orb_strat:
+                g_sigs = gold_orb_strat.scan(scalping_bars, scalping_prices)
+                before_ids = {p.id for p in store.get_open_positions()}
+                g_opened = gold_orb_strat.process_signals(g_sigs, scalping_prices) if g_sigs else 0
+                if not gold_orb_strat._shadow:
+                    _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
+                log.info(
+                    "  Gold-ORB: %d \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432, %d %s",
+                    len(g_sigs), g_opened,
+                    "shadow-logged" if gold_orb_strat._shadow else "\u043e\u0442\u043a\u0440\u044b\u0442\u043e",
+                )
         except Exception:
             log.exception("Ошибка скальпинг-стратегий")
 
@@ -772,15 +802,21 @@ def _calc_tp_distance(
     from fx_pro_bot.strategies.monitor import (
         CRYPTO_SCALP_TP_ATR_MULT, CRYPTO_SCALP_TP_MIN_PCT,
     )
+    from fx_pro_bot.strategies.scalping.gold_orb import GOLD_ORB_TP_ATR_MULT
     from fx_pro_bot.strategies.scalping.session_orb import ORB_TP_ATR_MULT
-    scalping = ("vwap_reversion", "stat_arb", "session_orb")
+    scalping = ("vwap_reversion", "stat_arb", "session_orb", "gold_orb")
     if strategy in scalping:
         if is_crypto(instrument) and entry_price > 0:
             atr_tp = CRYPTO_SCALP_TP_ATR_MULT * atr if atr > 0 else 0.0
             pct_tp = entry_price * CRYPTO_SCALP_TP_MIN_PCT
             return max(atr_tp, pct_tp)
-        # session_orb — breakout strategy, нужен TP ≥ 2R. vwap/stat_arb — mean-revert, 1.5×ATR.
-        tp_mult = ORB_TP_ATR_MULT if strategy == "session_orb" else SCALPING_TP_ATR_MULT
+        # session_orb/gold_orb — breakout, TP ≥ 2R. vwap/stat_arb — mean-rev, 1.5×ATR.
+        if strategy == "session_orb":
+            tp_mult = ORB_TP_ATR_MULT
+        elif strategy == "gold_orb":
+            tp_mult = GOLD_ORB_TP_ATR_MULT
+        else:
+            tp_mult = SCALPING_TP_ATR_MULT
         atr_tp = tp_mult * atr if atr > 0 else 0.0
         fixed_tp = SCALPING_TP_PIPS * ps
         commission_pips = broker_commission_usd() / pip_value_usd(instrument) if pip_value_usd(instrument) > 0 else 1.0
@@ -1086,7 +1122,7 @@ def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, floa
             else (pos.entry_price - pos.peak_price) / ps
         )
 
-        scalping = ("vwap_reversion", "stat_arb", "session_orb")
+        scalping = ("vwap_reversion", "stat_arb", "session_orb", "gold_orb")
         if pos.strategy in scalping and peak_pips >= SCALPING_TRAIL_TRIGGER_PIPS:
             trail_dist = SCALPING_TRAIL_DISTANCE_PIPS * ps
         elif pos.strategy in ("outsiders", "ensemble"):

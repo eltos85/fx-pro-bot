@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
+from fx_pro_bot.strategies.scalping.gold_orb import GOLD_ORB_TP_ATR_MULT
 from fx_pro_bot.strategies.scalping.session_orb import ORB_TP_ATR_MULT
 
 log = logging.getLogger(__name__)
@@ -168,7 +169,7 @@ class PositionMonitor:
         if pos.strategy == "leaders" and age_hours >= LEADERS_HARD_STOP_HOURS:
             return "leaders_time_7d"
 
-        scalping = ("vwap_reversion", "stat_arb", "session_orb")
+        scalping = ("vwap_reversion", "stat_arb", "session_orb", "gold_orb")
         if pos.strategy in scalping:
             if is_crypto(pos.instrument) and pos.entry_price > 0:
                 pct_move = (price - pos.entry_price) / pos.entry_price if pos.direction == "long" \
@@ -193,6 +194,9 @@ class PositionMonitor:
                 # vwap/stat_arb — mean-reversion, быстрый TP = 1.5 ATR ОК.
                 if pos.strategy == "session_orb":
                     tp_mult = ORB_TP_ATR_MULT
+                elif pos.strategy == "gold_orb":
+                    # gold_orb: TP = 3×ATR (R:R=2), доказано на 90d backtest
+                    tp_mult = GOLD_ORB_TP_ATR_MULT
                 else:
                     tp_mult = SCALPING_TP_ATR_MULT
                 scalp_tp = max(tp_mult * atr_pips_sc, SCALPING_TP_PIPS)

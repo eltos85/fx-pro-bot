@@ -6,6 +6,84 @@
 
 ## 2026-04-24
 
+### feat(strategies): отключены все старые live-стратегии, gold_orb → LIVE
+`<pending>`
+
+После 90d backtest (см. ниже) подтверждено: единственная прибыльная
+стратегия на FxPro за 90d — `gold_orb` (XAU/USD, +6146 pips). Все остальные
+убыточны или нерепрезентативны:
+
+| Стратегия | 90d Net (pips) | Статус |
+|---|---|---|
+| `session_orb` | **−4952** | отключено |
+| `vwap_reversion` | **−385** | отключено |
+| `stat_arb` | n=2, не показателен | отключено |
+| `leaders` (COT copy) | не верифицирован | отключено |
+| `outsiders` (BB 2σ) | не верифицирован | отключено |
+| `ensemble` (5-голос) | не верифицирован | отключено |
+| `gold_orb` | **+6146** | LIVE |
+
+**Действия:**
+- Добавлен флаг `ENSEMBLE_ENABLED` (settings.py, default true) + guard
+  в `main.py` (логирует «Ансамбль: отключён» если false).
+- На VPS в `.env` выставлено:
+  - `LEADERS_ENABLED=false`
+  - `OUTSIDERS_ENABLED=false`
+  - `ENSEMBLE_ENABLED=false`
+  - `SCALPING_VWAP_ENABLED=false`
+  - `SCALPING_STATARB_ENABLED=false`
+  - `SCALPING_ORB_ENABLED=false`
+  - `SCALPING_GOLD_ORB_ENABLED=true`
+  - `SCALPING_GOLD_ORB_SHADOW=false` (LIVE)
+
+Уже открытые позиции продолжают управляться monitor-ом до закрытия по
+SL/TP/trail. Новые входы — только `gold_orb` по XAU в London/NY сессиях.
+
+**Файлы:** `src/fx_pro_bot/config/settings.py`, `src/fx_pro_bot/app/main.py`.
+
+### feat: Gold ORB Isolated — новая стратегия после 90d backtest
+`<pending>`
+
+Полный процесс аналогично Bybit (`BYBIT_AB_TEST.md`): data → candidates →
+validate → choose winner → implement. Детали и таблицы —
+`STRATEGIES.md §3b-bis`.
+
+**Процесс:**
+1. 90d M5 OHLCV скачано с cTrader (14 инструментов, 230k баров)
+2. 3 стратегии-кандидата: Gold ORB, Asian Breakout, BB Reversion H1
+3. Итерация v2 (ослабили фильтры): Gold ORB дал Net +6146 pips (n=114, PF 1.67)
+4. Walk-forward half-split: обе половины + (T3 лучше H1, нет decay)
+5. Walk-forward third-split: все 3 трети + (T3 лучшая: +2575)
+6. Robustness grid (9 комбинаций SL/TP/ADX): все +
+
+**Победитель — gold_orb (XAU/USD):**
+- SL 1.5×ATR, TP 3.0×ATR (R:R=2)
+- Touch-break вход (без confirm-bar — ключевое отличие от session_orb)
+- Без ADX/volume фильтров (Gold торгуется на news)
+- EMA(50) slope filter от contra-trend входов
+- London (08:15-12:00) + NY (14:45-17:00) sessions
+- Max 2 позиции/день (1 per session)
+
+**Внедрение:**
+- Новая стратегия в `strategies/scalping/gold_orb.py` (отдельно от session_orb)
+- Shadow-mode по умолчанию (`SCALPING_GOLD_ORB_SHADOW=true`)
+- TP mult в `monitor.py` и `main.py` = `GOLD_ORB_TP_ATR_MULT` (3.0)
+- 10 unit-тестов (`TestGoldOrbStrategy`)
+- Данные backtest сохранены в `data/fxpro_klines/*.csv` (11 MB, 14 symbols)
+
+**Отчёт и параметры:** `STRATEGIES.md` §3b-bis «Gold ORB Isolated» —
+walk-forward таблицы, robustness grid, обоснование выбора.
+
+**Файлы:**
+- `src/fx_pro_bot/strategies/scalping/gold_orb.py` (новый)
+- `src/fx_pro_bot/strategies/monitor.py` (добавлен TP-mult для gold_orb)
+- `src/fx_pro_bot/app/main.py` (регистрация стратегии + scan cycle)
+- `src/fx_pro_bot/config/settings.py` (SCALPING_GOLD_ORB_* settings)
+- `scripts/backtest_fxpro_candidates.py` (новый, backtest 3 стратегий)
+- `scripts/backtest_gold_orb_robustness.py` (новый, robustness grid)
+- `tests/test_scalping.py` (10 новых тестов)
+- `STRATEGIES.md` (раздел 3b-bis)
+
 ### chore(rules): аудит .cursor/rules на пересечение ботов
 `4300adc`
 

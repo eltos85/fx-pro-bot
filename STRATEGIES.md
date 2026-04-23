@@ -276,8 +276,127 @@ RISK_PER_TRADE_USD=15.0
 SCALPING_VWAP_ENABLED=true
 SCALPING_STATARB_ENABLED=true
 SCALPING_ORB_ENABLED=true
+SCALPING_GOLD_ORB_ENABLED=true
+SCALPING_GOLD_ORB_SHADOW=true
 SCALPING_MAX_POSITIONS=10
 ```
+
+---
+
+## 3b-bis. Gold ORB Isolated — новая стратегия на XAU/USD (24.04.2026)
+
+**Файл:** `strategies/scalping/gold_orb.py`
+**Обоснование разработки:** полный research-процесс аналогично Bybit
+(см. `BYBIT_AB_TEST.md`) — 90-дневный backtest 3 стратегий-кандидатов
+на данных cTrader (14 инструментов, 230k баров M5), выбор победителя
+по walk-forward + robustness. Данные и скрипты: `data/fxpro_klines/`,
+`scripts/backtest_fxpro_candidates.py`, `scripts/fetch_fxpro_history.py`.
+
+### Параметры (финальные)
+
+| Параметр | Значение | Источник |
+|----------|----------|----------|
+| Инструмент | **GC=F** (XAU/USD) | единственный с edge, остальные 13 тонут в шуме |
+| Box bars | **3 × M5** (15 мин) | стандарт ORB [John Carter «Mastering the Trade» ch.7] |
+| Entry | **touch-break** (`high > box_high` или `low < box_low`) | без wait-for-close |
+| SL | **1.5 × ATR(14)** | robustness grid: 1.5-2.0 × ATR равнозначны |
+| TP | **3.0 × ATR(14)** | R:R=2; TP=2.0 даёт +6339, TP=4.0 +4729 |
+| EMA-slope filter | EMA(50) M5, slope ≥ 0 для LONG | защита от contra-trend |
+| ADX filter | **нет** | robustness: ADX<40 +7967, ADX<25 +5673 — Gold в тренде тоже торгуется |
+| Volume filter | **нет** | M5 volume на Gold (OTC) ненадёжен |
+| Sessions | London 08:15-12:00 UTC + NY 14:45-17:00 UTC | макс ликвидность, news windows |
+| Max positions | 2 (1 per session × 2 sessions) | 1 сигнал на сессию |
+| Trail trigger | 0.6 × ATR (общий scalping) | |
+
+### Ключевые отличия от `session_orb`
+
+`session_orb` (торгует все FX+commodities) строг к фильтрам: confirm bar,
+ADX<25, volume ≥ 1.3×avg, EMA-slope. На Gold эти фильтры РЕЖУТ edge:
+- Gold движется на news/fundamentals, а не на volume/ADX
+- confirm bar (M5 close за коробкой) теряет slingshot-движение
+  после пробоя (часто цена сразу откатывает на уровень пробоя)
+
+`gold_orb` оставляет только EMA-slope filter (contra-trend защита),
+остальное убрано.
+
+### Backtest — итоговые метрики (90d M5)
+
+| Стратегия | n | WR% | Gross | **Net** | Exp | PF | Sharpe | MaxDD | PD% |
+|-----------|---|-----|-------|---------|-----|-----|--------|-------|-----|
+| **gold_orb_iso** (winner) | **114** | 42.1 | 6624.7 | **+6145.9** | 0.39 | 1.67 | 3.16 | 2072 | 60.3 |
+| bb_reversion_h1 | 50 | 58.0 | 615.2 | +507.3 | 0.38 | 1.89 | 4.55 | 83 | 54.8 |
+| asia_breakout | 12 | 50.0 | 288.4 | +262.6 | 1.75 | 4.50 | 8.88 | 29 | 55.6 |
+
+### Walk-forward validation
+
+**Half-split (45d × 2):**
+
+| Стратегия | H1 n/WR/Net/PF | H2 n/WR/Net/PF |
+|-----------|----------------|----------------|
+| **gold_orb_iso** | 52 / 38.5 / **+2263** / 1.45 | 62 / 45.2 / **+3883** / 1.92 (H2 лучше H1) |
+| bb_reversion_h1 | 29 / 62.1 / +481 / 2.85 | 24 / 54.2 / +132 / 1.41 (edge-decay) |
+| asia_breakout | 5 / 40.0 / +109 / 4.32 | 7 / 57.1 / +153 / 4.65 (n мало) |
+
+**Third-split (30d × 3):**
+
+| Стратегия | T1 | T2 | T3 |
+|-----------|----|----|----|
+| **gold_orb_iso** | +2397 (PF 1.81) | +1298 (PF 1.35) | **+2575** (PF 2.06) |
+| bb_reversion_h1 | +267 | +340 | +21 (breakeven) |
+| asia_breakout | +17 | +235 | +11 (1-5 trades/треть) |
+
+Gold ORB — **все трети прибыльны, T3 лучшая** → нет edge-decay.
+
+### Robustness grid (Gold ORB, 9 комбинаций)
+
+| SL × TP × ADX filter | n | Net pips |
+|----------------------|---|----------|
+| 1.0 × 2.0 × —        | 114 | +5372.6 |
+| 1.0 × 3.0 × —        | 114 | +2627.7 (узкий SL — слабее) |
+| 1.5 × 2.0 × —        | 114 | +6339.4 |
+| **1.5 × 3.0 × —** (baseline) | 114 | **+6145.9** |
+| 1.5 × 4.0 × —        | 114 | +4728.7 |
+| 2.0 × 3.0 × —        | 114 | +6317.9 |
+| 2.0 × 4.0 × —        | 114 | +4584.1 |
+| 1.5 × 3.0 × ADX25    | 98  | +5673.2 |
+| **1.5 × 3.0 × ADX40** | 112 | **+7967.1** (потенциал +30%) |
+
+**Все 9 комбинаций положительны** → edge robust, не overfitted.
+ADX<40 soft-filter — кандидат на следующий раунд оптимизации.
+
+### Почему выбран именно gold_orb
+
+| Критерий | Gold ORB | BB Rev | Asia BO |
+|----------|----------|--------|---------|
+| Sample size (n≥50) | 114 ✅ | 50 ✅ | 12 ❌ |
+| Half-split (обе +) | ++ ✅ | + (decay) | + (n мало) |
+| Third-split (все 3 +) | +++ ✅ | ++/+/≈0 | 1/3/1 |
+| Net pips 90d | **+6146** | +507 | +263 |
+| Robustness grid | 9/9 ✅ | — | — |
+
+**Не выбран bb_reversion_h1:** PF падает с 2.85 (H1) до 1.41 (H2),
+T3 почти breakeven. Чувствителен к макро-режиму.
+
+**Не выбран asia_breakout:** n=12 за 90 дней, 0-5 в каждой трети —
+статистически недостоверно.
+
+### Shadow mode (safety rollout)
+
+По умолчанию `SCALPING_GOLD_ORB_SHADOW=true` — сигналы только логируются,
+позиции не открываются. Цель — 3-7 дней наблюдений, затем переключение
+на live через `.env`:
+
+```
+SCALPING_GOLD_ORB_SHADOW=false
+```
+
+### Почему работает (гипотеза)
+
+1. Gold = главный safe-haven / inflation-hedge → сильные psychological levels
+2. London 08:15 = ~30 мин перед US economic calendar (13:30 UTC) → pre-news positioning
+3. NY 14:45 = сразу после US GDP/CPI/NFP часто = news-driven breakouts
+4. R:R=2 + WR=42% даёт Expectancy +0.39R (baseline edge)
+5. Touch-break vs confirm-bar: на M5 Gold confirm-bar теряет 30-40% движения
 
 ---
 

@@ -17,3 +17,4 @@ dist/
 /data/backtest_*.csv
 /data/backtest_*.txt
 /data/backtest_*.log
+/data/fxpro_klines/
