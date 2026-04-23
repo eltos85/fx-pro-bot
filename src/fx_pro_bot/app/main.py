@@ -985,9 +985,15 @@ def _ensure_broker_sl_tp(
                 new_sl = (entry - sl_dist) if is_buy else (entry + sl_dist)
 
             cur_price = (prices or {}).get(db_pos.instrument, 0.0)
-            spread_buf = spread_cost_pips(db_pos.instrument) * ps
             if cur_price > 0:
-                sl_past = (is_buy and new_sl > cur_price - spread_buf) or (not is_buy and new_sl < cur_price + spread_buf)
+                # SL пройден — строгая проверка без spread buffer.
+                # Раньше был spread_buf = spread_cost_pips × pip_size, но для
+                # commodities с малыми SL distance (NG=F: SL 0.004, spread 5×
+                # 0.001 = 0.005) буфер превышал SL → ложный FORCE CLOSE
+                # даже для корректных позиций (23.04.2026, -$114 за 1ч).
+                sl_past = (is_buy and new_sl >= cur_price) or (
+                    not is_buy and new_sl <= cur_price
+                )
                 if sl_past:
                     log.warning(
                         "  FORCE CLOSE: %s #%d — SL %.5f уже пройден (price=%.5f)",

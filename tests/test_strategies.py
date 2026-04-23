@@ -278,16 +278,16 @@ def test_filter_ok(tmp_path) -> None:
 # ── Position sizing (ATR-scaled) ─────────────────────────────
 
 
-def test_calc_lot_size_eurusd_15usd_risk() -> None:
-    """При $15 риска и SL=15 pips на EURUSD: lot ≈ 0.10.
+def test_calc_lot_size_eurusd_formula() -> None:
+    """Проверяем формулу на SL где cap не мешает.
 
-    pip_value_usd(EURUSD, 0.01) = $0.10 → per 0.01 lot: 15 pips × $0.10 = $1.50.
-    lot = $15 / $1.50 × 0.01 = 0.10.
+    pip_value_usd(EURUSD, 0.01) = $0.10 → per 0.01 lot: 50 pips × $0.10 = $5.
+    lot = $15 / $5 × 0.01 = 0.03 (в пределах MAX_LOT_SIZE=0.05).
     """
     from fx_pro_bot.config.settings import calc_lot_size
-    sl_dist = 0.0015  # 15 pips для EURUSD (pip=0.0001)
+    sl_dist = 0.0050  # 50 pips для EURUSD
     lot = calc_lot_size("EURUSD=X", sl_dist, risk_usd=15.0)
-    assert 0.09 <= lot <= 0.11
+    assert 0.02 <= lot <= 0.04
 
 
 def test_calc_lot_size_zero_sl_fallback() -> None:

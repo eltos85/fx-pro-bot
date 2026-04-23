@@ -6,6 +6,55 @@
 
 ## 2026-04-23
 
+### fix(critical): ложный FORCE CLOSE на commodities + sanity check amend SL/TP + MAX_LOT 0.20→0.05
+`TBD`
+
+**Инцидент:** 23.04.2026 09:28-10:33 UTC — после деплоя `78bb554` за 1 час
+потеряно $128 (с $256 до $128, -50% депозита за час). Причина — связка
+из двух багов которая активировалась только при больших лотах (MAX_LOT=0.20):
+
+1. **Ложный FORCE CLOSE** (`app/main.py::_ensure_broker_sl_tp`):
+   `spread_buf = spread_cost_pips × pip_size`. Для NG=F: `5 × 0.001 = 0.005`,
+   SL-distance типичный 0.004. Буфер **больше** SL → условие
+   `new_sl > cur_price - spread_buf` ложно срабатывало даже для здоровых
+   позиций. Бот сам закрывал позицию по текущей цене (проскальзывание).
+   Наблюдалось на всех commodities (digits=3) и всех фьючерсах.
+   **Fix:** убрать spread_buf из проверки, использовать строгое
+   `new_sl >= cur_price` (LONG) / `new_sl <= cur_price` (SHORT).
+
+2. **Amend SL/TP без проверки стороны** (`trading/executor.py::amend_sl_tp`):
+   В логах `TRADING_BAD_STOPS: SL for BUY position should be <= BID.
+   current BID: 2.88, SL: 2.895` — где-то прилетает SL с перевёрнутым
+   знаком. cTrader отклоняет, но позиция остаётся без SL.
+   **Fix:** `_validate_sl_tp_side()` — перед отправкой amend проверяет
+   через reconcile что LONG SL < price < TP (и наоборот для SHORT).
+   Нарушение = отказ, лог ERROR, возврат False.
+
+3. **MAX_LOT_SIZE 0.20 → 0.05** (защитка):
+   При MAX=0.20 × SL-bug = катастрофические убытки. При 0.05 максимум
+   $2-3 риска на сделку даже при багнутом SL (вместо $38 как на NG=F).
+   Вернём 0.20 после отладки ATR-sizing на реальной торговле.
+
+**Factual (cTrader API, get_deal_list):**
+- Окно ПОСЛЕ `78bb554` (09:28-10:33 UTC): 6 сделок, 0% WR, -$128.23.
+  sid=1118 (NG=F): 3 сделки × ~-$38 = -$114.
+- Окно ДО фиксов (22.04 00:00 - 23.04 07:00 UTC, 31 час): 55 сделок,
+  -$14.27 (обычная дисперсия при мелком лоте).
+- Баланс сейчас: $128.32 (из $1500).
+
+**Файлы:**
+- `src/fx_pro_bot/app/main.py` (убран spread_buf в FORCE CLOSE)
+- `src/fx_pro_bot/trading/executor.py` (+ _validate_sl_tp_side)
+- `src/fx_pro_bot/config/settings.py` (MAX_LOT_SIZE 0.20→0.05)
+- `tests/test_strategies.py` (подогнан тест calc_lot_size под новый MAX)
+
+**Pending для разбора:**
+- Откуда amend SL=2.895 для NG=F LONG? Кандидаты: trailing в monitor.py,
+  или second amend из _ensure_broker_sl_tp с ATR-fallback. Нужно
+  дополнительно логировать source amend. Сейчас защищено sanity check.
+- Инструменты НЕ удалены — чиним баг, а не выключаем торговлю (по
+  запросу пользователя).
+
 ### feat(risk): ATR-scaled position sizing + лимиты 50→10, news фильтр блокирующий
 `78bb554`
 

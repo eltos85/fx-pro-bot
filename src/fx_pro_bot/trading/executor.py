@@ -277,6 +277,12 @@ class TradeExecutor:
         cTrader AmendPositionSLTPReq: если поле не задано, protobuf шлёт 0.0,
         что cTrader интерпретирует как «удалить». Поэтому перед amend всегда
         подтягиваем текущие SL/TP из reconcile и мержим с новыми значениями.
+
+        Sanity check (23.04.2026): для LONG SL должен быть ниже текущей
+        цены, для SHORT — выше. Симметрично для TP. Если нарушено —
+        отказываемся, чтобы не получить TRADING_BAD_STOPS и не оставить
+        позицию без уровней. Баг наблюдался на NG=F: amend пытался
+        поставить SL=2.895 для LONG при price=2.88.
         """
         try:
             cur_sl, cur_tp = self._get_broker_sl_tp(broker_position_id)
@@ -296,11 +302,77 @@ class TradeExecutor:
             sl_r = round(final_sl, digits) if final_sl is not None else None
             tp_r = round(final_tp, digits) if final_tp is not None else None
 
+            if not self._validate_sl_tp_side(broker_position_id, sl_r, tp_r):
+                return False
+
             self._client.amend_position_sl_tp(broker_position_id, sl_r, tp_r)
             return True
         except Exception as exc:
             log.error("Ошибка изменения SL/TP позиции %d: %s", broker_position_id, exc)
             return False
+
+    def _validate_sl_tp_side(
+        self,
+        broker_position_id: int,
+        sl_price: float | None,
+        tp_price: float | None,
+    ) -> bool:
+        """Проверить, что SL/TP стоят с правильной стороны от текущей цены.
+
+        LONG:  SL < current_price < TP
+        SHORT: TP < current_price < SL
+
+        Return False если нарушено — защита от TRADING_BAD_STOPS.
+        """
+        if sl_price is None and tp_price is None:
+            return True
+
+        try:
+            resp = self._client.reconcile()
+            for p in resp.position:
+                if p.positionId != broker_position_id:
+                    continue
+
+                price = p.price if hasattr(p, "price") and p.price else 0.0
+                td = p.tradeData if hasattr(p, "tradeData") else None
+                is_buy = td.tradeSide == 1 if td else True
+
+                if price <= 0:
+                    return True
+
+                if sl_price is not None:
+                    if is_buy and sl_price >= price:
+                        log.error(
+                            "  amend REJECTED #%d: LONG SL %.5f >= price %.5f",
+                            broker_position_id, sl_price, price,
+                        )
+                        return False
+                    if not is_buy and sl_price <= price:
+                        log.error(
+                            "  amend REJECTED #%d: SHORT SL %.5f <= price %.5f",
+                            broker_position_id, sl_price, price,
+                        )
+                        return False
+
+                if tp_price is not None:
+                    if is_buy and tp_price <= price:
+                        log.error(
+                            "  amend REJECTED #%d: LONG TP %.5f <= price %.5f",
+                            broker_position_id, tp_price, price,
+                        )
+                        return False
+                    if not is_buy and tp_price >= price:
+                        log.error(
+                            "  amend REJECTED #%d: SHORT TP %.5f >= price %.5f",
+                            broker_position_id, tp_price, price,
+                        )
+                        return False
+
+                return True
+        except Exception as exc:
+            log.debug("_validate_sl_tp_side %d failed: %s", broker_position_id, exc)
+
+        return True
 
     def _get_broker_sl_tp(self, position_id: int) -> tuple[float, float]:
         """Получить текущие (SL, TP) позиции из cTrader reconcile."""

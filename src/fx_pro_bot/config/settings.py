@@ -242,7 +242,11 @@ def spread_cost_pips(symbol: str) -> float:
 # Стандарт systematic trading — fixed fractional risk 0.5-1% на сделку.
 # При депозите $1500 → $15 = 1% per trade.
 MIN_LOT_SIZE = 0.01
-MAX_LOT_SIZE = 0.20  # предохранитель от overleveraged при очень tight SL
+# MAX снижен 0.20 → 0.05 после инцидента 23.04.2026 10:30 UTC: при MAX=0.20
+# и SL-bug на commodities (ложный FORCE CLOSE + amend с некорректным SL)
+# потеряно $128 за 1 час. Пока ATR-sizing не отработан в проде + SL-bug
+# не вылечен — cap держим низким. $1500 × 0.5% × 0.01/0.01 = $7.50 риск max.
+MAX_LOT_SIZE = 0.05
 
 
 def calc_lot_size(
