@@ -230,6 +230,13 @@ class Settings(BaseSettings):
     scalping_cof_symbols: str = Field(
         default="", validation_alias="BYBIT_BOT_SCALP_COF_SYMBOLS",
     )
+    # Verbose-режим для диагностики: при true включает DEBUG-логи ТОЛЬКО для
+    # модуля `crypto_overbought_fader`, показывая какой фильтр отсекает сигнал
+    # (NY/RSI/ATR%/VWAP/Turtle/HTF/ADX). Остальные модули остаются на INFO.
+    # Включать временно на первые дни после деплоя для отладки, затем выключать.
+    scalping_cof_verbose: bool = Field(
+        default=False, validation_alias="BYBIT_BOT_SCALP_COF_VERBOSE",
+    )
     # BTC нужен только как REFERENCE для BTC-Lead-Lag: грузим бары,
     # но в торговых стратегиях НЕ открываем позиции (убыточен в скальпе).
     leadlag_reference_symbol: str = Field(

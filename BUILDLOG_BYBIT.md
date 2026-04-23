@@ -2,6 +2,29 @@
 
 ## 2026-04-24
 
+### feat(cof): опциональный verbose-режим для диагностики фильтров
+`TBD`
+
+Добавлен флаг `BYBIT_BOT_SCALP_COF_VERBOSE` (default=false). При `true`
+включает DEBUG-логи **только** для модуля
+`bybit_bot.strategies.scalping.crypto_overbought_fader` — показывает
+какой из фильтров отсёк сигнал на каждом символе (NY-сессия / ATR% /
+ADX / RSI / VWAP-short / HTF-slope / Turtle-short).
+
+Остальные модули остаются на INFO — не зашумляем общий лог.
+
+Цель: первые 3–5 дней после включения COF убедиться что страта
+корректно сканит live-бары (а не пустой лог из-за бага). Потом флаг
+выключить.
+
+Оценка нагрузки: ~4500 DEBUG-строк/день (~0.9 MB) — в рамках
+существующего docker log driver cap (50 MB × 3 ротации), ротация
+теперь реже — раз в ~40 дней вместо ~6 месяцев. Не критично.
+
+**Файлы:** `src/bybit_bot/config/settings.py` (+`scalping_cof_verbose`),
+`src/bybit_bot/app/main.py` (селективный `setLevel(DEBUG)` после
+`basicConfig`), `docker-compose.yml` (+`BYBIT_BOT_SCALP_COF_VERBOSE`).
+
 ### chore(rules): аудит .cursor/rules на пересечение ботов
 `4300adc`
 

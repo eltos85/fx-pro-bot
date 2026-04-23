@@ -101,6 +101,12 @@ def run_bot() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    if settings.scalping_cof_verbose:
+        logging.getLogger(
+            "bybit_bot.strategies.scalping.crypto_overbought_fader"
+        ).setLevel(logging.DEBUG)
+        log.info("COF verbose: DEBUG-логи включены для crypto_overbought_fader")
+
     log.info("=" * 60)
     log.info("Bybit Crypto Bot запущен")
     log.info("Demo: %s | Category: %s", settings.demo, settings.category)

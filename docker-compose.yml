@@ -79,6 +79,9 @@ services:
       # Деплоим выключенной — включение требует ручного подтверждения.
       BYBIT_BOT_SCALP_COF_ENABLED: ${BYBIT_BOT_SCALP_COF_ENABLED:-false}
       BYBIT_BOT_SCALP_COF_SYMBOLS: ${BYBIT_BOT_SCALP_COF_SYMBOLS:-}
+      # Verbose-режим: включает DEBUG-логи ТОЛЬКО для crypto_overbought_fader
+      # (какой фильтр отсёк сигнал). Временный флаг для отладки, обычно false.
+      BYBIT_BOT_SCALP_COF_VERBOSE: ${BYBIT_BOT_SCALP_COF_VERBOSE:-false}
       # KillSwitch: на demo отключаем (demo equity $177k, 25% drawdown = $45k
       # триггерится от шума). На реале (account $500) включать обязательно.
       BYBIT_BOT_KS_ENABLED: ${BYBIT_BOT_KS_ENABLED:-true}
