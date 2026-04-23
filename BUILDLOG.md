@@ -6,6 +6,38 @@
 
 ## 2026-04-23
 
+### fix(root): не переустанавливать SL в amend если rel_sl уже в order
+`TBD`
+
+**Найдена корневая причина бага NG=F.** Детальные логи показали:
+
+```
+amend SEND: NG=F LONG entry=2.89400 sl=2.88900 tp=2.91100 sl_dist=0.00536
+AMEND wire: stopLoss=2.88900
+ERROR TRADING_BAD_STOPS: SL for BUY <= BID. current BID: 2.875, SL: 2.889
+```
+
+Что происходило:
+1. `send_new_order(..., relative_stop_loss=536)` — cTrader атомарно
+   ставит SL ниже fill price. Всё хорошо.
+2. Через 500ms ждём fill_price, делаем reconcile → получаем `price=2.894`
+   (цена позиции).
+3. Рассчитываем `amend_sl = 2.894 - 0.00536 = 2.889`.
+4. Но за эти 500ms **BID NG=F упал до 2.875**.
+5. Отправляем amend(stopLoss=2.889) → cTrader: «2.889 > 2.875 → BAD_STOPS».
+
+Фикс: если `relative_stop_loss` уже отправлен в `send_new_order`, SL в
+amend не трогаем (он УЖЕ стоит корректно от реальной fill price). Amend
+нужен только для TP (который cTrader не поддерживает в NewOrderReq для
+market-ордеров). Если TP тоже не нужен — amend пропускается совсем.
+
+Защитные проверки из `b6f099d` остаются:
+- `_validate_sl_tp_side` — если где-то в будущем SL всё же пересчитают.
+- Авто-close при FAILED amend.
+- MAX_LOT_SIZE=0.05.
+
+**Файлы:** `src/fx_pro_bot/trading/executor.py`
+
 ### fix(critical): авто-закрытие при неудачном amend + детальный лог wire
 `b6f099d`
 

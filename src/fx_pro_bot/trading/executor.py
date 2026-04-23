@@ -200,9 +200,27 @@ class TradeExecutor:
                         tp_price = price_for_amend + tp_distance if is_long else price_for_amend - tp_distance
                         amend_tp = round(tp_price, sym.digits)
 
-                    if sl_distance:
+                    # SL уже установлен атомарно через relative_stop_loss
+                    # в send_new_order — cTrader рассчитал его от реальной
+                    # fill price. В amend трогать SL НЕЛЬЗЯ: за 500ms между
+                    # fill и amend цена могла уйти, и SL от reconcile.price
+                    # окажется на неправильной стороне (пример NG=F 23.04:
+                    # entry=2.894, SL=2.889, реальный BID=2.875 → TRADING_BAD_STOPS).
+                    if sl_distance and not rel_sl:
                         sl_price = price_for_amend - sl_distance if is_long else price_for_amend + sl_distance
                         amend_sl = round(sl_price, sym.digits)
+
+                    if amend_sl is None and amend_tp is None:
+                        log.info(
+                            "cTrader: SL уже установлен в order, TP не нужен (pos %d)",
+                            pos_id,
+                        )
+                        return OrderResult(
+                            success=True,
+                            broker_position_id=pos_id,
+                            fill_price=fill_price or entry_price_hint,
+                            volume=volume,
+                        )
 
                     log.info(
                         "cTrader SL/TP amend SEND: pos %d %s entry=%.5f sl=%s tp=%s sl_dist=%.5f tp_dist=%.5f digits=%d",
