@@ -116,7 +116,7 @@ def run_bot() -> None:
 
     scalp_statarb = StatArbCryptoStrategy() if settings.scalping_statarb_enabled else None
     scalp_volume = VolumeSpikeStrategy() if settings.scalping_volume_enabled else None
-    scalp_orb = SessionOrbStrategy() if settings.scalping_orb_enabled else None
+    scalp_orb = _build_scalp_orb(settings) if settings.scalping_orb_enabled else None
     scalp_turtle = TurtleSoupStrategy() if settings.scalping_turtle_enabled else None
     scalp_leadlag = BtcLeadLagStrategy() if settings.scalping_leadlag_enabled else None
 
@@ -1019,6 +1019,27 @@ def _process_scalping(
             )
 
 
+def _parse_csv_env(value: str) -> set[str] | None:
+    """CSV-строка из env → set. Пустая строка → None (без ограничений)."""
+    cleaned = [v.strip() for v in value.split(",") if v.strip()]
+    return set(cleaned) if cleaned else None
+
+
+def _build_scalp_orb(settings: Settings) -> SessionOrbStrategy:
+    """SessionOrbStrategy с whitelist-фильтрами из env (backtest 90д 2026-04-23)."""
+    sessions = _parse_csv_env(settings.scalping_orb_sessions)
+    symbols = _parse_csv_env(settings.scalping_orb_symbols)
+    direction = settings.scalping_orb_direction.strip().lower() or None
+    if direction is not None and direction not in ("long", "short"):
+        log.warning("BYBIT_BOT_SCALP_ORB_DIRECTION=%r невалидно, игнорирую", direction)
+        direction = None
+    return SessionOrbStrategy(
+        allowed_sessions=sessions,
+        allowed_symbols=symbols,
+        allowed_direction=direction,
+    )
+
+
 def _log_scalping_config(settings: Settings) -> None:
     active = []
     if settings.scalping_vwap_enabled:
@@ -1030,7 +1051,15 @@ def _log_scalping_config(settings: Settings) -> None:
     if settings.scalping_volume_enabled:
         active.append("VolSpike")
     if settings.scalping_orb_enabled:
-        active.append("ORB")
+        # Показываем ORB-фильтры, если они заданы (backtest-обоснованные).
+        orb_parts = ["ORB"]
+        if settings.scalping_orb_sessions:
+            orb_parts.append(f"sess={settings.scalping_orb_sessions}")
+        if settings.scalping_orb_symbols:
+            orb_parts.append(f"syms={settings.scalping_orb_symbols}")
+        if settings.scalping_orb_direction:
+            orb_parts.append(f"dir={settings.scalping_orb_direction}")
+        active.append("/".join(orb_parts) if len(orb_parts) > 1 else "ORB")
     if settings.scalping_turtle_enabled:
         active.append("Turtle")
     if settings.scalping_leadlag_enabled:

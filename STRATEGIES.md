@@ -479,7 +479,7 @@ relative = Round(distance, symbol.Digits) * 100_000
 | VOLUME_MULT | 2.0× 20-bar avg | Granville volume confirmation |
 | Direction | Continuation (not fade) | HFT bias on positive lag |
 
-#### Session ORB 15m (Wave 4, не деплой)
+#### Session ORB 15m (единственная активная страта после backtest 2026-04-23)
 **Файл:** `session_orb.py`
 
 | Параметр | Значение | Research |
@@ -491,6 +491,26 @@ relative = Round(distance, symbol.Digits) * 100_000
 | ADX_MAX | 25 | Optional filter (FMZQuant: «VWAP/MACD optional toggles») |
 | SL / TP | 2.0 ATR / 2.0× box_range | ATR-based dynamic (FMZQuant) |
 | Сессии UTC | Asia 00-01, London 08-09, NY 14-15 | Ликвидные открытия трад. рынков |
+
+**Live-whitelist'ы (BYBIT_BOT_SCALP_ORB_* env в docker-compose), задаются по
+итогам backtest 90д 2026-04-23 (BUILDLOG_BYBIT.md, раздел «BACKTEST: все 6
+стратегий»):**
+
+| Env | Default | Обоснование |
+|-----|---------|-------------|
+| `BYBIT_BOT_SCALP_ORB_SESSIONS` | `london` | London n=118, PF 1.27, PnL +8.16%. NY n=137 убыточна (PF 0.73), Asia — 0 сигналов |
+| `BYBIT_BOT_SCALP_ORB_SYMBOLS` | `SOLUSDT,LINKUSDT,BNBUSDT` | Топ-3 по PnL на истории (+5.24, +4.79, +0.81). ADAUSDT/AVAXUSDT — хронический минус |
+| `BYBIT_BOT_SCALP_ORB_DIRECTION` | `long` | London/Long — лучший срез (PF 1.53, +7.18%). London/Short — близка к безубытку (PF 1.06) |
+
+Пустая строка в любой env-переменной = «без ограничений». Для экспериментов /
+A-B теста значения можно менять через `.env` на VPS без пересборки образа.
+
+**ПРИМЕЧАНИЕ.** Выборка по узкому срезу мала (n=54 сделки за 90 дней), формально
+ниже порога `sample-size.mdc` (≥100 сделок). Развёртывание одобрено пользователем
+явно (2026-04-23) как forward-тест гипотезы: edge на истории — реальный
+(p-value по биномиальному тесту: WR 54% vs 50% на n=54 даёт p ≈ 0.33 — не
+значим), но альтернативы (5 других страт с большими выборками) — статистически
+значимо убыточны. Live-выборку добираем до 100 сделок и пересматриваем.
 
 #### Turtle Soup fade (Wave 4, не деплой)
 **Файл:** `turtle_soup.py`

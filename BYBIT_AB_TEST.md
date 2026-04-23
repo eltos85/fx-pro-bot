@@ -61,6 +61,44 @@ docker exec fx-pro-bot-bybit-bot-1 python3 -m scripts.ab_test_snapshot \
     --since 2026-04-20T08:48 --output /ab-data/report_wave5.md
 ```
 
+### RESEARCH REFERENCE: сверка параметров с КРИПТО-backtest'ами (04-23, CORRECTED)
+
+Все 6 страт сверены с **крипто-специфичными** публичными backtest'ами (GitHub
+walk-forward, академ. paper'ы по крипто, крипто-PineScript). Предыдущая версия
+таблицы включала equity-источники (ES/NQ/Nifty) — не применимы к крипто из-за
+разной микроструктуры. Полный каталог и исправления → `BUILDLOG_BYBIT.md`,
+записи `CORRECTION: пересмотр RESEARCH-сверки` и `RESEARCH: сверка параметров...`.
+
+**Главные расхождения (🔴 = критичное, только крипто-источники):**
+
+| Страт | Парам | Наш | Крипто-референс | Critic |
+|---|---|---|---|---|
+| scalp_turtle | **концепция** | WR 30% n=21 | **Academic n=531: WR 44.6% PnL −2.22%** (Capstone 2025) | 🔴 фундаментально |
+| scalp_vwap | RR | 1:0.75 | 1:1.5 (Sword Red BTC, FMZQuant ETH) | 🟡 ниже нормы |
+| scalp_statarb | Z_EXIT | 0.5 | 0.0 (abailey81 Sharpe 1.61) | 🟡 подтверждено |
+| scalp_statarb | Z_STOP | нет | ±3.0 (abailey81) | 🟡 OPEN ISSUE |
+| scalp_orb | 15m | ✓ | **15m оптимально на BTC** (GBTC 90 дней) | ✅ корректно |
+| scalp_leadlag | rules | ✓ | ML (Springer crypto 2026) | 🟡 архитектура |
+| scalp_volume | 2.0× | ✓ | 2.0× (eltonaguiar crypto) | ✅ match |
+
+**Отменено** (было в equity-версии, не крипто):
+- ~~scalp_vwap RR 1:2~~ — это equity, на крипто 1:1.5
+- ~~scalp_orb 15m → 30m~~ — на BTC 30m НЕ работает
+- ~~scalp_turtle trailing stop~~ — на крипто вопрос не trailing, а жив ли принцип
+
+**ГЛАВНОЕ ОТКРЫТИЕ:** Turtle Soup на крипто подтверждённо минусовая на академ.
+backtest'е n=531 (Armenian Capstone 2025, Freqtrade, WR 44.6%, Sharpe −21.86).
+Наш `scalp_turtle` на n=21 показывает тот же паттерн. Это **не** правка
+параметров — обсуждение о судьбе страты целиком.
+
+**Приоритет обсуждения:**
+1. **🔴 scalp_turtle — отключить / трансформировать в trend-following**
+   (Extended Turtle: Capstone n=41, WR 52.75%, PnL +114% с EMA 30/60/100)
+2. **🟡 scalp_statarb exits** (Z_EXIT 0.5→0.0, +Z_STOP ±3.0)
+3. **🟡 scalp_vwap RR** (1:0.75 → 1:1.5) — требует backtest
+
+---
+
 ### OPEN ISSUE (ждём данных): наложение позиций
 
 На T+28.7h (04-21 13:34) в Wave 5 зафиксировано **2 эпизода наложения** на
@@ -77,6 +115,42 @@ docker exec fx-pro-bot-bybit-bot-1 python3 -m scripts.ab_test_snapshot \
 ```bash
 docker exec fx-pro-bot-bybit-bot-1 python3 /tmp/overlap_exchange.py
 ```
+
+### OBSERVATION (ждём повтора): alt-selloff regime event 2026-04-22
+
+На T+~70ч от Wave 5 baseline зафиксирован устойчивый alt-selloff при
+стационарном BTC: TIA −7.8%, SOL −2.8%, ADA −3%, BTC −0.1% за 19ч
+(22.04 12:00 → 23.04 07:00 UTC). В этом окне **все 4 активные страты**
+одновременно ушли в минус: scalp_turtle −$17.78 (WR 29%), scalp_vwap
+−$8.46, scalp_statarb −$5.42, scalp_volume −$0.33. Итог дня 22.04 =
+−$31.99 против +$17.31 (20.04) и +$5.78 (21.04).
+
+Проверено: код в окне не менялся, все exits штатные (`sync_closed` = SL),
+20 из 21 убыточной сделки в 13:30-20:00 UTC — Long-вхождения на падающих
+альтах. Типичный whipsaw — на TIA 19:00-20:00 UTC `scalp_vwap` открыл
+4 Long подряд в одном часе, все 4 SL.
+
+**Это не баг, это known failure mode mean-reversion стратегий** в trending
+режиме (Khandani&Lo 2007, Avellaneda&Lee 2010, Lopez de Prado гл.12).
+Полный разбор, цитаты и research-anchors см. `BUILDLOG_BYBIT.md` →
+"OBSERVATION: alt-selloff regime event 2026-04-22" (2026-04-23).
+
+**НЕ чиним** — n=30 в окне и n=52 на день кратно ниже `sample-size.mdc`
+порога. Любая правка по одному trending эпизоду = curve-fitting.
+
+**Метрики на следующий срез** (валидация гипотезы "регим-риск, не баг"):
+1. Повторился ли alt-selloff с той же декомпозицией по стратам? (ждём
+   ≥2 независимых эпизодов на ≥100 сделок).
+2. WR `scalp_turtle` на всей Wave 5 — сходится к ~50% (range-bound) или
+   систематически ниже?
+3. Частота whipsaw-серий (3+ losses подряд на одном символе от одной
+   страты в 1h окне)?
+
+Если воспроизведётся — переходим к обсуждению regime-filter гипотез
+(dynamic ADX_MAX, HTF-trend filter, symbol cool-down, alt-vs-BTC corr
+monitor), но каждая — только с backtest на out-of-sample.
+
+---
 
 ### OPEN ISSUE (ждём данных): stat-arb exit-логика
 

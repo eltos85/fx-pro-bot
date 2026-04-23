@@ -57,8 +57,18 @@ services:
       # /root/fx-pro-bot-data (bind mount ниже). Рестарт контейнера и
       # docker volume rm не трогают этот файл.
       AB_SNAPSHOTS_DB_PATH: /ab-data/ab_snapshots.sqlite
-      # Wave 4 strategies (по умолчанию false, включаются через .env на VPS)
-      BYBIT_BOT_SCALP_ORB_ENABLED: ${BYBIT_BOT_SCALP_ORB_ENABLED:-false}
+      # После backtest 90д / 9K сделок (см. BUILDLOG_BYBIT.md 2026-04-23):
+      # 5 страт (VWAP/StatArb/Volume/Turtle/LeadLag) подтверждённо убыточны
+      # на истории (PnL от -49% до -280%). Код не удалён — только флаг.
+      # ORB оставляем, но с жёсткими whitelist-ами: London-session / long /
+      # SOL-LINK-BNB — единственный прибыльный срез (PF 1.53, +7.18% на n=54).
+      BYBIT_BOT_SCALP_VWAP_ENABLED: ${BYBIT_BOT_SCALP_VWAP_ENABLED:-false}
+      BYBIT_BOT_SCALP_STATARB_ENABLED: ${BYBIT_BOT_SCALP_STATARB_ENABLED:-false}
+      BYBIT_BOT_SCALP_VOLUME_ENABLED: ${BYBIT_BOT_SCALP_VOLUME_ENABLED:-false}
+      BYBIT_BOT_SCALP_ORB_ENABLED: ${BYBIT_BOT_SCALP_ORB_ENABLED:-true}
+      BYBIT_BOT_SCALP_ORB_SESSIONS: ${BYBIT_BOT_SCALP_ORB_SESSIONS:-london}
+      BYBIT_BOT_SCALP_ORB_SYMBOLS: ${BYBIT_BOT_SCALP_ORB_SYMBOLS:-SOLUSDT,LINKUSDT,BNBUSDT}
+      BYBIT_BOT_SCALP_ORB_DIRECTION: ${BYBIT_BOT_SCALP_ORB_DIRECTION:-long}
       BYBIT_BOT_SCALP_TURTLE_ENABLED: ${BYBIT_BOT_SCALP_TURTLE_ENABLED:-false}
       BYBIT_BOT_SCALP_LEADLAG_ENABLED: ${BYBIT_BOT_SCALP_LEADLAG_ENABLED:-false}
       BYBIT_BOT_LEADLAG_REF_SYMBOL: ${BYBIT_BOT_LEADLAG_REF_SYMBOL:-BTCUSDT}

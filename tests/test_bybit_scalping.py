@@ -388,6 +388,35 @@ class TestSessionOrb:
         signals = strat.scan({"BTCUSDT": bars_a, "ETHUSDT": bars_b})
         assert len(signals) == 1
 
+    def test_allowed_sessions_whitelist(self):
+        """allowed_sessions={'asia'} блокирует London-пробой."""
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+
+        bars = _make_orb_session(breakout="up")  # london session
+        strat = SessionOrbStrategy(allowed_sessions={"asia"})
+        assert strat.scan({"BTCUSDT": bars}) == []
+        # Без ограничения — сигнал есть
+        assert len(SessionOrbStrategy().scan({"BTCUSDT": bars})) == 1
+
+    def test_allowed_symbols_whitelist(self):
+        """allowed_symbols={'ETHUSDT'} блокирует BTCUSDT-сигнал."""
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+
+        bars = _make_orb_session(breakout="up")
+        strat = SessionOrbStrategy(allowed_symbols={"ETHUSDT"})
+        assert strat.scan({"BTCUSDT": bars}) == []
+
+    def test_allowed_direction_long_blocks_short(self):
+        """allowed_direction='long' отсекает SHORT-пробой."""
+        from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
+
+        bars_down = _make_orb_session(breakout="down")
+        strat = SessionOrbStrategy(allowed_direction="long")
+        assert strat.scan({"BTCUSDT": bars_down}) == []
+        # Lower boundary: long проходит
+        bars_up = _make_orb_session(breakout="up")
+        assert len(strat.scan({"BTCUSDT": bars_up})) == 1
+
 
 # ── Turtle Soup Strategy ─────────────────────────────────────
 

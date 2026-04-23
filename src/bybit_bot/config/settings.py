@@ -199,6 +199,18 @@ class Settings(BaseSettings):
     scalping_orb_enabled: bool = Field(
         default=False, validation_alias="BYBIT_BOT_SCALP_ORB_ENABLED",
     )
+    # ORB whitelist-ы — по итогам backtest 90д 2026-04-23 (BUILDLOG_BYBIT.md).
+    # Формат: CSV-строка, пустая строка = "без ограничений" (все варианты).
+    # Дефолт = пустые → обратная совместимость: ORB работает как раньше.
+    scalping_orb_sessions: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_ORB_SESSIONS",
+    )
+    scalping_orb_symbols: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_ORB_SYMBOLS",
+    )
+    scalping_orb_direction: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_ORB_DIRECTION",
+    )
     scalping_turtle_enabled: bool = Field(
         default=False, validation_alias="BYBIT_BOT_SCALP_TURTLE_ENABLED",
     )

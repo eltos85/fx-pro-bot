@@ -11,3 +11,9 @@ dist/
 # Локальная статистика и секреты (пример календаря в data/ — в репозитории)
 /data/*.sqlite
 /data/*.sqlite3
+
+# Артефакты backtest-engine (регенерируются скриптами из scripts/)
+/data/backtest_klines/
+/data/backtest_*.csv
+/data/backtest_*.txt
+/data/backtest_*.log

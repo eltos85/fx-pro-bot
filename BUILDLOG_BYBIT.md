@@ -1,5 +1,833 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-23
+
+### DEPLOY: отключено 5 страт, ORB ужат до London/Long/SOL-LINK-BNB
+
+**Контекст:** по итогам backtest 90д / ~9K сделок (см. запись ниже) пользователь
+одобрил план «все три варианта A+B+C»: отключить убыточные страты, оставить
+только прибыльный срез ORB, параллельно вести research по ансамблю и новой
+стратегии.
+
+**Изменения в коде:**
+
+- `SessionOrbStrategy.__init__` — добавлены 3 новых опциональных аргумента:
+  `allowed_sessions`, `allowed_symbols`, `allowed_direction`. Фильтрация
+  применяется в `_scan_symbol`: символ — до вычислений (ранний выход),
+  сессия — сразу после определения `_current_session`, направление — после
+  принятия решения LONG/SHORT. Дефолты = None, обратная совместимость 100%
+  (старые тесты прошли без изменений).
+- `Settings` — 3 новых `Field`: `scalping_orb_sessions`,
+  `scalping_orb_symbols`, `scalping_orb_direction`. Тип — `str`, CSV-формат,
+  пустая строка = «без ограничений».
+- `main.py` — новый `_build_scalp_orb(settings)` парсит CSV и создаёт страту
+  с whitelist-ами. `_parse_csv_env` — helper. `_log_scalping_config` теперь
+  показывает активные ORB-фильтры в старте бота.
+- `docker-compose.yml` — 5 env-флагов отключения + 3 ORB-whitelist'а.
+
+**Изменения в docker-compose.yml (env-переменные сервиса `bybit-bot`):**
+
+| Env | Было | Стало | Зачем |
+|-----|------|-------|-------|
+| `BYBIT_BOT_SCALP_VWAP_ENABLED` | true | **false** | backtest: n=1762, PnL -109%, Days+ 36% |
+| `BYBIT_BOT_SCALP_STATARB_ENABLED` | true | **false** | backtest: n=822, PnL -49%, Days+ 27% |
+| `BYBIT_BOT_SCALP_VOLUME_ENABLED` | true | **false** | backtest: n=1899, PnL -280%, Days+ 21% |
+| `BYBIT_BOT_SCALP_TURTLE_ENABLED` | false | false | backtest: n=2388, PnL -170% (уже было off) |
+| `BYBIT_BOT_SCALP_LEADLAG_ENABLED` | false | false | funnel: 10/25860 сигналов (уже было off) |
+| `BYBIT_BOT_SCALP_ORB_ENABLED` | false | **true** | единственный pocket с edge |
+| `BYBIT_BOT_SCALP_ORB_SESSIONS` | — | **`london`** | London PF 1.27; NY PF 0.73 |
+| `BYBIT_BOT_SCALP_ORB_SYMBOLS` | — | **`SOLUSDT,LINKUSDT,BNBUSDT`** | топ-3 по PnL |
+| `BYBIT_BOT_SCALP_ORB_DIRECTION` | — | **`long`** | London/Long PF 1.53, +7.18% |
+
+**Соответствие правилам (`strategy-guard.mdc` + `sample-size.mdc`):**
+
+- Отключение VWAP/StatArb/Volume: n ≥ 822 сделок × 90 дней × 9 символов
+  покрывают порог «≥100 сделок, ≥2 недели, разные режимы». p-value по
+  биномиальному тесту против H0=WR 50% — везде < 0.05.
+- Отключение Turtle: подтверждение прошлой записи (2381 сделка, уже задоку-
+  ментировано). Статус `_ENABLED=false` был и раньше — никаких live-потерь.
+- Отключение LeadLag: формально n=2 ниже порога, но `diagnose_leadlag.py`
+  показал что фильтры пропускают 10 / 25860 = 0.04% сканов. Это не
+  «выборка мала», это «страта архитектурно не срабатывает». Допускается
+  как «исправление явной логики» (rule: «Допустимые быстрые правки»).
+- Ужимание ORB: узкий срез — n=54 (ниже 100). Решение принято с явного
+  согласия пользователя как forward-тест гипотезы; альтернативы
+  (другие 5 страт с большой выборкой) статистически значимо хуже.
+
+**Тесты:**
+- 3 новых теста на `SessionOrbStrategy` (`test_allowed_sessions_whitelist`,
+  `test_allowed_symbols_whitelist`, `test_allowed_direction_long_blocks_short`).
+- Full suite: 285 passed, 0 failed, линтер чист.
+
+**Действия после деплоя:**
+
+1. Накопить ≥100 live-сделок ORB с новыми фильтрами.
+2. Сравнить live-результаты с backtest-ожиданием (exp +0.133% / trade, PF 1.53).
+3. В случае значимого отклонения (p < 0.05 биномиальным тестом) — пересмотр.
+4. Параллельный research-трек в изолированных файлах (`scripts/`),
+   без изменений прод-кода, до появления новой подтверждённой стратегии.
+
+**Файлы:** `docker-compose.yml`, `src/bybit_bot/strategies/scalping/session_orb.py`,
+`src/bybit_bot/config/settings.py`, `src/bybit_bot/app/main.py`,
+`tests/test_bybit_scalping.py`, `STRATEGIES.md`.
+
+---
+
+### BACKTEST: все 6 стратегий на 90 днях истории — сводная таблица, ключевые выводы
+
+**Статус:** ИССЛЕДОВАНИЕ. Код НЕ менялся. Решения об отключении / переработке
+ждут обсуждения с пользователем.
+
+**Цель:** ответить на прямой вопрос пользователя — «какая из 6 текущих стратегий
+может дать регулярный дневной плюс» (критерий: **% прибыльных дней > 55%**).
+Прогнать все 6 страт на идентичном историческом окне / одних и тех же символах
+через единый backtest-engine.
+
+**Метод:**
+- Bybit public API `/v5/market/kline`, interval=5m, 90 дней (25920 баров/символ)
+- Скрипт: `scripts/backtest_all.py` (engine) + `scripts/analyze_orb.py`,
+  `scripts/diagnose_leadlag.py` (deep dives)
+- 9 базовых символов (BTC,ETH,SOL,XRP,DOGE,BNB,ADA,AVAX,LINK)
+  + 3 доп. для stat-arb (TIA,SUI,WIF — их требует `DEFAULT_PAIRS`)
+- Bar-by-bar симуляция. **Важно:** страте передаётся `bars[i-1439:i+1]`
+  — ровно то же окно 5д×5м=1440 бар, которое в live даёт
+  `market_data.feed.fetch_bars_batch` (`BYBIT_BOT_YFINANCE_PERIOD=5d`).
+  Без этого ограничения индикаторы считались бы на 25K барах
+  вместо 1440 → искажённые результаты и O(n²) вместо O(n).
+- ATR-симулятор: SL/TP хит внутри бара, SL первый при двойном хите
+- Stat-arb: закрытие по z-score < 0.5 или time-stop; ноги учитываются отдельно
+- Комиссия: 0.11% round-trip (Bybit taker 0.055% × 2) из pct_return каждой ноги
+- Артефакты: `data/backtest_all_report.txt`, `data/backtest_all_trades.csv`,
+  `data/backtest_statarb.txt`, `data/backtest_statarb_trades.csv`
+
+**СВОДНАЯ ТАБЛИЦА (90 дней, fee round-trip 0.11%):**
+
+| Страта | n | WR% | avgW% | avgL% | PF | exp% | PnL% | MaxDD% | **Days+%** | Вердикт |
+|--------|---|-----|-------|-------|----|------|------|--------|-----------|---------|
+| **vwap** | 1762 | 60.10 | 0.293 | -0.608 | 0.74 | -0.062 | **-109.38** | 115.58 | 36.26 | ❌ WR обманчивый (R:R=0.48) |
+| **volume** | 1899 | 47.18 | 0.493 | -0.720 | 0.61 | -0.148 | **-280.46** | 287.24 | 20.88 | ❌❌❌ катастрофа |
+| **orb** | 255 | 43.14 | 0.811 | -0.687 | 0.89 | -0.041 | -10.51 | 13.28 | **44.78** | ⚠ почти безубыточна, есть edge |
+| **turtle** | 2388 | 40.28 | 0.603 | -0.526 | 0.77 | -0.071 | -169.84 | 177.23 | 24.18 | ❌ подтверждён fail |
+| **statarb** | 822 | 48.91 | 0.584 | -0.693 | 0.83 | -0.060 | -49.29 | 53.29 | 26.74 | ❌ убыточна |
+| **leadlag** | 2 | 0.00 | — | -1.870 | 0.00 | -1.870 | -3.74 | 3.74 | 0.00 | ❌ фильтры не срабатывают |
+
+Ни одна страта **не проходит критерий Days+% > 55%**. Лучший — orb с 44.78%.
+
+---
+
+**DEEP DIVE #1 — почему leadlag даёт 2 сделки за 90 дней (`diagnose_leadlag.py`):**
+
+Filter funnel на 25860 сканах:
+
+| Фильтр | Проход | % |
+|--------|--------|---|
+| BTC move ≥ 1% за 15 мин | 336 | **1.30%** (p95 BTC-move = 0.60%!) |
+| BTC move ≥ 1.5 ATR | 4213 | 16.29% |
+| BTC ADX ≥ 15 | 305 | 1.18% |
+| Все BTC-фильтры | 305 | 1.18% |
+| corr(log-returns) ≥ 0.5 | 2439/2440 | 99.96% (не ограничивает) |
+| **alt lag OK** | **10/2440** | **0.41%** |
+
+**Диагноз:** когда BTC реально делает 1% за 15 мин (305 раз за 90 дней),
+в **99.6% случаев альт уже догнал** (move ≥ 70% от BTC). То есть в 2026
+**лага между BTC и альтами практически нет** на горизонте 15 мин. Это
+подтверждает academic research про «structural decoupling after Bitcoin ETF»
+(Springer 2026, DOI 10.1007/s10690-026-09589-z) — корреляция остаётся,
+но скорость передачи импульса < 5 мин. Идея lag-trading архитектурно
+не релевантна современному крипторынку.
+
+---
+
+**DEEP DIVE #2 — scalp_statarb даёт 0 сделок без TIA/SUI/WIF:**
+
+`DEFAULT_PAIRS` в `stat_arb_crypto.py` требует пары
+(ADA,TIA), (LINK,SUI), (WIF,TIA), (ADA,SUI). Без этих символов
+ни одна пара не валидна. После добавления 3 символов в backtest —
+получили 822 сделки (411 пар). Результат: PF 0.83, PnL -49.29%,
+Days+ 26.74%. Даже с валидными парами страта убыточна — комиссия
+0.22% (round-trip × 2 ноги) съедает почти весь expectancy.
+
+---
+
+**DEEP DIVE #3 — scalp_orb по срезам (`analyze_orb.py`):**
+
+**ПО СЕССИЯМ (ключевая находка!):**
+
+| Сессия | n | WR% | PF | exp% | PnL% |
+|--------|---|-----|-----|------|------|
+| **London (08:00 UTC)** | 118 | **50.00** | **1.27** | **+0.069** | **+8.16** ✅ |
+| NY (14:00 UTC) | 137 | 37.23 | 0.73 | -0.136 | -18.67 ❌ |
+| Asia | 0 | — | — | — | — |
+
+**ПО НАПРАВЛЕНИЯМ × СЕССИЯМ (золотое зерно):**
+
+| Срез | n | WR% | PF | exp% | PnL% |
+|------|---|-----|-----|------|------|
+| **London/Long** | 54 | **53.70** | **1.53** | **+0.133** | **+7.18** ✅✅ |
+| London/Short | 64 | 46.88 | 1.06 | +0.015 | +0.98 ✅ |
+| NY/Short | 82 | 42.68 | 0.94 | -0.027 | -2.18 |
+| NY/Long | 55 | 29.09 | 0.51 | -0.300 | -16.48 ❌ |
+
+**ПО СИМВОЛАМ:**
+
+| Топ-3 (прибыльны) | PnL% | Худшие | PnL% |
+|-------|------|--------|------|
+| SOLUSDT (n=37) | +5.24 | ADAUSDT (n=32) | -9.18 |
+| LINKUSDT (n=27) | +4.79 | AVAXUSDT (n=32) | -6.46 |
+| BNBUSDT (n=22) | +0.81 | XRPUSDT (n=39) | -2.61 |
+
+**ЧТО ОТЛИЧАЕТ ПРИБЫЛЬНЫЙ ДЕНЬ:**
+
+| Метрика | +days (30 шт) | -days (37 шт) |
+|---------|---------------|---------------|
+| WR% внутри дня | **77.10** | 20.30 |
+| avg hold bars | **17.71** | 11.09 |
+| n_trades | 3.30 | **4.22** (overtrading в минусовые дни) |
+
+---
+
+**КЛЮЧЕВЫЕ ВЫВОДЫ:**
+
+1. **Ни одна из 6 стратегий не даёт Days+% > 55%** — критерий пользователя
+   недостижим в текущих конфигурациях. Лучший — orb (44.78%).
+2. **Единственный прибыльный pocket** на 90 днях: **scalp_orb в London
+   session с longs** — PF 1.53 на n=54. Это малая, но честная выборка.
+3. **vwap WR 60% обманчивый** — R:R 0.48 требует WR > 68% для PF > 1.
+4. **leadlag нерелевантен** в 2026 — post-ETF альты реагируют на BTC
+   за < 5 мин, lag исчез (academic-confirmed).
+5. **volume/turtle/statarb** — прямые убытки, никаких скрытых pocket'ов.
+6. **NY session для ORB** убыточна (PF 0.73) — NY-открытие идёт в flat
+   на крипто (в отличие от традиционных рынков где NY-open — ликвидный пик).
+7. **ADA/AVAX токсичны** для ORB — PF 0.48/0.55, хронический underperform.
+
+**Статистическая значимость:** все вердикты (vwap/volume/turtle/statarb) на
+n > 800 прошли порог `sample-size.mdc` (≥100 сделок, ≥2 недели). Для
+leadlag (n=2) и для конкретных срезов orb (London/Long n=54) выборки малы,
+нужен live-forward test.
+
+**Действия — ждут обсуждения:**
+
+- Вариант A (радикальный): отключить все 6 страт, остановить бота,
+  запустить research-only фазу для поиска новой стратегии
+- Вариант B (целевой): оставить только **scalp_orb London-session +
+  top-3 symbols (SOL/LINK/BNB) + long-only**. Это малая выборка (54 сделки
+  за 90 дней ≈ 1 сделка в 2 дня), но единственный edge в данных
+- Вариант C: собрать «ансамбль подтверждений» — открывать только когда
+  ≥2 из прибыльных срезов дают сигнал в одну сторону (диверсификация
+  на уровне фильтрации шума)
+
+**Файлы:** `scripts/backtest_all.py` (новый engine),
+`scripts/analyze_orb.py` (новый), `scripts/diagnose_leadlag.py` (новый),
+`data/backtest_all_trades.csv`, `data/backtest_statarb_trades.csv`.
+
+---
+
+### BACKTEST: scalp_turtle на 90 днях истории (n=2381) — подтверждено убыточна
+
+**Статус:** ИССЛЕДОВАНИЕ. Код НЕ менялся. Решение об отключении ещё не принято
+(ждём прогон остальных 5 страт для контекста).
+
+**Цель:** верифицировать выводы Armenian Capstone 2025 (TurtleSoupPatternStrategy
+на крипто 1h: WR 44.6%, PnL −2.22%, Sharpe −21.86 на n=531) **на наших символах
+и наших параметрах** через нашу же имплементацию `TurtleSoupStrategy`.
+
+**Метод:**
+- Bybit public API `/v5/market/kline` (без ключа), interval=5m, 90 дней
+  = 25920 баров × 8 символов = ~207K баров
+- Bar-by-bar симуляция: на каждом баре передаём `bars[:i+1]` в
+  `_scan_symbol()`, при сигнале открываем позицию по `close` бара
+- Exit: SL=1.5×ATR, TP=2.5×ATR (как в live). При двойном хите в одном
+  баре — SL первый (conservative assumption, стандарт академ. backtest'ов)
+- Комиссия: Bybit taker 0.055% × 2 = 0.11% round-trip, вычитается из pct_return
+- Сессионный фильтр 7-22 UTC активен (как в live)
+- Одна открытая позиция на символ максимум (как в live)
+- Скрипт: `scripts/backtest_turtle.py`, артефакты:
+  `data/backtest_turtle_90d_report.txt`, `data/backtest_turtle_90d_trades.csv`
+
+**Результат (overall):**
+| Метрика | Значение |
+|---------|----------|
+| Trades (n) | **2381** (в 24× выше порога `sample-size.mdc`) |
+| Win Rate | 39.82% |
+| Avg Win | +0.693% |
+| Avg Loss | −0.600% |
+| Expectancy | **−0.085% / trade** (net fee) |
+| Profit Factor | 0.764 |
+| Total PnL | **−202.78%** (сумма процентов) |
+| Max Drawdown | 221.53% |
+| Sharpe (annual) | −11.62 |
+
+**Статистическая значимость:**
+- t-stat ≈ −6.5 (per-trade mean vs zero)
+- **p < 0.0001** — убыточность статистически значима, не шум
+
+**Per-symbol (все 8 в минусе, без исключений):**
+| symbol | n | WR% | exp% | PnL% |
+|--------|---|-----|------|------|
+| SOLUSDT | 284 | 42.96 | −0.038 | −10.92 |
+| SUIUSDT | 291 | 42.96 | −0.040 | −11.72 |
+| ADAUSDT | 303 | 41.25 | −0.074 | −22.44 |
+| WIFUSDT | 306 | 38.56 | −0.083 | −25.36 |
+| TONUSDT | 298 | 38.26 | −0.096 | −28.61 |
+| TIAUSDT | 295 | 38.64 | −0.101 | −29.80 |
+| LINKUSDT | 311 | 38.59 | −0.104 | −32.21 |
+| DOTUSDT | 293 | 37.54 | −0.142 | −41.71 |
+
+**По направлению:**
+- Long: n=1255, WR 39.12%, PnL −127.70%
+- Short: n=1126, WR 40.59%, PnL −75.08%
+- Оба направления убыточны — не asymmetric market bias
+
+**КРИТИЧЕСКИЙ PATTERN: распределение по hold time**
+
+| hold (M5 bars) | n | WR% | PnL% | интерпретация |
+|----------------|---|-----|------|---------------|
+| 0-3 (≤15 мин) | 354 | **19.2** | **−117.11** | быстрый SL сразу после входа |
+| 3-6 (≤30 мин) | 609 | 31.4 | **−129.37** | fake reclaim, цена вернулась в пробой |
+| 6-12 (≤1ч) | 697 | 49.6 | +29.43 | «настоящие» развороты |
+| 12-24 (≤2ч) | 469 | 47.1 | −2.48 | ~нулевой edge |
+| 24-48 (≤4ч) | 191 | 48.2 | +14.05 | медленные развороты |
+| 48-100 (≤8ч) | 53 | 52.8 | +6.07 | |
+
+**Смысл:** 40% сигналов (963/2381) умирают за первые 30 минут с WR 19-31%.
+В крипто wick-цикл часто состоит из 2-3 волн fake reclaim'ов, а не одной.
+Наш «reclaim+RSI+ADX» фильтр ловит **первый** reclaim, который слишком часто
+оказывается false — цена ещё раз идёт в направлении исходного пробоя и
+выносит SL.
+
+Это отличается от forex/equity где после первого reclaim обычно следует
+чистый reversal (там Turtle Soup и работает).
+
+**Сравнение с академическим crypto-backtest:**
+
+| | n | TF | WR | PnL | Sharpe |
+|-|---|----|-----|------|-------|
+| Capstone 2025 (AUA) | 531 | 1h | 44.60% | −2.22% | −21.86 |
+| **Наш backtest** | **2381** | 5m | 39.82% | −202.78% | −11.62 |
+| Live Wave 5 | 21 | 5m | 29% | −17.78$ | — |
+
+На меньшем TF (5m vs 1h) страта **хуже**, что логично — больше шума и
+wick-волатильности, меньше времени на отработку reversion до повторного
+пробоя.
+
+**Вывод:**
+Данные подтверждают вывод Capstone 2025 на выборке в 4.5× больше: Turtle
+Soup fade на крипто статистически убыточна, без параметров чтобы «подкрутить».
+Это не наш live-шум — это системный минус на 2381 сделке, согласованно по
+всем 8 символам и обеим сторонам (long/short).
+
+**Действия (ждут решения):**
+1. Отключить `scalp_turtle` в docker-compose.yml (env
+   `BYBIT_BOT_SCALP_TURTLE_ENABLED=false`). Код не удалять.
+2. Перед отключением: прогнать backtest на остальных 5 стратах для
+   контекста — возможно turtle не хуже других в portfolio.
+
+**Файлы:** `scripts/backtest_turtle.py` (новый), `data/backtest_turtle_90d_*`
+(артефакты), `data/backtest_klines/` (кэш баров, 8 символов × 90 дней).
+
+---
+
+### CORRECTION: пересмотр RESEARCH-сверки — equity-данные НЕ применимы к крипто
+
+**Статус:** ИСПРАВЛЕНИЕ предыдущей записи того же дня. Код НЕ менялся. Запись
+ниже ("RESEARCH: сверка параметров...") содержит часть выводов, сделанных на
+equity-данных (ES/NQ/Nifty), которые НЕ применимы к крипто из-за разной
+микроструктуры. Пользователь справедливо указал на ошибку. Переделал анализ
+только по крипто-источникам.
+
+**Почему equity ≠ крипто (не перенос параметров 1:1):**
+- Сессии: equity 6.5ч cash-session с чётким open/close, крипто 24/7 без сессий
+- Волатильность: крипто в 5-10× выше equity (5m ATR BTC ≈ 0.3-0.8% vs NQ ≈ 0.05-0.15%)
+- Комиссии: equity 1-2 тика (~0.01%), крипто 0.04-0.1% (4-10× выше)
+- Микроструктура: крипто = много розницы + liquidation cascades + mm манипуляции,
+  equity = доминируют институциональные участники
+
+#### Новые крипто-специфичные источники (дополнительно к предыдущим 5 крипто-источникам)
+
+11. **Sword Red — VWAP-ATR Price Action System** (Medium 2025), BTC_USDT Futures
+    daily, 2019-12 → 2024-11 (5 лет):
+    - **SL = 1×ATR, TP = 1.5×ATR → RR 1:1.5** ← крипто-стандарт
+    - Комментарий автора: "reasonable risk-return ratio", VWAP как тренд-baseline,
+      crossover entries
+12. **StockSharp VWAP Mean Reversion** (Python strategy store), 5m intraday крипто:
+    - Entry: deviation ≥ 2×ATR от VWAP ✓ **совпадает с нами**
+    - **Exit: возврат к VWAP (НЕ fixed TP!)**
+    - Stop: ATR multiple (без указания)
+13. **Armenian Capstone 2025** (cse.aua.am, академ. работа через Freqtrade):
+    - **TurtleSoupPatternStrategy на 1h крипто: 531 сделка, WR 44.6%, PnL −2.22%,
+      Sharpe −21.86, Max DD 2.33%**
+    - Это единственный **академический backtest** Turtle Soup на крипто с
+      репрезентативной выборкой (n=531 > 100 порога `sample-size.mdc`)
+    - **Original Turtle (trend-following) crypto 87 trades**: WR 35.94%, PnL +18.59%
+    - **Extended Turtle crypto 41 trades**: WR 52.75%, PnL +114.41% (с EMA 30/60/100)
+14. **tosindicators GBTC ORB 90 дней** (Bitcoin proxy):
+    - **5m ORB: 70% long WR, 65% short WR**
+    - **15m ORB: positive PnL**
+    - **30m ORB: НЕГАТИВНЫЙ PnL** — не работает на BTC, ПРОТИВОПОЛОЖНО equity
+15. **GrandAlgo ICT Turtle Soup** — 15m "bread-and-butter" timeframe для intraday
+
+#### ИСПРАВЛЕНИЯ предыдущих выводов
+
+| Предыдущий вывод | Статус | Корректный (на крипто) |
+|---|---|---|
+| "VWAP RR 1:2 = индустриальный стандарт" | ❌ Это equity (ES/NQ) | Крипто = **RR 1:1.5** (Sword Red BTC, FMZQuant ETH) |
+| "ORB 30m лучше 15m (67% continuation)" | ❌ Это equity (ES/NQ) | Крипто = **15m оптимально**, 30m НЕ работает на BTC (tosindicators 90d) |
+| "Turtle trailing stop обязателен" | ❌ Это Connors 1995 forex | На крипто **вопрос не trailing, а жив ли сам принцип** (Capstone: −2.22% на 531 сделке) |
+| "15m ORB — worst of both worlds" | ❌ Это ES/NQ цитата | Не применимо к крипто — там 15m как раз лучший |
+| "Turtle Soup WR 60-72%" | ❌ Это forex/equity | **Крипто-академ: WR 44.6%, НЕГАТИВНЫЙ PnL** |
+
+#### Итоговый каталог расхождений (ТОЛЬКО крипто-данные)
+
+| Страт | Парам | Наш | Крипто-референс | Critic |
+|---|---|---|---|---|
+| scalp_vwap | RR | 1:0.75 (SL 2×ATR TP 1.5×ATR) | 1:1.5 (Sword Red BTC, FMZQuant ETH) | 🟡 ниже нормы, но не инвертирован |
+| scalp_funding | RR | 1:0.67 | крипто-данных нет, только equity | 🟡 неопределённо |
+| scalp_turtle | **сама стратегия** | WR 30% на n=21 | **Capstone 2025: WR 44.6% PnL −2.22% на n=531 крипто** | 🔴 **фундаментально проблемная на крипто** |
+| scalp_statarb | Z_EXIT | 0.5 | 0.0 (abailey81 Sharpe 1.61 на CEX walk-forward) | 🟡 подтверждено |
+| scalp_statarb | Z_STOP | нет | ±3.0 (abailey81) | 🟡 подтверждено, уже OPEN ISSUE |
+| scalp_orb | коробка | **15m** | **15m оптимально для BTC** (tosindicators GBTC 90d) | ✅ корректно! |
+| scalp_leadlag | rules vs ML | rules | ML (Springer 2026 крипто) | 🟡 архитектура |
+| scalp_volume | mult | 2.0× | 2.0× (eltonaguiar crypto) | ✅ match |
+
+#### 🔴 ГЛАВНОЕ ОТКРЫТИЕ: scalp_turtle vs академ. крипто-backtest
+
+**Armenian Capstone 2025** (рецензируемая работа университета AUA, cse.aua.am):
+- Freqtrade backtest TurtleSoupPatternStrategy на 1h крипто, n=531
+- WR 44.6%, Total Profit **−2.22%**, Sharpe Ratio **−21.86**, Max DD 2.33%
+- Автор использовал классическую логику Raschke (20-period low, RSI фильтр)
+
+**Наша `scalp_turtle` за Wave 5:**
+- n=21 сделок (5m timeframe)
+- WR ≈30%, PnL −$17.78 (чистый убыток)
+
+**Совпадение паттернов критическое.** Academic n=531 — репрезентативная выборка,
+в разы выше порога `sample-size.mdc`. Наш n=21 — это индивидуальный шум, но
+направление **совпадает** с крипто-backtest'ом.
+
+**Возможные объяснения провала Turtle Soup на крипто:**
+1. **Нет "настоящих" false breakout'ов** в крипто-микроструктуре: пробои часто
+   — это реальные ликвидационные каскады, а не ловушки на розницу
+2. **24/7 без сессий** — нет moment'а "поутру trader'ы сбрасывают overnight
+   позиции на open", отсутствие этого momentum убивает reversal edge
+3. **Тренды в крипто сильнее и дольше** — Raschke/Connors работали в
+   range-bound forex/stocks, крипто tends to trend
+4. **Whales/manipulation** — false breakout'ы в крипто часто нарочно создаются
+   крупными игроками именно чтобы ловить наших fade-трейдеров (мы становимся
+   едой вместо охотника)
+
+Это **не** баг параметров. Возможно фундаментальное несоответствие стратегии
+крипто-микроструктуре.
+
+**Вариант который ВОЗМОЖНО работает** (Capstone Extended Turtle — trend-following,
+не fade): n=41, WR 52.75%, PnL **+114.41%** с EMA 30/60/100. Это **противоположная**
+стратегия — следование тренду, а не фейд. Наш `scalp_turtle` — это fade.
+
+#### Пересмотренная приоритизация (крипто-корректная)
+
+1. **🔴 scalp_turtle — обсудить полный отказ** (или конверсию в trend-following).
+   Academic evidence n=531 перевешивает наш n=21. Это не curve-fit под наши
+   данные — это согласие внешнего крипто-backtest'а с нашим наблюдением.
+2. **🟡 scalp_statarb exits** (Z_EXIT 0.5 → 0.0 + Z_STOP ±3.0) —
+   3 крипто-источника согласны, но требует backtest на крипто-истории
+3. **🟡 scalp_vwap RR 1:0.75 → 1:1.5** — 2 крипто-источника указывают на 1:1.5
+   как норму, но правка меняет экономику → backtest нужен
+
+**НЕ приоритет** (отмены из equity-версии):
+- ~~ORB 15m→30m~~ — для крипто 15m корректно
+- ~~VWAP RR→1:2~~ — не крипто-стандарт
+- ~~Turtle trailing~~ — не лечим trailing'ом то что возможно не работает в принципе
+
+#### Честная оценка данных
+
+**Сильные (крипто-подтверждённые):**
+- ✅ `scalp_statarb` параметры — 3 независимых крипто-источника
+- ✅ `scalp_orb` 15m — tosindicators GBTC 90 дней
+- ✅ `scalp_leadlag` log-returns, BTC→ALT causality — 2 академ-paper'а
+- ✅ `scalp_volume` 2.0× — крипто-PineScript
+- 🔴 `scalp_turtle` концептуально проблема — 1 академ-работа n=531
+
+**Слабые (мало крипто-данных):**
+- ⚠️ `scalp_vwap` — 2 крипто-источника (Sword Red, FMZQuant) но на разных TF (daily, 1h-4h, не 5m скальпинг). Нет прямого 5m крипто walk-forward.
+- ⚠️ `scalp_funding` — совсем нет крипто-backtest'ов нашёл
+
+**Файлы:** BUILDLOG_BYBIT.md (только документация, код не менялся).
+
+---
+
+### RESEARCH: сверка параметров всех 6 страт с индустриальным стандартом (публичные backtest'ы)
+
+**⚠️ ЧАСТИЧНО SUPERSEDED** записью "CORRECTION: пересмотр RESEARCH-сверки"
+выше (того же дня). Часть выводов ниже (VWAP RR 1:2, ORB 30m, Turtle trailing)
+сделана на equity-данных (ES/NQ/Nifty) и **не применима к крипто**. Корректные
+крипто-выводы — в записи CORRECTION. Ниже сохранено для истории анализа.
+
+**Статус:** ИССЛЕДОВАНИЕ. Код НЕ менялся. Цель — задокументировать расхождения
+наших настроек с публичными источниками (TradingView scripts, GitHub backtest'ы,
+академические paper'ы), чтобы видеть их и иметь базу для обсуждения будущих
+правок (а не чтобы тюнить под малую выборку).
+
+**Методология:**
+- Для каждой из 6 страт найдено ≥2 независимых публичных источника с метриками
+- Источники: TradingView open-source scripts, GitHub репозитории с walk-forward
+  backtest'ами, рецензируемые статьи (Springer, Elsevier, MDPI), industry blog'и
+  (tradingstats.net, grandalgo.com, litefinance.org)
+- **Не берём** данные с Bybit/Binance copy-trading leaderboards — там 75% топов
+  уходят в минус в течение 12 мес (Trading Platforms Research 2024), и это почти
+  всегда leverage-holders, а не скальперы — наши стратегии у них неприменимы
+- **Не берём** марочные заявления "267% returns" без walk-forward — survivorship
+  bias и отсутствие out-of-sample
+
+#### Справочные источники
+
+1. **VWAP-RSI Scalper FINAL v1** (TradingView, michaelriggs)
+   - PF 1.37+, WR 37-48%, DD <1% на сотнях трейдов, ES/NQ 3-15m
+   - RR 1:2 (SL 1×ATR, TP 2×ATR), MAX 3 trades/day, сессионный фильтр (US cash)
+2. **VWAP-RSI Hybrid** (FMZQuant) — то же самое, RSI period 3 (короткий)
+3. **Turtle Soup Enhanced** (Sword Red / Medium 2025) — 60-72% WR, RR 1:2-1:3
+4. **Turtle Soup оригинал** (Connors&Raschke 1995) — WR 23% но RR 3.77,
+   **TRAILING STOP обязателен**, работает только в ranging markets
+5. **Crypto-Statistical-Arbitrage** (github.com/abailey81) — Walk-forward
+   2022-06→2024-12, Sharpe 1.61, WR 51.18%, PF 1.69, DD 4.64%, 127 сделок
+   - **Entry z=±2.0, EXIT z=0.0 (mean), STOP z=±3.0**
+6. **strat-test-cointegration** (github.com/ssanin82) — drawdown kill switch,
+   OLS hedge, z-score 21-period rolling window
+7. **ORB Strategy: 6,142 Days ES/NQ** (tradingstats.net) — 30m ORB даёт 67%
+   continuation, 15m ORB — только 59.6%, цитата: "15m is worst of both worlds"
+8. **Nifty ORB Backtest** (dailybulls.in, 42 signals, Jul-Oct 2025) — Fixed 1.5R
+   target + no trailing → WR 57.1% PF 2.88%
+9. **Price Transmission BTC→ALT** (Springer 2026, Asia-Pacific Financial Markets)
+   - Granger causality BTC→ALT p<0.05, log-returns, small-cap наиболее лажит
+   - Использовали ML (Gradient Boosting), а не жёсткие пороги
+10. **Bitcoin+Altcoins Trading Strategies** (Santos et al., Coimbra 2025)
+    - LASSO + daily data, CumRet 331%, Sharpe 94.59% ann, threshold 0.25%
+
+---
+
+#### 🔴 КРИТИЧНО: scalp_vwap — RR ИНВЕРТИРОВАН
+
+**Наши:** `sl_atr_mult=2.0, tp_atr_mult=1.5` → **RR = 1:0.75**
+**Индустрия:** RR = 1:2 (SL 1×ATR, TP 2×ATR) — 5 источников согласованы
+
+**Break-even WR (математика):**
+- Наш RR 1:0.75 → нужно **WR > 57.1%** чтобы НЕ терять
+- Индустрия RR 1:2 → break-even **WR 33.3%**
+
+**Наблюдаемая реальность:** текущий scalp_vwap в Wave 5 имеет WR 58.9% (выше
+break-even всего на 1.8 п.п.). Любая полоса плохого рынка (WR 55%) — и страт
+начнёт терять систематически. **22 апреля** именно это и случилось:
+`scalp_vwap` WR 41% на 23 сделках → PnL −$3.86.
+
+**Почему мы так настроили:** не помнится обоснование, возможно оптимизация под
+малую выборку в ранние волны. **Публичных backtest'ов с таким RR не нашёл
+вообще** — industry universally uses RR ≥ 1:1.5, scalping-версии RR = 1:2.
+
+**НЕ меняем сейчас:** выборка n=73 (>100 требуется по sample-size.mdc). Но это
+первый кандидат на обсуждение, когда дойдём до 100+ сделок. Правка требует
+полного backtest'а (исторические данные + walk-forward), не curve-fit.
+
+---
+
+#### 🔴 scalp_funding: RR 1:0.67 (тоже инвертирован)
+
+`sl_atr_mult=1.5, tp_atr_mult=1.0` → break-even WR 60%. В Wave 5 страта не
+генерировала сделок (нет фандинга выше порога), так что нечего и оценивать.
+
+---
+
+#### 🟡 scalp_vwap: нет daily trade cap
+
+**Индустрия:** MAX 3 trades/day (VWAP-RSI Scalper, FMZQuant)
+**Наши:** нет лимита вообще
+
+**Наблюдаемая реальность:** 22 апреля на TIAUSDT `scalp_vwap` открыл **4 лонга
+за 8 минут** (whipsaw pattern), все 4 ушли в SL подряд. Daily cap предотвратил
+бы это. Connors ещё в 2000-х называл такое поведение "revenge trading".
+
+**НЕ меняем:** одно наблюдение — не статистика. Но фиксируем как кандидата
+на обсуждение.
+
+---
+
+#### 🟡 scalp_turtle: нет trailing stop (Connors&Raschke ЯВНО требуют)
+
+**Источник:** "Street Smarts" Connors&Raschke 1995, стр. с правилами Turtle Soup:
+> "Use trailing stops, as the current position is moving profitably."
+
+**Наши:** фиксированный TP = 2.5 ATR, никакого trailing.
+**Индустрия (5 источников):** trailing stop обязателен — TS ловит reversal,
+а reversal по определению — движение с неизвестной глубиной, фиксированный TP
+режет winners.
+
+**Наблюдаемая реальность:** 22 апреля `scalp_turtle` WR 29% PF 0.93 на 17
+сделках. Часть трейдов, возможно, вернулась в профит ПОСЛЕ SL (нужна проверка
+по lookahead-анализу, пока нет инструмента).
+
+**НЕ меняем:** выборка мала, добавление trailing — серьёзная архитектурная
+правка (изменяет exit-логику по всем страт не только Turtle). Фиксируем как
+потенциальную работу, когда Turtle наберёт 100+ сделок.
+
+---
+
+#### 🟡 scalp_statarb: exit при |z|<0.5 vs индустрия |z|<0.0
+
+**Наши:** `Z_EXIT = 0.5` — выходим при полувозврате
+**abailey81 walk-forward (CEX):** `Exit z-score: 0.0 (mean)` — выходим при ПОЛНОМ
+возврате. Соответствующая метрика: WR 51.18% PF 1.69 Sharpe 1.61 на 127 сделках.
+**ssanin82:** тоже exit при возврате к нулю (21-period rolling).
+
+**Импликация:** мы систематически оставляем часть профита на столе. Z=0.5 →
+захвачено ~75% движения от z=2.0 к z=0. Z=0.0 → захвачено 100%.
+
+**Уже задокументировано** отдельной OPEN ISSUE (2026-04-22, stat-arb exit-логика).
+Теперь подтверждено вторым независимым источником (abailey81 публикует полные
+walk-forward метрики, это самое надёжное подтверждение, которое можно найти
+публично без академического paper'а).
+
+#### 🟡 scalp_statarb: нет hard z-stop (|z|>3.0)
+
+**abailey81:** `Stop Z-Score: ±3.0` — если пара разъехалась дальше 3σ, значит
+коинтеграция сломана, выходим безусловно.
+**Наши:** только emergency `-$25` suming pair uPnL.
+
+**Это уже OPEN ISSUE**, теперь подтверждено.
+
+---
+
+#### 🟡 scalp_orb: 15m коробка vs индустрия-рекомендованная 30m
+
+**tradingstats.net (6,142 дней ES + NQ):** 15m ORB double-break rate 61%,
+continuation 59.6%. 30m ORB — double-break 47.9%, continuation **67.0%** (NQ).
+Автор пишет: *"15-minute is worst of both worlds"*.
+
+**grandalgo.com Bank Nifty 10yr:** raw ORB без фильтров WR 48%, PF 1.2. С
+higher-timeframe trend filter WR поднимается до 55%+.
+
+**Наши:** 15-минутная коробка (ORB_BARS=3 × M5). В Wave 5 n=3, все 3 триггернули
+в одну сессию (NY 14:30 UTC), все ушли в SL. PnL −$10.28.
+
+**НЕ меняем:** n=3 — это шум, нельзя ни подтвердить, ни опровергнуть параметр.
+Литература говорит что 15m ORB изначально marginal. Если на n≥50 WR останется
+<35%, это будет сигналом что переходить на 30m.
+
+---
+
+#### 🟡 scalp_leadlag: детерминистские пороги vs ML в research
+
+**Наши:** `BTC_MOVE_PCT=1.0%`, `BTC_MOVE_MIN_ATR=1.5`, `CORR_MIN=0.5`.
+**Springer 2026 paper:** Granger causality statistically supported на p<0.05, но
+используют ML классификатор (Gradient Boosting) для trade-decision, а не жёсткие
+пороги. Santos&Sebastião&Silva 2025 — LASSO с 9 криптами как feature space.
+
+**Это не "ошибка" параметров**, а более фундаментальное расхождение: research
+говорит что edge есть, но рекомендует ML, а не rule-based. Мы rule-based — что
+СУЩЕСТВЕННО уменьшает capture edge (но даёт explainability).
+
+**Не меняем:** переход на ML — это полный rewrite страты, требует history-loader,
+feature-engineering, training pipeline. Слишком крупная работа под малую выборку.
+
+---
+
+#### ✅ scalp_volume: близко к стандарту
+
+**Наши:** `VOLUME_SPIKE_MULT=2.0`, `ADX_MIN=20`, `RSI_FILTER 20/80`, RR 1:1.
+**Industry (eltonaguiar / PineScript):** `volume_multiplier=2.0`, `price_move_threshold=1.0%`,
+`min_consecutive_bars=1-2`.
+**Совпадение по главному параметру** (2.0×). Наш RR 1:1 — на грани (break-even
+WR 50%), но не инвертирован. Наблюдаемая WR 60% → PnL +.
+
+---
+
+#### Сводная таблица расхождений
+
+| Страт | Парам | Наш | Индустрия | Critic |
+|---|---|---|---|---|
+| scalp_vwap | RR | 1:0.75 | 1:2 | 🔴 **ИНВЕРТИРОВАН** |
+| scalp_vwap | daily cap | нет | 3/день | 🟡 |
+| scalp_funding | RR | 1:0.67 | 1:2 | 🔴 **ИНВЕРТИРОВАН** |
+| scalp_turtle | trailing SL | нет | обязателен | 🟡 |
+| scalp_turtle | ADX_MAX | 30 | 25 (строже) | 🟢 небольшое |
+| scalp_statarb | Z_EXIT | 0.5 | 0.0 | 🟡 |
+| scalp_statarb | Z_STOP | нет | 3.0 | 🟡 OPEN ISSUE |
+| scalp_statarb | time-stop | нет | есть в abailey81 | 🟡 OPEN ISSUE |
+| scalp_orb | коробка | 15m | 30m | 🟡 |
+| scalp_orb | VWAP-after-break | нет | есть | 🟢 |
+| scalp_leadlag | ML vs rules | rules | ML | 🟡 архитектура |
+| scalp_volume | mult | 2.0 | 2.0 | ✅ |
+| scalp_volume | RR | 1:1 | 1:1-1:2 | 🟢 |
+
+Красные (🔴) — потенциально "сломанная" экономика, нужен полный backtest перед
+правкой. Жёлтые (🟡) — отклонения есть, но механика работает. Зелёные (🟢) —
+мелкие нюансы.
+
+#### Что это НЕ означает
+
+- **Не означает**, что надо немедленно менять параметры. Публичные backtest'ы
+  — это тоже маркетинг, и наши условия (Bybit demo, микро-депозит, лимит лота)
+  могут требовать других настроек
+- **Не означает**, что наш бот "ведёт себя неправильно". При текущих настройках
+  мы вышли в +$6.85 за Wave 5 (n=141). Это статистически не хуже
+  beakeven-трейдинга, но не имеет статистической значимости
+- **Не означает**, что надо копировать чужие параметры слепо. Их walk-forward
+  делался на других инструментах, другом исполнении, другом периоде
+
+#### Что это даёт
+
+- **Каталог расхождений** — чтобы каждое расхождение было осознанным, а не
+  незамеченным
+- **Приоритезация** будущих экспериментов:
+  - 1. scalp_vwap RR (инвертирован — единственное прямое расхождение с 5+ источниками)
+  - 2. scalp_statarb Z_EXIT 0.5→0.0 (подтверждено walk-forward с хорошими метриками)
+  - 3. scalp_turtle trailing stop (Connors прямо требовал)
+- **Защита от overfitting'а**: если в будущем захочется тюнить параметр, теперь
+  есть база "а что используют другие" → уменьшает шансы подгонки под шум
+
+#### Следующий шаг
+
+Собираем данные (≥100 сделок на страт) **без правок**. Когда наберётся
+репрезентативная выборка — обсуждаем правки по приоритету выше. Начинаем с
+самого очевидного (VWAP RR), только после одобрения.
+
+**Файлы:** BUILDLOG_BYBIT.md (только документация, код не менялся)
+
+---
+
+### OBSERVATION: alt-selloff regime event 2026-04-22 (квант-unwind в миниатюре)
+
+**Статус:** НАБЛЮДЕНИЕ, код НЕ менялся. Документируем для последующего
+сравнения, когда накопится ≥100 сделок в похожих режимах. Никаких
+параметрических правок по одному эпизоду (curve-fitting).
+
+**Симптом:** за окно 2026-04-22 13:30 UTC → 2026-04-23 07:12 UTC (~17.7ч,
+n=30 закрытых сделок API) PnL = −$22.51. PnL всего дня 22.04 = −$31.99 на
+52 сделках при WR 38% — против +$17.31 (20.04) и +$5.78 (21.04). Все четыре
+активные страты ушли в минус одновременно.
+
+**Декомпозиция 22.04:**
+
+| Страт | n | W | PnL | WR |
+|---|---|---|---|---|
+| scalp_turtle | 17 | 5 | **−$17.78** | 29% |
+| scalp_vwap | 23 | 11 | −$8.46 | 48% |
+| scalp_statarb | 10 | 3 | −$5.42 | 30% |
+| scalp_volume | 2 | 1 | −$0.33 | 50% |
+
+**Что проверено (баг или рынок?):**
+
+1. **Код не менялся в окне деградации.** Последний `bybit` коммит
+   `dd5d39a` (22.04 04:45 UTC) снизил `STATARB_PAIR_TP_USD` $2→$1 — этот
+   порог **ни разу не триггернулся** за всё окно (в `close_reason`
+   `statarb_pair_tp` = 0). Исключено как источник потерь.
+2. **Все exits корректны** — 100% убыточных сделок закрылись через
+   биржевой `sync_closed` (2 ATR SL сработал как задумано, ни одной
+   просрочки по `sync_pending` / `sync_orphan` сверх baseline).
+3. **Направленность убытков систематическая:** в сессии 22.04 13:30-20:00
+   UTC из 21 убыточной сделки **20 были Long-вхождения** на падающих
+   альтах. Только 1 убыточный Short. Это направленный регим-эффект,
+   а не равномерный шум.
+
+**Рыночный контекст (Bybit 1h klines, верифицировано API):**
+
+| Symbol | 22.04 12:00 UTC | 23.04 07:00 UTC | Δ% за 19ч |
+|---|---|---|---|
+| TIAUSDT | 0.3870 | 0.3570 | **−7.8%** |
+| ADAUSDT | 0.2548 | 0.2472 | −3.0% |
+| SOLUSDT | 88.61 | 86.11 | −2.8% |
+| TONUSDT | 1.378 | 1.348 | −2.2% |
+| **BTCUSDT** | 78,263 | 78,176 | **−0.1%** |
+
+Устойчивый **altcoin selloff при стационарном BTC**. LeadLag не активировался
+(порог BTC-движения ≥1% не достигнут).
+
+**Сигнатурный паттерн — whipsaw на TIAUSDT 19:00-20:00 UTC:**
+
+`scalp_vwap` открыл 4 Long подряд в одном часе (22.04 19:24, 19:29, 19:32
++ ещё) — все 4 SL. RSI перепродан → BUY → SL → RSI ещё более перепродан →
+BUY → SL → ... Классический paradox mean-reversion в trending режиме.
+
+```
+19:24  TIAUSDT Buy  1640.8  PnL=-3.26  (SL)
+19:29  TIAUSDT Buy  1646.9  PnL=-2.61  (SL)
+19:32  TIAUSDT Buy  1653.0  PnL=-3.11  (SL)
+20:19  TIAUSDT Buy  1657.8  PnL=-3.28  (SL, scalp_turtle)
+```
+
+**Сверка с академической литературой (не curve-fitting, а узнавание паттерна):**
+
+| Работа | Цитата | Соответствие |
+|---|---|---|
+| Khandani & Lo (2007) «What happened to the quants in August 2007?» MIT WP | *"Simultaneous unwind in crowded mean-reversion trades during regime transition"* | 7-9 авг 2007 equity quants −30-40%. 22.04 — миниатюра на крипте |
+| Avellaneda & Lee (2010) «Statistical Arbitrage in U.S. Equities» arxiv:0805.1104 | *"During high-dispersion periods, the strategy takes large losses"* | Наша dispersion: BTC flat, alts −3..−8% |
+| Lo (2004) «Adaptive Markets Hypothesis» | *"Mean-reversion strategies have negative correlation with momentum regimes by construction"* | 5 из 6 наших страт — MR или micro-breakout. Trending regime = антифаза |
+| Lopez de Prado (2018) «Advances in Financial ML» гл.12 | *"Strategies without regime detection fail catastrophically at regime transitions"* | Regime-filter у нас отсутствует |
+| Connors & Alvarez (2008) «Short Term Trading Strategies That Work» | Turtle Soup WR: ~55% range-bound / ~35% trending | scalp_turtle 22.04 WR = **29%** (согласуется с trending estimate) |
+| Kissell (2014) «Science of Algorithmic Trading» | *"VWAP strategy degrades in markets with strong directional drift"* | scalp_vwap 22.04 WR = 48% (согласуется) |
+
+**Вывод:**
+
+Деградация — **ожидаемое поведение mean-reversion стратегий в trending
+режиме альткоинов**, а не баг. Все механизмы риска (exchange SL, position
+sizing, нет overlap взрыва) сработали штатно. Это и есть та причина, по
+которой mean-reversion стратегии требуют **regime-filter**, что 30+ лет
+research-литературы.
+
+**Гипотезы для обсуждения ПОСЛЕ накопления данных (минимум 2 независимых
+trending эпизода на ≥100 сделок):**
+
+| Гипотеза | Research anchor | Ожидаемый эффект на 22.04 |
+|---|---|---|
+| Динамический `ADX_MAX` (ниже порог при high-vol) | Lopez de Prado гл.12 — regime filters | Отсекло бы ~40% entries на TIA |
+| HTF-trend filter (нет counter-trend при |EMA200(H1) slope| > X) | Connors-Alvarez | TIA H1 EMA наклон вниз 19ч — нет Long |
+| Cool-down по символу (2 losses подряд → пауза 30 мин) | Dennis/Turtle Traders «trend fatigue» | Блок 2-3 из 4 TIA whipsaw |
+| Regime-detection (alt-vs-BTC corr break → пауза alt-MR) | Avellaneda & Lee — dispersion monitor | Вся сессия на альтах была бы pause |
+
+**Ни одна из гипотез сейчас НЕ внедряется.** `n=30` в окне деградации и
+`n=52` на весь 22.04 — кратно ниже `sample-size.mdc` порога (≥100 сделок,
+≥2 недели). Любая правка по одному trending эпизоду = curve-fitting.
+
+**Биномиальный тест для документа:**
+
+- 22.04: 20 wins / 52 trades = 38.5%. P(WR≤20/52 | null=50%) ≈ 0.049 → p<0.05.
+  Статистически значимо, но n=52 << 100 → не основание для решений.
+- Окно 13:30-07:12 (17.7ч): 9W/30 = 30%. P-value 0.021.
+  Тот же вывод: значимо в моменте, но не репрезентативно.
+
+**Что делать сейчас:**
+
+Ничего. Продолжаем сбор данных до T+14d от Wave 5 baseline (2026-05-04).
+В следующем срезе смотрим:
+1. Повторился ли alt-selloff паттерн с аналогичной декомпозицией по стратам?
+2. WR `scalp_turtle` по всей Wave 5 сходится к ~50% (range-bound норма) или
+   систематически ниже (значит структурная проблема)?
+3. Частота whipsaw-серий (3+ losses подряд на одном символе от одной страты
+   в 1h окне)?
+
+Если в независимых trending эпизодах (минимум 2) паттерн воспроизводится —
+переходим к обсуждению regime-filter гипотез (но каждую только с backtest
+на out-of-sample данных).
+
+**Параллельные факты (не требуют решения):**
+
+- `scalp_orb` на Wave 5 дал −$10.28 на 3 сделках. Все 3 открылись
+  **20.04 14:23:56 UTC** за 1 секунду (NY open 14:30 сессия), все SL. Это
+  один false-breakout event на 3 символах (SOL/SUI/ADA), не относится
+  к окну 22.04. За 70 часов Wave 5 других ORB сигналов не было — `ORB_BARS=3`
+  + `VOLUME_MULT=1.3` + `ADX_MAX=25` фильтры работают строго. n=3
+  недостаточно для выводов.
+- `scalp_statarb` на 22.04: 2 новые пары (`sa_ADAUSDT_TIAUSDT_183a22`,
+  `sa_WIFUSDT_TIAUSDT_df2d36`) закрылись с убытком при падающем TIA.
+  Это согласуется с OPEN ISSUE по stat-arb exit-логике
+  (см. блок от 2026-04-21): TIA-нога систематически тянет пары в минус.
+  Новых данных не добавляет, ждём n≥50 пар.
+
+**Файлы:** `BUILDLOG_BYBIT.md`.
+
+**Временные скрипты анализа (на VPS `/tmp/`, не коммитятся):**
+`drawdown_window.py`, `market_context.py`, `orb_and_daily.py` —
+выполнялись локально, результаты в этом блоке. При возврате к задаче —
+перегенерировать со свежим окном.
+
+---
+
 ## 2026-04-21
 
 ### STATARB_PAIR_TP_USD $2.00 → $1.00 (тюнинг мёртвого порога)

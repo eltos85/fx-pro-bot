@@ -87,8 +87,27 @@ class SessionOrbStrategy:
     `scalp_opened < max_positions`).
     """
 
-    def __init__(self, *, max_signals_per_scan: int = 3) -> None:
+    def __init__(
+        self,
+        *,
+        max_signals_per_scan: int = 3,
+        allowed_sessions: set[str] | None = None,
+        allowed_symbols: set[str] | None = None,
+        allowed_direction: str | None = None,
+    ) -> None:
+        """Параметры-ограничители (backtest 90д 2026-04-23, BUILDLOG_BYBIT.md):
+
+        - ``allowed_sessions`` — whitelist сессий ("asia"/"london"/"ny"), None=all.
+          London (08:00 UTC) прибыльна (PF 1.27), NY (14:00 UTC) убыточна (PF 0.73).
+        - ``allowed_symbols`` — whitelist символов, None=все. Топ-3 прибыльных:
+          SOLUSDT/LINKUSDT/BNBUSDT. ADAUSDT/AVAXUSDT — хронически убыточны.
+        - ``allowed_direction`` — "long"/"short"/None. London/Long — лучший срез
+          (PF 1.53). NY/Long — катастрофа (PF 0.51).
+        """
         self._max_signals = max_signals_per_scan
+        self._allowed_sessions = allowed_sessions
+        self._allowed_symbols = allowed_symbols
+        self._allowed_direction = allowed_direction
 
     def scan(self, bars_map: dict[str, list[Bar]]) -> list[OrbSignal]:
         signals: list[OrbSignal] = []
@@ -102,6 +121,8 @@ class SessionOrbStrategy:
         return signals[: self._max_signals]
 
     def _scan_symbol(self, symbol: str, bars: list[Bar]) -> OrbSignal | None:
+        if self._allowed_symbols is not None and symbol not in self._allowed_symbols:
+            return None
         if len(bars) < max(EMA_PERIOD, ATR_PERIOD * 2 + 1):
             return None
 
@@ -109,6 +130,8 @@ class SessionOrbStrategy:
         if session is None:
             return None
         session_name, session_start, _ = session
+        if self._allowed_sessions is not None and session_name not in self._allowed_sessions:
+            return None
 
         session_bars = _collect_session_bars(bars, session_start)
         # Нужно минимум ORB_BARS баров на коробку + хотя бы 1 post-ORB
@@ -160,6 +183,9 @@ class SessionOrbStrategy:
         elif last_bar.close < box_low - filt and slope < 0 and not earlier_broke_down:
             direction = Direction.SHORT
         else:
+            return None
+
+        if self._allowed_direction is not None and direction.value != self._allowed_direction:
             return None
 
         log.info(
