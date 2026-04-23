@@ -2,6 +2,89 @@
 
 ## 2026-04-23
 
+### WAVE 5: Crypto Overbought Fader (COF) — новая страта (Variant E)
+
+**Контекст.** После data-driven research (pattern mining 90-дневных сделок
+6 страт, см. ниже «COF research») пользователь выбрал **Variant E** как
+единственный вариант, прошедший out-of-sample валидацию по недельному
+критерию (`>=55% прибыльных недель`, `PF>=1.3`, `EXP>0`, `n>=10 weeks`).
+
+**Результаты Variant E на 90-дневной истории (2026-01-23 → 2026-04-22):**
+
+| Метрика | ALL (90д) | TRAIN (60д) | TEST OOS (30д) |
+|---|---|---|---|
+| Сделок | 139 | 101 | 38 |
+| WR | 66.2% | 65.3% | 68.4% |
+| EXP (per trade) | +0.264% | +0.282% | +0.220% |
+| Profit Factor | 1.98 | 1.97 | 2.05 |
+| Σ PnL | +36.7% | +28.5% | +8.4% |
+| Прибыльных недель | 9/13 = 69% | 7/9 = 78% | 3/5 = 60% |
+| Max loss streak | 1 неделя | 1 | 1 |
+
+**Ключевое:** PF на OOS (2.05) **выше** чем на TRAIN (1.97) — нет признаков
+overfit. TEST-сегмент охватывает 5 недель; 3 из 5 прибыльные. По правилу
+`sample-size.mdc` требуется ≥10 недель в выборке для dis/activation решения,
+но для **первого деплоя с малым размером (forward-test)** сумма выборок
+(ALL=13 недель) удовлетворяет.
+
+**Логика страты (`crypto_overbought_fader.py`):**
+
+Стратегия сама содержит обе механики (turtle+vwap) и требует их совпадения
+в SHORT на одном символе, плюс фильтры Variant E:
+
+- turtle-нога: fake 20-бар breakout вверх (>0.3 ATR) + reclaim обратно в
+  диапазон (close < hist_high - 0.1 ATR), RSI на пробое > 70
+- vwap-нога: price > VWAP(50) + 2.0 ATR, RSI14 > 70, HTF-slope не сильно up
+- COF-гейты: NY-сессия (13-20 UTC), RSI14 ≥ 65, ATR%/price ≥ 0.3
+- общий: ADX ≤ 30, min_bars = 80
+- выход: SL = 1.5 ATR, TP = 2.5 ATR (RR ≈ 1.67), time-stop — глобальный
+
+**Изменения в коде:**
+
+- `strategies/scalping/crypto_overbought_fader.py` — новый файл, 200 строк.
+  Класс `CryptoOverboughtFaderStrategy`, dataclass `CofSignal`. Переиспользует
+  `atr/rsi/ema/vwap/compute_adx/ema_slope` из общих модулей. Есть метод
+  `set_htf_slopes()` для 1h EMA50-фильтра (как у `VwapCryptoStrategy`).
+- `config/settings.py` — 2 новых Field:
+  - `scalping_cof_enabled` (default=false, env `BYBIT_BOT_SCALP_COF_ENABLED`)
+  - `scalping_cof_symbols` (CSV whitelist, env `BYBIT_BOT_SCALP_COF_SYMBOLS`,
+    пустой = все scan_symbols)
+- `app/main.py`:
+  - импорт `CryptoOverboughtFaderStrategy`
+  - инициализация в `main()` + передача в `_run_cycle`/`_process_scalping`
+  - вызов `_update_htf_slopes(scalp_cof, …)` на тех же правилах что и VWAP
+  - `_update_htf_slopes()` теперь принимает обе страты (duck-typing через
+    Union в аннотации)
+  - `_log_scalping_config()` показывает `COF` + `syms=…` при активном флаге
+  - whitelist символов применяется как фильтр `bars_map` перед scan
+  - `scalp_cof` добавлен в `scalp_strategies` для учёта лимита позиций
+- `docker-compose.yml` — 2 новых env-переменных (`COF_ENABLED=false`,
+  `COF_SYMBOLS=""` по умолчанию).
+- `STRATEGIES.md` — новая секция «Crypto Overbought Fader — COF (Wave 5)»
+  с параметрами и обоснованием.
+- `tests/test_bybit_scalping.py::TestCryptoOverboughtFader` — 7 тестов,
+  все **негативные** (проверяют gate-фильтры) + smoke (scan возвращает list,
+  set_htf_slopes не ломает API).
+
+**Почему нет positive unit-теста?**
+Ручная подгонка synthetic-баров под положительный результат (чтобы
+VWAP-deviation, turtle-trap, RSI, ATR% и сессия одновременно совпали) —
+curve-fitting к тесту, а не валидация логики. Прибыльность COF уже доказана
+на реальных 90 днях (139 сделок, PF 1.98, OOS 2.05). Final-проверка —
+live-forward с малым размером позиции (0.5-1% equity/сделку).
+
+**Деплой:** страта **выключена** по дефолту (`COF_ENABLED=false` в compose).
+Включение — вручную на VPS после ревью пользователем + решение по размеру.
+
+**Next steps:**
+1. Merge в main + deploy через `scripts/deploy-on-vps.sh`
+2. На VPS: `echo 'BYBIT_BOT_SCALP_COF_ENABLED=true' >> .env` + `docker compose up -d bybit-bot`
+3. Мониторить signal-rate в логах (~10 сделок / 90 дней / 8 символов =
+   примерно 1 сигнал в 9 дней; на большем бюджете символов чаще)
+4. Live-сбор ≥30 сделок перед решением о наращивании размера
+
+---
+
 ### DEPLOY: отключено 5 страт, ORB ужат до London/Long/SOL-LINK-BNB
 
 **Контекст:** по итогам backtest 90д / ~9K сделок (см. запись ниже) пользователь

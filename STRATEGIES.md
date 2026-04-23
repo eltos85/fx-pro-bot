@@ -598,6 +598,54 @@ A-B теста значения можно менять через `.env` на V
 | ADX_MAX | 30 | Отсекает сильный тренд (sweep = continuation, не ловушка) |
 | SL / TP | 1.5 / 2.5 ATR | RR 1.67 |
 
+#### Crypto Overbought Fader — COF (Wave 5, deploy 2026-04-23)
+**Файл:** `crypto_overbought_fader.py`
+
+**Происхождение:** data-driven research на 90 днях backtest-а (см. BUILDLOG_BYBIT.md
+2026-04-23). Pattern-mining (`scripts/mine_ensembles.py` → `mine_duo_short.py`)
+показал: DUO (turtle+vwap в одном направлении) даёт edge, которого нет у
+каждой страты отдельно. SHORT-ветка с фильтрами Variant E — единственная,
+прошедшая Out-of-Sample валидацию по недельному критерию прибыльности.
+
+**Логика:** SHORT открывается, когда одновременно срабатывают:
+1. **Turtle-SHORT** — fake 20-бар пробой вверх + reclaim обратно (см. Turtle Soup).
+2. **VWAP-SHORT** — price > VWAP + 2.0 ATR, RSI > 70, мягкий HTF-фильтр.
+3. **COF-фильтры (Variant E)**:
+   - Сессия **NY** (13–20 UTC).
+   - **RSI14 ≥ 65** (overbought).
+   - **ATR/price × 100 ≥ 0.3** (достаточная волатильность).
+4. **ADX ≤ 30** (унаследовано от turtle — отсекает сильный тренд).
+
+**Важно:** обе страты-источника (turtle, vwap) индивидуально убыточны на истории
+(PF 0.74–0.78). Edge возникает от ансамбля — вход ТОЛЬКО при согласии обеих
+на overbought-рынке.
+
+| Параметр | Значение | Источник |
+|---|---|---|
+| Turtle LOOKBACK | 20 | Connors & Raschke (turtle-нога COF) |
+| Turtle BREAK_DEPTH | 0.3 ATR | Turtle Soup defaults |
+| Turtle RECLAIM_WINDOW | 4 бара M5 | Turtle Soup defaults |
+| VWAP DEVIATION | 2.0 ATR | Vwap Crypto defaults |
+| VWAP WINDOW | 50 баров M5 | Vwap Crypto defaults |
+| HTF_SLOPE_FLAT | ±0.0005 / 1h EMA50 | Vwap Crypto (блок против сильного up) |
+| **COF RSI_MIN** | **≥ 65** | **Pattern mining Variant E (2026-04-23)** |
+| **COF ATR_PCT_MIN** | **≥ 0.3%** | **Pattern mining Variant E (2026-04-23)** |
+| **COF сессия** | **NY 13–20 UTC** | **Pattern mining Variant E (2026-04-23)** |
+| COF направление | SHORT only | Variant E: LONG-ветка дала отрицательный EXP |
+| ADX_MAX | 30 | Turtle heritage |
+| SL / TP | 1.5 / 2.5 ATR | Turtle heritage, RR ≈ 1.67 |
+
+**Валидация (90 дней, 2026-01-23 → 2026-04-22):**
+- Σ сделок = 139, WR = 66.2%, EXP = +0.264%/trade, PF = 1.98
+- Σ PnL = +36.7%
+- Прибыльных недель: 9 из 13 = 69.2% (порог ≥55% — пройден)
+- Max loss streak: 1 неделя
+- **OOS (последние 30 дней)**: PF = 2.05 (даже выше TRAIN PF 1.97 — не overfit)
+
+**Деплой — с малым размером** (0.5–1% equity / сделку) для forward-теста.
+Включение: `BYBIT_BOT_SCALP_COF_ENABLED=true` в `.env` на VPS.
+Опциональный whitelist: `BYBIT_BOT_SCALP_COF_SYMBOLS=SOLUSDT,LINKUSDT,...`.
+
 #### BTC Lead-Lag → Altcoin (Wave 4, не деплой)
 **Файл:** `btc_leadlag.py`
 **Reference symbol:** BTCUSDT (грузится, но НЕ торгуется — был убыточен в скальпе).
@@ -641,6 +689,8 @@ BYBIT_BOT_SCALP_ORB_ENABLED=false       # Wave 4 pending
 BYBIT_BOT_SCALP_TURTLE_ENABLED=false    # Wave 4 pending
 BYBIT_BOT_SCALP_LEADLAG_ENABLED=false   # Wave 4 pending
 BYBIT_BOT_LEADLAG_REF_SYMBOL=BTCUSDT    # reference-only, не торгуется
+BYBIT_BOT_SCALP_COF_ENABLED=false       # Wave 5 COF — включать ручно после решения
+BYBIT_BOT_SCALP_COF_SYMBOLS=            # CSV whitelist, пусто = все scan_symbols
 ```
 
 ---

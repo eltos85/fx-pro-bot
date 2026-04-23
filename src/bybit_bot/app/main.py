@@ -22,6 +22,7 @@ from bybit_bot.stats.store import PositionRow, StatsStore
 from bybit_bot.strategies.momentum import MomentumStrategy
 from bybit_bot.strategies.scalping.funding_scalp import FundingScalpStrategy
 from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+from bybit_bot.strategies.scalping.crypto_overbought_fader import CryptoOverboughtFaderStrategy
 from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
 from bybit_bot.strategies.scalping.stat_arb_crypto import StatArbCryptoStrategy
 from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
@@ -119,6 +120,8 @@ def run_bot() -> None:
     scalp_orb = _build_scalp_orb(settings) if settings.scalping_orb_enabled else None
     scalp_turtle = TurtleSoupStrategy() if settings.scalping_turtle_enabled else None
     scalp_leadlag = BtcLeadLagStrategy() if settings.scalping_leadlag_enabled else None
+    scalp_cof = CryptoOverboughtFaderStrategy() if settings.scalping_cof_enabled else None
+    scalp_cof_symbols = _parse_csv_env(settings.scalping_cof_symbols)
 
     client: BybitClient | None = None
     executor: TradeExecutor | None = None
@@ -191,6 +194,8 @@ def run_bot() -> None:
                 scalp_orb=scalp_orb,
                 scalp_turtle=scalp_turtle,
                 scalp_leadlag=scalp_leadlag,
+                scalp_cof=scalp_cof,
+                scalp_cof_symbols=scalp_cof_symbols,
                 client=client,
                 executor=executor,
                 killswitch=killswitch,
@@ -219,6 +224,8 @@ def _run_cycle(
     scalp_orb: SessionOrbStrategy | None,
     scalp_turtle: TurtleSoupStrategy | None,
     scalp_leadlag: BtcLeadLagStrategy | None,
+    scalp_cof: CryptoOverboughtFaderStrategy | None = None,
+    scalp_cof_symbols: set[str] | None = None,
     client: BybitClient | None,
     executor: TradeExecutor | None,
     killswitch: KillSwitch | None,
@@ -288,6 +295,8 @@ def _run_cycle(
 
     if scalp_vwap and client:
         _update_htf_slopes(scalp_vwap, client, settings)
+    if scalp_cof and client:
+        _update_htf_slopes(scalp_cof, client, settings)
 
     _process_scalping(
         bars_map=bars_map,
@@ -303,6 +312,8 @@ def _run_cycle(
         scalp_orb=scalp_orb,
         scalp_turtle=scalp_turtle,
         scalp_leadlag=scalp_leadlag,
+        scalp_cof=scalp_cof,
+        scalp_cof_symbols=scalp_cof_symbols,
         cycle_counter=cycle,
         tradeable_symbols=tradeable_symbols,
     )
@@ -730,11 +741,15 @@ def _process_exits(
 
 
 def _update_htf_slopes(
-    scalp_vwap: VwapCryptoStrategy,
+    strategy: VwapCryptoStrategy | CryptoOverboughtFaderStrategy,
     client: BybitClient,
     settings: Settings,
 ) -> None:
-    """Загрузить 1h бары через Bybit API и рассчитать EMA(50) slope для VWAP HTF фильтра."""
+    """Загрузить 1h бары и рассчитать EMA(50) slope для HTF-фильтра.
+
+    Работает для любой страты с методом `set_htf_slopes(dict[str, float])`
+    (VWAP, COF).
+    """
     from bybit_bot.analysis.signals import ema
     from bybit_bot.strategies.scalping.indicators import ema_slope
 
@@ -749,7 +764,7 @@ def _update_htf_slopes(
             slopes[symbol] = ema_slope(ema_vals, 5)
         except Exception:
             log.debug("HTF kline %s: ошибка загрузки", symbol)
-    scalp_vwap.set_htf_slopes(slopes)
+    strategy.set_htf_slopes(slopes)
     log.debug("HTF slopes: %d символов", len(slopes))
 
 
@@ -848,6 +863,8 @@ def _process_scalping(
     scalp_orb: SessionOrbStrategy | None,
     scalp_turtle: TurtleSoupStrategy | None,
     scalp_leadlag: BtcLeadLagStrategy | None,
+    scalp_cof: CryptoOverboughtFaderStrategy | None = None,
+    scalp_cof_symbols: set[str] | None = None,
     cycle_counter: int = 0,
     tradeable_symbols: set[str] | None = None,
 ) -> None:
@@ -867,7 +884,7 @@ def _process_scalping(
     open_symbols = {p.symbol for p in positions}
     scalp_strategies = {
         "scalp_vwap", "scalp_statarb", "scalp_funding", "scalp_volume",
-        "scalp_orb", "scalp_turtle", "scalp_leadlag",
+        "scalp_orb", "scalp_turtle", "scalp_leadlag", "scalp_cof",
     }
     db_open = stats.get_open_positions()
     scalp_opened = sum(1 for dp in db_open if dp.strategy in scalp_strategies)
@@ -959,6 +976,28 @@ def _process_scalping(
                 strategy_name="scalp_turtle",
             )
             scalp_trades.append((ts.symbol, sig, bars_map[ts.symbol], "scalp_turtle"))
+
+    if scalp_cof and bars_map:
+        # Опциональный whitelist символов через BYBIT_BOT_SCALP_COF_SYMBOLS
+        cof_whitelist = scalp_cof_symbols or set()
+        cof_bars_map = (
+            {s: bars for s, bars in bars_map.items() if s in cof_whitelist}
+            if cof_whitelist else bars_map
+        )
+        for cs in scalp_cof.scan(cof_bars_map):
+            if cs.symbol in open_symbols:
+                continue
+            sig = Signal(
+                direction=cs.direction, strength=0.8,
+                reasons=(
+                    f"cof_dev={cs.deviation_atr:.1f}ATR "
+                    f"turtle_depth={cs.turtle_depth_atr:.2f}ATR "
+                    f"rsi={cs.rsi:.0f} atr%={cs.atr_pct:.2f}",
+                ),
+                sl_atr_mult=1.5, tp_atr_mult=2.5,
+                strategy_name="scalp_cof",
+            )
+            scalp_trades.append((cs.symbol, sig, bars_map[cs.symbol], "scalp_cof"))
 
     if scalp_leadlag and bars_map:
         ref_symbol = settings.leadlag_reference_symbol
@@ -1064,6 +1103,11 @@ def _log_scalping_config(settings: Settings) -> None:
         active.append("Turtle")
     if settings.scalping_leadlag_enabled:
         active.append(f"LeadLag(ref={settings.leadlag_reference_symbol})")
+    if settings.scalping_cof_enabled:
+        cof_parts = ["COF"]
+        if settings.scalping_cof_symbols:
+            cof_parts.append(f"syms={settings.scalping_cof_symbols}")
+        active.append("/".join(cof_parts))
     log.info("Скальпинг: %s", ", ".join(active) if active else "отключён")
 
 

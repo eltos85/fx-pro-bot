@@ -217,6 +217,19 @@ class Settings(BaseSettings):
     scalping_leadlag_enabled: bool = Field(
         default=False, validation_alias="BYBIT_BOT_SCALP_LEADLAG_ENABLED",
     )
+    # Crypto Overbought Fader (COF) — ансамбль turtle+vwap в SHORT.
+    # Подробнее см. `strategies/scalping/crypto_overbought_fader.py` и
+    # BUILDLOG_BYBIT.md (2026-04-23 pattern-mining research).
+    scalping_cof_enabled: bool = Field(
+        default=False, validation_alias="BYBIT_BOT_SCALP_COF_ENABLED",
+    )
+    # Whitelist символов для COF (CSV, пустая строка = без ограничений).
+    # Default пустой — фильтры уже зашиты в саму страту (NY/RSI/ATR).
+    # Если пользователь захочет, например, {SOLUSDT,LINKUSDT,AVAXUSDT,ADAUSDT} —
+    # задаст через env.
+    scalping_cof_symbols: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_COF_SYMBOLS",
+    )
     # BTC нужен только как REFERENCE для BTC-Lead-Lag: грузим бары,
     # но в торговых стратегиях НЕ открываем позиции (убыточен в скальпе).
     leadlag_reference_symbol: str = Field(

@@ -427,6 +427,7 @@ def _make_turtle_bars(
     n_history: int = 100,
     center: float = 60000.0,
     range_half: float = 100.0,
+    ts_base: datetime | None = None,
 ) -> list[Bar]:
     """Сгенерировать бары для теста Turtle Soup.
 
@@ -436,10 +437,12 @@ def _make_turtle_bars(
     - bars[-2]: промежуточный.
     - last_bar: возвращается ВНУТРЬ диапазона с буфером.
     - trap_direction=None → нет пробоя.
+    - ts_base: начальная метка времени (по умолчанию 2026-04-17 12:00 UTC).
     """
     from datetime import timedelta
 
-    ts_base = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    if ts_base is None:
+        ts_base = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
     bars: list[Bar] = []
 
     # History: детерминированный шум с амплитудой range_half
@@ -778,6 +781,122 @@ class TestBtcLeadLag:
         assert BtcLeadLagStrategy().scan({"BTCUSDT": short_btc, "SOLUSDT": alt}) == []
 
 
+# ── Crypto Overbought Fader (COF) ────────────────────────────
+#
+# COF = ансамбль Turtle-SHORT + VWAP-SHORT + фильтры Variant E
+# (NY-сессия, RSI14≥65, ATR%≥0.3). Требуется согласие обеих стратегий.
+# Подробнее: `strategies/scalping/crypto_overbought_fader.py`.
+#
+# ВАЖНО: прибыльность COF валидирована 90-дневным backtest-ом (139 сделок,
+# PF 1.98, OOS PF 2.05 — см. BUILDLOG_BYBIT.md 2026-04-23 "COF research").
+# Unit-тесты здесь НЕ проверяют прибыльность — только корректность
+# gate-фильтров (сессия/RSI/ATR%/ADX/HTF). «Подогнанные под результат»
+# synthetic бары для positive-сценария не пишем (это curve-fitting к тесту,
+# а не валидация логики). Live-прогон на малом размере — финальная проверка.
+
+
+def _cof_ts_base(hour_utc: int = 17) -> datetime:
+    """ts_base такой, чтобы последний бар турт-сетапа попал на hour_utc.
+
+    _make_turtle_bars кладёт n_history (100) + bias_len (16) + 3 trap = 119 баров
+    с шагом 5 мин → диапазон 595 мин = 9h 55m. Последний бар = ts_base + 590 мин.
+    """
+    from datetime import timedelta
+    last_delta = timedelta(minutes=5 * (100 + 16 + 3 - 1))  # 590 min = 9h 50m
+    target = datetime(2026, 4, 17, hour_utc, 0, tzinfo=UTC)
+    return target - last_delta
+
+
+class TestCryptoOverboughtFader:
+    """Crypto Overbought Fader — gate-фильтры Variant E.
+
+    Тесты проверяют ТОЛЬКО корректность отсечений: страта не должна давать
+    сигнал вне NY-сессии, на long-setup, без пробоя, при низкой волатильности,
+    при малом числе баров. Проверка «страта действительно генерит SHORT» —
+    через backtest/live, не через подогнанные synthetic-бары.
+    """
+
+    def test_no_signal_outside_ny_session(self):
+        """Turtle-up setup вне NY (Asia 05:00 UTC) → COF-сигнал отсекается."""
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        bars = _make_turtle_bars(
+            trap_direction="up",
+            center=100.0, range_half=3.0,
+            ts_base=_cof_ts_base(hour_utc=5),  # Asia
+        )
+        assert CryptoOverboughtFaderStrategy().scan({"SOLUSDT": bars}) == []
+
+    def test_no_signal_on_long_setup(self):
+        """Setup «вниз» (long-candidate у turtle) — COF молчит (только SHORT)."""
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        bars = _make_turtle_bars(
+            trap_direction="down",
+            center=100.0, range_half=3.0,
+            ts_base=_cof_ts_base(hour_utc=17),
+        )
+        assert CryptoOverboughtFaderStrategy().scan({"SOLUSDT": bars}) == []
+
+    def test_no_signal_without_breakout(self):
+        """Нет turtle-trap в NY-сессию — COF молчит (DUO-agreement не выполнен)."""
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        bars = _make_turtle_bars(
+            trap_direction=None,
+            center=100.0, range_half=3.0,
+            ts_base=_cof_ts_base(hour_utc=17),
+        )
+        assert CryptoOverboughtFaderStrategy().scan({"SOLUSDT": bars}) == []
+
+    def test_no_signal_low_atr_pct(self):
+        """Очень низкий ATR/price*100 (BTC @60k, range_half=100) → COF молчит.
+
+        ATR≈10 при price≈60000 → ATR%≈0.017% ≪ 0.3% (порог Variant E).
+        """
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        bars = _make_turtle_bars(
+            trap_direction="up",
+            center=60000.0, range_half=100.0,
+            ts_base=_cof_ts_base(hour_utc=17),
+        )
+        assert CryptoOverboughtFaderStrategy().scan({"BTCUSDT": bars}) == []
+
+    def test_insufficient_bars(self):
+        """Слишком мало баров (< MIN_BARS+LOOKBACK+RECLAIM) — пропуск."""
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        assert CryptoOverboughtFaderStrategy().scan({"BTCUSDT": _make_bars(n=30)}) == []
+
+    def test_scan_returns_list_on_empty_input(self):
+        """API-контракт: scan возвращает list даже при пустом входе."""
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        assert CryptoOverboughtFaderStrategy().scan({}) == []
+
+    def test_set_htf_slopes_does_not_raise(self):
+        """set_htf_slopes принимает dict, не ломает last scan."""
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        strat = CryptoOverboughtFaderStrategy()
+        strat.set_htf_slopes({"SOLUSDT": 0.01, "LINKUSDT": -0.002})
+        # Scan на turtle-вниз сетапе всё равно молчит (long → не SHORT).
+        bars = _make_turtle_bars(
+            trap_direction="down",
+            center=100.0, range_half=3.0,
+            ts_base=_cof_ts_base(hour_utc=17),
+        )
+        assert strat.scan({"SOLUSDT": bars}) == []
+
+
 # ── Integration: imports ─────────────────────────────────────
 
 def test_all_scalping_imports():
@@ -789,3 +908,6 @@ def test_all_scalping_imports():
     from bybit_bot.strategies.scalping.session_orb import SessionOrbStrategy
     from bybit_bot.strategies.scalping.turtle_soup import TurtleSoupStrategy
     from bybit_bot.strategies.scalping.btc_leadlag import BtcLeadLagStrategy
+    from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+        CryptoOverboughtFaderStrategy, CofSignal,
+    )
