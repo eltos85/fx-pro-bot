@@ -5,8 +5,8 @@ alwaysApply: true
 
 # Статистика: точка отсчёта
 
-Статистика по стратегиям считается **с 23.04.2026 ~08:00 UTC** (commit
-`0782a2c`, деплой на VPS) — ремонт `session_orb`:
+Статистика по стратегиям считается **с 23.04.2026 08:58 UTC** (commit
+`49861fe`, деплой на VPS) — ремонт `session_orb`:
 расширен whitelist (+9 инструментов, 5→16), добавлен confirm bar,
 HTF EMA200 H1 сделан блокирующим для news_fade, изменён R:R на 2:1
 (SL 2.0→1.5 ATR, TP 1.5→3.0 ATR). Плюс откат overfit параметров
@@ -31,7 +31,9 @@ PF net 0.35, R:R 0.97 (≈1:1 вместо 2:1). Крипта (332 сделки,
   `OUTSIDERS_MODE=confirmed` как default.
 - **22.04.2026 04:36 UTC** — правки на выборке без HTF (коммит `0c8c758`):
   USDJPY exclude, News Fade session filter, NY close cutoff 21:00 UTC.
-- **23.04.2026 ~08:00 UTC (commit `0782a2c`)** — **текущий baseline.**
+- **23.04.2026 08:58 UTC (commit `49861fe`)** — **текущий baseline.**
+  (суммарно 3 коммита: `0782a2c` основной рефактор session_orb,
+  `753e2bc` обновление BUILDLOG, `49861fe` fix server-side TP для session_orb)
   Ремонт `session_orb` по диагностике 839 чистых сделок 09-22.04
   (WR 36%, PF net 0.35, R:R 0.97):
   - **Whitelist +9 инструментов** (5→16): возвращены commodities (GC/CL/BZ/NG)
