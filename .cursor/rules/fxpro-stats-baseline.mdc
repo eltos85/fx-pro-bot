@@ -1,9 +1,15 @@
 ---
-description: Baseline date for trading statistics
-alwaysApply: true
+description: FxPro/advisor baseline даты торговой статистики, депозита и инструментов. Применяется ТОЛЬКО к fx_pro_bot (cTrader, advisor). Для Bybit см. bybit-stats-baseline.mdc.
+globs: ["src/fx_pro_bot/**/*", "BUILDLOG.md", "STRATEGIES.md", "tests/test_strategies.py", "tests/test_trading.py", "tests/test_verifier.py", "tests/test_whales.py", "scripts/fetch_fxpro_history.py", "scripts/pnl_report.py", "scripts/audit_sl_tp.py", "scripts/audit_recent.py", "scripts/ab_test_snapshot.py", "scripts/analysis_9h.py", "scripts/compare_stats.py", "scripts/fix_*.py", "scripts/set_tp_all.py", "data/fxpro_*", "data/signals*", "data/ctrader_*"]
+alwaysApply: false
 ---
 
-# Статистика: точка отсчёта
+# FxPro / advisor: точка отсчёта статистики
+
+> **Scope:** только `fx_pro_bot` / advisor (cTrader-based). Это правило
+> автоматически активируется когда в контексте файл из `src/fx_pro_bot/`,
+> `BUILDLOG.md` или связанные FxPro-артефакты.
+> Для Bybit используется отдельный `bybit-stats-baseline.mdc`.
 
 Статистика по стратегиям считается **с 23.04.2026 09:28 UTC** (commit `86469d1`,
 деплой на VPS, manual) — комплексный апгрейд risk management + `outsiders`:

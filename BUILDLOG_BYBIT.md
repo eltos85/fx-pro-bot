@@ -1,5 +1,30 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-24
+
+### chore(rules): аудит .cursor/rules на пересечение ботов
+`f603a4b`
+
+Cross-cutting правка IDE-правил. Причина: правила применялись одновременно
+к обоим ботам, и bot-specific контекст мог влиять на другую кодовую базу.
+
+- Создан `bybit-stats-baseline.mdc` (conditional по `src/bybit_bot/**/*`,
+  `BUILDLOG_BYBIT.md`, bybit-тесты/скрипты, `docker-compose.yml`).
+  Внутри — текущий baseline 2026-04-23 WAVE 5: `scalp_cof` добавлена
+  (disabled), 5 страт отключены, `scalp_orb` сужен до
+  london/SOLUSDT-LINKUSDT-BNBUSDT/long; демо $500, KillSwitch off.
+- `bybit-pnl.mdc` переведено в conditional (`alwaysApply: false`,
+  globs на bybit-файлы) — перестаёт шуметь в advisor-сессиях.
+- `buildlog.mdc` дополнено: Bybit-правки → `BUILDLOG_BYBIT.md`,
+  FxPro → `BUILDLOG.md`; cross-cutting → оба.
+- `deploy-vps.mdc` расширено примером проверки `fx-pro-bot-bybit-bot-1`.
+- `strategy-guard.mdc`: Bybit research-инварианты явно отделены от
+  FxPro, добавлен `CryptoOverboughtFaderStrategy` (Wave 5).
+
+Аналогичная запись — в `BUILDLOG.md` для FxPro-контекста.
+
+**Файлы:** `.cursor/rules/*.mdc` (7 файлов, см. детали в `BUILDLOG.md`).
+
 ## 2026-04-23
 
 ### WAVE 5: Crypto Overbought Fader (COF) — новая страта (Variant E)

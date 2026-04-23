@@ -35,14 +35,37 @@ alwaysApply: true
   2. Обновить research-блок в docstring модуля стратегии.
   3. Обновить таблицу в `STRATEGIES.md` с новым значением + источником.
 - **Ключевые research-инварианты** (не трогать без обсуждения):
+
+  **Bybit (`src/bybit_bot/strategies/`):**
   - `BtcLeadLagStrategy`: корреляция считается по **log-returns**, не по
     ценам (Asia-Pacific Financial Markets 2026).
-  - `SessionOrbStrategy`: 15-минутная коробка, volume 1.3× 20-bar avg
-    (FMZQuant 2024).
+  - `SessionOrbStrategy` (crypto-версия): 15-минутная коробка, volume
+    1.3× 20-bar avg (FMZQuant 2024).
   - `TurtleSoupStrategy`: 20-period lookback, RSI-confirmation
     (Connors/Raschke 1995; Enhanced Sword Red 2024).
   - `VwapCryptoStrategy`: 2 ATR порог отклонения (95% boundary HFT).
   - `StatArbCryptoStrategy`: Z_entry=2.5σ, ADF crit=-2.86 (5% level).
+  - `CryptoOverboughtFaderStrategy` (Wave 5): DUO-SHORT (Turtle + VWAP
+    agree), NY сессия (13–20 UTC), RSI ≥ 65, ATR% ≥ 0.3 — параметры
+    из mining 90-дневного OOS backtest, Variant E.
+
+  **FxPro / advisor (`src/fx_pro_bot/strategies/`):**
+  - `SessionOrbStrategy` (FX-версия): confirm bar на close пробойной свечи
+    (Al Brooks 2012, ch.5); R:R 2:1 (SL 1.5 ATR / TP 3.0 ATR, John Carter
+    2012 ch.7); HTF EMA200 H1 блокирующий (Murphy 1999, ch.9).
+  - `NewsFade`: RSI 25/75 (Chen/Yu/Wang 2024 для FX, Wilder 1978),
+    BB 2σ (Bollinger 2001 canonical); HTF EMA200 H1 блокирующий
+    (Asness et al. 2013 Value&Momentum); NY cutoff 21:00 UTC.
+  - `OutsidersStrategy`: RSI 25/75, BB 2σ; `atr_spike` setup **удалён**
+    как противоречащий mean-reversion (Chande/Kroll 1994: 4× ATR range
+    = capitulation, fade не работает); News proximity ±4ч high-impact —
+    блокирующий фильтр (Andersen/Bollerslev/Diebold/Vega 2003 AER).
+  - **ATR-scaled position sizing** с фиксированным риском $15 на сделку
+    (1% от $1500 депозита) — Van K. Tharp «Trade Your Way to Financial
+    Freedom» (2007) ch.11. Лоты пересчитываются из SL-дистанции.
+  - **Correlation-aware portfolio limits**: `OUTSIDERS_MAX_POSITIONS=10`,
+    `LEADERS_MAX_POSITIONS=10`, `SCALPING_MAX_POSITIONS=10`,
+    `OUTSIDERS_MAX_PER_INSTRUMENT=1` (Tharp/Vince).
 
 ## Изменения стратегий — только с одобрения
 

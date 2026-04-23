@@ -1,9 +1,14 @@
 ---
-description: Правила интерпретации P&L и работы с данными cTrader
-alwaysApply: true
+description: Правила интерпретации P&L и работы с данными cTrader API. Применяется ТОЛЬКО к fx_pro_bot/advisor. Для Bybit см. bybit-pnl.mdc.
+globs: ["src/fx_pro_bot/**/*", "BUILDLOG.md", "STRATEGIES.md", "tests/test_strategies.py", "tests/test_trading.py", "tests/test_verifier.py", "tests/test_whales.py", "scripts/fetch_fxpro_history.py", "scripts/pnl_report.py", "scripts/audit_sl_tp.py", "scripts/audit_recent.py", "scripts/ab_test_snapshot.py", "scripts/analysis_9h.py", "scripts/compare_stats.py", "scripts/fix_*.py", "scripts/set_tp_all.py", "data/fxpro_*", "data/signals*", "data/ctrader_*"]
+alwaysApply: false
 ---
 
 # cTrader: P&L и статистика
+
+> **Scope:** только `fx_pro_bot` / advisor (cTrader API, `get_deal_list`).
+> Правило активируется когда в контексте advisor-файлы.
+> Для bybit_bot — см. `bybit-pnl.mdc`.
 
 ## P&L в cTrader — всегда NET
 

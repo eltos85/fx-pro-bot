@@ -1,0 +1,82 @@
+---
+description: Bybit bot baseline даты торговой статистики, депозита, инструментов. Применяется ТОЛЬКО к bybit_bot. Для fx_pro_bot/advisor см. fxpro-stats-baseline.mdc.
+globs: ["src/bybit_bot/**/*", "BUILDLOG_BYBIT.md", "BYBIT_AB_TEST.md", "tests/test_bybit_*", "scripts/backtest_all.py", "scripts/mine_*.py", "scripts/evaluate_cof*.py", "scripts/enrich_trades.py", "scripts/diagnose_leadlag.py", "scripts/analyze_orb.py", "data/backtest_*", "data/cof_*", "data/mine_*", "docker-compose.yml"]
+alwaysApply: false
+---
+
+# Bybit bot: точка отсчёта статистики
+
+> **Scope:** только `bybit_bot` (Bybit API, демо-счёт). Это правило
+> автоматически активируется когда в контексте файл из `src/bybit_bot/`,
+> `BUILDLOG_BYBIT.md`, связанные тесты/скрипты или `docker-compose.yml`.
+> Для fx_pro_bot/advisor используется `fxpro-stats-baseline.mdc`.
+
+## Текущий baseline
+
+**2026-04-23** — WAVE 5 деплой (commit `8b9179b`):
+
+- **`scalp_cof` добавлена как новая страта** (Crypto Overbought Fader,
+  Variant E). Выключена по дефолту (`BYBIT_BOT_SCALP_COF_ENABLED=false`)
+  — включение требует ручного решения по размеру позиции.
+- **5 страт отключены** (backtest 90 дней, 2026-01-23 → 2026-04-22,
+  подтверждённая убыточность): `scalp_vwap`, `scalp_statarb`,
+  `scalp_volume`, `scalp_turtle`, `scalp_leadlag`.
+- **`scalp_orb` сужен whitelist-ом**: `sessions=london`,
+  `symbols=SOLUSDT,LINKUSDT,BNBUSDT`, `direction=long` — единственный
+  прибыльный срез на 90-дневной истории (PF 1.53, +7.18% на n=54).
+- **KillSwitch на демо ОТКЛЮЧЁН** (`BYBIT_BOT_KS_ENABLED=false` в demo
+  окружении). На live — включать обязательно.
+
+Подробности — в `BUILDLOG_BYBIT.md` записи «WAVE 5», «DEPLOY», «DEPLOY
+FINALIZATION» за 2026-04-23.
+
+## История baseline-дат (контекст)
+
+- **07.04.2026** — подключение демо-счёта Bybit. Начало реальной
+  торговли через API.
+- **Конец марта / начало апреля 2026** — ужесточение под $500 депозит:
+  emergency loss снижен, лимиты позиций урезаны, 3 убыточные пары
+  (ADAUSDT etc.) выведены.
+- **2026-04-23** — комплексный disable+ORB-whitelist+WAVE 5 (текущий baseline).
+
+## Торговые символы (Bybit demo)
+
+`scan_symbols` (из `Settings`):
+`SOLUSDT, ADAUSDT, LINKUSDT, SUIUSDT, TONUSDT, WIFUSDT, TIAUSDT, DOTUSDT`
+
+Дополнительно — `BTCUSDT` как reference-only для `scalp_leadlag` (грузится,
+не торгуется, страта всё равно отключена).
+
+## Депозит
+
+- Начальный демо-счёт Bybit: **$500** (07.04.2026)
+- Demo-equity API может показывать инфлированные числа ($100K-$180K),
+  так как Bybit даёт тестовый банк. **Реальный baseline для расчёта
+  риска — $500**, а не `balance.available_balance` из API.
+- Настройка риска: `account_balance = 500` в `Settings` (хардкод, не
+  берётся из API).
+
+## Фильтрация при анализе
+
+При анализе P&L, win-rate, статистики Bybit:
+
+- Фильтровать по времени деплоя текущего коммита или по baseline
+  выше (`2026-04-23`).
+- **НЕ использовать** данные из SQLite/логов как источник правды —
+  только `closedPnl` из Bybit API (см. `bybit-pnl.mdc`).
+- Demo-баланс из API ≠ реальный торговый капитал.
+
+## Live vs demo различия
+
+На live-счёте (когда подключим):
+
+- Обязательно включить KillSwitch: `BYBIT_BOT_KS_ENABLED=true`
+- Проверить хардкод `account_balance = 500` — заменить на реальный депозит
+- Все disable-флаги остаются (5 страт подтверждённо убыточны на крипте)
+
+## Связь с другими правилами
+
+- `bybit-pnl.mdc` — как корректно получать статистику Bybit (API, net PnL).
+- `sample-size.mdc` — минимальные пороги выборки перед дальнейшими правками.
+- `no-data-fitting.mdc` — запрет подгонки параметров под ожидаемый результат.
+- `buildlog.mdc` — Bybit-изменения фиксируются в `BUILDLOG_BYBIT.md`.

@@ -6,6 +6,34 @@
 
 ## 2026-04-24
 
+### chore(rules): аудит .cursor/rules на пересечение ботов
+`f603a4b`
+
+Cross-cutting правка IDE-правил. Причина: правила применялись одновременно
+к обоим ботам (fx_pro_bot и bybit_bot), и bot-specific контекст (baseline
+даты, депозит, инструменты) мог влиять на другую кодовую базу.
+
+- `stats-baseline.mdc` переименовано в `fxpro-stats-baseline.mdc`,
+  переведено в conditional (`alwaysApply: false` + `globs`) —
+  активируется только для fx_pro_bot файлов.
+- Создан зеркальный `bybit-stats-baseline.mdc` с Bybit-baseline
+  (07.04.2026 демо, $500 депозит, текущий baseline 2026-04-23 WAVE 5).
+- `bybit-pnl.mdc` и `ctrader-pnl.mdc` переведены в conditional через
+  `globs`, убран шум в противоположных сессиях.
+- `buildlog.mdc` дополнено mapping-таблицей: FxPro → `BUILDLOG.md`,
+  Bybit → `BUILDLOG_BYBIT.md`; cross-cutting → оба лога.
+- `deploy-vps.mdc` расширено примером проверки обоих контейнеров
+  (`advisor-1` + `bybit-bot-1`).
+- `strategy-guard.mdc`: добавлены FxPro research-инварианты
+  (session_orb confirm bar, R:R 2:1, HTF EMA200 H1 блокирующий,
+  News Fade RSI 25/75, Outsiders BB 2σ, ATR-scaled sizing по Tharp).
+
+**Файлы:** `.cursor/rules/buildlog.mdc`, `.cursor/rules/bybit-pnl.mdc`,
+`.cursor/rules/bybit-stats-baseline.mdc` (новый),
+`.cursor/rules/ctrader-pnl.mdc`, `.cursor/rules/deploy-vps.mdc`,
+`.cursor/rules/fxpro-stats-baseline.mdc` (переименован из stats-baseline.mdc),
+`.cursor/rules/strategy-guard.mdc`.
+
 ### feat: dynamic slippage guard (30% TP-distance вместо static)
 `c60c4d1`
 

@@ -1,9 +1,13 @@
 ---
-description: Правила интерпретации P&L и работы с данными Bybit
-alwaysApply: true
+description: Правила интерпретации P&L и работы с данными Bybit API. Применяется ТОЛЬКО к bybit_bot. Для fx_pro_bot/advisor см. ctrader-pnl.mdc.
+globs: ["src/bybit_bot/**/*", "BUILDLOG_BYBIT.md", "BYBIT_AB_TEST.md", "tests/test_bybit_*", "scripts/backtest_all.py", "scripts/mine_*.py", "scripts/evaluate_cof*.py", "scripts/enrich_trades.py", "scripts/diagnose_leadlag.py", "scripts/analyze_orb.py", "data/backtest_*", "data/cof_*", "data/mine_*", "docker-compose.yml"]
+alwaysApply: false
 ---
 
 # Bybit: P&L и статистика
+
+> **Scope:** только `bybit_bot` (Bybit API, `closedPnl`). Правило активируется
+> когда в контексте bybit-файлы. Для fx_pro_bot — см. `ctrader-pnl.mdc`.
 
 ## P&L на Bybit — всегда NET
 

@@ -20,9 +20,17 @@ alwaysApply: true
    - Скрипт делает `git fetch` + `git reset --hard origin/main`
    - Перестраивает и перезапускает Docker
 
-3. **После пуша обязательно проверить**, что Docker перезапустился:
+3. **После пуша обязательно проверить**, что Docker перезапустился.
+   Нужно проверять **тот контейнер**, код которого правили:
+
    ```bash
+   # Для fx_pro_bot / advisor (cTrader):
    ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-advisor-1 --tail 20"
+
+   # Для bybit_bot:
+   ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-bybit-bot-1 --tail 20"
+
+   # Если правки затронули оба — проверить оба контейнера.
    ```
 
 ## VPS
@@ -30,7 +38,10 @@ alwaysApply: true
 - Хост: `204.168.149.140`, пользователь `root`
 - Путь: `/root/fx-pro-bot`
 - Репозиторий на VPS — git clone с `origin git@github.com:eltos85/fx-pro-bot.git`
-- Docker volume `advisor_data` хранит SQLite — не удалять
+- Контейнеры:
+  - `fx-pro-bot-advisor-1` — fx_pro_bot (cTrader)
+  - `fx-pro-bot-bybit-bot-1` — bybit_bot
+- Docker volume `advisor_data` хранит SQLite advisor'а — не удалять
 
 ## Секреты GitHub Actions
 
