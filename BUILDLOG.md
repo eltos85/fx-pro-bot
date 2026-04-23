@@ -7,7 +7,7 @@
 ## 2026-04-24
 
 ### feat: dynamic slippage guard (30% TP-distance вместо static)
-`0778480`
+`c60c4d1`
 
 Переход от статических лимитов slippage (`max_slippage_pips(symbol)`) к
 динамическому порогу: `max_slip = tp_distance / pip_size × 0.30`.
