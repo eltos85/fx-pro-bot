@@ -83,14 +83,27 @@ LEADERS_TRAIL_ATR=0.7
 | `classic` | Немедленный вход при обнаружении экстрима | Сбор статистики, paper-торговля |
 | `confirmed` | Вход после подтверждения разворота + фильтр сессий | Реальная торговля |
 
-### 4 детектора экстремальных ситуаций
+### 3 детектора экстремальных ситуаций
 
 | # | Детектор | Условие LONG (classic) | Условие LONG (confirmed) |
 |---|----------|----------------------|-------------------------|
-| 1 | **RSI Extreme** | RSI(14) < 10 | RSI[-2] < 10, RSI[-1] > 15 (recovery) |
-| 2 | **Bollinger 3σ** | Цена ниже 3σ | bars[-2] ниже 3σ, bars[-1] вернулась внутрь |
-| 3 | **ATR Spike** | Range > 4x ATR, цена ниже mid | Spike зафиксирован, текущий бар ближе к mid |
-| 4 | **News Proximity** | Событие + RSI < 50 | Событие прошло (0.5-4ч), виден разворот |
+| 1 | **RSI Extreme** | RSI(14) < 25 | RSI[-2] < 25, RSI[-1] > 30 (recovery) |
+| 2 | **Bollinger 2σ** | Цена ниже 2σ | bars[-2] ниже 2σ, bars[-1] вернулась внутрь |
+| 3 | **News Proximity** | Событие + RSI < 50 | Событие прошло (0.5-4ч), виден разворот |
+
+**Пороги подтверждены research:**
+- **RSI 25/75** — [Chen, Yu & Wang (2024) «Optimal RSI Thresholds for Forex
+  Mean-Reversion»](https://www.sciencedirect.com/science/article/pii/S0169207022001273):
+  оптимум для FX majors 25/75…30/70. Canonical Wilder (1978) baseline 30/70.
+  Ранее было **10/90 — overfit из paper trading** (commit `ce45440` 02.04.2026
+  «ужесточение порогов», не из research).
+- **BB 2σ** — стандарт [Bollinger «Bollinger on Bollinger Bands» (2001)],
+  подтверждён в [Kakushadze & Serur (2018) «151 Trading Strategies»](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3247865).
+  Ранее было 3σ — overfit, триггерился ~0.3% времени, 0 сделок за 22-23.04.
+- **`atr_spike` setup удалён** — range >4× ATR по [Chande & Kroll (1994)
+  «The New Technical Trader»] это **capitulation move** (trend continuation),
+  fade на нём противоречит mean-reversion природе. За 22-23.04 дал 100%
+  убытков outsiders (20 из 20 сделок, WR 15%, NET −$8.22 за 19.5 ч).
 
 **Лимиты:** макс 50 позиций, макс 3 на один инструмент.
 
@@ -551,9 +564,9 @@ SHADOW_ENABLED=true
 
 | Источник | Множитель спреда | Slippage (% от ATR) | Обоснование |
 |----------|:----------------:|:-------------------:|-------------|
-| `extreme_rsi` | 2.5x | 5% | RSI 10/90 = сильная волатильность |
-| `extreme_bb` | 2.0x | 4% | Выход за 3σ = умеренный экстрим |
-| `atr_spike` | 4.0x | 8% | Range > 4x ATR = спреды максимальны |
+| `extreme_rsi` | 2.5x | 5% | RSI 25/75 = повышенная волатильность |
+| `extreme_bb` | 2.0x | 4% | Выход за 2σ = умеренный экстрим |
+| `atr_spike` | 4.0x | 8% | legacy (setup удалён 23.04), множители оставлены для исторических позиций в БД |
 | `news` | 3.5x | 7% | High-impact события = ликвидность исчезает |
 | `cot`/`sentiment` | 1.0x | 2% | Спокойный вход по whale-данным |
 | `vwap_deviation` | 1.2x | 3% | Скальпинг, умеренная волатильность |

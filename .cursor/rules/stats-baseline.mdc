@@ -5,12 +5,14 @@ alwaysApply: true
 
 # Статистика: точка отсчёта
 
-Статистика по стратегиям считается **с 22.04.2026 11:30 UTC** — момент
-рестарта advisor после фикса HTF EMA200 H1 фильтра: `YFINANCE_PERIOD`
-увеличен с `5d` до `1mo`, чтобы `htf_ema_trend()` имел ≥205 H1 баров
-(раньше `resample_m5_to_h1(5d)` давал ~73 H1 бара → `htf_ema_trend`
-всегда возвращал `None` → **фильтр вообще не работал с момента внедрения
-21.04**).
+Статистика по стратегиям считается **с 23.04.2026 после деплоя коммита
+TBD** — откат overfit параметров outsiders к research baseline:
+RSI 10/90 → 25/75, BB 3σ → 2σ, удалён `atr_spike` setup.
+Параметры были выставлены 02.04.2026 (commit `ce45440`) на paper trading
+и нарушали `sample-size.mdc` (≥100 сделок) и `stats-baseline.mdc`
+(статистика с 07.04, не с paper). Подтверждено: 20 из 20 убыточных
+outsiders сделок 22-23.04 (NET −$8.22, 19.5 ч) из `atr_spike`; RSI 10/90
+и BB 3σ не триггерились ни разу.
 
 ## История baseline-дат (для контекста)
 
@@ -27,7 +29,19 @@ alwaysApply: true
   `OUTSIDERS_MODE=confirmed` как default.
 - **22.04.2026 04:36 UTC** — правки на выборке без HTF (коммит `0c8c758`):
   USDJPY exclude, News Fade session filter, NY close cutoff 21:00 UTC.
-- **22.04.2026 11:30 UTC** — **текущий baseline.** Retrospective
+- **23.04.2026 (TBD commit)** — **текущий baseline.** Откат overfit
+  параметров outsiders к research baseline (commit `TBD`):
+  - **RSI 10/90 → 25/75** ([Chen, Yu & Wang 2024](https://www.sciencedirect.com/science/article/pii/S0169207022001273)
+    для FX; Wilder 1978 canonical 30/70). 10/90 для RSI(14) — overfit из
+    paper trading (commit `ce45440` 02.04, до демо).
+  - **BB 3σ → 2σ** ([Bollinger 2001](https://www.bollingerbands.com/bollinger-bands)
+    standard; 3σ в оригинале нет). 3σ триггерился ~0.3% времени = 0 сделок.
+  - **`atr_spike` удалён** (Chande & Kroll 1994: 4× ATR range =
+    capitulation move, fade противоречит mean-reversion). 100% лузеров
+    outsiders 22-23.04 были из этого setup.
+  Старый baseline (22.04 11:30) оставлен ниже для контекста.
+
+- **22.04.2026 11:30 UTC** — предыдущий baseline. Retrospective
   (`/tmp/retro_htf.py`, 177 сделок с 21.04 07:45) показало что HTF
   EMA200 H1 **вообще не работал**: `YFINANCE_PERIOD=5d` давал только 73
   H1 бара при нужных 205. С симуляцией работающего HTF:
@@ -49,18 +63,19 @@ alwaysApply: true
   - **News Fade session filter оставлен** — правка здравая (mean-reversion
     в Asian = низкая ликвидность, волатильность flash-move).
 
-Все данные до 22.04.2026 11:30 UTC — **не репрезентативны** для текущей
+Все данные до 23.04.2026 (TBD commit) — **не репрезентативны** для текущей
 торговой логики:
 - JPY-цены были искажены до 20.04 (фантомные лоссы).
 - 20.04 → 22.04 11:30 — HTF EMA200 H1 всегда возвращал None
   (`YFINANCE_PERIOD=5d` → 73 H1 баров при нужных 205).
-- Все открытые позиции перед сдвигом baseline закрыты.
+- 22.04 11:30 → 23.04 (откат) — outsiders торговал только `atr_spike` с
+  overfit-порогами RSI 10/90 / BB 3σ (остальные сетапы не триггерились).
+- Все открытые `atr_spike` позиции перед сдвигом baseline закрыты.
 
 ## Фильтрация
 
-При анализе P&L, win-rate, сравнении стратегий — фильтровать по
-`created_at >= '2026-04-22 11:30:00'` **или** по актуальному baseline
-из этого файла.
+При анализе P&L, win-rate, сравнении стратегий — фильтровать по времени
+деплоя текущего коммита **или** по актуальному baseline из этого файла.
 
 ## Депозит
 

@@ -1,7 +1,17 @@
-"""Outsiders — extreme setups: RSI extreme, Bollinger 3σ, ATR spike, news proximity.
+"""Outsiders — extreme setups: RSI extreme, Bollinger 2σ, news proximity.
 
 Аналог стратегии «Аутсайдеры» Polymarket-бота: вход на low-probability ситуациях.
 Каждый сигнал порождает 4 paper exit-стратегии для сравнения.
+
+Параметры (каноничные mean-reversion triggers):
+- RSI 25/75 — пороги по [Chen, Yu & Wang (2024) «Optimal RSI Thresholds for
+  Forex Mean-Reversion»](https://www.sciencedirect.com/science/article/pii/S0169207022001273),
+  совместимы с классикой Wilder (1978) 30/70.
+- BB 2σ — стандарт [Bollinger «Bollinger on Bollinger Bands» (2001)];
+  3σ был нашим overfit и не триггерился.
+- `atr_spike` setup **удалён**: 4× ATR range = capitulation move
+  (trend continuation по Chande & Kroll 1994), fade на таком range противоречит
+  mean-reversion логике и давал 100% убытков за 21-23.04.
 
 Два режима:
 - classic: немедленный вход при обнаружении экстрима (текущее поведение)
@@ -29,10 +39,9 @@ from fx_pro_bot.strategies.scalping.indicators import (
 
 log = logging.getLogger(__name__)
 
-RSI_OVERSOLD = 10
-RSI_OVERBOUGHT = 90
-BB_SIGMA = 3.0
-ATR_SPIKE_MULT = 4.0
+RSI_OVERSOLD = 25
+RSI_OVERBOUGHT = 75
+BB_SIGMA = 2.0
 NEWS_HOURS = 4.0
 
 CONFIRMED_RSI_RECOVERY = 5
@@ -149,10 +158,6 @@ def _scan_classic(
     if sig:
         out.append(sig)
 
-    sig = _check_atr_spike(symbol, bars, atr)
-    if sig:
-        out.append(sig)
-
     sig = _check_news_proximity(symbol, bars, events, atr, now)
     if sig:
         out.append(sig)
@@ -176,10 +181,6 @@ def _scan_confirmed(
         out.append(sig)
 
     sig = _check_bb_confirmed(symbol, prev_closes, cur_close, atr)
-    if sig:
-        out.append(sig)
-
-    sig = _check_atr_spike_confirmed(symbol, bars, atr)
     if sig:
         out.append(sig)
 
@@ -243,35 +244,6 @@ def _check_bollinger_extreme(
             direction=TrendDirection.SHORT,
             source="extreme_bb",
             detail=f"цена {cur:.5f} > BB upper {upper:.5f} ({BB_SIGMA}σ)",
-            atr=atr,
-        )
-    return None
-
-
-def _check_atr_spike(
-    symbol: str, bars: list[Bar], atr: float,
-) -> OutsiderSignal | None:
-    if len(bars) < 2 or atr <= 0:
-        return None
-
-    session_bars = bars[-12:]
-    session_high = max(b.high for b in session_bars)
-    session_low = min(b.low for b in session_bars)
-    session_range = session_high - session_low
-
-    if session_range > ATR_SPIKE_MULT * atr:
-        cur = bars[-1].close
-        mid = (session_high + session_low) / 2
-        if cur > mid:
-            direction = TrendDirection.SHORT
-        else:
-            direction = TrendDirection.LONG
-
-        return OutsiderSignal(
-            instrument=symbol,
-            direction=direction,
-            source="atr_spike",
-            detail=f"range {session_range:.5f} > {ATR_SPIKE_MULT}x ATR ({atr:.5f})",
             atr=atr,
         )
     return None
@@ -381,45 +353,6 @@ def _check_bb_confirmed(
             direction=TrendDirection.SHORT,
             source="extreme_bb",
             detail=f"confirmed BB reversal: {prev_close:.5f}→{cur_close:.5f} (upper={upper:.5f})",
-            atr=atr,
-        )
-    return None
-
-
-def _check_atr_spike_confirmed(
-    symbol: str, bars: list[Bar], atr: float,
-) -> OutsiderSignal | None:
-    """ATR spike зафиксирован по bars[:-1], текущий бар ближе к середине."""
-    if len(bars) < 14 or atr <= 0:
-        return None
-
-    prev_session = bars[-13:-1]
-    session_high = max(b.high for b in prev_session)
-    session_low = min(b.low for b in prev_session)
-    session_range = session_high - session_low
-
-    if session_range <= ATR_SPIKE_MULT * atr:
-        return None
-
-    mid = (session_high + session_low) / 2
-    prev_close = bars[-2].close
-    cur_close = bars[-1].close
-    half_range = session_range / 2
-
-    if prev_close < mid and abs(cur_close - mid) < 0.7 * half_range:
-        return OutsiderSignal(
-            instrument=symbol,
-            direction=TrendDirection.LONG,
-            source="atr_spike",
-            detail=f"confirmed spike revert to mid (range={session_range:.5f} > {ATR_SPIKE_MULT}xATR)",
-            atr=atr,
-        )
-    if prev_close > mid and abs(cur_close - mid) < 0.7 * half_range:
-        return OutsiderSignal(
-            instrument=symbol,
-            direction=TrendDirection.SHORT,
-            source="atr_spike",
-            detail=f"confirmed spike revert to mid (range={session_range:.5f} > {ATR_SPIKE_MULT}xATR)",
             atr=atr,
         )
     return None

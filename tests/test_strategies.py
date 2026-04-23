@@ -108,14 +108,14 @@ def test_detect_rsi_extreme() -> None:
         assert rsi_sigs[0].direction in (TrendDirection.LONG, TrendDirection.SHORT)
 
 
-def test_detect_atr_spike() -> None:
+def test_atr_spike_removed() -> None:
+    """atr_spike setup удалён: 4× ATR fade был overfit (см. outsiders.py docstring)."""
     closes = [1.10] * 40 + [1.10 + i * 0.005 for i in range(15)]
     bars_map = {"EURUSD=X": _make_bars(closes)}
 
     sigs = detect_extreme_setups(("EURUSD=X",), bars_map)
     spike_sigs = [s for s in sigs if s.source == "atr_spike"]
-    if spike_sigs:
-        assert spike_sigs[0].instrument == "EURUSD=X"
+    assert spike_sigs == []
 
 
 def test_detect_news_proximity() -> None:

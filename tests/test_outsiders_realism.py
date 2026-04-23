@@ -18,7 +18,6 @@ from fx_pro_bot.strategies.outsiders import (
     CONFIRMED_SL_ATR,
     OutsiderSignal,
     OutsidersStrategy,
-    _check_atr_spike_confirmed,
     _check_bb_confirmed,
     _check_news_confirmed,
     _check_rsi_confirmed,
@@ -204,22 +203,6 @@ class TestBbConfirmed:
         base = [1.1000 + 0.0005 * (i % 3 - 1) for i in range(20)]
         prev_closes = base + [1.1002]
         sig = _check_bb_confirmed("EURUSD=X", prev_closes, 1.1001, 0.002)
-        assert sig is None
-
-
-class TestAtrSpikeConfirmed:
-    def test_spike_with_revert_to_mid(self):
-        base = [1.1000] * 40
-        spike = base + [1.0800, 1.0700, 1.0650, 1.0600, 1.0550, 1.0500,
-                        1.0550, 1.0600, 1.0650, 1.0700, 1.0750, 1.0780, 1.0800]
-        bars = _make_bars(spike, high_offset=0.001, low_offset=0.001)
-        sig = _check_atr_spike_confirmed("EURUSD=X", bars, 0.0010)
-        pass
-
-    def test_no_spike_no_signal(self):
-        closes = [1.1000 + i * 0.00001 for i in range(55)]
-        bars = _make_bars(closes)
-        sig = _check_atr_spike_confirmed("EURUSD=X", bars, 0.0020)
         assert sig is None
 
 

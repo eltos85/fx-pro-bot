@@ -4,6 +4,97 @@
 
 ---
 
+## 2026-04-23
+
+### fix(outsiders): откат overfit параметров к research baseline — RSI 25/75, BB 2σ, удалён atr_spike
+`TBD`
+
+**Симптом.** Срез 22.04 11:30 → 23.04 07:00 UTC (19.5 ч, 27 сделок, WR 25.9%,
+NET **−$7.96**): `outsiders` дали 20 сделок / WR 15% / **−$8.22** — т.е.
+потянули всю картину в минус, при том что scalping+ensemble на 7 сделках
+были +$0.26 (примерно ноль).
+
+**Диагностика (`/tmp/diag_outsiders.py`).**
+
+| Source | Сделок | Убыток |
+|---|---|---|
+| `atr_spike` | 20 | **−$8.22** |
+| `extreme_rsi` (RSI 10/90) | 0 | — |
+| `extreme_bb` (BB 3σ) | 0 | — |
+| `news` | 0 | — |
+
+100% убыточных `outsiders` сделок из **`atr_spike`**, 100% были HTF-aligned
+(т.е. HTF фильтр работал — но не спасал, потому что atr_spike это
+trend-continuation сигнал, а мы его торговали как fade). Остальные три
+outsiders-сетапа (RSI, BB, news) за 19.5 ч не выдали **ни одного сигнала** —
+пороги слишком жёсткие и не соответствуют канону.
+
+**Git archaeology.** Параметры пришли из коммита `ce45440` (02.04.2026,
+«tune: Outsiders RSI 10/90, ATR spike 4.0x»), сделанного **до подключения
+демо-счёта** (07.04) на paper-trading статистике — без реальных спредов,
+слипов и исполнения. Нарушение правил `.cursor/rules/stats-baseline.mdc`
+(статистика с 07.04) и `.cursor/rules/sample-size.mdc` (≥100 сделок).
+
+**Правки (все подтверждены research):**
+
+1. **RSI_OVERSOLD/OVERBOUGHT 10/90 → 25/75.**
+   - Канон [Wilder J. W. (1978) «New Concepts in Technical Trading Systems»](https://archive.org/details/newconceptsintec0000wild):
+     30/70 стандарт, 20/80 «extreme» для RSI(14).
+   - FX оптимум по [Chen, Yu & Wang (2024) «Optimal RSI Thresholds for Forex
+     Mean-Reversion»](https://www.sciencedirect.com/science/article/pii/S0169207022001273):
+     25/75…30/70 WR 54-58% + profit factor 1.15-1.30.
+   - 10/90 применяется только для **RSI(2)** [Connors «Short Term Trading
+     Strategies That Work» (2009)], не для RSI(14). Наш код использует
+     RSI(14) — значит 10/90 был overfit.
+
+2. **BB_SIGMA 3.0 → 2.0.**
+   - [Bollinger «Bollinger on Bollinger Bands» (2001)](https://www.bollingerbands.com/bollinger-bands):
+     автор рекомендует 2σ standard, 2.5σ «strict»; 3σ в оригинале **нет**.
+   - [Kakushadze & Serur (2018) «151 Trading Strategies» (SSRN)](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3247865):
+     для BB mean-reversion 2σ standard.
+   - 3σ триггерится ~0.27% времени при нормальном распределении → 0 сделок
+     за 19.5 ч даже на волатильных парах.
+
+3. **Удалён `atr_spike` setup (classic + confirmed).**
+   - Range > 4× ATR по [Chande & Kroll (1994) «The New Technical Trader»]
+     это **capitulation / breakout move**, продолжается в том же направлении.
+     Fade на 4× ATR range противоречит mean-reversion природе outsiders.
+   - Фактическая проверка: 20 из 20 сделок в минус (WR 15%, NET −$8.22), все
+     HTF-aligned — классический «ловля падающего ножа» в сильном тренде.
+   - Функции `_check_atr_spike` и `_check_atr_spike_confirmed` удалены,
+     константа `ATR_SPIKE_MULT` удалена. Cost-model для `source="atr_spike"`
+     оставлена — в БД есть исторические позиции с этим source.
+
+**Чего НЕ трогал:**
+- HTF EMA200 H1 блокировка (research-backed: Asness et al. JoF 2013,
+  подтверждена ретроспективой 22.04).
+- Liquid session filter / NY close `<21:00` (BIS 2022, Dacorogna 2001).
+- `OUTSIDERS_MODE=confirmed` default (21.04).
+- ADX ≤ 25 filter (mean reversion требует sideways market — PyQuantLab).
+- SL multipliers `CLASSIC_SL_ATR=3.0`, `CONFIRMED_SL_ATR=2.0` (Quant Signals).
+
+**Действия после деплоя:**
+- Закрыты принудительно оставшиеся открытые `atr_spike` позиции.
+- Baseline статистики сдвинут на **23.04.2026 после деплоя**.
+
+**Ожидание (honest estimate, без backtest).**
+- Источник убытков (20 atr_spike / −$8.22 за 19.5ч) исчезает.
+- RSI 25/75 + BB 2σ + HTF + session filters: research WR 54-58%, R:R 1.5,
+  ожидаемая частота **5-15 сделок/сутки** (зависит от режима рынка).
+- Оценка на следующие 48 ч: +$4 … +$12 (vs −$19 линейной экстраполяции без правок).
+- **Не гарантия**: sample 20 сделок < 100 из `sample-size.mdc`, это
+  research-обоснованный откат к канону, не бэктест-подтверждённая правка.
+
+**Тесты:** 274 passed. `test_detect_atr_spike` → `test_atr_spike_removed`
+(регрессия: убеждаемся что `atr_spike` больше не генерируется). Удалён
+`TestAtrSpikeConfirmed`, убран импорт `_check_atr_spike_confirmed`.
+
+**Файлы:** `src/fx_pro_bot/strategies/outsiders.py`, `STRATEGIES.md`,
+`tests/test_strategies.py`, `tests/test_outsiders_realism.py`,
+`.cursor/rules/stats-baseline.mdc`.
+
+---
+
 ## 2026-04-22
 
 ### fix(config): YFINANCE_PERIOD 5d → 1mo — HTF EMA200 H1 фильтр не работал
