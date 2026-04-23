@@ -3,7 +3,7 @@
 ## 2026-04-24
 
 ### feat(cof): опциональный verbose-режим для диагностики фильтров
-`TBD`
+`9648ea3`
 
 Добавлен флаг `BYBIT_BOT_SCALP_COF_VERBOSE` (default=false). При `true`
 включает DEBUG-логи **только** для модуля
