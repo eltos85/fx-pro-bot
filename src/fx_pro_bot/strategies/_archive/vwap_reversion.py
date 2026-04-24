@@ -1,4 +1,11 @@
-"""VWAP Mean-Reversion Micro-Scalper.
+"""[DEPRECATED 2026-04-24] VWAP Mean-Reversion Micro-Scalper.
+
+.. warning::
+   Стратегия **архивирована** после 90d FxPro backtest: Net **−385 pips**.
+   Не использовать, не править. См. BUILDLOG.md 2026-04-24 и
+   `strategies/_archive/__init__.py`.
+
+VWAP Mean-Reversion Micro-Scalper.
 
 Цена стремится вернуться к VWAP (~70-75% времени в активные часы),
 т.к. институциональные алгоритмы используют VWAP как бенчмарк исполнения.

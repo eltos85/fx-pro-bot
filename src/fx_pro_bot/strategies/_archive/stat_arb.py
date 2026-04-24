@@ -1,4 +1,12 @@
-"""Stat-Arb Cross-Pair Spread Scalping.
+"""[DEPRECATED 2026-04-24] Stat-Arb Cross-Pair Spread Scalping.
+
+.. warning::
+   Стратегия **архивирована** после 90d FxPro backtest: n=2 trades
+   (noise). Недостаточно сделок для статистической значимости.
+   Не использовать, не править. См. BUILDLOG.md 2026-04-24 и
+   `strategies/_archive/__init__.py`.
+
+Stat-Arb Cross-Pair Spread Scalping.
 
 Статистический арбитраж между коинтегрированными валютными парами.
 Когда spread (z-score) расходится на ±2σ — вход на возврат к среднему.

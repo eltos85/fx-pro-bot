@@ -9,9 +9,10 @@ from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
 from fx_pro_bot.strategies.scalping.gold_orb import GOLD_ORB_TP_ATR_MULT
-from fx_pro_bot.strategies.scalping.session_orb import ORB_TP_ATR_MULT
 
 log = logging.getLogger(__name__)
+
+ORB_TP_ATR_MULT = 3.0
 
 LEADERS_HARD_STOP_HOURS = 168.0
 

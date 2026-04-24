@@ -32,9 +32,6 @@ from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
 from fx_pro_bot.trading.symbols import SymbolCache
 from fx_pro_bot.strategies.scalping.gold_orb import GoldOrbStrategy
-from fx_pro_bot.strategies.scalping.session_orb import SessionOrbStrategy
-from fx_pro_bot.strategies.scalping.stat_arb import StatArbStrategy
-from fx_pro_bot.strategies.scalping.vwap_reversion import VwapReversionStrategy
 from fx_pro_bot.whales.cot import fetch_cot_signals
 from fx_pro_bot.whales.sentiment import fetch_sentiment_signals
 from fx_pro_bot.whales.tracker import WhaleTracker
@@ -311,18 +308,6 @@ def run_advisor() -> None:
     monitor = PositionMonitor(store, outsiders_mode=settings.outsiders_mode, lot_size=settings.lot_size)
     shadow = ShadowTracker(store)
 
-    vwap_strat = (
-        VwapReversionStrategy(store, max_positions=settings.scalping_max_positions)
-        if settings.scalping_vwap_enabled else None
-    )
-    statarb_strat = (
-        StatArbStrategy(store, max_positions=settings.scalping_max_positions)
-        if settings.scalping_statarb_enabled else None
-    )
-    orb_strat = (
-        SessionOrbStrategy(store, max_positions=settings.scalping_max_positions)
-        if settings.scalping_orb_enabled else None
-    )
     gold_orb_strat = (
         GoldOrbStrategy(
             store,
@@ -338,8 +323,6 @@ def run_advisor() -> None:
     executor, killswitch = _init_trading(settings, store)
 
     scalp_names = [n for n, s in [
-        ("VWAP", vwap_strat), ("StatArb", statarb_strat),
-        ("ORB", orb_strat),
         (f"GoldORB{'[shadow]' if settings.scalping_gold_orb_shadow else ''}", gold_orb_strat),
     ] if s]
     log.info(
@@ -363,9 +346,6 @@ def run_advisor() -> None:
                 ctrader_client, whale_tracker,
                 leaders_strat, outsiders_strat, monitor, shadow,
                 cycle_count, executor, killswitch,
-                vwap_strat=vwap_strat,
-                statarb_strat=statarb_strat,
-                orb_strat=orb_strat,
                 gold_orb_strat=gold_orb_strat,
             )
             cycle_count += 1
@@ -393,9 +373,6 @@ def _run_cycle(
     executor=None,
     killswitch=None,
     *,
-    vwap_strat: VwapReversionStrategy | None = None,
-    statarb_strat: StatArbStrategy | None = None,
-    orb_strat: SessionOrbStrategy | None = None,
     gold_orb_strat: GoldOrbStrategy | None = None,
 ) -> None:
     bar_fetcher = _make_bar_fetcher(executor)
@@ -564,30 +541,6 @@ def _run_cycle(
                     prices[r.symbol] = r.last_price
                     if len(r.bars) > 14:
                         atrs[r.symbol] = _atr(r.bars)
-
-            if vwap_strat:
-                v_sigs = [s for s in vwap_strat.scan(scalping_bars, scalping_prices)
-                          if s.instrument not in SCALPING_EXCLUDE_SYMBOLS]
-                before_ids = {p.id for p in store.get_open_positions()}
-                v_opened = vwap_strat.process_signals(v_sigs, scalping_prices) if v_sigs else 0
-                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
-                log.info("  VWAP: %d сигналов, %d открыто", len(v_sigs), v_opened)
-
-            if statarb_strat:
-                sa_sigs = statarb_strat.scan(scalping_bars)
-                before_ids = {p.id for p in store.get_open_positions()}
-                sa_opened = statarb_strat.process_signals(sa_sigs, scalping_prices) if sa_sigs else 0
-                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
-                sa_closed = statarb_strat.check_exits(scalping_bars)
-                log.info("  Stat-Arb: %d сигналов, %d открыто, %d закрыто", len(sa_sigs), sa_opened, sa_closed)
-
-            if orb_strat:
-                o_sigs = [s for s in orb_strat.scan(scalping_bars, scalping_prices, events)
-                          if s.instrument not in SCALPING_EXCLUDE_SYMBOLS]
-                before_ids = {p.id for p in store.get_open_positions()}
-                o_opened = orb_strat.process_signals(o_sigs, scalping_prices) if o_sigs else 0
-                _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
-                log.info("  ORB: %d сигналов, %d открыто", len(o_sigs), o_opened)
 
             if gold_orb_strat:
                 g_sigs = gold_orb_strat.scan(scalping_bars, scalping_prices)
@@ -803,7 +756,7 @@ def _calc_tp_distance(
         CRYPTO_SCALP_TP_ATR_MULT, CRYPTO_SCALP_TP_MIN_PCT,
     )
     from fx_pro_bot.strategies.scalping.gold_orb import GOLD_ORB_TP_ATR_MULT
-    from fx_pro_bot.strategies.scalping.session_orb import ORB_TP_ATR_MULT
+    ORB_TP_ATR_MULT = 3.0
     scalping = ("vwap_reversion", "stat_arb", "session_orb", "gold_orb")
     if strategy in scalping:
         if is_crypto(instrument) and entry_price > 0:

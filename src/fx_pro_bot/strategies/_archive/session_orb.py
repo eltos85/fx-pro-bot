@@ -1,4 +1,11 @@
-"""Session Opening Range Breakout + News Fade.
+"""[DEPRECATED 2026-04-24] Session Opening Range Breakout + News Fade.
+
+.. warning::
+   Стратегия **архивирована** после 90d FxPro backtest: Net **−4952 pips**.
+   Не использовать, не править. См. BUILDLOG.md 2026-04-24 и
+   `strategies/_archive/__init__.py`.
+
+Session Opening Range Breakout + News Fade.
 
 ORB: первые 15 минут (3 бара M5) London/NY формируют "коробку".
 Пробой коробки с EMA-фильтром, volume-подтверждением и **confirm bar**

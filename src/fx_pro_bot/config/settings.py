@@ -401,9 +401,8 @@ class Settings(BaseSettings):
     ensemble_enabled: bool = Field(default=True, validation_alias="ENSEMBLE_ENABLED")
 
     # Скальпинг-стратегии
-    scalping_vwap_enabled: bool = Field(default=True, validation_alias="SCALPING_VWAP_ENABLED")
-    scalping_statarb_enabled: bool = Field(default=True, validation_alias="SCALPING_STATARB_ENABLED")
-    scalping_orb_enabled: bool = Field(default=True, validation_alias="SCALPING_ORB_ENABLED")
+    # SCALPING_VWAP_ENABLED / SCALPING_STATARB_ENABLED / SCALPING_ORB_ENABLED —
+    # удалены 2026-04-24: стратегии архивированы (strategies/_archive/).
     scalping_gold_orb_enabled: bool = Field(default=True, validation_alias="SCALPING_GOLD_ORB_ENABLED")
     scalping_gold_orb_shadow: bool = Field(default=True, validation_alias="SCALPING_GOLD_ORB_SHADOW")
     scalping_max_positions: int = Field(default=10, validation_alias="SCALPING_MAX_POSITIONS")
