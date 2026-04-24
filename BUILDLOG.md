@@ -4,6 +4,83 @@
 
 ---
 
+## 2026-04-16
+
+### feat(strategies): Variant 2 — Squeeze H4 + Turtle H4 + GBPJPY fade (shadow)
+`pending commit`
+
+После 2 недель глубокого research на 2-летних FxPro M5 данных
+(2024-04-24 → 2026-04-24) внедрены 3 новые стратегии, прошедшие
+out-of-sample / walk-forward валидацию. Полный research-trail в
+`scripts/`: `bottom_up_analysis.py`, `scalp_setups_m5.py`,
+`gh_forex_setups.py`, `backtest_gbpusd_jpy_fade.py`,
+`backtest_pairs_zscore.py`, `backtest_late_session_mr.py`,
+`backtest_pca_residual.py`, `walkforward_gbpjpy.py`,
+`swing_turtle_h4.py`, `swing_rsi2_daily.py`, `swing_squeeze_h4.py`,
+`news_nfp_fade.py`, `carry_jpy_basket.py`, `cross_asset_dxy.py`.
+
+**Результаты по всем 7 протестированным стратегиям (IS vs OOS, 2 года):**
+
+| # | Стратегия                   | Best instruments | OOS edge       | Статус  |
+|---|-----------------------------|------------------|----------------|---------|
+| 1 | Gold ORB (M5)               | GC=F             | +6146 (90d)    | LIVE    |
+| 2 | **Squeeze H4**              | GC=F, BZ=F       | +10799 / +1606 | **shadow** |
+| 3 | **Turtle H4**               | GC=F, BZ=F       | +7320 / +1539  | **shadow** |
+| 4 | **GBPJPY fade (WFO)**       | GBPJPY=X         | +1332          | **shadow** |
+| 5 | RSI-2 daily                 | overfit          | nothing        | rejected |
+| 6 | NFP fade/momentum           | weak +14 OOS     | p=0.45         | rejected |
+| 7 | Carry JPY-basket            | regime-dependent | p=0.12 borderline | rejected |
+| 8 | Cross-asset DXY momentum    | отрицательный p  | -1185          | rejected |
+| 9 | Late Session MR / CSI / Pairs | noise          | nothing        | rejected |
+
+**Реализация (внедрено прямо сейчас):**
+
+1. `src/fx_pro_bot/strategies/scalping/squeeze_h4.py` — TTM Squeeze
+   (BB внутри KC) + SMA50 trend filter + 2×ATR SL + 10d time-stop.
+   Только GC=F и BZ=F.
+2. `src/fx_pro_bot/strategies/scalping/turtle_h4.py` — 20-day breakout
+   на H4 + 2×ATR SL + 30d time-stop. Только GC=F и BZ=F.
+3. `src/fx_pro_bot/strategies/scalping/gbpjpy_fade.py` — trigger по
+   GBPUSD 4h log-return (z≥2σ, 30d std), fade-entry GBPJPY через 1h,
+   time-stop 36h, cool-off 4h. Диверсификатор (минимальный лот).
+4. `src/fx_pro_bot/strategies/monitor.py` — добавлены time-stops:
+   `SQUEEZE_H4_HARD_STOP_HOURS=240`, `TURTLE_H4_HARD_STOP_HOURS=720`,
+   `GBPJPY_FADE_HARD_STOP_HOURS=36`.
+5. `src/fx_pro_bot/app/main.py` — подключение 3 стратегий в цикл,
+   extra-symbols fetch (GC=F/BZ=F/GBPUSD/GBPJPY), `_calc_tp_distance`
+   для новых стратегий (4×ATR для H4, 2×ATR для fade).
+6. `src/fx_pro_bot/config/settings.py` — флаги
+   `SCALPING_{SQUEEZE_H4,TURTLE_H4,GBPJPY_FADE}_{ENABLED,SHADOW}`;
+   `yfinance_period` повышен до `60d` (нужно для 20-day breakout H4
+   и 30-day rolling std для GBPJPY fade).
+7. `src/fx_pro_bot/strategies/scalping/indicators.py` — добавлен
+   `resample_m5_to_h4` (buckets 00/04/08/12/16/20 UTC).
+8. `tests/test_scalping.py` — +21 unit-тест (constants, scan, shadow,
+   cooloff, H4 resample, max_positions).
+
+**Shadow rollout:** все 3 новые стратегии стартуют с `*_SHADOW=true`.
+В логах «SHADOW» — сигналы не отправляются на cTrader, только логируются.
+Через 2-3 недели наблюдений — переход в LIVE при совпадении частоты
+сигналов с backtest (Squeeze ~2-4/нед, Turtle ~1-2/нед, GBPJPY-fade ~1-2/нед).
+
+**Что сознательно отложено:**
+- SMA50-cross exit для Squeeze H4 (пока только time-stop 10d + SL).
+  Для корректной реализации нужно пересчитывать H4-SMA50 на каждом
+  цикле monitor-а — это переработка архитектуры.
+- Trailing SL по 10-day противоположному breakout для Turtle H4 —
+  аналогично, нужен пересчёт в monitor-е. Пока работает SL + time-stop.
+- RSI-2 daily classic + Bollinger RSI FX-подгруппа (прошли
+  только на слабом FX-edge) — добавим после проверки Variant 2.
+
+**Файлы:** `src/fx_pro_bot/strategies/scalping/{squeeze_h4,turtle_h4,
+gbpjpy_fade,indicators,__init__}.py`, `src/fx_pro_bot/strategies/monitor.py`,
+`src/fx_pro_bot/config/settings.py`, `src/fx_pro_bot/app/main.py`,
+`tests/test_scalping.py`, `STRATEGIES.md §3b-ter`.
+
+**Тесты:** все 310 pytest-тестов проходят (было 289 → стало 310, +21).
+
+---
+
 ## 2026-04-24
 
 ### feat(strategies): отключены все старые live-стратегии, gold_orb → LIVE

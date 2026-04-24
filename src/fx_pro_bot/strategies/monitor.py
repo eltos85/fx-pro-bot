@@ -48,6 +48,11 @@ SCALPING_TRAIL_TRIGGER_ATR_MULT = 0.6
 SCALPING_TRAIL_DISTANCE_PIPS = 3.0
 SCALPING_TRAIL_DISTANCE_ATR_MULT = 0.3
 
+# Swing/trend стратегии — держим дольше, без агрессивных time-stops.
+SQUEEZE_H4_HARD_STOP_HOURS = 240.0    # 10 дней
+TURTLE_H4_HARD_STOP_HOURS = 720.0     # 30 дней
+GBPJPY_FADE_HARD_STOP_HOURS = 36.0    # WFO-параметр
+
 CRYPTO_SCALP_TP_ATR_MULT = 1.0
 CRYPTO_SCALP_SL_ATR_MULT = 0.75
 CRYPTO_SCALP_TRAIL_TRIGGER_ATR_MULT = 0.6
@@ -169,6 +174,13 @@ class PositionMonitor:
 
         if pos.strategy == "leaders" and age_hours >= LEADERS_HARD_STOP_HOURS:
             return "leaders_time_7d"
+
+        if pos.strategy == "squeeze_h4" and age_hours >= SQUEEZE_H4_HARD_STOP_HOURS:
+            return "squeeze_h4_time_10d"
+        if pos.strategy == "turtle_h4" and age_hours >= TURTLE_H4_HARD_STOP_HOURS:
+            return "turtle_h4_time_30d"
+        if pos.strategy == "gbpjpy_fade" and age_hours >= GBPJPY_FADE_HARD_STOP_HOURS:
+            return "gbpjpy_fade_time_36h"
 
         scalping = ("vwap_reversion", "stat_arb", "session_orb", "gold_orb")
         if pos.strategy in scalping:

@@ -31,7 +31,10 @@ from fx_pro_bot.strategies.shadow import ShadowTracker
 from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 from fx_pro_bot.trading.killswitch import KillSwitch, KillSwitchConfig
 from fx_pro_bot.trading.symbols import SymbolCache
+from fx_pro_bot.strategies.scalping.gbpjpy_fade import GBPJPY_FADE_SYMBOL, GBPJPY_FADE_TRIGGER, GbpjpyFadeStrategy
 from fx_pro_bot.strategies.scalping.gold_orb import GoldOrbStrategy
+from fx_pro_bot.strategies.scalping.squeeze_h4 import SQUEEZE_H4_SYMBOLS, SqueezeH4Strategy
+from fx_pro_bot.strategies.scalping.turtle_h4 import TURTLE_H4_SYMBOLS, TurtleH4Strategy
 from fx_pro_bot.whales.cot import fetch_cot_signals
 from fx_pro_bot.whales.sentiment import fetch_sentiment_signals
 from fx_pro_bot.whales.tracker import WhaleTracker
@@ -317,6 +320,32 @@ def run_advisor() -> None:
         )
         if settings.scalping_gold_orb_enabled else None
     )
+    squeeze_h4_strat = (
+        SqueezeH4Strategy(
+            store,
+            max_positions=2,
+            max_per_instrument=1,
+            shadow=settings.scalping_squeeze_h4_shadow,
+        )
+        if settings.scalping_squeeze_h4_enabled else None
+    )
+    turtle_h4_strat = (
+        TurtleH4Strategy(
+            store,
+            max_positions=2,
+            max_per_instrument=1,
+            shadow=settings.scalping_turtle_h4_shadow,
+        )
+        if settings.scalping_turtle_h4_enabled else None
+    )
+    gbpjpy_fade_strat = (
+        GbpjpyFadeStrategy(
+            store,
+            max_positions=1,
+            shadow=settings.scalping_gbpjpy_fade_shadow,
+        )
+        if settings.scalping_gbpjpy_fade_enabled else None
+    )
 
     cycle_count = 0
 
@@ -324,6 +353,9 @@ def run_advisor() -> None:
 
     scalp_names = [n for n, s in [
         (f"GoldORB{'[shadow]' if settings.scalping_gold_orb_shadow else ''}", gold_orb_strat),
+        (f"SqueezeH4{'[shadow]' if settings.scalping_squeeze_h4_shadow else ''}", squeeze_h4_strat),
+        (f"TurtleH4{'[shadow]' if settings.scalping_turtle_h4_shadow else ''}", turtle_h4_strat),
+        (f"GBPJPYFade{'[shadow]' if settings.scalping_gbpjpy_fade_shadow else ''}", gbpjpy_fade_strat),
     ] if s]
     log.info(
         "Запуск v0.8: ансамбль + Leaders + Outsiders(%s) + Shadow + Scalping(%s)%s, "
@@ -347,6 +379,9 @@ def run_advisor() -> None:
                 leaders_strat, outsiders_strat, monitor, shadow,
                 cycle_count, executor, killswitch,
                 gold_orb_strat=gold_orb_strat,
+                squeeze_h4_strat=squeeze_h4_strat,
+                turtle_h4_strat=turtle_h4_strat,
+                gbpjpy_fade_strat=gbpjpy_fade_strat,
             )
             cycle_count += 1
         except KeyboardInterrupt:
@@ -374,6 +409,9 @@ def _run_cycle(
     killswitch=None,
     *,
     gold_orb_strat: GoldOrbStrategy | None = None,
+    squeeze_h4_strat: SqueezeH4Strategy | None = None,
+    turtle_h4_strat: TurtleH4Strategy | None = None,
+    gbpjpy_fade_strat: GbpjpyFadeStrategy | None = None,
 ) -> None:
     bar_fetcher = _make_bar_fetcher(executor)
 
@@ -520,14 +558,25 @@ def _run_cycle(
         except Exception:
             log.exception("Ошибка Outsiders")
 
-    # 3b. Scalping strategies (отдельный bars_map, чтобы не затрагивать основные стратегии)
-    if vwap_strat or statarb_strat or orb_strat or gold_orb_strat:
-        log.info("── Скальпинг ──")
+    # 3b. Scalping / swing strategies (отдельный bars_map, чтобы не затрагивать основные стратегии)
+    active_strats = [s for s in (gold_orb_strat, squeeze_h4_strat, turtle_h4_strat, gbpjpy_fade_strat) if s]
+    if active_strats:
+        log.info("── Скальпинг/свинг ──")
         try:
             scalping_bars = dict(bars_map)
             scalping_prices = dict(prices)
 
-            extra = set(SCALPING_EXTRA_SYMBOLS) - set(settings.scan_symbols)
+            # Добавить символы, нужные новым стратегиям (если их нет в scan_symbols)
+            needed: set[str] = set(SCALPING_EXTRA_SYMBOLS)
+            if squeeze_h4_strat:
+                needed.update(SQUEEZE_H4_SYMBOLS)
+            if turtle_h4_strat:
+                needed.update(TURTLE_H4_SYMBOLS)
+            if gbpjpy_fade_strat:
+                needed.add(GBPJPY_FADE_TRIGGER)
+                needed.add(GBPJPY_FADE_SYMBOL)
+
+            extra = needed - set(settings.scan_symbols)
             if extra:
                 extra_results = scan_instruments(
                     tuple(extra),
@@ -549,12 +598,48 @@ def _run_cycle(
                 if not gold_orb_strat._shadow:
                     _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
                 log.info(
-                    "  Gold-ORB: %d \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432, %d %s",
+                    "  Gold-ORB: %d сигналов, %d %s",
                     len(g_sigs), g_opened,
-                    "shadow-logged" if gold_orb_strat._shadow else "\u043e\u0442\u043a\u0440\u044b\u0442\u043e",
+                    "shadow-logged" if gold_orb_strat._shadow else "открыто",
+                )
+
+            if squeeze_h4_strat:
+                sq_sigs = squeeze_h4_strat.scan(scalping_bars, scalping_prices)
+                before_ids = {p.id for p in store.get_open_positions()}
+                sq_opened = squeeze_h4_strat.process_signals(sq_sigs, scalping_prices) if sq_sigs else 0
+                if not squeeze_h4_strat._shadow:
+                    _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
+                log.info(
+                    "  Squeeze-H4: %d сигналов, %d %s",
+                    len(sq_sigs), sq_opened,
+                    "shadow-logged" if squeeze_h4_strat._shadow else "открыто",
+                )
+
+            if turtle_h4_strat:
+                tu_sigs = turtle_h4_strat.scan(scalping_bars, scalping_prices)
+                before_ids = {p.id for p in store.get_open_positions()}
+                tu_opened = turtle_h4_strat.process_signals(tu_sigs, scalping_prices) if tu_sigs else 0
+                if not turtle_h4_strat._shadow:
+                    _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
+                log.info(
+                    "  Turtle-H4: %d сигналов, %d %s",
+                    len(tu_sigs), tu_opened,
+                    "shadow-logged" if turtle_h4_strat._shadow else "открыто",
+                )
+
+            if gbpjpy_fade_strat:
+                gf_sigs = gbpjpy_fade_strat.scan(scalping_bars, scalping_prices)
+                before_ids = {p.id for p in store.get_open_positions()}
+                gf_opened = gbpjpy_fade_strat.process_signals(gf_sigs, scalping_prices) if gf_sigs else 0
+                if not gbpjpy_fade_strat._shadow:
+                    _open_broker_for_new(store, executor, killswitch, before_ids, prices, settings, atrs)
+                log.info(
+                    "  GBPJPY-fade: %d сигналов, %d %s",
+                    len(gf_sigs), gf_opened,
+                    "shadow-logged" if gbpjpy_fade_strat._shadow else "открыто",
                 )
         except Exception:
-            log.exception("Ошибка скальпинг-стратегий")
+            log.exception("Ошибка скальпинг/свинг-стратегий")
 
     # 4. Detect broker-side closures (server-side TP/SL hit by cTrader)
     if executor:
@@ -775,6 +860,19 @@ def _calc_tp_distance(
         commission_pips = broker_commission_usd() / pip_value_usd(instrument) if pip_value_usd(instrument) > 0 else 1.0
         cost_floor = (spread_cost_pips(instrument) + commission_pips) * 3.0 * ps
         return max(atr_tp, fixed_tp, cost_floor)
+    # Swing: H4-стратегии + gbpjpy_fade. TP не фиксированный (exit по SMA50-cross
+    # или по time-stop в monitor), но cTrader требует какое-то значение. Ставим
+    # широкий TP = 4×ATR чтобы он почти никогда не сработал, и выход был через
+    # bot-side exit rules.
+    if strategy in ("squeeze_h4", "turtle_h4"):
+        if atr > 0:
+            return 4.0 * atr
+        return None
+    if strategy == "gbpjpy_fade":
+        # fade на mean-reversion; TP = 2× SL (R:R=2:1), если SL известен через ATR.
+        if atr > 0:
+            return 2.0 * atr
+        return None
     if strategy in ("outsiders", "ensemble"):
         atr_tp = OUTSIDERS_TP_ATR_MULT * atr if atr > 0 else 0.0
         fixed_tp = OUTSIDERS_CONFIRMED_AGGRESSIVE_TP * ps

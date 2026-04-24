@@ -349,7 +349,9 @@ class Settings(BaseSettings):
         validation_alias="SCAN_SYMBOLS",
     )
 
-    yfinance_period: str = Field(default="1mo", validation_alias="YFINANCE_PERIOD")
+    # 60d требуется для H4-стратегий (Turtle 20d breakout = 120 H4 bars)
+    # и gbpjpy_fade (30d rolling std). yfinance лимит для 5m = 60d.
+    yfinance_period: str = Field(default="60d", validation_alias="YFINANCE_PERIOD")
     yfinance_interval: str = Field(default="5m", validation_alias="YFINANCE_INTERVAL")
 
     poll_interval_sec: int = Field(default=300, validation_alias="POLL_INTERVAL_SEC")
@@ -406,6 +408,18 @@ class Settings(BaseSettings):
     scalping_gold_orb_enabled: bool = Field(default=True, validation_alias="SCALPING_GOLD_ORB_ENABLED")
     scalping_gold_orb_shadow: bool = Field(default=True, validation_alias="SCALPING_GOLD_ORB_SHADOW")
     scalping_max_positions: int = Field(default=10, validation_alias="SCALPING_MAX_POSITIONS")
+
+    # Variant 2 (см. BUILDLOG.md 2026-04-16):
+    # новые стратегии выкатываются в SHADOW mode на 2-3 недели,
+    # затем переводятся в LIVE при стабильной статистике.
+    scalping_squeeze_h4_enabled: bool = Field(default=True, validation_alias="SCALPING_SQUEEZE_H4_ENABLED")
+    scalping_squeeze_h4_shadow: bool = Field(default=True, validation_alias="SCALPING_SQUEEZE_H4_SHADOW")
+
+    scalping_turtle_h4_enabled: bool = Field(default=True, validation_alias="SCALPING_TURTLE_H4_ENABLED")
+    scalping_turtle_h4_shadow: bool = Field(default=True, validation_alias="SCALPING_TURTLE_H4_SHADOW")
+
+    scalping_gbpjpy_fade_enabled: bool = Field(default=True, validation_alias="SCALPING_GBPJPY_FADE_ENABLED")
+    scalping_gbpjpy_fade_shadow: bool = Field(default=True, validation_alias="SCALPING_GBPJPY_FADE_SHADOW")
 
     # cTrader Open API (автоторговля)
     ctrader_trading_enabled: bool = Field(

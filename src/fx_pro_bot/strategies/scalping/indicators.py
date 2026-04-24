@@ -168,6 +168,32 @@ def resample_m5_to_h1(bars: list[Bar]) -> list[Bar]:
     return result
 
 
+def resample_m5_to_h4(bars: list[Bar]) -> list[Bar]:
+    """Агрегирует M5 бары в H4 (границы 00/04/08/12/16/20 UTC)."""
+    if not bars:
+        return []
+    buckets: dict[str, list[Bar]] = {}
+    for b in bars:
+        # H4 bucket = floor(hour / 4) * 4
+        h4 = (b.ts.hour // 4) * 4
+        key = f"{b.ts.strftime('%Y-%m-%d')}-{h4:02d}"
+        buckets.setdefault(key, []).append(b)
+
+    result: list[Bar] = []
+    for key in sorted(buckets):
+        group = buckets[key]
+        result.append(Bar(
+            instrument=group[0].instrument,
+            ts=group[0].ts,
+            open=group[0].open,
+            high=max(b.high for b in group),
+            low=min(b.low for b in group),
+            close=group[-1].close,
+            volume=sum(b.volume for b in group),
+        ))
+    return result
+
+
 def htf_ema_trend(bars_m5: list[Bar], ema_period: int = 200) -> float | None:
     """EMA trend на H1 (ресемплированных из M5).
 

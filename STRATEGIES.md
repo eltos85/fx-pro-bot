@@ -9,7 +9,7 @@
   1. Ансамбль (5 индикаторов) → советы по входу
   2. Leaders (copy-trading) → paper-позиции на основе whale-данных
   3. Outsiders (extreme setups, classic/confirmed) → paper-позиции + 4 exit-стратегии
-  3b. Скальпинг (3 стратегии) → VWAP / Stat-Arb / ORB
+  3b. Scalping/Swing (4 стратегии) → Gold ORB / Squeeze H4 / Turtle H4 / GBPJPY fade
   4. Monitor → проверка SL / trail / time-stops всех позиций
   5. Shadow → ROI-снимки для аналитики
   6. Верификация → проверка старых сигналов ансамбля (15/30/60 мин)
@@ -397,6 +397,107 @@ SCALPING_GOLD_ORB_SHADOW=false
 3. NY 14:45 = сразу после US GDP/CPI/NFP часто = news-driven breakouts
 4. R:R=2 + WR=42% даёт Expectancy +0.39R (baseline edge)
 5. Touch-break vs confirm-bar: на M5 Gold confirm-bar теряет 30-40% движения
+
+---
+
+## 3b-ter. Variant 2 — Swing H4 commodities + GBPJPY fade (16.04.2026)
+
+По результатам 2-летнего backtest на FxPro M5 (2024-04-24 → 2026-04-24,
+весь research см. BUILDLOG.md за 16.04.2026) тестировались 7 стратегий
+× 2 парадигмы (scalping, swing, carry, news-driven, cross-asset). Из них
+устойчивые edge'и на OOS показали:
+
+| # | Стратегия       | Инструменты | TF | OOS net pips       | OOS PF | Статус  |
+|---|-----------------|-------------|----|--------------------|--------|---------|
+| 1 | **gold_orb**    | GC=F        | M5 | +6146 (90d)        | 1.67   | LIVE    |
+| 2 | **squeeze_h4**  | GC=F + BZ=F | H4 | +10799 / +1606     | 4.11   | Shadow  |
+| 3 | **turtle_h4**   | GC=F + BZ=F | H4 | +7320 / +1539      | 1.87   | Shadow  |
+| 4 | **gbpjpy_fade** | GBPJPY      | M5 | +1332 (WFO)        | 1.06   | Shadow  |
+
+Все четыре стратегии включены в LIVE и shadow mode (по умолчанию shadow
+для новых трёх — собираем 2-3 недели реальной статистики, затем переход
+в LIVE). Все FX-scalp стратегии (vwap_reversion, stat_arb, classic ORB,
+Late Session MR, CSI, pairs) на 2-летнем backtest оказались неприбыльными
+или статистически незначимыми на FxPro из-за spread + комиссия.
+
+### 3b-ter.1 Squeeze H4 — TTM Squeeze на Gold + Brent
+
+**Файл:** `strategies/scalping/squeeze_h4.py`
+
+Классический TTM Squeeze (John Carter): сжатие BB(20,2σ) внутри KC(20,1.5×ATR)
+→ release → вход в направлении тренда SMA(50).
+
+| Параметр            | Значение |
+|---------------------|----------|
+| BB period × σ       | 20 × 2.0 |
+| KC period × ATR     | 20 × 1.5 |
+| SMA trend filter    | 50 H4    |
+| Min squeeze bars    | 3        |
+| SL                  | 2×ATR(14) |
+| Max hold            | 10 дней (240h) |
+| Инструменты         | GC=F, BZ=F |
+| Max позиций         | 2 (по 1 на инструмент) |
+
+**Вход (LONG):** на H4 баре после release (BB вышла из KC) И `close > SMA50`
+И `close > BB_upper_prev`. **SHORT** — симметрично.
+
+**Выход:** SL 2×ATR или time-stop 10 дней. SMA50-cross exit реализуется
+неявно через time-stop (H4-данные в реальном времени нужно было бы
+пересчитывать в monitor'е — оставлено на v2).
+
+### 3b-ter.2 Turtle H4 — 20-day breakout на Gold + Brent
+
+**Файл:** `strategies/scalping/turtle_h4.py`
+
+Упрощённая Turtle (Dennis 1983, без pyramiding):
+
+| Параметр         | Значение |
+|------------------|----------|
+| Entry lookback   | 120 H4 (20 дней) |
+| Exit lookback    | 60 H4 (10 дней) — trailing |
+| SL               | 2×ATR(14) |
+| Max hold         | 30 дней (720h) |
+| Инструменты      | GC=F, BZ=F |
+
+**Вход (LONG):** `high[t] > max(high[-120:-1])`. **SHORT** — `low[t] < min(low[-120:-1])`.
+
+### 3b-ter.3 GBPJPY fade — trigger GBPUSD, fade GBPJPY
+
+**Файл:** `strategies/scalping/gbpjpy_fade.py`
+
+Единственная FX-стратегия с положительным WFO-OOS edge (+1332 pips, PF 1.06).
+Trigger — экстремальный 4h log-return GBPUSD (|z| ≥ 2σ) с 30-дневной
+скользящей std. Entry — через 1 час в GBPJPY в противоположном
+направлении (fade overreaction).
+
+| Параметр            | Значение |
+|---------------------|----------|
+| Return window       | 4h (48 M5 bars) |
+| Entry delay         | 1h (12 M5 bars) |
+| Std window          | 30 дней rolling |
+| Trigger             | \|z\| ≥ 2.0 |
+| SL                  | 2σ по GBPJPY (в единицах цены) |
+| Time-stop           | 36h |
+| Cool-off            | 4h между триггерами |
+| Инструменты         | trigger GBPUSD=X, entry GBPJPY=X |
+| Max позиций         | 1 |
+
+Edge слабый (p=0.13 на permutation test), держится стабильно через
+3 walk-forward окна — торгуем на минимальном лоте как диверсификатор.
+
+### Shadow rollout
+
+Все 3 новые стратегии стартуют в shadow mode:
+
+```bash
+SCALPING_SQUEEZE_H4_SHADOW=true     # default
+SCALPING_TURTLE_H4_SHADOW=true       # default
+SCALPING_GBPJPY_FADE_SHADOW=true    # default
+```
+
+**Критерий перехода в LIVE:** после 2-3 недель shadow-наблюдений
+проверяем совпадение sigs с IS/OOS backtest (target 2-4 сигнала/неделя
+по Squeeze, 1-2 по Turtle, 1-2 по GBPJPY-fade).
 
 ---
 

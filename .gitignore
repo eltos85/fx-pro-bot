@@ -18,3 +18,17 @@ dist/
 /data/backtest_*.txt
 /data/backtest_*.log
 /data/fxpro_klines/
+/data/fxpro_klines_*/
+# Research outputs (регенерируются скриптами из scripts/)
+/data/bottom_up_*.txt
+/data/carry_*.txt
+/data/cof_*.txt
+/data/cross_asset_*.txt
+/data/gh_forex_*.txt
+/data/mine_*.txt
+/data/news_*.txt
+/data/scalp_*.txt
+/data/swing_*.txt
+/data/walkforward_*.txt
+/data/gh_forex_setups_summary.csv
+/data/scalp_setups_m5_summary.csv

@@ -13,6 +13,7 @@ from fx_pro_bot.strategies.scalping.indicators import (
     avg_volume,
     ema_slope,
     ols_hedge_ratio,
+    resample_m5_to_h4,
     rolling_z_score,
     session_range,
     spread_series,
@@ -27,6 +28,40 @@ from fx_pro_bot.strategies.scalping.gold_orb import (
     GoldOrbSignal,
     GoldOrbStrategy,
     SL_ATR_MULT as GOLD_ORB_SL_ATR_MULT,
+)
+from fx_pro_bot.strategies.scalping.squeeze_h4 import (
+    BB_K,
+    BB_N,
+    KC_MULT,
+    MIN_SQUEEZE_BARS,
+    SMA_N,
+    SQUEEZE_H4_SOURCE,
+    SQUEEZE_H4_SYMBOLS,
+    ATR_STOP_MULT as SQUEEZE_SL_MULT,
+    SqueezeH4Signal,
+    SqueezeH4Strategy,
+)
+from fx_pro_bot.strategies.scalping.turtle_h4 import (
+    ENTRY_LOOKBACK_H4,
+    EXIT_LOOKBACK_H4,
+    MAX_HOLD_H4,
+    TURTLE_H4_SOURCE,
+    TURTLE_H4_SYMBOLS,
+    ATR_STOP_MULT as TURTLE_SL_MULT,
+    TurtleH4Signal,
+    TurtleH4Strategy,
+)
+from fx_pro_bot.strategies.scalping.gbpjpy_fade import (
+    COOLOFF_HOURS,
+    ENTRY_DELAY_M5,
+    GBPJPY_FADE_SOURCE,
+    GBPJPY_FADE_SYMBOL,
+    GBPJPY_FADE_TRIGGER,
+    RETURN_WINDOW_M5,
+    STD_WINDOW_M5,
+    TRIGGER_SIGMA,
+    GbpjpyFadeSignal,
+    GbpjpyFadeStrategy,
 )
 
 
@@ -328,3 +363,241 @@ class TestGoldOrbStrategy:
         # LONG-сигнала быть не должно, т.к. slope<0
         longs = [s for s in signals if s.direction == TrendDirection.LONG]
         assert longs == []
+
+
+# ── M5 → H4 resample ────────────────────────────────────────
+
+
+class TestResampleH4:
+    def test_empty(self):
+        assert resample_m5_to_h4([]) == []
+
+    def test_bucket_boundaries(self):
+        """Бары 00:00-03:55 UTC → один H4 бар, 04:00-07:55 → другой."""
+        base = datetime(2026, 3, 28, 0, 0, tzinfo=UTC)
+        inst = InstrumentId(symbol="GC=F")
+        bars: list[Bar] = []
+        for i in range(96):   # 8 часов × 12 M5 bars = 96
+            ts = base + timedelta(minutes=5 * i)
+            bars.append(Bar(
+                instrument=inst, ts=ts,
+                open=2000.0 + i * 0.1, high=2001.0 + i * 0.1,
+                low=1999.0 + i * 0.1, close=2000.5 + i * 0.1, volume=100,
+            ))
+        h4 = resample_m5_to_h4(bars)
+        assert len(h4) == 2   # 00:00-03:55 и 04:00-07:55
+        # Первый бар: high = max первых 48 баров
+        first = h4[0]
+        assert first.open == pytest.approx(2000.0)
+        assert first.high == pytest.approx(2001.0 + 47 * 0.1)
+
+
+# ── Squeeze H4 ──────────────────────────────────────────────
+
+
+class TestSqueezeH4:
+    """TTM Squeeze на commodities (GC=F, BZ=F)."""
+
+    def test_constants(self):
+        assert SQUEEZE_H4_SYMBOLS == ("GC=F", "BZ=F")
+        assert BB_N == 20
+        assert BB_K == 2.0
+        assert KC_MULT == 1.5
+        assert SMA_N == 50
+        assert SQUEEZE_SL_MULT == 2.0
+        assert MIN_SQUEEZE_BARS == 3
+
+    def test_scan_empty_no_crash(self, tmp_path):
+        store = _store(tmp_path)
+        strat = SqueezeH4Strategy(store)
+        assert strat.scan({}, {}) == []
+
+    def test_scan_insufficient_data(self, tmp_path):
+        """Нужно ≥55 H4 баров = 2640 M5."""
+        store = _store(tmp_path)
+        strat = SqueezeH4Strategy(store)
+        bars = _make_bars([2000.0] * 100, instrument="GC=F")
+        assert strat.scan({"GC=F": bars}, {"GC=F": 2000.0}) == []
+
+    def test_scan_skips_non_commodity(self, tmp_path):
+        """Стратегия не сканирует FX-пары, даже если они в bars_map."""
+        store = _store(tmp_path)
+        strat = SqueezeH4Strategy(store)
+        # Много M5 баров EURUSD — но GC=F нет → нет сигналов
+        bars = _make_bars([1.10] * 3000, instrument="EURUSD=X")
+        signals = strat.scan({"EURUSD=X": bars}, {"EURUSD=X": 1.10})
+        assert signals == []
+
+    def test_process_signals_opens_in_live(self, tmp_path):
+        store = _store(tmp_path)
+        strat = SqueezeH4Strategy(store, shadow=False)
+        sig = SqueezeH4Signal(
+            instrument="GC=F", direction=TrendDirection.LONG,
+            source=SQUEEZE_H4_SOURCE, entry_level=2050.0,
+            sma50=2040.0, atr=5.0, squeeze_count=5, detail="test",
+        )
+        opened = strat.process_signals([sig], {"GC=F": 2050.0})
+        assert opened == 1
+        assert store.count_open_positions(strategy="squeeze_h4") == 1
+
+    def test_shadow_mode_no_open(self, tmp_path):
+        store = _store(tmp_path)
+        strat = SqueezeH4Strategy(store, shadow=True)
+        sig = SqueezeH4Signal(
+            instrument="GC=F", direction=TrendDirection.LONG,
+            source=SQUEEZE_H4_SOURCE, entry_level=2050.0,
+            sma50=2040.0, atr=5.0, squeeze_count=5, detail="test",
+        )
+        opened = strat.process_signals([sig], {"GC=F": 2050.0})
+        assert opened == 1
+        assert store.count_open_positions(strategy="squeeze_h4") == 0
+
+    def test_max_per_instrument_respected(self, tmp_path):
+        store = _store(tmp_path)
+        strat = SqueezeH4Strategy(store, max_per_instrument=1)
+        sig = SqueezeH4Signal(
+            instrument="GC=F", direction=TrendDirection.LONG,
+            source=SQUEEZE_H4_SOURCE, entry_level=2050.0,
+            sma50=2040.0, atr=5.0, squeeze_count=5, detail="test",
+        )
+        strat.process_signals([sig], {"GC=F": 2050.0})
+        opened2 = strat.process_signals([sig], {"GC=F": 2050.0})
+        assert opened2 == 0
+
+
+# ── Turtle H4 ──────────────────────────────────────────────
+
+
+class TestTurtleH4:
+    """20-day breakout на commodities."""
+
+    def test_constants(self):
+        assert TURTLE_H4_SYMBOLS == ("GC=F", "BZ=F")
+        assert ENTRY_LOOKBACK_H4 == 120
+        assert EXIT_LOOKBACK_H4 == 60
+        assert TURTLE_SL_MULT == 2.0
+        assert MAX_HOLD_H4 == 180
+
+    def test_scan_empty_no_crash(self, tmp_path):
+        store = _store(tmp_path)
+        strat = TurtleH4Strategy(store)
+        assert strat.scan({}, {}) == []
+
+    def test_scan_insufficient_data(self, tmp_path):
+        store = _store(tmp_path)
+        strat = TurtleH4Strategy(store)
+        bars = _make_bars([2000.0] * 500, instrument="GC=F")   # 500 M5 < 120 H4
+        assert strat.scan({"GC=F": bars}, {"GC=F": 2000.0}) == []
+
+    def test_scan_skips_fx(self, tmp_path):
+        """FX-пары не торгуются Turtle."""
+        store = _store(tmp_path)
+        strat = TurtleH4Strategy(store)
+        bars = _make_bars([1.10] * 8000, instrument="EURUSD=X")
+        signals = strat.scan({"EURUSD=X": bars}, {"EURUSD=X": 1.10})
+        assert signals == []
+
+    def test_process_signals_opens_in_live(self, tmp_path):
+        store = _store(tmp_path)
+        strat = TurtleH4Strategy(store, shadow=False)
+        sig = TurtleH4Signal(
+            instrument="BZ=F", direction=TrendDirection.LONG,
+            source=TURTLE_H4_SOURCE, entry_level=85.0,
+            atr=1.2, lookback_high=85.0, lookback_low=75.0, detail="test",
+        )
+        opened = strat.process_signals([sig], {"BZ=F": 85.1})
+        assert opened == 1
+        assert store.count_open_positions(strategy="turtle_h4") == 1
+
+    def test_shadow_mode_no_open(self, tmp_path):
+        store = _store(tmp_path)
+        strat = TurtleH4Strategy(store, shadow=True)
+        sig = TurtleH4Signal(
+            instrument="GC=F", direction=TrendDirection.LONG,
+            source=TURTLE_H4_SOURCE, entry_level=2100.0,
+            atr=5.0, lookback_high=2100.0, lookback_low=2000.0, detail="test",
+        )
+        opened = strat.process_signals([sig], {"GC=F": 2100.0})
+        assert opened == 1
+        assert store.count_open_positions(strategy="turtle_h4") == 0
+
+
+# ── GBPJPY Fade ────────────────────────────────────────────
+
+
+class TestGbpjpyFade:
+    """Trigger GBPUSD → fade entry GBPJPY."""
+
+    def test_constants(self):
+        assert GBPJPY_FADE_TRIGGER == "GBPUSD=X"
+        assert GBPJPY_FADE_SYMBOL == "GBPJPY=X"
+        assert RETURN_WINDOW_M5 == 48      # 4h
+        assert ENTRY_DELAY_M5 == 12        # 1h
+        assert STD_WINDOW_M5 == 30 * 288   # 30 дней
+        assert TRIGGER_SIGMA == 2.0
+        assert COOLOFF_HOURS == 4.0
+
+    def test_scan_insufficient_data(self, tmp_path):
+        store = _store(tmp_path)
+        strat = GbpjpyFadeStrategy(store)
+        bars = _make_bars([1.25] * 500, instrument="GBPUSD=X")
+        signals = strat.scan(
+            {"GBPUSD=X": bars, "GBPJPY=X": bars},
+            {"GBPUSD=X": 1.25, "GBPJPY=X": 188.0},
+        )
+        assert signals == []   # < 30d M5 данных
+
+    def test_scan_no_trigger_on_flat(self, tmp_path):
+        """На плоской цене GBPUSD z-score должен быть 0 → нет сигнала."""
+        store = _store(tmp_path)
+        strat = GbpjpyFadeStrategy(store)
+        # 30d+ плоских баров
+        n = STD_WINDOW_M5 + RETURN_WINDOW_M5 + ENTRY_DELAY_M5 + 10
+        flat_bars = _make_bars([1.25] * n, instrument="GBPUSD=X")
+        flat_gbpjpy = _make_bars([188.0] * n, instrument="GBPJPY=X")
+        signals = strat.scan(
+            {"GBPUSD=X": flat_bars, "GBPJPY=X": flat_gbpjpy},
+            {"GBPUSD=X": 1.25, "GBPJPY=X": 188.0},
+        )
+        assert signals == []
+
+    def test_process_signals_fade_direction(self, tmp_path):
+        """GBPUSD rally (z>0) → fade = SHORT на GBPJPY."""
+        store = _store(tmp_path)
+        strat = GbpjpyFadeStrategy(store, shadow=False)
+        sig = GbpjpyFadeSignal(
+            instrument=GBPJPY_FADE_SYMBOL, direction=TrendDirection.SHORT,
+            source=GBPJPY_FADE_SOURCE, entry_level=188.50,
+            z_score=2.5, reaction_pips=40.0, sigma_px=0.30, detail="test",
+        )
+        opened = strat.process_signals([sig], {GBPJPY_FADE_SYMBOL: 188.50})
+        assert opened == 1
+        assert store.count_open_positions(strategy="gbpjpy_fade") == 1
+
+    def test_shadow_mode_no_open(self, tmp_path):
+        store = _store(tmp_path)
+        strat = GbpjpyFadeStrategy(store, shadow=True)
+        sig = GbpjpyFadeSignal(
+            instrument=GBPJPY_FADE_SYMBOL, direction=TrendDirection.LONG,
+            source=GBPJPY_FADE_SOURCE, entry_level=188.50,
+            z_score=-2.3, reaction_pips=40.0, sigma_px=0.30, detail="test",
+        )
+        opened = strat.process_signals([sig], {GBPJPY_FADE_SYMBOL: 188.50})
+        assert opened == 1
+        assert store.count_open_positions(strategy="gbpjpy_fade") == 0
+
+    def test_cooloff_blocks_second_trigger(self, tmp_path):
+        """После одного открытия в течение COOLOFF_HOURS второй сигнал не проходит."""
+        store = _store(tmp_path)
+        strat = GbpjpyFadeStrategy(store, shadow=False)
+        # Первый сигнал
+        sig = GbpjpyFadeSignal(
+            instrument=GBPJPY_FADE_SYMBOL, direction=TrendDirection.LONG,
+            source=GBPJPY_FADE_SOURCE, entry_level=188.50,
+            z_score=-2.3, reaction_pips=40.0, sigma_px=0.30, detail="test",
+        )
+        opened1 = strat.process_signals([sig], {GBPJPY_FADE_SYMBOL: 188.50})
+        assert opened1 == 1
+        # Попытка вернуть второй сигнал через scan() — но scan_bars нет,
+        # достаточно убедиться что _is_in_cooloff возвращает True после открытия.
+        assert strat._is_in_cooloff()
