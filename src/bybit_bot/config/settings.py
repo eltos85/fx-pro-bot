@@ -187,6 +187,25 @@ class Settings(BaseSettings):
     scalping_vwap_enabled: bool = Field(
         default=True, validation_alias="BYBIT_BOT_SCALP_VWAP_ENABLED",
     )
+    # VWAP whitelist'ы — Wave 6 (BUILDLOG.md 2026-04-25, data-driven Bybit
+    # API n=636 + 90d backtest, OOS TEST PF=1.26 +w%=80%).
+    # Формат: CSV-строка, пустая строка = "без ограничений".
+    # Дефолт = пустые → обратная совместимость и тесты не ломаются.
+    scalping_vwap_direction: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_VWAP_DIRECTION",
+    )
+    scalping_vwap_symbols: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_VWAP_SYMBOLS",
+    )
+    # Часы UTC, в которые разрешены входы. Пример: "14,15,16,19,20".
+    # Пустая строка = без ограничений (только session_filter глобальный).
+    scalping_vwap_hours_utc: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_VWAP_HOURS_UTC",
+    )
+    # Дни недели (mon,tue,wed,thu,fri,sat,sun). Пустая строка = без ограничений.
+    scalping_vwap_weekdays: str = Field(
+        default="", validation_alias="BYBIT_BOT_SCALP_VWAP_WEEKDAYS",
+    )
     scalping_statarb_enabled: bool = Field(
         default=True, validation_alias="BYBIT_BOT_SCALP_STATARB_ENABLED",
     )

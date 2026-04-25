@@ -67,7 +67,15 @@ services:
       # на истории (PnL от -49% до -280%). Код не удалён — только флаг.
       # ORB оставляем, но с жёсткими whitelist-ами: London-session / long /
       # SOL-LINK-BNB — единственный прибыльный срез (PF 1.53, +7.18% на n=54).
-      BYBIT_BOT_SCALP_VWAP_ENABLED: ${BYBIT_BOT_SCALP_VWAP_ENABLED:-false}
+      # VWAP (Wave 6, BUILDLOG.md 2026-04-25). Data-driven whitelist по
+      # Bybit API n=636 (2026-04-11..23) и 90d backtest (n=126 в выбранном
+      # сегменте, OOS TEST PF=1.26 +w%=80%). Включена по умолчанию с
+      # фильтрами: long / 5 символов / часы 14-16,19-20 UTC / будни.
+      BYBIT_BOT_SCALP_VWAP_ENABLED: ${BYBIT_BOT_SCALP_VWAP_ENABLED:-true}
+      BYBIT_BOT_SCALP_VWAP_DIRECTION: ${BYBIT_BOT_SCALP_VWAP_DIRECTION:-long}
+      BYBIT_BOT_SCALP_VWAP_SYMBOLS: ${BYBIT_BOT_SCALP_VWAP_SYMBOLS:-ADAUSDT,SOLUSDT,SUIUSDT,TONUSDT,WIFUSDT}
+      BYBIT_BOT_SCALP_VWAP_HOURS_UTC: ${BYBIT_BOT_SCALP_VWAP_HOURS_UTC:-14,15,16,19,20}
+      BYBIT_BOT_SCALP_VWAP_WEEKDAYS: ${BYBIT_BOT_SCALP_VWAP_WEEKDAYS:-mon,tue,wed,thu,fri}
       BYBIT_BOT_SCALP_STATARB_ENABLED: ${BYBIT_BOT_SCALP_STATARB_ENABLED:-false}
       BYBIT_BOT_SCALP_VOLUME_ENABLED: ${BYBIT_BOT_SCALP_VOLUME_ENABLED:-false}
       BYBIT_BOT_SCALP_ORB_ENABLED: ${BYBIT_BOT_SCALP_ORB_ENABLED:-true}

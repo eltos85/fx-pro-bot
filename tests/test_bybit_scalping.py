@@ -120,6 +120,75 @@ class TestVwapCrypto:
         assert sig.direction == Direction.LONG
         assert sig.deviation_atr == 2.5
 
+    # ── Wave 6 whitelist'ы (BUILDLOG.md 2026-04-25) ────────────────
+
+    def test_is_active_time_no_filters_passes(self):
+        """Без allowed_weekdays и allowed_hours — пропускает любое время."""
+        from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
+        bar = Bar(
+            symbol="BTCUSDT",
+            ts=datetime(2026, 4, 25, 23, 30, tzinfo=UTC),  # суббота, 23 UTC
+            open=1, high=1, low=1, close=1, volume=1,
+        )
+        strat = VwapCryptoStrategy()
+        assert strat._is_active_time(bar) is True
+
+    def test_is_active_time_weekday_filter_blocks_weekend(self):
+        """allowed_weekdays={mon..fri} отсекает субботу (weekday=5)."""
+        from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
+        sat = Bar(symbol="BTCUSDT",
+                  ts=datetime(2026, 4, 25, 14, 30, tzinfo=UTC),  # Sat
+                  open=1, high=1, low=1, close=1, volume=1)
+        mon = Bar(symbol="BTCUSDT",
+                  ts=datetime(2026, 4, 27, 14, 30, tzinfo=UTC),  # Mon
+                  open=1, high=1, low=1, close=1, volume=1)
+        strat = VwapCryptoStrategy(allowed_weekdays={0, 1, 2, 3, 4})
+        assert strat._is_active_time(sat) is False
+        assert strat._is_active_time(mon) is True
+
+    def test_is_active_time_hour_filter_blocks_off_hours(self):
+        """allowed_hours_utc={14,15,16,19,20} отсекает 17 UTC."""
+        from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
+        h17 = Bar(symbol="BTCUSDT",
+                  ts=datetime(2026, 4, 27, 17, 0, tzinfo=UTC),
+                  open=1, high=1, low=1, close=1, volume=1)
+        h15 = Bar(symbol="BTCUSDT",
+                  ts=datetime(2026, 4, 27, 15, 0, tzinfo=UTC),
+                  open=1, high=1, low=1, close=1, volume=1)
+        strat = VwapCryptoStrategy(allowed_hours_utc={14, 15, 16, 19, 20})
+        assert strat._is_active_time(h17) is False
+        assert strat._is_active_time(h15) is True
+
+    def test_is_active_time_naive_ts_assumes_utc(self):
+        """Бар без tzinfo трактуется как UTC, weekday/hour корректны."""
+        from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
+        naive = Bar(symbol="BTCUSDT",
+                    ts=datetime(2026, 4, 27, 15, 0),  # без tzinfo
+                    open=1, high=1, low=1, close=1, volume=1)
+        strat = VwapCryptoStrategy(allowed_hours_utc={15})
+        assert strat._is_active_time(naive) is True
+
+    def test_allowed_symbols_blocks_non_whitelisted(self):
+        """allowed_symbols={ETHUSDT} → BTCUSDT не сканируется (нет сигнала)."""
+        from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
+        strat = VwapCryptoStrategy(allowed_symbols={"ETHUSDT"})
+        bars = _make_bars(symbol="BTCUSDT", n=60)
+        assert strat.scan({"BTCUSDT": bars}) == []
+
+    def test_init_stores_filter_params(self):
+        """Параметры сохраняются в инстансе для последующего применения."""
+        from bybit_bot.strategies.scalping.vwap_crypto import VwapCryptoStrategy
+        strat = VwapCryptoStrategy(
+            allowed_direction="long",
+            allowed_symbols={"ADAUSDT", "SOLUSDT"},
+            allowed_hours_utc={14, 15, 16, 19, 20},
+            allowed_weekdays={0, 1, 2, 3, 4},
+        )
+        assert strat._allowed_direction == "long"
+        assert strat._allowed_symbols == {"ADAUSDT", "SOLUSDT"}
+        assert strat._allowed_hours_utc == {14, 15, 16, 19, 20}
+        assert strat._allowed_weekdays == {0, 1, 2, 3, 4}
+
 
 # ── Stat-Arb Crypto Strategy ────────────────────────────────
 
@@ -911,3 +980,75 @@ def test_all_scalping_imports():
     from bybit_bot.strategies.scalping.crypto_overbought_fader import (
         CryptoOverboughtFaderStrategy, CofSignal,
     )
+
+
+# ── Wave 6: VWAP env-парсеры и build-helper ──────────────────────
+
+class TestVwapEnvParsers:
+    def test_parse_hours_env_valid(self):
+        from bybit_bot.app.main import _parse_hours_env
+        assert _parse_hours_env("14,15,16,19,20") == {14, 15, 16, 19, 20}
+
+    def test_parse_hours_env_empty(self):
+        from bybit_bot.app.main import _parse_hours_env
+        assert _parse_hours_env("") is None
+        assert _parse_hours_env("   ") is None
+
+    def test_parse_hours_env_skips_invalid(self):
+        from bybit_bot.app.main import _parse_hours_env
+        assert _parse_hours_env("14,abc,99,15") == {14, 15}
+
+    def test_parse_weekdays_env_valid(self):
+        from bybit_bot.app.main import _parse_weekdays_env
+        assert _parse_weekdays_env("mon,tue,wed,thu,fri") == {0, 1, 2, 3, 4}
+
+    def test_parse_weekdays_env_case_insensitive(self):
+        from bybit_bot.app.main import _parse_weekdays_env
+        assert _parse_weekdays_env("MON, Tue,WED") == {0, 1, 2}
+
+    def test_parse_weekdays_env_skips_unknown(self):
+        from bybit_bot.app.main import _parse_weekdays_env
+        assert _parse_weekdays_env("mon,xyz,fri") == {0, 4}
+
+    def test_parse_weekdays_env_empty(self):
+        from bybit_bot.app.main import _parse_weekdays_env
+        assert _parse_weekdays_env("") is None
+
+    def test_build_scalp_vwap_with_full_wave6_config(self, monkeypatch):
+        """Полный набор Wave 6 → передаётся в VwapCryptoStrategy."""
+        from bybit_bot.app.main import _build_scalp_vwap
+        from bybit_bot.config.settings import Settings
+        monkeypatch.setenv("BYBIT_BOT_SCALP_VWAP_DIRECTION", "long")
+        monkeypatch.setenv("BYBIT_BOT_SCALP_VWAP_SYMBOLS", "ADAUSDT,SOLUSDT,SUIUSDT,TONUSDT,WIFUSDT")
+        monkeypatch.setenv("BYBIT_BOT_SCALP_VWAP_HOURS_UTC", "14,15,16,19,20")
+        monkeypatch.setenv("BYBIT_BOT_SCALP_VWAP_WEEKDAYS", "mon,tue,wed,thu,fri")
+        s = Settings(_env_file=None)
+        strat = _build_scalp_vwap(s)
+        assert strat._allowed_direction == "long"
+        assert strat._allowed_symbols == {"ADAUSDT", "SOLUSDT", "SUIUSDT", "TONUSDT", "WIFUSDT"}
+        assert strat._allowed_hours_utc == {14, 15, 16, 19, 20}
+        assert strat._allowed_weekdays == {0, 1, 2, 3, 4}
+
+    def test_build_scalp_vwap_invalid_direction_ignored(self, monkeypatch):
+        from bybit_bot.app.main import _build_scalp_vwap
+        from bybit_bot.config.settings import Settings
+        monkeypatch.setenv("BYBIT_BOT_SCALP_VWAP_DIRECTION", "sideways")
+        s = Settings(_env_file=None)
+        strat = _build_scalp_vwap(s)
+        assert strat._allowed_direction is None
+
+    def test_build_scalp_vwap_empty_config_no_filters(self, monkeypatch):
+        """Пустые env-строки → None во всех фильтрах (обратная совместимость)."""
+        from bybit_bot.app.main import _build_scalp_vwap
+        from bybit_bot.config.settings import Settings
+        for k in (
+            "BYBIT_BOT_SCALP_VWAP_DIRECTION", "BYBIT_BOT_SCALP_VWAP_SYMBOLS",
+            "BYBIT_BOT_SCALP_VWAP_HOURS_UTC", "BYBIT_BOT_SCALP_VWAP_WEEKDAYS",
+        ):
+            monkeypatch.delenv(k, raising=False)
+        s = Settings(_env_file=None)
+        strat = _build_scalp_vwap(s)
+        assert strat._allowed_direction is None
+        assert strat._allowed_symbols is None
+        assert strat._allowed_hours_utc is None
+        assert strat._allowed_weekdays is None

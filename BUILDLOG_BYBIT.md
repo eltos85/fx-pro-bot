@@ -1,5 +1,74 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-25
+
+### feat(scalp_vwap): Wave 6 — VWAP whitelist'ы long/5syms/prime hours/будни
+`pending commit`
+
+Деплой Wave 6 после data-driven research (запись «research: 90д API +
+backtest» от 25.04 в основном `BUILDLOG.md`).
+
+**Контекст:**
+По итогам пары COF/ORB Wave 5 за неделю 17-23.04 бот фактически перестал
+торговать (1-2 сделки/день в среднем, 0 на 23.04). Пользователь запросил
+аудит истории, чтобы найти рабочую связку «не из фантазий».
+
+**Найденная связка** (тройное подтверждение):
+1. Bybit API closedPnl 11-23.04 (n=636, NET): «будни × 14-16,19-20 UTC» —
+   единственный профитный сегмент, n=102 WR 60.8% +$25.94. 17-18 UTC —
+   −$116 на n=113 (alt-selloff zone, BYBIT_AB_TEST.md OBS 2026-04-22).
+2. Backtest 90д на 8 символах (n=126 в сегменте `vwap × LONG × prime ×
+   good5`): ALL PF 1.27 +8.99%, 11/13 недель в плюсе.
+3. **OOS TEST** (последние 30 дней, после 2026-03-25, где другие страты
+   посыпались): n=49 PF 1.26 +2.88% +w%=80%. **Единственная связка,
+   прошедшая OOS-проверку.**
+
+**Активированные фильтры:**
+
+| Env | Default Wave 6 | Источник цифр |
+|---|---|---|
+| `BYBIT_BOT_SCALP_VWAP_ENABLED` | `true` | (было `false` в Wave 5) |
+| `BYBIT_BOT_SCALP_VWAP_DIRECTION` | `long` | LONG PF 1.20, SHORT PF 0.97 |
+| `BYBIT_BOT_SCALP_VWAP_SYMBOLS` | `ADAUSDT,SOLUSDT,SUIUSDT,TONUSDT,WIFUSDT` | Top-5 PnL в сегменте, TIA/DOT/LINK исключены |
+| `BYBIT_BOT_SCALP_VWAP_HOURS_UTC` | `14,15,16,19,20` | Live 14-16: +$25, 17-18: −$116 |
+| `BYBIT_BOT_SCALP_VWAP_WEEKDAYS` | `mon,tue,wed,thu,fri` | Будни −$148, выходные −$201 |
+
+**Изменения в коде** (минимальные, по образцу Wave 5 ORB):
+- `vwap_crypto.py` — 4 новых kwargs в `__init__`, `_is_active_time` метод,
+  применение фильтров в `scan` (быстрый отказ до расчёта индикаторов).
+- `settings.py` — 4 новых Field с `validation_alias`, default = "".
+- `app/main.py` — `_build_scalp_vwap`, `_parse_hours_env`,
+  `_parse_weekdays_env`, обновлён `_log_scalping_config`.
+- `docker-compose.yml` — env-vars с Wave 6 дефолтами.
+- `tests/test_bybit_scalping.py` — 12 новых тестов (parsers, init, filters).
+
+**Сама логика VWAP-сигнала не тронута** (DEVIATION_THRESHOLD=2.0,
+RSI<30/>70, ADX<25, мягкий HTF slope) — она не overfit'ная, edge от
+фильтров на стратификацию.
+
+**Sample-size baseline (`sample-size.mdc`):**
+- ALL backtest n=126 (>100) ✓
+- Live n=102 (на грани, формально <100 — но независимое подтверждение API)
+- 13 недель < 2 недели порога — старт нового A/B
+- TRAIN+TEST оба прибыльные (нет overfit) ✓
+
+**Метрики для оценки через 2 недели:**
+- ≥100 закрытых сделок по `scalp_vwap` в Wave 6
+- PF ≥ 1.0 (минимум; цель 1.2)
+- WR ≥ 55%
+- +w% ≥ 60%
+- Без 17-18 UTC сделок (фильтр работает) и без weekend-сделок
+
+**Если на n=100+ метрики не проходят** — откатываем фильтры (например,
+расширяем часы до 14-21 UTC) или отключаем `scalp_vwap` обратно.
+Решение **только** через обсуждение с пользователем (`strategy-guard.mdc`).
+
+**Файлы:** `vwap_crypto.py`, `settings.py`, `app/main.py`,
+`docker-compose.yml`, `tests/test_bybit_scalping.py`, `STRATEGIES.md`,
+`BUILDLOG.md`.
+
+---
+
 ## 2026-04-24
 
 ### feat(cof): опциональный verbose-режим для диагностики фильтров

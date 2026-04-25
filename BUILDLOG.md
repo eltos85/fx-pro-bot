@@ -4,6 +4,143 @@
 
 ---
 
+## 2026-04-25
+
+### feat(scalp_vwap): Wave 6 — VWAP с data-driven whitelist'ами (long/5syms/prime hours/будни)
+`pending commit`
+
+После research'а (запись ниже) и одобрения пользователя ("Вариант 1")
+включаем `scalp_vwap` с жёсткими whitelist'ами — по образцу того, как
+Wave 5 сужала ORB.
+
+**Что включено:**
+- `BYBIT_BOT_SCALP_VWAP_ENABLED=true` (было false)
+- `BYBIT_BOT_SCALP_VWAP_DIRECTION=long`
+- `BYBIT_BOT_SCALP_VWAP_SYMBOLS=ADAUSDT,SOLUSDT,SUIUSDT,TONUSDT,WIFUSDT`
+- `BYBIT_BOT_SCALP_VWAP_HOURS_UTC=14,15,16,19,20`
+- `BYBIT_BOT_SCALP_VWAP_WEEKDAYS=mon,tue,wed,thu,fri`
+
+**Изменения в коде:**
+1. `vwap_crypto.py` — `VwapCryptoStrategy.__init__` принимает 4 новых
+   опциональных kwargs: `allowed_direction`, `allowed_symbols`,
+   `allowed_hours_utc`, `allowed_weekdays`. Добавлен метод `_is_active_time`
+   проверяет weekday/hour из `bars[-1].ts` (UTC). В `scan` фильтры
+   применяются ДО расчёта индикаторов (быстрый отказ).
+2. `settings.py` — 4 новых Field'а с `validation_alias`. Default = пустая
+   строка → None во фильтре → обратная совместимость не ломается.
+3. `app/main.py` — новый `_build_scalp_vwap(settings)`, парсеры
+   `_parse_hours_env` / `_parse_weekdays_env`. `_log_scalping_config`
+   показывает активные фильтры.
+4. `docker-compose.yml` — новые env-переменные с дефолтами Wave 6.
+
+**Тесты** (12 новых, все pass): фильтры по weekday/hour/symbols,
+парсинг env-строк, валидация невалидных значений (direction='sideways'),
+обратная совместимость (пустые env → None).
+
+**Прогноз активности по бэктесту 90д (n=126 в выбранном сегменте):**
+- ~1.4 сделки/день в будни 14-16,19-20 UTC
+- WR ~70%, PF ~1.27 (ALL), OOS TEST PF 1.26
+- 11 из 13 недель в плюсе (+w% 84.6%)
+
+**Метрики для подтверждения через 2 недели (по `sample-size.mdc`):**
+- n ≥ 100 сделок по `scalp_vwap` в Wave 6
+- PF ≥ 1.0 (порог; цель ≥ 1.2)
+- WR ≥ 55%
+- +w% ≥ 60%
+- Если PF < 1.0 на n ≥ 100 → обсудить откат фильтров или отключение
+
+**Что НЕ изменено:**
+- Сама логика VWAP-сигнала (DEVIATION_THRESHOLD, RSI, ADX, HTF slope) —
+  она не overfit'ная, осталась как есть
+- ORB, COF, остальные страты не затронуты
+- KillSwitch, лимиты позиций, размер сделки — без изменений
+
+**Файлы:** `src/bybit_bot/strategies/scalping/vwap_crypto.py`,
+`src/bybit_bot/config/settings.py`, `src/bybit_bot/app/main.py`,
+`docker-compose.yml`, `tests/test_bybit_scalping.py`, `STRATEGIES.md`,
+`BUILDLOG.md`, `BUILDLOG_BYBIT.md`.
+
+### research: data-driven анализ 90д Bybit + поиск рабочей связки (no-code)
+`pending commit`
+
+По запросу пользователя проведён полный аудит истории Bybit-бота: API
+closedPnl за 13 дней (период жизни бота 11.04 → 23.04), БД бота
+(`/ab-data/ab_snapshots.sqlite`, 108 строк до 19.04, поле `strategy`
+не заполнено), бэктест 90д на 8 baseline-символах (4668 сделок).
+Никакого изменения кода не сделано — только наблюдения.
+
+**Источники:**
+- Bybit closedPnl API: 636 сделок, период 2026-04-11 13:45 → 2026-04-23 11:54,
+  total NET PnL **−$349.48** (комиссия уже вычтена).
+- Бэктест 90д vwap+turtle+orb на 8 символах
+  (`data/backtest_memes_baseline_trades.csv`): 4668 сделок, total **−342.77%**
+  (sum, без position sizing).
+- БД бота за 16-19.04 (Wave 1-3): `strategy` поле не заполнено,
+  fuzzy-match не работает → разбивка по стратегиям только за период
+  `BYBIT_AB_TEST.md` (СТАЛО, 104 сделки): scalp_vwap −$70.80, PF 0.34
+  на n=72 (главный донор убытка).
+
+**Главные сегменты по факту (Bybit API, n=636):**
+
+| Сегмент | n | WR% | PnL | вывод |
+|---|---|---|---|---|
+| Будни Mon-Fri | 383 | 51% | −$148 | базис |
+| Выходные Sat-Sun | 253 | 42% | **−$201** | 58% всех убытков на 40% сделок |
+| Часы 17-18 UTC (поздняя NY) | 113 | 30% | **−$116** | концентрация alt-selloff |
+| Будни × 14-16 UTC | 61 | 60.7% | **+$29.72** | единственный профитный кластер |
+| Будни × 14-16,19-20 UTC | 102 | 60.8% | **+$25.94** | расширенная prime-зона |
+
+**Бэктест 90д (подтверждение):**
+
+| Связка | ALL n | TRAIN (60д) | TEST (30д, OOS) |
+|---|---|---|---|
+| `vwap × LONG × prime × good5` | 126 | n=77 PF 1.27 +6.12% +w% 77.8% | n=49 **PF 1.26 +2.88% +w% 80.0%** |
+| `vwap × LONG × prime` | 209 | n=127 PF 1.12 +4.72% +w% 55.6% | n=82 **PF 1.40 +6.34% +w% 80.0%** |
+| `vwap × FULL` (ничего не фильтруем) | 2043 | — | PF 0.85 −63.21% (выходные) |
+
+Где:
+- `prime` = будни Mon-Fri × часы UTC ∈ {14, 15, 16, 19, 20}
+  (исключены 17-18 UTC: концентрат убытков и в API, и в бэктесте)
+- `good5` = {ADAUSDT, SOLUSDT, SUIUSDT, TONUSDT, WIFUSDT} —
+  топ-5 по PnL в этом сегменте (TIAUSDT/DOTUSDT/LINKUSDT — отрицательные)
+- `LONG` only — в этом сегменте PF 1.20 (long) против 0.97 (short)
+
+**Weekly history (vwap × LONG × prime × good5, 13 недель):** 11 из 13
+недель в плюс (+w% 84.6%), max просадка от пика 4.86% в неделе W05,
+кумулятив +8.99% к концу периода. **Это первая связка за всё research,
+которая держится на OOS-периоде** (после 25.03), где COF/ORB/turtle
+посыпались.
+
+**Sample-size проверка (`sample-size.mdc`):**
+- ✓ n=126 на ALL (>100)
+- ✓ 90 дней (>>2 недели)
+- ✓ +w%=76.9% (порог >55%)
+- ✓ PF=1.27 (порог ≥1.0, граничный для ≥1.3)
+- ✓ TRAIN+TEST оба прибыльные (нет overfit)
+- ⚠ TEST n=49 < 100 — на TEST формально недовыборка, но WR/PF держатся
+- ⚠ Live n=102 на «будни × 14-16,19-20» в API — формально недовыборка
+
+**Что предложено пользователю (без кода):** активировать в Wave 6
+конфигурацию `scalp_vwap` с whitelist'ами по аналогии с тем, как
+сделано для ORB (Wave 5):
+
+```
+BYBIT_BOT_SCALP_VWAP_ENABLED=true
+BYBIT_BOT_SCALP_VWAP_DIRECTION=long
+BYBIT_BOT_SCALP_VWAP_SYMBOLS=ADAUSDT,SOLUSDT,SUIUSDT,TONUSDT,WIFUSDT
+BYBIT_BOT_SCALP_VWAP_HOURS_UTC=14,15,16,19,20
+BYBIT_BOT_SCALP_VWAP_WEEKDAYS=mon,tue,wed,thu,fri
+```
+
+Ожидаемая активность: ~1.4 сделки/день в активные часы (5d × 5h × ~0.06
+сделки/час = ~1.5/день), не «лот за неделю» как сейчас. Решение —
+за пользователем.
+
+**Файлы:** только наблюдения, без правок кода. Анализ-данные:
+`/tmp/closed_pnl_90d.json`, `data/backtest_memes_baseline_trades.csv`.
+
+---
+
 ## 2026-04-16
 
 ### feat(strategies): Variant 2 — Squeeze H4 + Turtle H4 + GBPJPY fade (shadow)

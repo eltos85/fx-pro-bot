@@ -119,7 +119,7 @@ def run_bot() -> None:
     stats = StatsStore(settings.stats_db_path)
     momentum = MomentumStrategy(min_votes=settings.min_ensemble_votes) if settings.momentum_enabled else None
 
-    scalp_vwap = VwapCryptoStrategy() if settings.scalping_vwap_enabled else None
+    scalp_vwap = _build_scalp_vwap(settings) if settings.scalping_vwap_enabled else None
 
     scalp_statarb = StatArbCryptoStrategy() if settings.scalping_statarb_enabled else None
     scalp_volume = VolumeSpikeStrategy() if settings.scalping_volume_enabled else None
@@ -1085,10 +1085,72 @@ def _build_scalp_orb(settings: Settings) -> SessionOrbStrategy:
     )
 
 
+_WEEKDAY_NAMES: dict[str, int] = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+
+def _parse_hours_env(value: str) -> set[int] | None:
+    """CSV "14,15,16,19,20" → {14,15,16,19,20}. Невалидное игнорируется."""
+    cleaned: set[int] = set()
+    for v in value.split(","):
+        v = v.strip()
+        if not v:
+            continue
+        try:
+            h = int(v)
+        except ValueError:
+            log.warning("BYBIT_BOT_SCALP_VWAP_HOURS_UTC: невалидное %r, пропуск", v)
+            continue
+        if 0 <= h <= 23:
+            cleaned.add(h)
+        else:
+            log.warning("BYBIT_BOT_SCALP_VWAP_HOURS_UTC: час %d вне 0..23, пропуск", h)
+    return cleaned or None
+
+
+def _parse_weekdays_env(value: str) -> set[int] | None:
+    """CSV "mon,tue,wed,thu,fri" → {0,1,2,3,4}. Невалидное игнорируется."""
+    cleaned: set[int] = set()
+    for v in value.split(","):
+        key = v.strip().lower()
+        if not key:
+            continue
+        idx = _WEEKDAY_NAMES.get(key)
+        if idx is None:
+            log.warning("BYBIT_BOT_SCALP_VWAP_WEEKDAYS: неизвестный день %r, пропуск", v)
+            continue
+        cleaned.add(idx)
+    return cleaned or None
+
+
+def _build_scalp_vwap(settings: Settings) -> VwapCryptoStrategy:
+    """VwapCryptoStrategy с whitelist-фильтрами из env (Wave 6, BUILDLOG.md 2026-04-25)."""
+    direction = settings.scalping_vwap_direction.strip().lower() or None
+    if direction is not None and direction not in ("long", "short"):
+        log.warning("BYBIT_BOT_SCALP_VWAP_DIRECTION=%r невалидно, игнорирую", direction)
+        direction = None
+    return VwapCryptoStrategy(
+        allowed_direction=direction,
+        allowed_symbols=_parse_csv_env(settings.scalping_vwap_symbols),
+        allowed_hours_utc=_parse_hours_env(settings.scalping_vwap_hours_utc),
+        allowed_weekdays=_parse_weekdays_env(settings.scalping_vwap_weekdays),
+    )
+
+
 def _log_scalping_config(settings: Settings) -> None:
     active = []
     if settings.scalping_vwap_enabled:
-        active.append("VWAP")
+        vwap_parts = ["VWAP"]
+        if settings.scalping_vwap_direction:
+            vwap_parts.append(f"dir={settings.scalping_vwap_direction}")
+        if settings.scalping_vwap_symbols:
+            vwap_parts.append(f"syms={settings.scalping_vwap_symbols}")
+        if settings.scalping_vwap_hours_utc:
+            vwap_parts.append(f"h={settings.scalping_vwap_hours_utc}")
+        if settings.scalping_vwap_weekdays:
+            vwap_parts.append(f"d={settings.scalping_vwap_weekdays}")
+        active.append("/".join(vwap_parts) if len(vwap_parts) > 1 else "VWAP")
     if settings.scalping_statarb_enabled:
         active.append("StatArb")
     if settings.scalping_funding_enabled:

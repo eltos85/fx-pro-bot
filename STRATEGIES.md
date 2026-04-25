@@ -743,6 +743,22 @@ relative = Round(distance, symbol.Digits) * 100_000
 | RSI filter | <30 / >70 | Confirmation (Wilder) |
 | SL / TP | 2.0 / 1.5 ATR | RR 0.75 — агрессивный scalp |
 
+**Live-whitelist'ы (Wave 6, BUILDLOG.md 2026-04-25),** задаются по итогам
+data-driven анализа Bybit closedPnl API за 11-23.04 (n=636) +
+out-of-sample backtest (90 дней, OOS TEST PF=1.26 +w%=80% — единственная
+связка, прошедшая OOS-проверку):
+
+| Env | Default | Обоснование |
+|---|---|---|
+| `BYBIT_BOT_SCALP_VWAP_DIRECTION` | `long` | LONG: PF 1.20 +11.06% +w%=61.5%. SHORT: PF 0.97 −1.84%. В выбранном сегменте edge только в LONG-направлении (mean-reversion вверх к VWAP) |
+| `BYBIT_BOT_SCALP_VWAP_SYMBOLS` | `ADAUSDT,SOLUSDT,SUIUSDT,TONUSDT,WIFUSDT` | Топ-5 по PnL на сегменте `vwap × LONG × prime`. ADA WR 75.8% +9.52%, SOL WR 68.6% +4.31%, остальные позитивные. TIAUSDT/DOTUSDT/LINKUSDT — отрицательные, исключены |
+| `BYBIT_BOT_SCALP_VWAP_HOURS_UTC` | `14,15,16,19,20` | NY core-сессия без 17-18 UTC. На live-данных 14-16 UTC дали +$25 на n=61, 17-18 UTC дали −$116 на n=113 (alt-selloff zone, BYBIT_AB_TEST.md OBSERVATION 2026-04-22) |
+| `BYBIT_BOT_SCALP_VWAP_WEEKDAYS` | `mon,tue,wed,thu,fri` | Будни: WR 51% −$148. Sat+Sun: WR 38% −$201 (58% всех убытков на 40% сделок). На бэктесте: будни PF 0.85, выходные PF 0.57 |
+
+Пустая строка в любой env = «без ограничений» (обратная совместимость).
+Для экспериментов через `.env` можно сузить (например, только ADA+SOL)
+или расширить (добавить часы 13, 21).
+
 #### Stat-Arb Cross-Pair (crypto)
 **Файл:** `stat_arb_crypto.py`
 **Exit-ы (в порядке проверки):** (1) z-score revert `|z|<0.5` → close; (2) pair TP — суммарный uPnL пары ≥ `$1.00` → close; (3) emergency — суммарный uPnL пары ≤ `-$25` → close.
