@@ -4,6 +4,63 @@
 
 ---
 
+## 2026-04-27
+
+### revert(trailing): откат двух правок trailing/fast-poll для gold_orb
+`pending commit`
+
+**Причина отката.** Пользователь указал, что две последние правки фактически
+изменили exit-логику стратегии `gold_orb` без должного согласования и без
+сдвига baseline статистики (`.cursor/rules/fxpro-stats-baseline.mdc`).
+Нарушено правило `strategy-guard.mdc`: «ЗАПРЕЩЕНО менять торговую логику без
+согласования: параметры SL/trailing/time-stops, exit-уровни».
+
+**Что было изменено (теперь откатываем):**
+
+| Что | Baseline 23.04 (вернули) | Стало после правок (откат) |
+|---|---|---|
+| Источник peak | `bar.close` | `bar.high/low` (intra-bar) |
+| Bot-side `scalp_trail` для gold_orb | активен | был отключён |
+| Частота trailing-amend | 5 мин (основной цикл) | 30 сек (fast-poll) |
+| `_validate_sl_tp_side` | проверка от entry | проверка от current M1 |
+| `executor.get_recent_m1_bar` | отсутствовал | добавлен |
+| `settings.fast_poll_interval_sec` | отсутствовал | добавлен |
+
+`STRATEGIES.md §3b` определяет gold_orb как **touch-break + ATR-SL(1.5) +
+ATR-TP(3.0)**. Backtest +6146 pips (90d), на котором gold_orb обоснован, делался
+**без trailing**. Внедрение fast-poll + intra-bar peak фактически переключило
+exit с ATR-SL/TP на агрессивный trailing — это другое распределение P&L,
+не покрытое исходным research'ем стратегии.
+
+**Live-результат подтвердил**: NY-сессия 27.04 (4 закрытых сделки) дала NET
+−$20.29 (cTrader API, NET = grossProfit + commission + swap), один полный
+stop-out (#150084861) −$19.34 съел два прибыльных trail-выхода. Малая
+выборка, но change of regime вне согласованных рамок — не приемлемо.
+
+**Reverted коммиты:**
+- `859c6b5` — feat(trailing): fast-poll 30s + pre-check amend для gold_orb
+- `fb1072a` — fix(trailing): intra-bar peak (high/low) для gold_orb + отключение bot-side trail
+
+**Файлы (вернулись к состоянию до 27.04):**
+`src/fx_pro_bot/app/main.py`, `src/fx_pro_bot/strategies/monitor.py`,
+`src/fx_pro_bot/trading/executor.py`, `src/fx_pro_bot/config/settings.py`,
+`tests/test_strategies.py`, `STRATEGIES.md`,
+`scripts/backtest_gold_orb_trailing_compare.py` (удалён).
+
+**Тесты:** 326 passed (было 333 с новыми тестами + 326 после отката,
+ровно −7 тестов которые покрывали reverted-логику).
+
+**Дальнейшие шаги:** утреннюю проблему (-$17 на pos=150078855 с REJECTED
+amend от 5-min lag) обсуждаем **отдельно** — без изменения trailing-агрессивности
+и частоты polling, только в рамках baseline 23.04. Возможный вариант —
+точечно починить `_validate_sl_tp_side` (использование current price вместо
+entry для валидации стороны SL), но как обособленный bug-fix, не как часть
+изменений стратегии.
+
+**Файлы:** `BUILDLOG.md` (эта запись), revert через git.
+
+---
+
 ## 2026-04-25
 
 ### feat(scalp_vwap): Wave 6 — VWAP с data-driven whitelist'ами (long/5syms/prime hours/будни)
