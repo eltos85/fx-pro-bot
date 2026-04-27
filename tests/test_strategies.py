@@ -277,6 +277,122 @@ def test_monitor_peak_fallback_to_close_without_bars(tmp_path) -> None:
     assert pos.peak_price == 4705.0
 
 
+def test_fast_trail_update_long_high(tmp_path) -> None:
+    """fast-poll: peak обновляется по high M1 бара cTrader для long-позиции."""
+    from fx_pro_bot.app.main import _fast_trail_update
+
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="gold_orb", source="gold_orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4700.0, stop_loss_price=4690.0,
+    )
+    pos = store.get_open_positions()[0]
+    store.set_broker_position_id(pos.id, 999)
+
+    inst = InstrumentId(symbol="GC=F")
+    # close=4715 = peak: amend в момент пика (когда new_sl=4714.70 ниже цены)
+    bar = Bar(
+        instrument=inst, ts=datetime(2026, 4, 27, 12, tzinfo=UTC),
+        open=4701.0, high=4715.0, low=4699.0, close=4715.0, volume=10.0,
+    )
+
+    class FakeExecutor:
+        amend_calls: list = []
+
+        def get_recent_m1_bar(self, sym: str):
+            return bar if sym == "GC=F" else None
+
+        def amend_sl_tp(self, pid_, sl_price=None, tp_price=None, yf_symbol=None):
+            self.amend_calls.append((pid_, sl_price, tp_price))
+            return True
+
+    fx = FakeExecutor()
+    _fast_trail_update(store, fx)
+    pos2 = store.get_open_positions()[0]
+    # peak подтянут к bar.high
+    assert pos2.peak_price == 4715.0
+    # peak_pips = 150 >= trigger 5 → должен быть amend_sl_tp вызов
+    assert len(fx.amend_calls) == 1
+    # new_sl = peak - 3 pips = 4715 - 0.30 = 4714.70
+    assert abs(fx.amend_calls[0][1] - 4714.70) < 1e-6
+
+
+def test_fast_trail_update_skips_amend_after_pullback(tmp_path) -> None:
+    """Pre-check: если цена откатилась от peak ниже trigger новой SL —
+    amend не отправляется (избегаем REJECTED).
+
+    Это точный кейс из BUILDLOG 2026-04-27: SHORT позиция в плюсе, peak
+    зафиксирован, но цена УЖЕ вернулась обратно — ставить SL ниже текущей
+    цены для шорта = мгновенное срабатывание, brokerSr отклоняет.
+    """
+    from fx_pro_bot.app.main import _fast_trail_update
+
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="gold_orb", source="gold_orb_breakout", instrument="GC=F",
+        direction="short", entry_price=4703.6, stop_loss_price=4708.91,
+    )
+    pos = store.get_open_positions()[0]
+    store.set_broker_position_id(pos.id, 150078855)
+    store.update_position_price(
+        pos.id, 4703.6, 0.0, 0.0,
+        peak_price=4700.9, trough_price=4703.6,
+        trail_price=0.0, trail_activated=False,
+    )
+    inst = InstrumentId(symbol="GC=F")
+    # close уже вернулся к entry → ставить SL=4701.20 (peak+3pips) для шорта
+    # при цене 4703.6 невозможно (4701.20 < 4703.6 → reject)
+    bar = Bar(
+        instrument=inst, ts=datetime(2026, 4, 27, 12, tzinfo=UTC),
+        open=4703.6, high=4704.0, low=4703.0, close=4703.6, volume=10.0,
+    )
+
+    class FakeExecutor:
+        amend_calls: list = []
+
+        def get_recent_m1_bar(self, sym: str):
+            return bar
+
+        def amend_sl_tp(self, *a, **kw):
+            self.amend_calls.append(a)
+            return True
+
+    fx = FakeExecutor()
+    _fast_trail_update(store, fx)
+    # peak обновлён (но был ниже = min для шорта, новое 4703.0 > 4700.9 → не меняется)
+    pos2 = store.get_open_positions()[0]
+    assert pos2.peak_price == 4700.9
+    # amend не отправлен из-за pre-check
+    assert len(fx.amend_calls) == 0
+
+
+def test_fast_trail_update_skips_other_strategies(tmp_path) -> None:
+    """fast-poll работает только для FAST_TRAIL_STRATEGIES (gold_orb)."""
+    from fx_pro_bot.app.main import _fast_trail_update
+
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="vwap_reversion", source="vwap", instrument="EURUSD=X",
+        direction="long", entry_price=1.10, stop_loss_price=1.095,
+    )
+    pos = store.get_open_positions()[0]
+    store.set_broker_position_id(pos.id, 888)
+
+    class FakeExecutor:
+        called = False
+
+        def get_recent_m1_bar(self, sym: str):
+            FakeExecutor.called = True
+            return None
+
+        def amend_sl_tp(self, *a, **kw):
+            return True
+
+    _fast_trail_update(store, FakeExecutor())
+    # для не-gold_orb get_recent_m1_bar не должен вызываться
+    assert FakeExecutor.called is False
+
+
 def test_monitor_gold_orb_no_botside_trail(tmp_path) -> None:
     """Для gold_orb monitor НЕ должен закрывать по scalp_trail.
 

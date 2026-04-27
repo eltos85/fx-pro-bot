@@ -430,7 +430,7 @@ class TradeExecutor:
             sl_r = round(final_sl, digits) if final_sl is not None else None
             tp_r = round(final_tp, digits) if final_tp is not None else None
 
-            if not self._validate_sl_tp_side(broker_position_id, sl_r, tp_r):
+            if not self._validate_sl_tp_side(broker_position_id, sl_r, tp_r, yf_symbol):
                 return False
 
             self._client.amend_position_sl_tp(broker_position_id, sl_r, tp_r)
@@ -439,11 +439,39 @@ class TradeExecutor:
             log.error("Ошибка изменения SL/TP позиции %d: %s", broker_position_id, exc)
             return False
 
+    def get_recent_m1_bar(self, yf_symbol: str):
+        """Получить последний завершённый M1 бар через cTrader.
+
+        Используется для fast-polling трейлинга: даёт live high/low/close
+        с минутной точностью без 5-мин задержки yfinance.
+
+        Возвращает Bar (см. market_data.models) или None при ошибке.
+        """
+        from fx_pro_bot.market_data.ctrader_feed import _decode_trendbar
+        from fx_pro_bot.market_data.models import InstrumentId
+        import time as _time
+
+        sym = self._symbols.resolve_yfinance(yf_symbol)
+        if sym is None:
+            return None
+        try:
+            now_ms = int(_time.time() * 1000)
+            from_ms = now_ms - 5 * 60 * 1000  # 5 минут назад — гарантированно есть бары
+            raw = self._client.get_trendbars(sym.symbol_id, 1, from_ms, now_ms)
+            if not raw:
+                return None
+            instrument = InstrumentId(symbol=yf_symbol)
+            return _decode_trendbar(raw[-1], sym.digits, instrument)
+        except Exception as exc:
+            log.debug("get_recent_m1_bar %s failed: %s", yf_symbol, exc)
+            return None
+
     def _validate_sl_tp_side(
         self,
         broker_position_id: int,
         sl_price: float | None,
         tp_price: float | None,
+        yf_symbol: str | None = None,
     ) -> bool:
         """Проверить, что SL/TP стоят с правильной стороны от текущей цены.
 
@@ -451,6 +479,11 @@ class TradeExecutor:
         SHORT: TP < current_price < SL
 
         Return False если нарушено — защита от TRADING_BAD_STOPS.
+
+        Сравниваем с **актуальной рыночной ценой** (M1 close через cTrader),
+        а не с entry price из reconcile: для трейлинга в плюсе SL может
+        быть с правильной стороны от entry, но не с правильной стороны от
+        текущей цены — именно это вызывает TRADING_BAD_STOPS.
         """
         if sl_price is None and tp_price is None:
             return True
@@ -461,9 +494,16 @@ class TradeExecutor:
                 if p.positionId != broker_position_id:
                     continue
 
-                price = p.price if hasattr(p, "price") and p.price else 0.0
                 td = p.tradeData if hasattr(p, "tradeData") else None
                 is_buy = td.tradeSide == 1 if td else True
+
+                price = 0.0
+                if yf_symbol:
+                    bar = self.get_recent_m1_bar(yf_symbol)
+                    if bar is not None:
+                        price = bar.close
+                if price <= 0:
+                    price = p.price if hasattr(p, "price") and p.price else 0.0
 
                 if price <= 0:
                     return True

@@ -390,7 +390,35 @@ def run_advisor() -> None:
         except Exception:
             log.exception("Ошибка в цикле, повтор через %d сек", settings.poll_interval_sec)
 
-        time.sleep(settings.poll_interval_sec)
+        # Sleep до следующего основного цикла, но между чанками — fast-poll
+        # для актуализации peak_price и trailing SL на live-позициях.
+        _sleep_with_fast_poll(settings, store, executor)
+
+
+def _sleep_with_fast_poll(
+    settings: Settings, store: StatsStore, executor,
+) -> None:
+    """Спать poll_interval_sec, между чанками вызывать fast-trailing.
+
+    fast_poll_interval_sec=0 → обычный sleep без fast-poll (отключение).
+    """
+    fast = settings.fast_poll_interval_sec
+    total = settings.poll_interval_sec
+    if fast <= 0 or executor is None:
+        time.sleep(total)
+        return
+
+    elapsed = 0
+    while elapsed < total:
+        chunk = min(fast, total - elapsed)
+        time.sleep(chunk)
+        elapsed += chunk
+        if elapsed >= total:
+            break
+        try:
+            _fast_trail_update(store, executor)
+        except Exception:
+            log.exception("fast_trail_update failed")
 
 
 def _run_cycle(
@@ -1159,6 +1187,68 @@ def _ensure_broker_sl_tp(
         )
 
 
+FAST_TRAIL_STRATEGIES = ("gold_orb",)
+
+
+def _fast_trail_update(store: StatsStore, executor) -> None:
+    """Fast-poll: обновить peak_price и подвинуть trailing SL для open scalping
+    позиций между основными циклами.
+
+    Вызывается раз в `fast_poll_interval_sec` (по умолчанию 30 сек). Берёт
+    актуальный M1 бар через cTrader (быстрее yfinance с 5-мин лагом),
+    обновляет peak/trough в БД по high/low бара и дёргает
+    `_update_broker_trailing_sl`. Атомарность не критична: SL только
+    подтягивается ближе, никогда не отдаляется.
+
+    Применяется только к стратегиям из FAST_TRAIL_STRATEGIES — для других
+    интервал 5 мин достаточен.
+    """
+    targets = [
+        p for p in store.get_open_positions()
+        if p.broker_position_id and p.strategy in FAST_TRAIL_STRATEGIES
+    ]
+    if not targets:
+        return
+
+    moved = 0
+    for pos in targets:
+        bar = executor.get_recent_m1_bar(pos.instrument)
+        if bar is None:
+            continue
+
+        ps = pip_size(pos.instrument)
+        if ps == 0:
+            continue
+
+        if pos.direction == "long":
+            new_peak = max(pos.peak_price, bar.high)
+            new_trough = min(pos.trough_price, bar.low) if pos.trough_price > 0 else bar.low
+        else:
+            new_peak = min(pos.peak_price, bar.low) if pos.peak_price > 0 else bar.low
+            new_trough = max(pos.trough_price, bar.high)
+
+        cur_price = bar.close
+        cur_pips = (
+            (cur_price - pos.entry_price) / ps if pos.direction == "long"
+            else (pos.entry_price - cur_price) / ps
+        )
+        cur_pct = cur_pips * ps / pos.entry_price * 100 if pos.entry_price else 0.0
+
+        if new_peak != pos.peak_price or new_trough != pos.trough_price:
+            store.update_position_price(
+                pos.id, cur_price, cur_pips, cur_pct,
+                new_peak, new_trough, pos.trail_price, pos.trail_activated,
+            )
+            moved += 1
+
+    # ATR не критичен для gold_orb — там фиксированные 5/3 pips,
+    # передаём пустой dict.
+    _update_broker_trailing_sl(store, executor, {})
+
+    if moved:
+        log.debug("fast_trail: обновлён peak для %d позиций", moved)
+
+
 def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, float]) -> None:
     """Двигать SL на cTrader вслед за trailing stop.
 
@@ -1201,6 +1291,18 @@ def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, floa
         else:
             new_sl = pos.peak_price + trail_dist
             if pos.stop_loss_price > 0 and new_sl >= pos.stop_loss_price:
+                continue
+
+        # Pre-check: если current_price уже не позволяет ставить new_sl
+        # с правильной стороны (для long: new_sl >= price; short: new_sl <= price),
+        # пропускаем amend. Это убирает REJECTED-спам и не делает заведомо
+        # бессмысленный запрос.
+        cur_bar = executor.get_recent_m1_bar(pos.instrument)
+        cur_price = cur_bar.close if cur_bar else 0.0
+        if cur_price > 0:
+            if pos.direction == "long" and new_sl >= cur_price:
+                continue
+            if pos.direction == "short" and new_sl <= cur_price:
                 continue
 
         ok = executor.amend_sl_tp(
