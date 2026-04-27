@@ -588,6 +588,7 @@ def _run_cycle(
                     scalping_bars[r.symbol] = r.bars
                     scalping_prices[r.symbol] = r.last_price
                     prices[r.symbol] = r.last_price
+                    bars_map[r.symbol] = r.bars  # для recent_bars/monitor
                     if len(r.bars) > 14:
                         atrs[r.symbol] = _atr(r.bars)
 
@@ -648,7 +649,11 @@ def _run_cycle(
     # 4b. Monitor all positions
     log.info("── Мониторинг позиций ──")
     positions_before_close = {p.id: p for p in store.get_open_positions()}
-    mon_stats = monitor.run(prices, atrs)
+    # Последний M5 бар по каждому инструменту → intra-bar peak для trailing
+    # (high для long, low для short). Без этого peak обновляется только по close
+    # и пропускает максимумы внутри бара (см. BUILDLOG 2026-04-27).
+    recent_bars = {sym: bs[-1] for sym, bs in bars_map.items() if bs}
+    mon_stats = monitor.run(prices, atrs, recent_bars=recent_bars)
     open_total = store.count_open_positions()
     log.info(
         "  Позиций: %d открыто, обновлено %d, закрыто: SL=%d trail=%d TP=%d time=%d",

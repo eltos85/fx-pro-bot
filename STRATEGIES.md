@@ -669,6 +669,31 @@ relative = Round(distance, symbol.Digits) * 100_000
 2. Если новый SL лучше старого — бот обновляет SL через `amend_position_sl_tp`
 3. Цена откатывается — **cTrader сам закрывает** по обновлённому SL
 
+#### Intra-bar peak (gold_orb, 2026-04-27)
+
+Базовая реализация trailing использовала `peak_price` обновляемый только
+по close последнего M5 бара. Это пропускало intra-bar пики: цена могла
+сходить вверх на $5 (50 pips для XAU) и вернуться обратно за один бар —
+бот не зафиксировал пик и SL не двигался.
+
+Backtest на 2 годах GC=F (`scripts/backtest_gold_orb_trailing_compare.py`,
+989 сигналов):
+
+| Variant | OOS net pips | OOS WR | OOS PF | trail % |
+|---|---|---|---|---|
+| no-trail (baseline) | +12 009 | 42.7 | 1.56 | 0 |
+| close-only peak (старое) | +12 053 | 74.2 | 2.73 | 73.7 |
+| **high/low peak (новое)** | **+20 832** | **85.4** | **6.53** | **89.6** |
+
+Внедрено для `gold_orb`: peak обновляется по `bar.high` (long) /
+`bar.low` (short) последнего M5 бара. `_update_broker_trailing_sl` уже
+двигает SL у брокера по этому peak — теперь он точнее, и брокер
+быстрее реагирует на откат.
+
+Чтобы избежать race condition, для `gold_orb` отключён bot-side
+`scalp_trail` — закрытие по trailing полностью отдано брокеру (через
+амендмент SL).
+
 ### Детектирование broker-side closures
 
 Каждый цикл бот сверяет открытые позиции в БД с реально открытыми на cTrader.

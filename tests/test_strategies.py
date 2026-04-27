@@ -218,6 +218,98 @@ def test_monitor_updates_price(tmp_path) -> None:
     assert positions[0].current_price == 1.11
 
 
+def test_monitor_peak_uses_bar_high(tmp_path) -> None:
+    """recent_bars: peak обновляется по high бара (а не close).
+
+    Это ключ к корректному server-side trailing — high бара даёт intra-bar
+    peak, который пропускается при использовании только close.
+    """
+    store = StatsStore(tmp_path / "t.db")
+    store.open_position(
+        strategy="gold_orb", source="gold_orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4700.0,
+    )
+    inst = InstrumentId(symbol="GC=F")
+    bar = Bar(
+        instrument=inst,
+        ts=datetime(2026, 4, 27, 10, 35, tzinfo=UTC),
+        open=4700.5, high=4710.0, low=4698.0, close=4702.0, volume=100.0,
+    )
+    mon = PositionMonitor(store)
+    # ATR=5.0 → atr_pips=50 → scalp_tp=150, movement 20pips недостаточно
+    mon.run({"GC=F": 4702.0}, {"GC=F": 5.0}, recent_bars={"GC=F": bar})
+    pos = store.get_open_positions()[0]
+    # close=4702, но high=4710 → peak должен быть 4710 (long)
+    assert pos.peak_price == 4710.0
+    assert pos.trough_price == 4698.0
+
+
+def test_monitor_peak_short_uses_bar_low(tmp_path) -> None:
+    store = StatsStore(tmp_path / "t.db")
+    store.open_position(
+        strategy="gold_orb", source="gold_orb_breakout", instrument="GC=F",
+        direction="short", entry_price=4710.0,
+    )
+    inst = InstrumentId(symbol="GC=F")
+    bar = Bar(
+        instrument=inst,
+        ts=datetime(2026, 4, 27, 10, 35, tzinfo=UTC),
+        open=4709.5, high=4712.0, low=4700.0, close=4708.0, volume=100.0,
+    )
+    mon = PositionMonitor(store)
+    mon.run({"GC=F": 4708.0}, {"GC=F": 5.0}, recent_bars={"GC=F": bar})
+    pos = store.get_open_positions()[0]
+    # close=4708, но low=4700 → peak должен быть 4700 (short = min)
+    assert pos.peak_price == 4700.0
+    assert pos.trough_price == 4712.0
+
+
+def test_monitor_peak_fallback_to_close_without_bars(tmp_path) -> None:
+    """Без recent_bars peak обновляется по close (обратная совместимость)."""
+    store = StatsStore(tmp_path / "t.db")
+    store.open_position(
+        strategy="gold_orb", source="gold_orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4700.0,
+    )
+    mon = PositionMonitor(store)
+    mon.run({"GC=F": 4705.0}, {"GC=F": 5.0})
+    pos = store.get_open_positions()[0]
+    assert pos.peak_price == 4705.0
+
+
+def test_monitor_gold_orb_no_botside_trail(tmp_path) -> None:
+    """Для gold_orb monitor НЕ должен закрывать по scalp_trail.
+
+    Trailing полностью отдан брокеру (server-side через amend SL). Иначе
+    возникает race condition между bot closure и broker SL hit.
+    """
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="gold_orb", source="gold_orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4700.0, stop_loss_price=4695.0,
+    )
+    # Симулируем peak +20 pips, потом откат на 10 pips (триггер trail = 5pips,
+    # distance = 3 pips → откат 10 pips должен бы закрыть в обычной scalp-логике).
+    # Перед run-ом установим peak
+    pos = store.get_open_positions()[0]
+    store.update_position_price(
+        pos.id, 4702.0, 20.0, 0.0,
+        peak_price=4702.0, trough_price=4699.0,
+        trail_price=0.0, trail_activated=False,
+    )
+    inst = InstrumentId(symbol="GC=F")
+    bar = Bar(
+        instrument=inst,
+        ts=datetime(2026, 4, 27, 10, 40, tzinfo=UTC),
+        open=4702.0, high=4702.5, low=4701.0, close=4701.0, volume=100.0,
+    )
+    mon = PositionMonitor(store)
+    stats = mon.run({"GC=F": 4701.0}, {"GC=F": 0.5}, recent_bars={"GC=F": bar})
+    # gold_orb не закрылся по scalp_trail
+    assert stats["closed_trail"] == 0
+    assert store.count_open_positions() == 1
+
+
 # ── Shadow ───────────────────────────────────────────────────
 
 

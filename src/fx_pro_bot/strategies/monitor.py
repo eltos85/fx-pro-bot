@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime
 
 from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
+from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
 from fx_pro_bot.strategies.scalping.gold_orb import GOLD_ORB_TP_ATR_MULT
@@ -74,9 +75,22 @@ class PositionMonitor:
         self._outsiders_mode = outsiders_mode
         self._lot_size = lot_size
 
-    def run(self, prices: dict[str, float], atrs: dict[str, float]) -> dict[str, int]:
-        """Обновить все позиции, проверить стопы. Возвращает статистику действий."""
+    def run(
+        self,
+        prices: dict[str, float],
+        atrs: dict[str, float],
+        recent_bars: dict[str, Bar] | None = None,
+    ) -> dict[str, int]:
+        """Обновить все позиции, проверить стопы. Возвращает статистику действий.
+
+        recent_bars — последний M5 бар по каждому инструменту. Если передан,
+        peak/trough обновляются по high/low бара (а не по close), что даёт
+        корректный intra-bar peak для server-side trailing. Это критично для
+        gold_orb (см. backtest_gold_orb_trailing_compare: peak по high vs close
+        даёт +73% pips OOS).
+        """
         stats = {"updated": 0, "closed_sl": 0, "closed_trail": 0, "closed_time": 0, "closed_tp": 0}
+        recent_bars = recent_bars or {}
 
         for pos in self._store.get_open_positions():
             price = prices.get(pos.instrument)
@@ -89,8 +103,17 @@ class PositionMonitor:
             pips = _calc_pips(pos.direction, pos.entry_price, price, ps)
             pct = pips * ps / pos.entry_price * 100 if pos.entry_price else 0.0
 
-            peak = max(pos.peak_price, price) if pos.direction == "long" else min(pos.peak_price, price)
-            trough = min(pos.trough_price, price) if pos.direction == "long" else max(pos.trough_price, price)
+            bar = recent_bars.get(pos.instrument)
+            if bar is not None:
+                # Intra-bar peak: для long берём high бара, для short — low.
+                peak_candidate = bar.high if pos.direction == "long" else bar.low
+                trough_candidate = bar.low if pos.direction == "long" else bar.high
+            else:
+                peak_candidate = price
+                trough_candidate = price
+
+            peak = max(pos.peak_price, peak_candidate) if pos.direction == "long" else min(pos.peak_price, peak_candidate)
+            trough = min(pos.trough_price, trough_candidate) if pos.direction == "long" else max(pos.trough_price, trough_candidate)
 
             trail_price = pos.trail_price
             trail_activated = pos.trail_activated
@@ -215,10 +238,15 @@ class PositionMonitor:
                 scalp_tp = max(tp_mult * atr_pips_sc, SCALPING_TP_PIPS)
                 if pips >= scalp_tp:
                     return "scalp_tp"
-                scalp_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_TRIGGER_PIPS)
-                scalp_trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_DISTANCE_PIPS)
-                if peak_pips >= scalp_trigger and (peak_pips - pips) >= scalp_trail_d:
-                    return "scalp_trail"
+                # Для gold_orb trailing полностью отдан брокеру через
+                # _update_broker_trailing_sl + intra-bar peak (recent_bars).
+                # Бот-сайд trail тут только дублировал бы и порождал race
+                # condition между closure от monitor и broker SL hit.
+                if pos.strategy != "gold_orb":
+                    scalp_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_TRIGGER_PIPS)
+                    scalp_trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips_sc, SCALPING_TRAIL_DISTANCE_PIPS)
+                    if peak_pips >= scalp_trigger and (peak_pips - pips) >= scalp_trail_d:
+                        return "scalp_trail"
                 if age_hours >= SCALPING_HARD_STOP_HOURS:
                     return "scalp_time_12h"
 
