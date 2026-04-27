@@ -694,35 +694,6 @@ Backtest на 2 годах GC=F (`scripts/backtest_gold_orb_trailing_compare.py`
 `scalp_trail` — закрытие по trailing полностью отдано брокеру (через
 амендмент SL).
 
-#### Fast-polling 30 сек (gold_orb, 2026-04-27 v2)
-
-Базовая 5-минутная задержка цикла оставалась проблемой: peak фиксируется
-intra-bar, но если цена успевает откатиться внутри тех же 5 минут,
-amend опаздывает. Реальный кейс: SHORT XAUUSD заходил в плюс +27 pips,
-возвращался к entry за 4 мин — amend SL=peak+3pips отклонялся cTrader
-(`SL <= price`), original SL отрабатывал на -55 pips.
-
-**Решение:** между основными циклами (`POLL_INTERVAL_SEC=300`) бот раз
-в `FAST_POLL_INTERVAL_SEC=30` сек вызывает `_fast_trail_update`:
-
-1. Для каждой open позиции стратегии `gold_orb` запрашивает последний
-   M1 бар через cTrader (`get_trendbars(symbol_id, period=1)`).
-2. Обновляет `peak_price` и `trough_price` в БД по `bar.high`/`bar.low`.
-3. Вызывает `_update_broker_trailing_sl`, который при необходимости
-   amend-ит SL у брокера.
-
-Дополнительно: перед `amend_sl_tp` проверяется что `new_sl` стоит с
-правильной стороны от **актуальной M1 close цены** (а не entry — как
-было). Если new_sl бессмыслен (для long ≥ price, для short ≤ price) —
-amend пропускается, REJECTED-спам уходит из логов.
-
-Реакция на peak ускорилась с **5 мин → 30 сек** (12×). Это покрывает
-большинство быстрых разворотов XAUUSD на M5.
-
-Применяется только к стратегиям из `FAST_TRAIL_STRATEGIES = ("gold_orb",)`.
-Для других scalping (vwap, statarb, session_orb) основной 5-мин цикл
-достаточен — там нет такой быстрой intra-bar динамики.
-
 ### Детектирование broker-side closures
 
 Каждый цикл бот сверяет открытые позиции в БД с реально открытыми на cTrader.

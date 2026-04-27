@@ -355,11 +355,6 @@ class Settings(BaseSettings):
     yfinance_interval: str = Field(default="5m", validation_alias="YFINANCE_INTERVAL")
 
     poll_interval_sec: int = Field(default=300, validation_alias="POLL_INTERVAL_SEC")
-    # Fast-poll: между основными циклами обновляем peak_price и trailing SL
-    # для открытых scalping-позиций через cTrader M1. Это покрывает
-    # intra-cycle движения цены, которых не видит yfinance с 5-мин лагом.
-    # 0 → выключено (только основной цикл).
-    fast_poll_interval_sec: int = Field(default=30, validation_alias="FAST_POLL_INTERVAL_SEC")
 
     verify_horizons_raw: str = Field(
         default="15,30,60",

@@ -6,66 +6,6 @@
 
 ## 2026-04-27
 
-### feat(trailing): fast-poll 30s + pre-check amend для gold_orb
-`pending commit`
-
-**Симптом (повторно):** XAUUSD SHORT #150078855 закрылась по original SL
-с -55 pips ≈ -$16.5, хотя в моменте была в плюсе +$8 (peak=4700.90 vs
-entry=4703.60). Лог показал три подряд `amend REJECTED #150078855: SHORT
-SL 4701.20 <= price 4703.60` — то есть бот ПЫТАЛСЯ зафиксировать
-прибыль через trail, но цена успевала откатиться между peak и
-следующим 5-минутным циклом. К моменту amend new_sl уже не имел смысла.
-
-**Корневая причина:** 5-минутный polling слишком медленный для золота
-на M5. Цена успевает сходить к peak и вернуться внутри одного бара.
-Также `_validate_sl_tp_side` сравнивал new_sl с **entry price** из
-reconcile (а не с реальной текущей ценой) — поэтому валидация неправильно
-помечала SL как REJECTED для трейлинга в плюсе.
-
-**Изменения:**
-
-1. `src/fx_pro_bot/config/settings.py`:
-   - Новый `FAST_POLL_INTERVAL_SEC` (default 30, env-конфиг). 0 — выкл.
-2. `src/fx_pro_bot/trading/executor.py`:
-   - `get_recent_m1_bar(yf_symbol)` — actuel M1 бар через cTrader
-     `get_trendbars`. Используется как источник live-цены (без yfinance
-     5-мин лага и rate-limits).
-   - `_validate_sl_tp_side` теперь принимает `yf_symbol` и сравнивает
-     с реальной M1 close ценой (а не entry).
-3. `src/fx_pro_bot/app/main.py`:
-   - `_fast_trail_update(store, executor)` — для каждой open `gold_orb`
-     позиции запрашивает M1 бар, обновляет peak/trough по high/low
-     и вызывает `_update_broker_trailing_sl`.
-   - `_sleep_with_fast_poll` — между основными циклами разбивает sleep
-     на 30-сек чанки и в каждом чанке запускает fast-trail.
-   - В `_update_broker_trailing_sl` добавлен **pre-check current price**:
-     для long new_sl должен быть < cur_price, для short — > cur_price.
-     Иначе amend пропускается (избегаем REJECTED-спама и заведомо
-     бессмысленных запросов).
-4. `tests/test_strategies.py`: +3 теста на fast_trail_update (long peak,
-   pre-check skip after pullback, не-gold_orb стратегии skip).
-
-**Эффект:**
-- Реакция на peak: 5 мин → **30 сек** (12× быстрее).
-- M1 бар через cTrader даёт high/low с минутной точностью —
-  intra-cycle движения видны.
-- REJECTED-спам уходит из логов.
-- Сценарий из инцидента (peak +27 pips → откат к entry за 4 мин)
-  теперь будет успевать amend SL и фиксировать прибыль.
-
-**Что НЕ изменено:**
-- Параметры trail: trigger 5 pips / distance 3 pips для gold_orb.
-- Логика входа.
-- Static SL/TP при открытии.
-
-**Тесты:** 333/333 (+3 fast_trail тестов), lint чистый.
-
-**Файлы:** `src/fx_pro_bot/config/settings.py`,
-`src/fx_pro_bot/trading/executor.py`, `src/fx_pro_bot/app/main.py`,
-`tests/test_strategies.py`, `STRATEGIES.md §3c (раздел trailing)`.
-
----
-
 ### fix(trailing): peak по high/low бара + отключение bot-side trail для gold_orb
 `pending commit`
 
