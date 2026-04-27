@@ -399,6 +399,7 @@ class TradeExecutor:
         sl_price: float | None = None,
         tp_price: float | None = None,
         yf_symbol: str | None = None,
+        current_price: float | None = None,
     ) -> bool:
         """Изменить SL/TP позиции — БЕЗОПАСНО, не затирает неуказанные поля.
 
@@ -411,6 +412,13 @@ class TradeExecutor:
         отказываемся, чтобы не получить TRADING_BAD_STOPS и не оставить
         позицию без уровней. Баг наблюдался на NG=F: amend пытался
         поставить SL=2.895 для LONG при price=2.88.
+
+        `current_price` (27.04.2026): актуальная рыночная цена из вызывающего
+        кода (последний M5 close из `prices`). Если не передан — fallback на
+        `p.price` из reconcile (entry price позиции). Передача current_price
+        нужна для корректной проверки trailing-amend, когда new_sl находится
+        в правильной зоне относительно current price, но «по неправильную
+        сторону» от entry.
         """
         try:
             cur_sl, cur_tp = self._get_broker_sl_tp(broker_position_id)
@@ -430,7 +438,9 @@ class TradeExecutor:
             sl_r = round(final_sl, digits) if final_sl is not None else None
             tp_r = round(final_tp, digits) if final_tp is not None else None
 
-            if not self._validate_sl_tp_side(broker_position_id, sl_r, tp_r):
+            if not self._validate_sl_tp_side(
+                broker_position_id, sl_r, tp_r, current_price=current_price,
+            ):
                 return False
 
             self._client.amend_position_sl_tp(broker_position_id, sl_r, tp_r)
@@ -444,6 +454,7 @@ class TradeExecutor:
         broker_position_id: int,
         sl_price: float | None,
         tp_price: float | None,
+        current_price: float | None = None,
     ) -> bool:
         """Проверить, что SL/TP стоят с правильной стороны от текущей цены.
 
@@ -451,6 +462,13 @@ class TradeExecutor:
         SHORT: TP < current_price < SL
 
         Return False если нарушено — защита от TRADING_BAD_STOPS.
+
+        Bug-fix 27.04.2026: ранее использовалось `p.price` из reconcile
+        (entry price позиции), что неверно для trailing-amend. Если
+        позиция в плюсе и trailing подтянул SL за entry, проверка
+        ошибочно отвергала валидный amend. Теперь используем переданный
+        current_price (последний M5 close из вызывающего кода); если не
+        передан — fallback на entry для обратной совместимости.
         """
         if sl_price is None and tp_price is None:
             return True
@@ -461,9 +479,12 @@ class TradeExecutor:
                 if p.positionId != broker_position_id:
                     continue
 
-                price = p.price if hasattr(p, "price") and p.price else 0.0
                 td = p.tradeData if hasattr(p, "tradeData") else None
                 is_buy = td.tradeSide == 1 if td else True
+
+                price = current_price if current_price and current_price > 0 else 0.0
+                if price <= 0:
+                    price = p.price if hasattr(p, "price") and p.price else 0.0
 
                 if price <= 0:
                     return True

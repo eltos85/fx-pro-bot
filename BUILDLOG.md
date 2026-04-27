@@ -6,6 +6,106 @@
 
 ## 2026-04-27
 
+### fix(executor): _validate_sl_tp_side использует current_price вместо entry
+`pending commit`
+
+**Симптом.** XAUUSD SHORT #150078855 (gold_orb, 27.04 12:14 UTC) закрылась
+по original SL с -55.2 pips ≈ −$16.5 NET. Trailing SL должен был
+зафиксировать частичную прибыль (peak был 4700.90, entry 4703.60 = +27 pip
+в плюсе). В логе три подряд:
+
+```
+amend REJECTED #150078855: SHORT SL 4701.20 <= price 4703.60
+```
+
+Здесь `price 4703.60` = **entry price позиции**, не текущий ASK. Бот
+пытался выставить SL=4701.20 (валидный trailing-stop, ниже entry для SHORT
+= зафиксированный профит). Validator сравнивал new_sl c entry → false
+REJECT, SL не двигался. Цена откатилась обратно — закрытие по original SL
+вместо trailing.
+
+**Причина.** `_validate_sl_tp_side` в `executor.py` читал поле `p.price`
+из reconcile-ответа cTrader. По спецификации `ProtoOAPosition.price` —
+это **price at which position was opened** (entry), не текущая рыночная
+цена. Это **неправильное чтение поля API** — баг в логике валидатора.
+Validator должен сравнивать new SL с **current ASK/BID**, а не с entry.
+
+Sanity check сам по себе нужен (защита от `TRADING_BAD_STOPS` ошибки на
+NG=F 09.04, см. предыдущие записи), но реализован неверно: использовал
+не то поле.
+
+**Классификация.** Bug-fix: «использовали не то поле API» — попадает в
+исключения `strategy-guard.mdc`:
+
+> Допустимые правки БЕЗ нового анализа: Bug-fix в самой стратегии
+> (неправильная формула, опечатка, **inverted sign**, off-by-one).
+
+Не меняет:
+- Параметры стратегий (ATR-множители, lot-size, лимиты позиций)
+- Частоту polling (POLL_INTERVAL_SEC=300, остаётся)
+- Источник peak (bar.close, как в baseline 23.04)
+- Активность bot-side `scalp_trail` (включён для всех scalping, как было)
+- Список инструментов / whitelist'ы
+
+Меняет только: **корректность валидации** в `_validate_sl_tp_side`.
+Сторонний эффект: валидные trailing-amends, которые раньше отвергались,
+теперь проходят. Это поведение **возвращается к замыслу**
+`_update_broker_trailing_sl`, не вводит новую механику.
+
+**Решение.**
+
+1. `executor._validate_sl_tp_side` — добавлен опциональный параметр
+   `current_price: float | None = None`. Если передан и > 0 → используется
+   для проверки стороны SL/TP. Иначе — fallback на `p.price` из reconcile
+   (старое поведение для обратной совместимости).
+2. `executor.amend_sl_tp` — добавлен опциональный `current_price`,
+   проброшен в `_validate_sl_tp_side`.
+3. `main._update_broker_trailing_sl` — принимает `prices: dict[str, float]
+   | None`, передаёт `prices.get(pos.instrument)` в `amend_sl_tp` через
+   параметр `current_price`. В вызове на строке 666 теперь передаётся
+   существующий `prices` из основного цикла (M5 close yfinance).
+4. `main._ensure_broker_sl_tp` — для audit-вызова `amend_sl_tp` (строка
+   1133+) теперь передаётся `current_price = prices.get(db_pos.instrument)`.
+   Orphan emergency-вызов (строка 1049+) оставлен без current_price —
+   там нет yf_symbol для маппинга, fallback на entry приемлем как
+   crash-recovery механика.
+
+`prices[symbol]` — это close последнего M5 бара (yfinance, лаг до 5 мин).
+**Это не tick-perfect**, но строго лучше entry price (которая может быть
+часами раньше). При быстрых движениях (например XAU NY-spike) могут
+оставаться false-REJECT'ы, но они не приводят к убытку — просто SL не
+подтянется в этом цикле, в следующем цикле (через 5 мин) попытка
+повторится с обновлённой ценой.
+
+**Не делалось** (намеренно):
+- Никакого fast-poll / 30-second cycle
+- Никакого fetch'а live M1 баров через cTrader
+- Никаких изменений источника peak (остаётся bar.close)
+- Никаких изменений TRAIL_TRIGGER/TRAIL_DISTANCE параметров
+- Никаких изменений active-status `scalp_trail` для gold_orb
+
+**Проверка соответствия правилам.**
+
+| Правило | Статус |
+|---|---|
+| `strategy-guard.mdc` — bug-fix exception | ✓ «inverted/wrong-field» категория |
+| `no-data-fitting.mdc` — артефакт анализа | ✓ симптом → причина → фикс в коммите |
+| `sample-size.mdc` — не требуется | ✓ не меняем стратегию |
+| `fxpro-stats-baseline.mdc` — baseline | ✓ baseline 23.04 не сдвигается |
+
+**Тесты.** +10 unit-тестов в `tests/test_trading.py::TestValidateSlTpSide`:
+- SHORT/LONG trailing valid с current_price ниже/выше entry
+- SHORT/LONG invalid когда new_sl на неправильной стороне current_price
+- Fallback на entry когда current_price=None или 0 (обратная совместимость)
+- TP-сторона валидации (SHORT TP должен быть ниже current)
+- Edge cases: позиция не найдена, оба SL/TP None
+Все 336 тестов в репозитории проходят.
+
+**Файлы:** `src/fx_pro_bot/trading/executor.py`,
+`src/fx_pro_bot/app/main.py`, `tests/test_trading.py`, `BUILDLOG.md`.
+
+---
+
 ### post-mortem: нарушения правил при правках trailing 27.04
 `pending commit`
 

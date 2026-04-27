@@ -663,7 +663,7 @@ def _run_cycle(
 
     # 4d. cTrader: двинуть trailing SL на брокере
     if executor:
-        _update_broker_trailing_sl(store, executor, atrs)
+        _update_broker_trailing_sl(store, executor, atrs, prices)
 
     # 4e. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
     if executor and killswitch:
@@ -1130,11 +1130,13 @@ def _ensure_broker_sl_tp(
                 fallback = entry * 0.002 if is_crypto(db_pos.instrument) else 10 * ps
                 new_tp = (entry + fallback) if is_buy else (entry - fallback)
 
+        cur_price_audit = prices.get(db_pos.instrument, 0.0) if prices else 0.0
         ok = executor.amend_sl_tp(
             pos_id,
             sl_price=new_sl,
             tp_price=new_tp,
             yf_symbol=db_pos.instrument,
+            current_price=cur_price_audit if cur_price_audit > 0 else None,
         )
         if ok:
             fixed += 1
@@ -1154,11 +1156,21 @@ def _ensure_broker_sl_tp(
         )
 
 
-def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, float]) -> None:
+def _update_broker_trailing_sl(
+    store: StatsStore,
+    executor,
+    atrs: dict[str, float],
+    prices: dict[str, float] | None = None,
+) -> None:
     """Двигать SL на cTrader вслед за trailing stop.
 
     Каждый цикл пересчитываем trailing SL и если он лучше текущего — обновляем на брокере.
     Так cTrader сам закроет при откате, не дожидаясь 5-минутного цикла.
+
+    `prices` (27.04.2026, bug-fix): актуальный close M5 для проверки стороны
+    SL в `_validate_sl_tp_side`. Без него валидатор сравнивал new_sl с
+    entry price позиции, что отвергало валидные trailing-amend, когда цена
+    ушла в плюс.
     """
     for pos in store.get_open_positions():
         if not pos.broker_position_id:
@@ -1198,8 +1210,12 @@ def _update_broker_trailing_sl(store: StatsStore, executor, atrs: dict[str, floa
             if pos.stop_loss_price > 0 and new_sl >= pos.stop_loss_price:
                 continue
 
+        cur_price = prices.get(pos.instrument, 0.0) if prices else 0.0
         ok = executor.amend_sl_tp(
-            pos.broker_position_id, sl_price=new_sl, yf_symbol=pos.instrument,
+            pos.broker_position_id,
+            sl_price=new_sl,
+            yf_symbol=pos.instrument,
+            current_price=cur_price if cur_price > 0 else None,
         )
         if ok:
             store.update_stop_loss(pos.id, new_sl)

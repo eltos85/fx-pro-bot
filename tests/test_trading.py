@@ -239,3 +239,100 @@ class TestTradeExecutor:
         assert TradeExecutor._clamp_volume(1500, sym) == 1000
         assert TradeExecutor._clamp_volume(100_000, sym) == 100_000
         assert TradeExecutor._clamp_volume(99_999_999, sym) == 5_000_000
+
+
+# ── _validate_sl_tp_side: bug-fix 27.04.2026 ────────────────────
+
+
+def _make_position_mock(position_id: int, entry: float, is_buy: bool):
+    """Хелпер: cTrader ProtoOAPosition mock с tradeData.tradeSide и .price."""
+    pos = MagicMock()
+    pos.positionId = position_id
+    pos.price = entry
+    pos.tradeData = MagicMock()
+    pos.tradeData.tradeSide = 1 if is_buy else 2
+    return pos
+
+
+def _make_executor_with_mock_position(positions):
+    from fx_pro_bot.trading.executor import TradeExecutor
+    client = MagicMock()
+    reconcile_resp = MagicMock()
+    reconcile_resp.position = positions
+    client.reconcile.return_value = reconcile_resp
+    cache = SymbolCache()
+    return TradeExecutor(client, cache, lot_size=0.01)
+
+
+class TestValidateSlTpSide:
+    """Покрытие bug-fix 27.04.2026 — _validate_sl_tp_side использует
+    current_price (а не entry) для проверки стороны SL/TP.
+
+    Симптом утром 27.04: SHORT XAUUSD #150078855 entry=4703.60. Бот
+    отправлял amend SL=4701.20 (валидный trailing с lock'ом +24 пипса
+    в плюсе). Validator сравнивал new_sl с entry: 4701.20 ≤ 4703.60 →
+    REJECTED. Если бы цена была доступна (например 4699 — позиция в
+    плюсе, ASK ≈ 4699), validator увидел бы SL=4701.20 > 4699 →
+    легитимный для SHORT amend, прошёл бы.
+    """
+
+    def test_short_trail_valid_with_current_price_below_entry(self):
+        """SHORT в плюсе: current_price ниже entry, new_sl между ними → ВАЛИДНО."""
+        ex = _make_executor_with_mock_position([_make_position_mock(150078855, 4703.60, is_buy=False)])
+        ok = ex._validate_sl_tp_side(150078855, sl_price=4701.20, tp_price=None, current_price=4699.00)
+        assert ok is True
+
+    def test_short_trail_invalid_with_current_price_above_proposed_sl(self):
+        """SHORT: current_price=4702, new_sl=4701.20 (ниже current) → INVALID."""
+        ex = _make_executor_with_mock_position([_make_position_mock(150078855, 4703.60, is_buy=False)])
+        ok = ex._validate_sl_tp_side(150078855, sl_price=4701.20, tp_price=None, current_price=4702.00)
+        assert ok is False
+
+    def test_long_trail_valid_with_current_price_above_entry(self):
+        """LONG в плюсе: current_price выше entry, new_sl между ними → ВАЛИДНО."""
+        ex = _make_executor_with_mock_position([_make_position_mock(123, 1.0800, is_buy=True)])
+        ok = ex._validate_sl_tp_side(123, sl_price=1.0820, tp_price=None, current_price=1.0850)
+        assert ok is True
+
+    def test_long_trail_invalid_when_sl_above_current(self):
+        """LONG: current_price=1.0810, new_sl=1.0820 (выше current) → INVALID."""
+        ex = _make_executor_with_mock_position([_make_position_mock(123, 1.0800, is_buy=True)])
+        ok = ex._validate_sl_tp_side(123, sl_price=1.0820, tp_price=None, current_price=1.0810)
+        assert ok is False
+
+    def test_fallback_to_entry_when_current_price_not_provided(self):
+        """Без current_price → fallback на entry (старое поведение, обратная совместимость)."""
+        ex = _make_executor_with_mock_position([_make_position_mock(123, 4703.60, is_buy=False)])
+        # Без current_price: validator сравнивает с entry=4703.60 → SL=4701.20 ≤ 4703.60 → REJECTED
+        ok = ex._validate_sl_tp_side(123, sl_price=4701.20, tp_price=None, current_price=None)
+        assert ok is False
+
+    def test_fallback_to_entry_when_current_price_zero(self):
+        """current_price=0 (нет данных в prices) → fallback на entry."""
+        ex = _make_executor_with_mock_position([_make_position_mock(123, 4703.60, is_buy=False)])
+        ok = ex._validate_sl_tp_side(123, sl_price=4701.20, tp_price=None, current_price=0.0)
+        assert ok is False
+
+    def test_short_tp_valid_below_current(self):
+        """SHORT TP должен быть ниже current_price → ВАЛИДНО."""
+        ex = _make_executor_with_mock_position([_make_position_mock(123, 4703.60, is_buy=False)])
+        ok = ex._validate_sl_tp_side(123, sl_price=None, tp_price=4690.00, current_price=4700.00)
+        assert ok is True
+
+    def test_short_tp_invalid_above_current(self):
+        """SHORT TP выше current_price → INVALID."""
+        ex = _make_executor_with_mock_position([_make_position_mock(123, 4703.60, is_buy=False)])
+        ok = ex._validate_sl_tp_side(123, sl_price=None, tp_price=4710.00, current_price=4700.00)
+        assert ok is False
+
+    def test_returns_true_when_position_not_found(self):
+        """Позиция не найдена в reconcile → True (не блокируем amend)."""
+        ex = _make_executor_with_mock_position([_make_position_mock(999, 1.0, is_buy=True)])
+        ok = ex._validate_sl_tp_side(150078855, sl_price=1.0, tp_price=None, current_price=2.0)
+        assert ok is True
+
+    def test_returns_true_when_both_none(self):
+        """SL и TP оба None → ничего не валидируем."""
+        ex = _make_executor_with_mock_position([_make_position_mock(123, 1.0, is_buy=True)])
+        ok = ex._validate_sl_tp_side(123, sl_price=None, tp_price=None, current_price=2.0)
+        assert ok is True
