@@ -87,6 +87,12 @@ class GoldOrbSignal:
     atr: float
     session: str         # "london" | "ny"
     detail: str
+    # Диагностика «качества» входа (28.04.2026, наблюдения позиции #150097702):
+    # bars_since_box_end — сколько M5-баров прошло с конца ORB-коробки до touch-break
+    # break_distance_atr — на сколько ATR текущая цена отстоит от пробитой границы
+    # Эти поля только логируются, не влияют на торговую логику.
+    bars_since_box_end: int = 0
+    break_distance_atr: float = 0.0
 
 
 class GoldOrbStrategy:
@@ -164,10 +170,12 @@ class GoldOrbStrategy:
                 tp_dist = GOLD_ORB_TP_ATR_MULT * sig.atr
                 tp = price + tp_dist if sig.direction == TrendDirection.LONG else price - tp_dist
                 log.info(
-                    "  GOLD-ORB SHADOW: %s %s @ %.5f [%s, box=[%.5f..%.5f], SL=%.5f, TP=%.5f]",
+                    "  GOLD-ORB SHADOW: %s %s @ %.5f [%s, box=[%.5f..%.5f], SL=%.5f, TP=%.5f, "
+                    "bars_since_box_end=%d, break_dist=%.2fATR]",
                     display_name(sig.instrument),
                     sig.direction.value.upper(),
                     price, sig.session, sig.box_high, sig.box_low, sl, tp,
+                    sig.bars_since_box_end, sig.break_distance_atr,
                 )
                 opened += 1
                 current += 1
@@ -187,10 +195,12 @@ class GoldOrbStrategy:
             self._store.set_estimated_cost(pid, cost.round_trip_pips)
 
             log.info(
-                "  GOLD-ORB OPEN: %s %s @ %.5f [%s session, box=[%.5f..%.5f], SL=%.5f]",
+                "  GOLD-ORB OPEN: %s %s @ %.5f [%s session, box=[%.5f..%.5f], SL=%.5f, "
+                "bars_since_box_end=%d, break_dist=%.2fATR]",
                 display_name(sig.instrument),
                 sig.direction.value.upper(),
                 price, sig.session, sig.box_high, sig.box_low, sl,
+                sig.bars_since_box_end, sig.break_distance_atr,
             )
             opened += 1
             current += 1
@@ -214,10 +224,23 @@ class GoldOrbStrategy:
             return None
 
         last = bars[-1]
+        # Диагностика: сколько M5-баров с конца ORB-коробки. Для оценки
+        # «свежести» пробоя — late-entry (>>1 бар после box_end) часто
+        # exhausted move с risk быстрого reversal'а (наблюдение 28.04
+        # позиции #150097702 в BUILDLOG).
+        last_t = last.ts.time() if last.ts.tzinfo else last.ts.replace(tzinfo=timezone.utc).time()
+        if session_tag == "london":
+            box_end_minutes = LONDON_ORB_END.hour * 60 + LONDON_ORB_END.minute
+        else:
+            box_end_minutes = NY_ORB_END.hour * 60 + NY_ORB_END.minute
+        cur_minutes = last_t.hour * 60 + last_t.minute
+        bars_since_box_end = max(0, (cur_minutes - box_end_minutes) // 5)
+
         # touch-break: high/low текущего бара пересёк границу
         if last.high > box_high:
             if slope < 0:   # contra-trend защита: LONG только при slope>=0
                 return None
+            break_dist_atr = (last.high - box_high) / atr if atr > 0 else 0.0
             return GoldOrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.LONG,
@@ -228,11 +251,14 @@ class GoldOrbStrategy:
                 atr=atr,
                 session=session_tag,
                 detail=f"touch-break above {box_high:.5f} (high={last.high:.5f})",
+                bars_since_box_end=bars_since_box_end,
+                break_distance_atr=round(break_dist_atr, 2),
             )
 
         if last.low < box_low:
             if slope > 0:
                 return None
+            break_dist_atr = (box_low - last.low) / atr if atr > 0 else 0.0
             return GoldOrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.SHORT,
@@ -243,6 +269,8 @@ class GoldOrbStrategy:
                 atr=atr,
                 session=session_tag,
                 detail=f"touch-break below {box_low:.5f} (low={last.low:.5f})",
+                bars_since_box_end=bars_since_box_end,
+                break_distance_atr=round(break_dist_atr, 2),
             )
 
         return None
