@@ -3,7 +3,7 @@
 ## 2026-04-28
 
 ### feat(scalp_vwap): RR 1:0.75 → 1:1.5 (research-anchor Sword Red BTC / FMZQuant)
-`8d10a00`
+`2f5deb1`
 
 **Контекст.** Wave 6 за 3 суток (25-28.04, ~70ч) дал **n=1 сделку**:
 WIFUSDT Long, 27.04 15:20-15:21 UTC, −$4.52. Разбор пары `entry/SL/TP`
@@ -57,7 +57,7 @@ Break-even WR:
 ---
 
 ### feat(observability): SL/TP/RR в "СКАЛЬП ОТКРЫТ" + почасовой COF funnel
-`8d10a00`
+`2f5deb1`
 
 **Контекст.** Разбор сделки WIFUSDT 27.04 потребовал лезть в
 `get_order_history` Bybit чтобы понять реальные SL/TP — лог открытия их
@@ -101,7 +101,7 @@ reset).
 ---
 
 ### chore(observation): Wave 6 / COF — низкая активность за первые 70ч
-`8d10a00`
+`2f5deb1`
 
 **Без изменений в коде**, фиксация наблюдения для T+14d среза.
 
