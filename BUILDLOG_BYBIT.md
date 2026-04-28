@@ -1,5 +1,148 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-28
+
+### feat(scalp_vwap): RR 1:0.75 → 1:1.5 (research-anchor Sword Red BTC / FMZQuant)
+`8d10a00`
+
+**Контекст.** Wave 6 за 3 суток (25-28.04, ~70ч) дал **n=1 сделку**:
+WIFUSDT Long, 27.04 15:20-15:21 UTC, −$4.52. Разбор пары `entry/SL/TP`
+по Bybit `get_order_history` показал реальный R:R 1:0.64 (entry 0.17408 /
+SL 0.17286 = -0.70% / TP 0.17486 = +0.45%). Это согласуется с
+теоретическим минимумом текущих констант `sl_atr_mult=2.0,
+tp_atr_mult=1.5` (RR 1:0.75) — после tick-rounding выходит ещё хуже.
+
+**Sample-size**. n=1 — **не основание** для правки (`sample-size.mdc`
+требует ≥100 сделок). Основание для этой правки — **research-drift**:
+
+1. `BYBIT_AB_TEST.md` "RESEARCH REFERENCE: сверка с КРИПТО-backtest'ами
+   (04-23, CORRECTED)" уже зафиксировал расхождение как известный issue:
+   `| scalp_vwap | RR | 1:0.75 | 1:1.5 (Sword Red BTC, FMZQuant ETH) |
+   🟡 ниже нормы |`. Документ был, фикс просто откладывался.
+2. Docstring `vwap_crypto.py` гласит: `TP: возврат к VWAP. SL: 2.0 ATR.`
+   — расхождение между описанием и кодом.
+
+**Что меняем.**
+- `bybit_bot.app.main`: добавлены module-level константы
+  `_VWAP_SL_ATR_MULT=2.0`, `_VWAP_TP_ATR_MULT=3.0`. Раньше `1.5`/`2.0`
+  были hard-coded в `Signal(...)` внутри `_process_scalping`. Перенос в
+  константы — для тестируемости (см. `tests/test_bybit_scalping.py
+  ::TestVwapRiskReward`).
+- `vwap_crypto.py` docstring обновлён: research-блок с источниками
+  (Sword Red BTC FMZQuant 2024, BYBIT_AB_TEST.md), история параметра
+  и место хранения констант.
+- `STRATEGIES.md`: строка `SL / TP` обновлена — RR 1:1.5 + ссылка на
+  research, отметка о смене 28.04.
+
+**Что НЕ меняем.** Сама логика сигнала — без изменений (`DEVIATION_THRESHOLD=2.0`,
+`RSI<30/>70`, `ADX<25`, мягкий HTF-slope). Wave 6 whitelist'ы остаются
+(direction long, 5 символов, часы 14-16,19-20 UTC, будни) — они
+проверены на 90д backtest + live n=102 как single-pocket с edge.
+
+**Влияние на торговлю.** При WR=50%:
+- было EXP = 0.5×1.5 − 0.5×2.0 = **−0.25 ATR / trade** (минус)
+- стало EXP = 0.5×3.0 − 0.5×2.0 = **+0.50 ATR / trade** (плюс)
+
+Break-even WR:
+- было 1/(1+0.75) = **57%** (трудно достижим для VWAP-fade)
+- стало 1/(1+1.5) = **40%** (комфортно — bbtest WR 60.8% на n=102)
+
+**Тесты.**
+`TestVwapRiskReward::test_vwap_sl_tp_constants_match_research_anchor` —
+проверка значений и RR=1.5. Полный suite: 340 passed, 0 failed.
+
+**Файлы:** `src/bybit_bot/app/main.py`, `src/bybit_bot/strategies/scalping/vwap_crypto.py`,
+`STRATEGIES.md`, `BYBIT_AB_TEST.md`, `tests/test_bybit_scalping.py`.
+
+---
+
+### feat(observability): SL/TP/RR в "СКАЛЬП ОТКРЫТ" + почасовой COF funnel
+`8d10a00`
+
+**Контекст.** Разбор сделки WIFUSDT 27.04 потребовал лезть в
+`get_order_history` Bybit чтобы понять реальные SL/TP — лог открытия их
+не содержал. И при попытке оценить «почему COF молчит» пришлось
+`grep`'ать DEBUG-логи руками (1415 строк/24ч на 4 категории).
+
+**Что добавлено.**
+
+1. В лог `СКАЛЬП ОТКРЫТ` теперь печатаются SL/TP в абсолютных значениях,
+   их % от entry и итоговый RR. Пример нового формата (для WIFUSDT
+   c новыми константами 2.0 / 3.0 ATR):
+   ```
+   СКАЛЬП ОТКРЫТ: Buy WIFUSDT qty=3591 entry=0.1740
+     sl=0.17286(-0.70%) tp=0.17591(+1.05%) RR=1:1.50 [scalp_vwap]
+   ```
+   Для stat-arb (где SL/TP не выставляются и pair-управляется):
+   `(no SL/TP — pair-managed)`.
+
+2. `CryptoOverboughtFaderStrategy` теперь аккумулирует filter-funnel:
+   `scans / outside_session / low_atr_pct / high_adx / low_rsi /
+   vwap_short_failed / turtle_short_failed / passed`. Метод
+   `get_funnel_and_reset()` возвращает snapshot и обнуляет.
+
+3. В `_run_cycle` раз в 12 циклов (=1ч при 5m-cycle) вызывается лог:
+   ```
+   COF funnel за час: scans=N → outside_session=N low_atr=N high_adx=N
+     low_rsi=N vwap_fail=N turtle_fail=N → passed=N
+   ```
+   Позволяет видеть «как далеко доходит scan по фильтрам» без grep.
+
+**Соответствие правилам.** Это observability/логирование — `sample-size.mdc`
+явно разрешает: «технические улучшения / логирование, не влияют на
+торговлю». Сама scan-логика и сигналы не тронуты.
+
+**Тесты.** `TestCofFunnel` — 3 теста (init, outside_session-инкремент,
+reset).
+
+**Файлы:** `src/bybit_bot/strategies/scalping/crypto_overbought_fader.py`,
+`src/bybit_bot/app/main.py`, `tests/test_bybit_scalping.py`.
+
+---
+
+### chore(observation): Wave 6 / COF — низкая активность за первые 70ч
+`8d10a00`
+
+**Без изменений в коде**, фиксация наблюдения для T+14d среза.
+
+**Wave 6 (scalp_vwap) — 3 дня live (25.04 08:48 → 28.04 06:50 UTC).**
+- Закрытых сделок: **1** (WIFUSDT Long 27.04, −$4.52).
+- Проверка фильтров: час 15 UTC ∈ {14,15,16,19,20}, символ WIF ∈
+  whitelist, понедельник ∈ будни, сигнал — RSI=20 oversold + price <
+  VWAP−2 ATR (каноничный VWAP-fade Long). Все фильтры отработали
+  корректно.
+- Backtest-ожидание: ~10 сделок/день. Live: 0.33 сделки/день. **30×
+  отставание** — но `sample-size.mdc` требует ≥2 недель и ≥100 сделок,
+  так что вывод откладываем до T+14d (2026-05-09).
+
+**COF (scalp_cof) — 5 дней live, 24-часовой grep.**
+- Закрытых сделок: **0**.
+- Распределение rejection'ов из verbose DEBUG-логов за 24ч (n=1415):
+  | Причина | Кол-во | % |
+  |---|---|---|
+  | Вне NY-сессии (час ∉ 13-20 UTC) | ~666 | 47% |
+  | Низкая волатильность (ATR%/price < 0.30) | 642 | 45% |
+  | Сильный тренд (ADX > 30) | 59 | 4% |
+  | Не overbought (RSI < 65) | 48 | 3% |
+- 0 строк по фильтрам "VWAP-short не выполнен" / "Turtle-short не
+  выполнен" — никто за 24ч даже не дошёл до этих этапов. Рынок текущий
+  далёк от условий COF (overbought + RSI 65+ во время NY).
+- **Согласуется** с `BYBIT_AB_TEST.md` OBSERVATION 2026-04-22
+  (alt-selloff regime), `PREDICTIONS.md` (Fear&Greed=8, BTC −39% от ATH).
+  Это known regime risk mean-reversion стратегий — не overfit и не баг.
+
+**Пользователь спросил**: «возможна ли цифра <900 grep-counts/24ч».
+Цифра — упрощение, более точная метрика теперь — `passed` и
+`turtle_short_failed`/`vwap_short_failed` в почасовом funnel-логе.
+Сценарий, при котором они станут ненулевыми — euphoria-phase крипто
+(Q1 2026 такие были регулярно), сейчас режим противоположный.
+
+**Что делать:** ничего. Sample-size недостаточен. Мониторим funnel,
+ждём T+14d (09.05) для среза. Если на 14д остаётся 0 COF и ≤5 VWAP —
+это уже основание для обсуждения regime-фильтра, но не правки сейчас.
+
+**Файлы:** только этот лог.
+
 ## 2026-04-25
 
 ### feat(scalp_vwap): Wave 6 — VWAP whitelist'ы long/5syms/prime hours/будни

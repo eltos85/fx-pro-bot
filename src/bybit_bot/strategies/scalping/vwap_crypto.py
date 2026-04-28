@@ -2,7 +2,23 @@
 
 Цена стремится вернуться к VWAP (~70-75% времени).
 Вход: отклонение > DEVIATION_THRESHOLD * ATR + RSI подтверждение + фильтр ADX.
-TP: возврат к VWAP. SL: 2.0 ATR.
+
+─── Research basis (exit) ──────────────────────────────────────────────
+SL: 2.0 ATR, TP: 3.0 ATR  →  RR 1:1.5
+
+Источники для crypto VWAP mean-reversion:
+  • Sword Red BTC (FMZQuant 2024) — RR 1:1.5 на BTC-perp.
+  • FMZQuant ETH-perp study — RR 1:1.5 как оптимум по 90-дневной выборке.
+  • BYBIT_AB_TEST.md "RESEARCH REFERENCE" 2026-04-23.
+
+История параметра:
+  • До 2026-04-28: tp=1.5 ATR (RR 1:0.75). Задокументировано в
+    BYBIT_AB_TEST.md как "🟡 ниже нормы". WIFUSDT 27.04 (n=1) ушёл в SL
+    с RR 0.64 — согласуется с теоретическим минимумом этой связки.
+  • 2026-04-28: повышено до 3.0 ATR (RR 1:1.5) под research-anchor.
+  • Параметры заданы в bybit_bot.app.main как константы _VWAP_SL_ATR_MULT
+    / _VWAP_TP_ATR_MULT (применяются к Signal при конструировании из
+    VwapSignal). Исполнитель — TradeExecutor.compute_trade.
 """
 
 from __future__ import annotations

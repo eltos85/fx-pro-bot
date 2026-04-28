@@ -41,6 +41,18 @@ STATARB_EMERGENCY_LOSS = 25.0
 # не изменение логики, не curve-fitting. Подробнее см. BUILDLOG_BYBIT.md.
 STATARB_PAIR_TP_USD = 1.00  # take-profit по суммарному uPnL пары (комиссии пары ~$0.70 → нетто ~$0.30)
 
+# ─── scalp_vwap: SL/TP-множители (Wave 6+, 2026-04-28) ─────────────────
+# RR 1:1.5 — research-anchor для crypto VWAP mean-reversion:
+#   - Sword Red BTC (FMZQuant 2024 ETH-perp study)
+#   - см. BYBIT_AB_TEST.md → "RESEARCH REFERENCE" 2026-04-23
+# До 2026-04-28 было tp=1.5 (RR 1:0.75) — задокументировано как "🟡 ниже
+# нормы". На live-данных 25-28.04 (Wave 6, n=1) первая же сделка ушла в SL
+# с фактическим RR 0.64 — что согласуется с теоретическим минимумом.
+# n=1 — не основание для правки, основание — research-anchor + drift между
+# docstring ("TP: возврат к VWAP") и реализацией.
+_VWAP_SL_ATR_MULT = 2.0
+_VWAP_TP_ATR_MULT = 3.0
+
 log = logging.getLogger(__name__)
 
 _shutdown = False
@@ -323,6 +335,23 @@ def _run_cycle(
         cycle_counter=cycle,
         tradeable_symbols=tradeable_symbols,
     )
+
+    # Почасовой filter-funnel COF (один раз в 12 циклов = 1ч при cycle=5m).
+    # Помогает мониторить "подходит ли рыночный режим" без grep'а DEBUG-логов.
+    if scalp_cof is not None and cycle > 0 and cycle % 12 == 0:
+        funnel = scalp_cof.get_funnel_and_reset()
+        log.info(
+            "COF funnel за час: scans=%d → outside_session=%d low_atr=%d "
+            "high_adx=%d low_rsi=%d vwap_fail=%d turtle_fail=%d → passed=%d",
+            funnel["scans"],
+            funnel["outside_session"],
+            funnel["low_atr_pct"],
+            funnel["high_adx"],
+            funnel["low_rsi"],
+            funnel["vwap_short_failed"],
+            funnel["turtle_short_failed"],
+            funnel["passed"],
+        )
 
 
 def _fetch_entry_price(client: BybitClient, symbol: str, fallback: float) -> float:
@@ -909,7 +938,7 @@ def _process_scalping(
                 sig = Signal(
                     direction=vs.direction, strength=0.7,
                     reasons=(f"vwap_dev={vs.deviation_atr:.1f}",),
-                    sl_atr_mult=2.0, tp_atr_mult=1.5, strategy_name="scalp_vwap",
+                    sl_atr_mult=_VWAP_SL_ATR_MULT, tp_atr_mult=_VWAP_TP_ATR_MULT, strategy_name="scalp_vwap",
                 )
                 scalp_trades.append((vs.symbol, sig, bars_map[vs.symbol], "scalp_vwap"))
 
@@ -1058,9 +1087,21 @@ def _process_scalping(
                 opened_bar_idx=cycle_counter,
             )
             open_symbols.add(symbol)
+            if params.sl is not None and params.tp is not None and entry > 0:
+                risk = abs(entry - params.sl)
+                reward = abs(params.tp - entry)
+                rr = reward / risk if risk > 0 else 0.0
+                sl_pct = risk / entry * 100.0
+                tp_pct = reward / entry * 100.0
+                exit_str = (
+                    f" sl={params.sl:.6g}({sl_pct:.2f}%) "
+                    f"tp={params.tp:.6g}({tp_pct:.2f}%) RR=1:{rr:.2f}"
+                )
+            else:
+                exit_str = " (no SL/TP — pair-managed)"
             log.info(
-                "СКАЛЬП ОТКРЫТ: %s %s %s qty=%s entry=%.4f [%s]",
-                params.side, display_name(symbol), symbol, params.qty, entry, strategy,
+                "СКАЛЬП ОТКРЫТ: %s %s %s qty=%s entry=%.4f%s [%s]",
+                params.side, display_name(symbol), symbol, params.qty, entry, exit_str, strategy,
             )
 
 

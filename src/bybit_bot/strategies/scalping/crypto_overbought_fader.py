@@ -134,12 +134,40 @@ class CryptoOverboughtFaderStrategy:
     turtle-short + vwap-short + фильтры COF (сессия/RSI/ATR%).
     """
 
+    # Ключи воронки: каждое значение — счётчик per-symbol-scan.
+    # "scans" — сколько символов вообще пытались сканить (не обрезаны
+    # по len(bars) < MIN_BARS+...). "passed" — сколько отдали сигнал.
+    _FUNNEL_KEYS = (
+        "scans",
+        "outside_session",
+        "low_atr_pct",
+        "high_adx",
+        "low_rsi",
+        "vwap_short_failed",
+        "turtle_short_failed",
+        "passed",
+    )
+
     def __init__(self) -> None:
         self._htf_slopes: dict[str, float] = {}
+        self._funnel: dict[str, int] = {k: 0 for k in self._FUNNEL_KEYS}
 
     def set_htf_slopes(self, slopes: dict[str, float]) -> None:
         """Передать 1h EMA(50)-slope-ы (считаются в main.py)."""
         self._htf_slopes = slopes
+
+    def get_funnel_and_reset(self) -> dict[str, int]:
+        """Вернуть накопленные счётчики filter-funnel и обнулить.
+
+        Используется main.py для почасового сводного лога — позволяет
+        отслеживать подходит ли рыночный режим под COF без grep-парсинга
+        DEBUG-логов. Не влияет на торговую логику (`sample-size.mdc`:
+        технические улучшения / логирование).
+        """
+        snapshot = dict(self._funnel)
+        for key in self._FUNNEL_KEYS:
+            self._funnel[key] = 0
+        return snapshot
 
     def scan(self, bars_map: dict[str, list[Bar]]) -> list[CofSignal]:
         signals: list[CofSignal] = []
@@ -154,6 +182,8 @@ class CryptoOverboughtFaderStrategy:
         if len(bars) < MIN_BARS + T_LOOKBACK + T_RECLAIM_WINDOW + 1:
             return None
 
+        self._funnel["scans"] += 1
+
         # ── COF-фильтр 1: сессия NY (13–21 UTC) ────────────────────────
         last = bars[-1]
         # bars timestamp может быть naive или с tz — нормализуем
@@ -163,6 +193,7 @@ class CryptoOverboughtFaderStrategy:
         else:
             hour = ts.astimezone(timezone.utc).hour
         if hour not in COF_SESSION_HOURS:
+            self._funnel["outside_session"] += 1
             log.debug("%s COF: час %02d UTC вне NY-сессии 13-20", symbol, hour)
             return None
 
@@ -175,6 +206,7 @@ class CryptoOverboughtFaderStrategy:
         # ── COF-фильтр 2: ATR% ≥ 0.3 ──────────────────────────────────
         atr_pct = atr_val / price * 100.0 if price > 0 else 0.0
         if atr_pct < COF_ATR_PCT_MIN:
+            self._funnel["low_atr_pct"] += 1
             log.debug("%s COF: ATR%%=%.3f < %.2f — низкая волатильность",
                       symbol, atr_pct, COF_ATR_PCT_MIN)
             return None
@@ -182,6 +214,7 @@ class CryptoOverboughtFaderStrategy:
         # ── Общий фильтр ADX ──────────────────────────────────────────
         adx_val = compute_adx(bars, period=14)
         if adx_val > ADX_MAX:
+            self._funnel["high_adx"] += 1
             log.debug("%s COF: ADX=%.1f > %.1f — сильный тренд", symbol, adx_val, ADX_MAX)
             return None
 
@@ -190,6 +223,7 @@ class CryptoOverboughtFaderStrategy:
 
         # ── COF-фильтр 3: RSI14 ≥ 65 (overbought) ─────────────────────
         if rsi_val < COF_RSI_MIN:
+            self._funnel["low_rsi"] += 1
             log.debug("%s COF: RSI=%.1f < %.1f — не overbought", symbol, rsi_val, COF_RSI_MIN)
             return None
 
@@ -208,6 +242,7 @@ class CryptoOverboughtFaderStrategy:
                 vwap_short_ok = False
 
         if not vwap_short_ok:
+            self._funnel["vwap_short_failed"] += 1
             log.debug("%s COF: VWAP-short не выполнен (dev=%.2f, rsi=%.1f)",
                       symbol, deviation, rsi_val)
             return None
@@ -215,10 +250,12 @@ class CryptoOverboughtFaderStrategy:
         # ── Turtle-short сигнал ───────────────────────────────────────
         turtle_depth = self._turtle_short_signal(bars, atr_val)
         if turtle_depth is None:
+            self._funnel["turtle_short_failed"] += 1
             log.debug("%s COF: Turtle-short не выполнен", symbol)
             return None
 
         # Оба сигнала согласны + все фильтры прошли
+        self._funnel["passed"] += 1
         return CofSignal(
             symbol=symbol,
             direction=Direction.SHORT,

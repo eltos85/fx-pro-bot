@@ -1052,3 +1052,74 @@ class TestVwapEnvParsers:
         assert strat._allowed_symbols is None
         assert strat._allowed_hours_utc is None
         assert strat._allowed_weekdays is None
+
+
+# ── Wave 6+: scalp_vwap RR-константы ─────────────────────────────────
+
+class TestVwapRiskReward:
+    """SL/TP-множители для scalp_vwap зафиксированы в main.py.
+    RR 1:1.5 — research-anchor (Sword Red BTC, FMZQuant ETH-perp).
+    """
+
+    def test_vwap_sl_tp_constants_match_research_anchor(self):
+        from bybit_bot.app.main import _VWAP_SL_ATR_MULT, _VWAP_TP_ATR_MULT
+        assert _VWAP_SL_ATR_MULT == 2.0
+        assert _VWAP_TP_ATR_MULT == 3.0
+        rr = _VWAP_TP_ATR_MULT / _VWAP_SL_ATR_MULT
+        assert abs(rr - 1.5) < 1e-9, f"RR должен быть 1:1.5, получили 1:{rr}"
+
+
+# ── Wave 5+: COF filter-funnel для observability ─────────────────────
+
+class TestCofFunnel:
+    """COF аккумулирует счётчики rejection'ов по фильтрам и сбрасывает
+    их по требованию main.py (раз в час). Не влияет на торговлю.
+    """
+
+    def test_funnel_initialized_with_zeros(self):
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        strat = CryptoOverboughtFaderStrategy()
+        snap = strat.get_funnel_and_reset()
+        assert snap == {
+            "scans": 0, "outside_session": 0, "low_atr_pct": 0,
+            "high_adx": 0, "low_rsi": 0, "vwap_short_failed": 0,
+            "turtle_short_failed": 0, "passed": 0,
+        }
+
+    def test_funnel_counts_outside_session_rejections(self):
+        """Бары с timestamp вне 13-20 UTC → outside_session++."""
+        from datetime import datetime, timedelta, timezone
+        from bybit_bot.market_data.models import Bar
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        strat = CryptoOverboughtFaderStrategy()
+        # Последний бар попадёт на 04-28 09:05 UTC = вне NY-сессии 13-20.
+        end_ts = datetime(2026, 4, 28, 9, 5, tzinfo=timezone.utc)
+        bars = [
+            Bar(
+                symbol="TESTUSDT",
+                ts=end_ts - timedelta(minutes=5 * (109 - i)),
+                open=1.0, high=1.01, low=0.99, close=1.0, volume=100.0,
+            )
+            for i in range(110)
+        ]
+        result = strat.scan({"TESTUSDT": bars})
+        assert result == []
+        snap = strat.get_funnel_and_reset()
+        assert snap["scans"] == 1
+        assert snap["outside_session"] == 1
+        assert snap["passed"] == 0
+
+    def test_funnel_reset_after_get(self):
+        from bybit_bot.strategies.scalping.crypto_overbought_fader import (
+            CryptoOverboughtFaderStrategy,
+        )
+        strat = CryptoOverboughtFaderStrategy()
+        strat._funnel["low_rsi"] = 42
+        first = strat.get_funnel_and_reset()
+        assert first["low_rsi"] == 42
+        second = strat.get_funnel_and_reset()
+        assert second["low_rsi"] == 0

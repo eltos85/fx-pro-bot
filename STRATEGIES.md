@@ -741,7 +741,7 @@ relative = Round(distance, symbol.Digits) * 100_000
 |---|---|---|
 | DEVIATION_THRESHOLD | 2.0 ATR | 95% boundary, стандарт HFT |
 | RSI filter | <30 / >70 | Confirmation (Wilder) |
-| SL / TP | 2.0 / 1.5 ATR | RR 0.75 — агрессивный scalp |
+| SL / TP | **2.0 / 3.0 ATR** | **RR 1:1.5** — Sword Red BTC, FMZQuant ETH-perp study (2024). До 2026-04-28 было 2.0/1.5 (RR 0.75) — задокументировано в `BYBIT_AB_TEST.md` как «🟡 ниже нормы». Поднято до research-anchor 28.04. Параметры заданы в `bybit_bot.app.main` как `_VWAP_SL_ATR_MULT` / `_VWAP_TP_ATR_MULT` |
 
 **Live-whitelist'ы (Wave 6, BUILDLOG.md 2026-04-25),** задаются по итогам
 data-driven анализа Bybit closedPnl API за 11-23.04 (n=636) +
