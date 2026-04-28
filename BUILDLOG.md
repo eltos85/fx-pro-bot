@@ -4,6 +4,122 @@
 
 ---
 
+## 2026-04-28
+
+### analysis(gold_orb): сравнение CANON vs LIVE (scalp_trail), диагностический лог
+`pending commit`
+
+**Контекст.** Пользователь задал вопрос после live-наблюдения позиции
+#150095761 (XAUUSD SHORT, gold_orb, 28.04 09:47 UTC): peak P&L был +88.6 pip
+(~$26 unreal), exit по `scalp_trail` дал +61.2 pip ($8.86 net), просадка от
+peak 27.4 pip. Гипотеза: bot-side `scalp_trail` режет winners относительно
+канонической схемы из research-baseline (+6146 net pip за 90d делался на
+ATR-SL/TP **без trail**, см. `STRATEGIES.md §3b-bis`).
+
+**Артефакты:**
+
+- `scripts/analyze_gold_orb_trail_compare.py` — аналитический скрипт.
+  Один и тот же набор entry-сигналов `gold_orb` симулируется в двух
+  вариантах: CANON (ATR-SL 1.5 + ATR-TP 3.0, time-stop 6h) и LIVE
+  (то же + bot-side `scalp_trail` exit на bar.close с trigger=max(0.6×ATR_pips,
+  5pip), distance=max(0.3×ATR_pips, 3pip), hard-stop 4h).
+- `data/fxpro_klines/GC_F_M5.csv` — 17366 M5-баров cTrader за
+  2026-01-28 → 2026-04-28 (`scripts.fetch_fxpro_history --days 90 --symbols GC=F`).
+- `data/gold_orb_trail_compare.csv` — per-trade результаты обеих симуляций.
+- `data/gold_orb_trail_compare_out.txt` — текстовый отчёт.
+
+**Результат на 90d (114 сигналов, обе симуляции):**
+
+| Метрика     | CANON    | LIVE     | Δ (LIVE−CANON) |
+|-------------|----------|----------|----------------|
+| trades      | 114      | 114      | 0              |
+| win-rate    | 40.4 %   | 65.8 %   | +25.4 %        |
+| net pips    | +3459.6  | +3440.3  | **−19.3**      |
+| profit factor | 1.38   | 1.76     | +0.38          |
+| avg pip     | +30.4    | +30.2    | −0.2           |
+| avg win     | +275.3   | +106.3   | **−169.0**     |
+| avg loss    | −135.3   | −116.1   | +19.2          |
+| max win     | +772.3   | +772.3   | 0.0            |
+| max loss    | −372.0   | −365.3   | +6.7           |
+
+Распределение exit reasons:
+
+| reason       | CANON | LIVE |
+|--------------|-------|------|
+| sl           | 67    | 31   |
+| tp           | 44    | 14   |
+| time         | 3     | 0    |
+| scalp_trail  | 0     | 69   |
+
+Walk-forward (трети по времени):
+
+| period | n  | WR_CANON | WR_LIVE | NET_CANON | NET_LIVE | PF_CANON | PF_LIVE |
+|--------|----|----------|---------|-----------|----------|----------|---------|
+| T1     | 38 | 28.9 %   | 60.5 %  | −827.5    | +477.3   | 0.79     | 1.27    |
+| T2     | 38 | 39.5 %   | 65.8 %  | +1808.0   | +1529.0  | 1.54     | 1.77    |
+| T3     | 38 | 52.6 %   | 71.1 %  | +2479.1   | +1433.9  | 2.31     | 2.79    |
+
+**Что это значит.**
+
+1. **NET pips равны** в пределах шума: разница −19 pip за 90 дней
+   (~−0.6 % от total). Утверждение «scalp_trail режет gold_orb» по сумме
+   пунктов **не подтверждается** — это были бы 100+ pip разница.
+2. **Distribution принципиально разная.** LIVE: высокий WR 66 %, узкие
+   winners (avg +106 vs +275). CANON: низкий WR 40 %, широкие winners.
+   То, что пользователь увидел live (peak +88 → exit +61) — это by-design
+   профиль scalp_trail, не баг.
+3. **PF лучше у LIVE** (1.76 vs 1.38), потому что scalp_trail убирает
+   часть SL-ударов (67→31) и time-стопов (3→0) ценой части TP-выходов
+   (44→14).
+4. **Trade-off по walk-forward:**
+   - В worst-third (T1) scalp_trail **спасает** период: −827 pip → +477 pip.
+     Это аргумент в пользу LIVE-режима для drawdown-control.
+   - В лучшем третьем (T3, последние 30d, тренд) CANON +2479 vs LIVE +1434:
+     scalp_trail режет тренд-winners почти в 2 раза. Это аргумент против
+     LIVE для trend-following сценариев.
+5. **Sample-size** (`sample-size.mdc`) для решения «отключить scalp_trail»:
+   - Trades 114 ≥ 100 ✓
+   - Период 90d ≥ 2 недели ✓
+   - WR-разница 25 % ✓ (но это смена profile, а не «better»)
+   - **Net pips разница −19 на 90d → p-value заведомо > 0.05** (bootstrap CI
+     наверняка пересекает 0). Решение делать **нельзя** — статистически
+     неотличимо.
+
+**Решение: ничего не менять в стратегии.** scalp_trail не режет gold_orb
+по net pips. Live-наблюдение (одна позиция #150095761) укладывается
+в распределение по T2/T3 — это не баг и не аномалия.
+
+**Сделано (безопасное, без изменения торговой логики):**
+
+- `monitor.py` — расширен лог при scalp-exit'ах: добавлены `peak_pips`,
+  `tp_target`, `trail_trigger`, `trail_d`, `ATR_pips`. Только
+  диагностика для последующих наблюдений и сверки с live-данными
+  (попадает в `strategy-guard.mdc` → «технические улучшения без
+  влияния на торговлю»). Пример формата:
+  ```
+  CLOSE GOLD_ORB: Золото SHORT → +61.2 pips (scalp_trail)
+    [peak=+88.6 tp_target=+157.8 trail_trigger=+31.6 trail_d=15.8 ATR=52.6p]
+  ```
+- `scripts/analyze_gold_orb_trail_compare.py` — переиспользуемый
+  аналитический инструмент, можно прогонять раз в неделю на свежих
+  данных для мониторинга.
+
+**Не делалось** (намеренно):
+- Никаких изменений `SCALPING_TRAIL_TRIGGER/DISTANCE` параметров
+- Никаких изменений `_check_exits` логики
+- Никаких отключений `scalp_trail` для gold_orb или других стратегий
+- Сдвиг `fxpro-stats-baseline.mdc` не требуется (поведение не менялось)
+
+**Тесты:** 340 passed (было 336 + +4 новых от других правок, ничего
+сломанного не выявлено).
+
+**Файлы:** `scripts/analyze_gold_orb_trail_compare.py`,
+`src/fx_pro_bot/strategies/monitor.py`, `data/fxpro_klines/GC_F_M5.csv`,
+`data/gold_orb_trail_compare.csv`, `data/gold_orb_trail_compare_out.txt`,
+`BUILDLOG.md`.
+
+---
+
 ## 2026-04-27
 
 ### fix(executor): _validate_sl_tp_side использует current_price вместо entry

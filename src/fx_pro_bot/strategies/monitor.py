@@ -120,11 +120,37 @@ class PositionMonitor:
                     )
                 )
                 stats[category] = stats.get(category, 0) + 1
-                log.info(
-                    "  CLOSE %s: %s %s → %+.1f pips (%s)",
-                    pos.strategy.upper(), display_name(pos.instrument),
-                    pos.direction.upper(), pips, exit_reason,
-                )
+                # Расширенный диагностический лог для scalp-exit'ов: показывает
+                # peak vs current и пороги trail/TP. Чисто информационно — нужно
+                # для оценки, насколько scalp_trail режет winners в gold_orb /
+                # session_orb. Источник: дискуссия 28.04.2026 + аналитика
+                # `scripts/analyze_gold_orb_trail_compare.py`.
+                if "scalp" in exit_reason and ps > 0:
+                    atr_pips = atr / ps
+                    trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips,
+                                  SCALPING_TRAIL_DISTANCE_PIPS)
+                    trail_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips,
+                                        SCALPING_TRAIL_TRIGGER_PIPS)
+                    if pos.strategy == "session_orb":
+                        tp_mult = ORB_TP_ATR_MULT
+                    elif pos.strategy == "gold_orb":
+                        tp_mult = GOLD_ORB_TP_ATR_MULT
+                    else:
+                        tp_mult = SCALPING_TP_ATR_MULT
+                    tp_target = max(tp_mult * atr_pips, SCALPING_TP_PIPS)
+                    log.info(
+                        "  CLOSE %s: %s %s → %+.1f pips (%s) "
+                        "[peak=%+.1f tp_target=%+.1f trail_trigger=%+.1f trail_d=%.1f ATR=%.1fp]",
+                        pos.strategy.upper(), display_name(pos.instrument),
+                        pos.direction.upper(), pips, exit_reason,
+                        peak_pips, tp_target, trail_trigger, trail_d, atr_pips,
+                    )
+                else:
+                    log.info(
+                        "  CLOSE %s: %s %s → %+.1f pips (%s)",
+                        pos.strategy.upper(), display_name(pos.instrument),
+                        pos.direction.upper(), pips, exit_reason,
+                    )
             else:
                 update_paper_positions(
                     self._store, pos.id, price, pos.direction,
