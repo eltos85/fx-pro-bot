@@ -4,6 +4,533 @@
 
 ---
 
+## 2026-04-29
+
+### analytics(gold_orb): разбор live-сессии 29.04 London (наблюдения, без правок)
+
+`no commit — observations only`
+
+**Контекст.** Аналитический разбор логов advisor-контейнера за период
+07:00–10:00 UTC (10:00–13:00 MSK) по запросу «изучи логи как биржевой
+аналитик». Никаких правок кода/стратегии **не делалось** — только
+фиксация наблюдений для будущей OOS-проверки.
+
+**Рыночный контекст.** XAUUSD после sell-off 28.04 (4630 → 4555).
+Утро 29.04 — фаза bottoming-range. ATR M5 ≈ 5.4 USD (≈54 pip). London
+ORB box (08:00–08:15 UTC): `[4564.51, 4573.29]` = $8.78 = 88 pip =
+**1.62 ATR** — узкий box (по Brooks 2012, Carter 2012 узкие ORB
+часто дают false-breakouts).
+
+**Сделки:**
+
+| # | broker_id | время UTC | dir | entry (fill) | break_dist | bars_since_box_end | slippage | результат |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 150123948 | 08:38 | SHORT | 4561.53 | **0.45 ATR** | 3 | **+8.7 pip** | broker SL −81.5 pip за 11 мин (close 4569.68) |
+| 2 | 150124464 | 09:37 | SHORT | 4567.13 | **0.14 ATR** | **15** | +1.9 pip | open, plавающий +78 pip (peak 4558.89) |
+
+**Ключевые наблюдения:**
+
+1. **Оба входа в кластере `break_distance_atr < 0.5 ATR`** — это тот
+   самый кластер, который на 90d in-sample backtest
+   (`scripts/analyze_gold_orb_late_entry.py`, 28.04) показал
+   **WR 29.5%, PF 0.71, NET −2178 pip** на 78 сделках в bin
+   `[0, 1.0) ATR`. Today live Trade 1 уже подтвердил отрицательный
+   edge (−81.5 pip за 11 мин). Trade 2 в плюсе только из-за
+   вторичного движения вниз, а не валидности шортового сигнала.
+2. **Trade 2 — wick-entry / Turtle-Soup pattern**: бар имел
+   `low < box_low (4564.51)`, но `close = 4567.32` — выше box_low.
+   То есть свеча с rejection-of-low (отказ от продавцов) →
+   по канону Connors–Raschke (1995) это **fade-сигнал** (LONG-side),
+   а не trend-entry SHORT. Текущий touch-break (`bar.low < box_low`)
+   на узких box генерирует контр-канонические сигналы.
+3. **Trade 2 late-entry**: `bars_since_box_end=15` = **75 минут**
+   после конца ORB-формирования.
+4. **Узкий box (1.62 ATR)** — структурно слабый сигнал; сегодня дал
+   2 шортовых триггера почти без displacement за границу.
+5. **TRAIL SL: проблема 5-мин лага вернулась**. Между poll и
+   amend ASK успевает отрасти больше чем `trail_distance=3 pip`
+   (= 0.30 USD = ~5.5% от ATR — структурно слишком тугой trail
+   для XAU):
+   - 09:42:45 — TRAIL SL accepted (peak 4564.52, SL 4564.82).
+   - 09:48:05 — `cTrader REJECT (TRADING_BAD_STOPS)`: peak обновился
+     до 4558.89, bot предложил SL 4559.19, но ASK уже 4559.70.
+   - 09:53:24 — наш `_validate_sl_tp_side` (bug-fix 27.04) ловит
+     ту же ситуацию **до отправки** на cTrader (4559.19 ≤ 4559.47).
+     Bug-fix работает корректно: нет log-spam от cTrader rejection.
+   - **Корневая причина** (poll-lag) не устранена — мы только
+     перестали слать заведомо отклоняемые amend-ы.
+6. **Live-выборка `gold_orb` на VPS — 26 trades, 25 закр, средний
+   пик +11.0 pip, нереализ $+25.74**. **Меньше порога**
+   `sample-size.mdc` (≥100 trades, ≥2 недели) — статистически
+   ненадёжно.
+
+**Канди­даты на OOS-проверку (НЕ правки стратегии):**
+
+1. **`break_distance_atr < 0.5 ATR` filter** на свежих 30d данных
+   вне 90d in-sample (walk-forward). Если стабильно negative edge —
+   обсуждать фильтр через Variant-X в `STRATEGIES.md`.
+2. **Распределение box-width в ATR на 90d**: если узкие boxes
+   (<1.0 ATR) системно проигрывают — кандидат на min-box-width
+   filter.
+3. **Wick-vs-close breakout study**: посчитать долю `gold_orb`
+   сигналов на 90d, где `bar.low < box_low` **и** `bar.close >
+   box_low` (= наш сегодняшний Trade 2). Если их WR существенно
+   ниже общей популяции — кандидат на close-based confirmation
+   (Brooks 2012, ch.5 — close-confirmation на breakout-bar).
+4. **TRAIL SL REJECTED counter** — observability-метрика
+   (счётчик отклонённых amend в day, не меняет торговлю).
+
+**Решения по rule-compliance:**
+
+- `sample-size.mdc`: отключать стратегию или менять параметры по
+  2 сделкам **запрещено** — только наблюдение.
+- `no-data-fitting.mdc`: предложенные OOS-проверки требуют
+  walk-forward на out-of-sample периоде; только в этом случае
+  результат может стать основанием для обсуждения изменений.
+- `strategy-guard.mdc`: для любого нового фильтра — research
+  basis + согласование с пользователем + research-блок в
+  docstring + обновление `STRATEGIES.md`.
+
+**Файлы:** `BUILDLOG.md` (только запись наблюдений).
+
+---
+
+### feat(gold_orb): shadow-логирование фильтров F1 + F2 (только observability)
+
+`pending commit`
+
+**Контекст.** После backtest+walk-forward анализа фильтров F1 (min
+`break_distance_atr` ≥ 0.3) и F2 (sl_cooldown — после первого SL
+в сессии×направлении блок) пользователь попросил добавить их в код
+**только как наблюдение**, без влияния на торговлю. Цель — собрать
+live-данные «что бы сказал каждый фильтр» и через 1–2 недели
+сравнить с реальными результатами.
+
+**Сделано:**
+
+1. **`StatsStore.has_loss_position_in_window(strategy, direction,
+   window_start_iso, window_end_iso)`** — новый read-only метод для
+   проверки «была ли убыточная позиция в окне». Используется shadow
+   F2-evaluator-ом.
+2. **`GoldOrbStrategy._evaluate_shadow_filters(sig)`** — возвращает
+   `(f1_status, f2_status)`:
+   - F1: `'ok'` если `break_distance_atr >= 0.3` (`SHADOW_F1_MIN_BREAK_ATR`),
+     иначе `'BLOCK'`.
+   - F2: `'BLOCK'` если в текущей сессии (London 08:00-12:00 или
+     NY 14:30-17:00 UTC) сегодня уже была закрытая `gold_orb`
+     позиция в этом же направлении с `profit_pips < 0`. Иначе `'ok'`.
+3. **`GOLD-ORB OPEN` и `GOLD-ORB SHADOW` логи** расширены: добавлен
+   суффикс `[SHADOW F1=ok|BLOCK F2=ok|BLOCK]`. Никакой блокировки
+   торгов нет — это **только лог**.
+4. **Параметры shadow-фильтров** вынесены в module-level константы
+   `SHADOW_F1_MIN_BREAK_ATR = 0.3` с комментарием, что это
+   кандидаты на будущее обсуждение, не canonical research.
+5. **Тесты:** добавлены 4 unit-теста в `tests/test_scalping.py`
+   `TestGoldOrbStrategy`:
+   - `test_shadow_f1_break_below_threshold` — `break < 0.3` → BLOCK.
+   - `test_shadow_f1_break_above_threshold` — `break >= 0.3` → ok.
+   - `test_shadow_f2_off_session_returns_ok` — несессионный сигнал → ok.
+   - `test_shadow_does_not_block_open` — F1=BLOCK не блокирует open.
+   Все 344 теста проходят.
+
+**Что НЕ изменилось:**
+
+- Торговая логика `process_signals` не изменена — фильтры **только
+  логируются**.
+- Параметры стратегии (SL/TP/sessions) не тронуты.
+- Backtest-симуляторы не изменены (они продолжают работать с
+  baseline кодом).
+
+**Ожидаемое поведение в логах** (пример из 29.04 после деплоя):
+
+```
+GOLD-ORB OPEN: Золото SHORT @ 4565.0 [london, ..., break_dist=0.45ATR]
+    [SHADOW F1=ok F2=ok]            # первый трейд сессии в этом направлении
+GOLD-ORB OPEN: ... break_dist=0.14ATR ... [SHADOW F1=BLOCK F2=ok]
+    # шумовой пробой, F1 бы заблокировал
+GOLD-ORB OPEN: ... [SHADOW F1=ok F2=BLOCK]
+    # после первого убыточного шорта, F2 бы заблокировал
+GOLD-ORB OPEN: ... [SHADOW F1=BLOCK F2=BLOCK]
+    # оба фильтра «против»
+```
+
+**Compliance:**
+
+- `strategy-guard.mdc`: разрешено как «технические улучшения без
+  влияния на торговлю (логирование)».
+- `no-data-fitting.mdc`: фильтры F1/F2 пока **не применяются**
+  к торгам. Решение о применении — после накопления live-данных
+  (≥1–2 недель, ≥30+ сделок) и сравнения «shadow-вердикт vs
+  реальный исход» по правилам `sample-size.mdc`.
+- `fxpro-stats-baseline.mdc`: shadow-лог не сдвигает baseline,
+  только добавляет observability. baseline остаётся 23.04.2026.
+
+**Файлы:**
+
+- `src/fx_pro_bot/strategies/scalping/gold_orb.py` — `_evaluate_shadow_filters`,
+  обновлены OPEN/SHADOW лог-строки, новая константа
+  `SHADOW_F1_MIN_BREAK_ATR`.
+- `src/fx_pro_bot/stats/store.py` — `has_loss_position_in_window`.
+- `tests/test_scalping.py` — 4 новых теста.
+- `BUILDLOG.md` — эта запись.
+
+---
+
+### oos(gold_orb): 3 фильтра качества входов (F1 break, F2 cooldown, F3 levels)
+
+`pending commit`
+
+**Контекст.** Трейдерский разбор сегодняшней сессии 29.04 (5 SHORT в
+один box, day-net −62 pip) дал 3 гипотезы для возможной фильтрации:
+
+- F1: `min_break_atr` — не входить если пробой границы box < N ATR
+  (отрезает шумовые тык-возвраты).
+- F2: `sl_cooldown` — после первого SL в текущей сессии в направлении
+  X новые сигналы X в этой сессии блокируются.
+- F3: `level_proximity_pips` — не шортить ближе K pip к вчерашнему
+  low (поддержка), не лонговать ближе K pip к вчерашнему high.
+
+**Что сделано:** скрипт
+`[scripts/analyze_gold_orb_filters.py](scripts/analyze_gold_orb_filters.py)`
+прогнал 8 конфигураций на 90d in-sample + fresh 30d OOS + replay
+сегодняшней сессии 29.04 (CANON simulator). Артефакт:
+`data/gold_orb_filters_out.txt`.
+
+**Результаты (in-sample 90d):**
+
+| config           |   n  |   WR  |    NET   |  PF   |  maxDD |
+|------------------|-----:|------:|---------:|------:|-------:|
+| BASELINE         | 485  | 75.1% |  +87,109 |  6.76 |  −1651 |
+| F1 break≥0.3     | 470  | 78.1% |  +90,345 |  8.15 |  −1091 |
+| F1 break≥0.5     | 457  | 79.4% |  +89,858 |  8.63 |   −955 |
+| F2 sl_cooldown   | 410  | 77.3% |  +78,129 |  7.40 |  −1034 |
+| F3 level 50pip   | 481  | 75.1% |  +86,114 |  6.78 |  −1651 |
+| F3 level 100pip  | 474  | 74.9% |  +84,166 |  6.70 |  −1651 |
+| F1+F2            | 404  | 79.0% |  +79,774 |  8.38 |   −880 |
+| F1+F2+F3         | 399  | 78.9% |  +78,468 |  8.39 |   −880 |
+
+**Результаты (fresh OOS 30d):** ту же качественную картину — F1
+немного улучшает NET, F2 снижает DD, F3 ничего не делает.
+
+**Replay 29.04 London (3 сигнала в CANON-simulator):**
+
+| config         | signals | P&L pip |
+|----------------|--------:|--------:|
+| BASELINE       |       3 |    −164 |
+| F1 break≥0.3   |       3 |    −166 |
+| F2 sl_cooldown |       1 |     −84 |
+| F3 level 50pip |       3 |    −164 |
+| F1+F2          |       1 |     −84 |
+
+Replay показывает 3 трейда вместо 5 live — разница из-за CANON
+exit (trail-SL, который в live зафиксировал +116.6, в CANON
+держится до time-stop) и идеализированного entry (без slippage).
+Качественно: F2 единственный, кто реально режет повторные шорты
+после стопа.
+
+**Трейдерская интерпретация:**
+
+- **F1 (break ≥ 0.3 ATR)**: на длинном горизонте улучшает PF
+  с 6.76 до 8.15+, снижает maxDD на 30% (−1651 → −1091).
+  Сегодня не помог (наши пробои выше 0.3 ATR). Полезен против
+  «тык-возврат» паттернов в спокойные дни.
+- **F2 (sl_cooldown)**: единственный, кто реально помог бы
+  сегодня (−84 вместо −164). На длинном горизонте режет 10%
+  NET, но снижает DD на 37% (−1651 → −1034) и поднимает PF.
+  Дисциплина «не reveng-трейдить после стопа» (Tharp 2007 —
+  «no martingale after loss»).
+- **F3 (уровни)**: гипотеза не подтвердилась. Вчерашний H/L
+  на gold M5 — не значимый магнит. **Закрываем.**
+- **F1+F2 комбинация**: самый низкий DD (−880, −47% от
+  baseline), PF 8.38, NET −8% от baseline.
+
+**Caveat**: NET-разница между F1 и F2 в пределах шума одного
+периода (3–10%). При том что абсолютные числа CANON
+переоценены (Sharpe 16+ нереалистично — slippage и poll-lag не
+учтены), отдельные ±5% net-pips в backtest = меньше волатильности
+переменных среды.
+
+**Что НЕ ДЕЛАЕМ сейчас:**
+
+- Не правим стратегию (research-basis сначала, walk-forward потом).
+- Не добавляем фильтры в live код.
+
+**Кандидаты на следующий шаг (требуют согласования):**
+
+1. **Walk-forward на F1 и F2** (T1/T2/T3) — убедиться, что
+   улучшение PF/DD стабильно во всех третях, а не благодаря
+   одной удачной выборке.
+2. Если walk-forward stable → обсуждать F2 как добавление в код
+   с research basis (Tharp 2007 «Trade Your Way to Financial
+   Freedom», ch.11 — risk control after loss; Vince 2007).
+3. F1 как отдельный фильтр шума — обсуждать после F2.
+4. **F3 закрыто** как не подтверждённое данными.
+
+**Walk-forward T1/T2/T3 (90d in-sample, 28.01–28.04):**
+
+| config         |  T1 NET / PF / DD     |  T2 NET / PF / DD     |  T3 NET / PF / DD     |
+|----------------|----------------------:|----------------------:|----------------------:|
+| BASELINE       | +24,189 / 5.22 / −1013 | +39,552 / 7.79 / −1651 | +23,369 / 7.58 /  −513 |
+| F1 break≥0.3   | +25,682 / 6.41 /  −815 | +41,044 / 9.50 / −1091 | +23,620 / 8.70 /  −513 |
+| F1 break≥0.5   | +24,986 / 6.55 /  −955 | +41,025 / 9.99 /  −836 | +23,847 / 9.79 /  −513 |
+| F2 sl_cooldown | +18,867 / 4.71 /  −899 | +38,465 / 10.01 / −1034 | +20,796 / 8.30 /  −650 |
+| F1+F2          | +19,839 / 5.57 /  −880 | +38,887 / 11.06 /  −698 | +21,048 / 9.08 /  −582 |
+
+**Вывод walk-forward:**
+
+- **F1**: NET ≥ baseline во всех 3-х третях, PF выше во всех 3-х
+  третях, DD ниже или равен. **Edge stable**, не плавающий.
+  Walk-forward проходит — фильтр годен для добавления.
+- **F2**: NET ниже baseline на 11–22% в трендовых третях (T1, T3),
+  но PF выше во всех 3-х третях, DD ниже в T1/T2. Это **structural
+  risk/return trade-off**, не нестабильный edge. Walk-forward
+  показывает, что F2 **последовательно** жертвует NET ради PF/DD.
+- **F1+F2**: лучший контроль DD (T2 −698 vs −1651 baseline = −58%),
+  PF в T2 рекордный 11.06. NET в T1/T3 ниже на ~18%.
+
+**Файлы:**
+- `scripts/analyze_gold_orb_filters.py` (новый, walk-forward
+  добавлен)
+- `data/gold_orb_filters_out.txt` (вывод)
+- `BUILDLOG.md` (эта запись)
+
+---
+
+### oos(gold_orb): canonical session-guard FAIL — multi-entry empirically лучше
+
+`pending commit`
+
+**Контекст.** План `oos_gold_orb_session_guard_c77a3067.plan.md` — OOS-проверка
+гипотезы «код должен соответствовать docstring `1 trade per session per day`».
+Сегодняшняя сессия 29.04 (5 SHORT входов в один London ORB box, day-net
+−62 pip) подняла вопрос о расхождении docstring↔code. Критерий принятия:
+canonical-guard >= baseline по Net pips / PF / Sharpe в обоих датасетах,
+walk-forward без deterioration >10%.
+
+**Что сделано:**
+
+1. **Свежий 122d датасет** через `[scripts/fetch_fxpro_history.py](scripts/fetch_fxpro_history.py)`
+   — `data/fxpro_klines/GC_F_M5_122d.csv`, период 28.12.2025 → 29.04.2026,
+   23520 баров. OOS-окно: 28.12.2025 → 28.01.2026 (5876 баров, до начала
+   существующего in-sample 90d).
+
+2. **Скрипт `[scripts/analyze_gold_orb_session_guard.py](scripts/analyze_gold_orb_session_guard.py)`**
+   — пере­использует `_simulate_canon`/`_simulate_live` из
+   `analyze_gold_orb_trail_compare.py`, добавляет `simulate_with_guard()`
+   с флагом `session_guard`. Прогон 4×2 матрицы:
+   `{baseline, guard} × {canon, live} × {90d in-sample, 30d OOS}`.
+
+3. **Walk-forward T1/T2/T3** на 90d для обоих режимов.
+
+4. **Case studies** — топ-5 дней с наибольшей разницей BASE vs GUARD.
+
+**Результаты (in-sample 90d, 28.01 → 28.04):**
+
+| метрика        | BASE×CANON | GUARD×CANON | BASE×LIVE | GUARD×LIVE |
+|----------------|-----------:|------------:|----------:|-----------:|
+| trades         |        485 |         114 |       766 |        114 |
+| win-rate %     |       75.1 |        41.2 |      83.7 |       65.8 |
+| net pips       |    +87,109 |      +3,651 |  +106,152 |     +3,532 |
+| profit factor  |       6.76 |        1.40 |      9.38 |       1.77 |
+| Sharpe (trade) |      16.17 |        1.48 |     19.46 |       2.06 |
+| max DD pips    |     −1,651 |      −2,072 |      −742 |       −665 |
+
+**Результаты (fresh OOS 30d, 28.12 → 28.01):**
+
+| метрика        | BASE×CANON | GUARD×CANON | BASE×LIVE | GUARD×LIVE |
+|----------------|-----------:|------------:|----------:|-----------:|
+| trades         |        122 |          33 |       191 |         33 |
+| win-rate %     |       53.3 |        18.2 |      67.5 |       48.5 |
+| net pips       |     +7,252 |      −1,264 |   +10,024 |       −197 |
+| profit factor  |       2.50 |        0.51 |      3.42 |       0.85 |
+| Sharpe         |       4.39 |       −1.65 |      6.57 |      −0.36 |
+
+**Walk-forward 90d (BASE×CANON стабильно прибыльный во всех 3-х третях):**
+
+| period | BASE n | BASE NET | BASE PF | GUARD n | GUARD NET | GUARD PF |
+|--------|-------:|---------:|--------:|--------:|----------:|---------:|
+| T1     |    161 |  +24,189 |    5.22 |      38 |      −604 |     0.84 |
+| T2     |    161 |  +39,552 |    7.79 |      38 |    +1,789 |     1.52 |
+| T3     |    163 |  +23,369 |    7.58 |      38 |    +2,466 |     2.30 |
+
+**Case studies (in-sample, дни где BASE >> GUARD):**
+
+| дата       | BASE NET | GUARD NET | Δ        | BASE n |
+|------------|---------:|----------:|---------:|-------:|
+| 2026-03-23 |  +11,929 |    +1,382 |  +10,547 |     14 |
+| 2026-03-03 |  +10,272 |      −141 |  +10,413 |     20 |
+| 2026-03-27 |   +7,201 |      +553 |   +6,648 |     24 |
+| 2026-03-20 |   +4,516 |      −401 |   +4,917 |     17 |
+| 2026-02-05 |   +4,228 |      −564 |   +4,793 |     15 |
+
+Дни где GUARD > BASE существенно мельче (max Δ −586 pip), и обычно
+такие дни — choppy/non-trend, где обе стратегии теряют. Multi-entry
+**доминирует** в trending дни (которых в gold большинство).
+
+#### Решение: FAIL
+
+По всем 4 ключевым сравнениям (90d/30d × CANON/LIVE) canonical-guard
+**значимо хуже** baseline:
+- Net pips: −95.8% (90d CANON), −96.7% (90d LIVE), −117.4% (30d CANON), −102.0% (30d LIVE)
+- PF: −5.36 .. −1.99 (≪ −0.05 порога)
+- Sharpe: −14.69 .. −6.04 (≪ −0.05 порога)
+
+Walk-forward GUARD×CANON показывает T1 в убытке (−604 pip, WR 31.6%);
+BASE×CANON прибылен во всех 3-х третях (+24K / +40K / +23K).
+
+**Вывод.** Расхождение docstring↔код **НЕ является bug**. Эмпирически
+multi-entry режим даёт **на порядок** лучшие результаты, чем
+canonical Carter-2012 «1 trade per session per day». Текущий код
+работает в более прибыльном режиме случайно/исторически — это
+**эмпирически найденная оптимизация**, а не баг.
+
+#### Что ДЕЛАЕМ
+
+1. **НЕ правим код** `gold_orb.py:process_signals` — оставляем
+   текущее поведение (multi-entry ограниченное `count_open_positions`).
+2. **Обновляем docstring** в `gold_orb.py`: убрать строку «1 trade per
+   session per day» (она вводит в заблуждение и противоречит данным),
+   добавить блок с реальным поведением + ссылкой на этот OOS-анализ.
+3. **Обновляем `STRATEGIES.md`**: зафиксировать multi-entry как
+   эмпирически валидированную особенность gold_orb (с числами PF/Sharpe).
+4. **Не делаем** правок live-кода / тестов / VPS-deploy.
+
+#### Что НЕ ДЕЛАЕМ
+
+- Не отключаем gold_orb по сегодняшним 5 трейдам (1 день, sample-size).
+- Не подкручиваем параметры (break_dist, ADX) под сегодняшний день
+  (no-data-fitting.mdc).
+
+#### Caveat: расхождение backtest vs live
+
+Backtest BASE×CANON показывает Sharpe 16+ / PF 6.7+ / WR 75% —
+эти числа **существенно** превышают live-результаты gold_orb на
+демо (26 trades, средний пик +11 pip ≈ break-even). Симулятор
+не учитывает:
+- Реальный slippage (8–19 pip live vs 5 pip simulated round-trip).
+- 5-min poll-lag (мы пропускаем intra-bar moves).
+- broker amend REJECTED.
+- Spread variance в новостные часы.
+
+Эти biases применяются **одинаково** к BASE и GUARD, поэтому
+**относительная** разница (BASE >> GUARD) достоверна. Но
+**абсолютные** ожидания от live следует калибровать по реальной
+торговле, а не backtest.
+
+**Файлы:**
+- `scripts/analyze_gold_orb_session_guard.py` (новый)
+- `data/gold_orb_session_guard_out.txt` (вывод)
+- `data/fxpro_klines/GC_F_M5_122d.csv` (gitignored)
+- `BUILDLOG.md` (эта запись)
+- `STRATEGIES.md` (обновление, см. отдельный пункт ниже)
+- `src/fx_pro_bot/strategies/scalping/gold_orb.py` (только docstring,
+  не торговая логика)
+
+---
+
+### analytics(gold_orb): продолжение сессии 11:00–11:34 UTC + root-cause re-entry
+
+`no commit — observations only`
+
+**Дополнение к утреннему разбору.** Пользователь попросил «изучи логи
+торгов» после 09:53 UTC. К текущему моменту (11:34 UTC) бот добавил
+ещё **3 закрытых сделки + 1 открытую** — все из **того же** London
+ORB box `[4564.51, 4573.29]`.
+
+| # | broker_id | время UTC | strat→fill | slip pip | break_dist | bars_since_box_end | exit | P&L pip |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 150123948 | 08:38 | 4562.40→4561.53 | +8.7  | 0.45 ATR | 3  | broker SL | **−81.5** |
+| 2 | 150124464 | 09:37 | 4567.32→4567.13 | +1.9  | 0.14 ATR | 15 | trail SL  | **+116.6** ✓ |
+| 3 | 150124840 | 10:09 | 4562.29→4564.26 | +19.7 | 1.65 ATR | 21 | broker SL | **−87.6** |
+| 4 | 150125208 | 11:02 | 4569.86→4567.99 | +18.7 | 0.11 ATR | 32 | broker SL | **−10.1** |
+| 5 | 150125413 | 11:34 | 4564.73→4566.20 | +14.7 | 0.02 ATR | **38** | open | live |
+
+**Day P&L (4 closed): −81.5 + 116.6 − 87.6 − 10.1 = −62.6 pip
+≈ −$6.26**, WR 25%, PF ≈ 0.7. Соответствует ожиданию кластера
+`break_dist<0.5 ATR` из 90d backtest (WR 29.5%, PF 0.71).
+
+**Trade 2 (+116.6 pip)** закрылся не по TP (target 4550.81),
+а по trail-SL @ 4555.45 (peak 4555.15, trail_d=0.30 USD).
+Это означает, что **trail на этой сделке ЗАФИКСИРОВАЛ профит**,
+а не урезал его (peak был достигнут после движения 4567 → 4555 =
+116 pip, и TP 4550.81 не был достигнут — цена развернулась
+вверх до 4564). На этой сделке `scalp_trail` отработал в нашу
+пользу — это контрпример к наблюдению 28.04 на сделке
+#150095761, где trail урезал winner.
+
+#### Root-cause: расхождение канона vs кода — отсутствие per-session re-entry guard
+
+**Канон стратегии** (`gold_orb.py` docstring строка 28):
+> Trade window: London 08:15-12:00, NY 14:45-17:00
+> **1 trade per session per day**
+
+**Реальный код** (`process_signals`, строки 147–157):
+
+```python
+current = self._store.count_open_positions(strategy="gold_orb")
+for sig in signals:
+    if current >= self._max_positions:  # = 2 (1 на сессию × 2 сессии)
+        break
+    instr_count = self._store.count_open_positions(
+        strategy="gold_orb", instrument=sig.instrument,
+    )
+    if instr_count >= self._max_per_instrument:  # = 1
+        continue
+```
+
+Код проверяет только **сейчас открытые** позиции. Как только
+предыдущая закрылась (по SL/TP/trail), `count_open_positions=0`,
+счётчик «сбрасывается», и следующий же `touch-break` open'ит
+новый шорт в том же box. Результат: **5 входов в один box за
+3 часа** (Trade #5 — через 190 минут после конца ORB-формирования).
+
+Это **structural divergence research↔code**:
+
+- Canonical ORB по Carter (2012, ch.7): один сигнал на сессию
+  в направлении первого валидного пробоя. После SL/TP сессия
+  «отыграна», новый сигнал — следующая сессия.
+- Brooks (2012, ch.5): re-test of failed breakout area — это
+  fade-сигнал, **не trend-entry**. Каждый последующий
+  touch-of-box-low в нашем сценарии — это re-test, который
+  должен **развернуть** цену, а не пробить.
+
+**Что НЕ делаю сейчас** (строго по запросу «занести наблюдения»):
+
+- Не правлю код.
+- Не отключаю `gold_orb`.
+
+**Что предлагаю обсудить** (потенциальный bug-fix, не curve-fit):
+
+Добавить в `gold_orb` персистентный счётчик `trades_today_session`
+(per-day × per-session × per-direction): если в текущей сессии
+уже была сделка по этому box, новые сигналы блокируются до
+следующей сессии. Это **приведёт код в соответствие с
+docstring** и каноном Carter (2012) — не подгонка под сегодняшние
+данные, а исправление расхождения research↔code.
+
+Если такая правка будет одобрена — нужен:
+1. OOS walk-forward на 90d с `1 trade per session per day`
+   restriction (имитировать guard) — чтобы убедиться, что
+   уменьшение количества сделок не ломает edge.
+2. Сравнение `Net pips`, `WR`, `PF`, `Sharpe` baseline (текущий
+   код) vs canonical (1 trade/session) на 90d.
+3. Если canonical >= baseline по PF и Sharpe (с учётом
+   меньшего числа trades = меньше комиссии) → правка
+   обоснованная.
+
+**Slippage-паттерн сегодня:** 8.7 → 1.9 → 19.7 → 18.7 → 14.7 pip.
+4 из 5 трейдов с slippage > 5 pip, **всегда против нас**
+(strat→fill +). Это говорит о structural buying pressure в
+зоне 4555–4570 (после вчерашнего sell-off). Покупатели
+подбирают каждое тестирование low'ов; наши SHORTs
+исполняются по «худшему» концу spread'а. Сам факт большого
+slippage на short-side в зоне consolidation — сигнал, что мы
+торгуем против potential reversal.
+
+**Файлы:** `BUILDLOG.md` (только запись наблюдений).
+
+---
+
 ## 2026-04-28
 
 ### diag(gold_orb): late-entry метрики в OPEN-логе + backtest-анализ

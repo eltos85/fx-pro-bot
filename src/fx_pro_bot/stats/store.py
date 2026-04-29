@@ -579,6 +579,32 @@ class StatsStore:
             row = conn.execute(f"SELECT COUNT(*) AS c FROM positions {where}", params).fetchone()
         return int(row["c"])
 
+    def has_loss_position_in_window(
+        self,
+        strategy: str,
+        direction: str,
+        window_start_iso: str,
+        window_end_iso: str,
+    ) -> bool:
+        """Проверка: была ли закрытая позиция стратегии × направления с
+        profit_pips < 0 в окне created_at ∈ [window_start_iso, window_end_iso).
+
+        Нужно для shadow-логирования F2 (sl_cooldown) — НЕ блокирует
+        торговлю, только наблюдение.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM positions
+                WHERE strategy=? AND direction=? AND status='closed'
+                  AND profit_pips < 0
+                  AND created_at >= ? AND created_at < ?
+                LIMIT 1
+                """,
+                (strategy, direction, window_start_iso, window_end_iso),
+            ).fetchone()
+        return row is not None
+
     def position_summary_by_strategy(self) -> list[dict[str, object]]:
         with self._connect() as conn:
             rows = conn.execute(

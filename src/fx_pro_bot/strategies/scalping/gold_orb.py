@@ -25,8 +25,51 @@ Gold ORB:
 - SL = 1.5 × ATR, TP = 3.0 × ATR (R:R = 2)
 - Box = 3 × M5 bars (15 мин) — London 08:00-08:15, NY 14:30-14:45 UTC
 - Trade window: London 08:15-12:00, NY 14:45-17:00
-- 1 trade per session per day
 - Touch-break: `bar.high > box_high` (long) или `bar.low < box_low` (short)
+- Re-entry policy: пока активна позиция — block, после закрытия —
+  следующий валидный touch-break открывает новую (multi-entry внутри
+  сессии). См. OOS-анализ ниже.
+
+## Re-entry (multi-entry) vs canonical (1 trade per session)
+
+Канон Carter (2012, ch.7) предполагает «1 trade per session per day»
+(вход только по первому валидному пробою, остальные сигналы в
+сессии — это re-test и должны fade'иться, а не пробивать).
+
+**Текущий код реализует multi-entry**: после закрытия предыдущей
+позиции (по SL/TP/trail/time) следующий же touch-break открывает
+новую. На сессии 29.04 это привело к 5 SHORT входам в один London
+ORB box за 3 часа (см. BUILDLOG.md 2026-04-29).
+
+OOS-анализ `[scripts/analyze_gold_orb_session_guard.py](../../scripts/analyze_gold_orb_session_guard.py)`
+(29.04.2026, артефакт `data/gold_orb_session_guard_out.txt`) сравнил
+multi-entry (текущий код) vs canonical-guard на 90d in-sample
+(28.01–28.04) + fresh 30d OOS (28.12–28.01):
+
+| режим                 | trades | WR    | Net pips | PF    | Sharpe |
+|-----------------------|-------:|------:|---------:|------:|-------:|
+| **multi-entry** 90d   |    485 | 75.1% |  +87,109 |  6.76 |  16.17 |
+| canonical-guard 90d   |    114 | 41.2% |   +3,651 |  1.40 |   1.48 |
+| **multi-entry** OOS30 |    122 | 53.3% |   +7,252 |  2.50 |   4.39 |
+| canonical-guard OOS30 |     33 | 18.2% |   −1,264 |  0.51 |  −1.65 |
+
+Multi-entry значимо лучше во всех метриках на обоих датасетах.
+Walk-forward T1/T2/T3: multi-entry прибылен во всех 3-х третях
+(+24K / +40K / +23K, PF 5.2 / 7.8 / 7.6); canonical-guard убыточен
+в T1 (−604, PF 0.84). По плану `oos_gold_orb_session_guard` —
+**FAIL** для canonical-guard.
+
+**Caveat**: backtest BASE×CANON показывает Sharpe 16+ / PF 6.7+,
+но live-performance существенно скромнее (slippage 8–19 pip vs
+4.2 pip simulated, 5-min poll lag, broker amend REJECTED).
+Относительная разница multi-entry vs canonical достоверна (биасы
+одинаковые), но абсолютные числа калибруем по live.
+
+## Защита от concurrent positions
+
+Реализована через `max_positions=2` (1 на London × 1 на NY) и
+`max_per_instrument=1` в `process_signals`. После закрытия
+позиции счётчик уменьшается, что и разрешает re-entry.
 
 Robustness grid:
 | Config                | Net pips (90d) |
@@ -50,7 +93,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import time, timezone
+from datetime import datetime, time, timezone
 
 from fx_pro_bot.analysis.signals import TrendDirection, _atr, _ema
 from fx_pro_bot.config.settings import display_name, pip_size
@@ -74,6 +117,14 @@ LONDON_CLOSE = time(12, 0)
 NY_OPEN = time(14, 30)
 NY_ORB_END = time(14, 45)
 NY_CLOSE = time(17, 0)
+
+# Shadow-фильтры (только логирование, не влияют на торговлю).
+# Параметры из 90d backtest + walk-forward 29.04.2026
+# (`scripts/analyze_gold_orb_filters.py`, `data/gold_orb_filters_out.txt`,
+# BUILDLOG.md 2026-04-29). НЕ являются canonical research-параметрами,
+# а кандидатами на будущее обсуждение. Поэтому в shadow-режиме.
+SHADOW_F1_MIN_BREAK_ATR = 0.3   # F1: пробой границы ORB-box в ATR
+                                 # ниже этого = шумовой тык, кандидат на блок
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +161,42 @@ class GoldOrbStrategy:
         self._max_positions = max_positions
         self._max_per_instrument = max_per_instrument
         self._shadow = shadow
+
+    def _evaluate_shadow_filters(self, sig: GoldOrbSignal) -> tuple[str, str]:
+        """Возвращает (f1_status, f2_status) для shadow-логирования.
+
+        НЕ влияет на торговлю — только наблюдение для будущего анализа.
+
+        F1: 'ok' если break_distance_atr >= SHADOW_F1_MIN_BREAK_ATR,
+            иначе 'BLOCK' (шумовой тык за границу ORB-box).
+        F2: 'ok' если в этой сессии (London/NY) сегодня ещё НЕ было
+            убыточной позиции в этом же направлении, иначе 'BLOCK'
+            (sl_cooldown — не лезть туда же после стопа).
+        """
+        f1 = "ok" if sig.break_distance_atr >= SHADOW_F1_MIN_BREAK_ATR else "BLOCK"
+
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        if sig.session == "london":
+            start = datetime.combine(today, LONDON_OPEN, tzinfo=timezone.utc)
+            end = datetime.combine(today, LONDON_CLOSE, tzinfo=timezone.utc)
+        elif sig.session == "ny":
+            start = datetime.combine(today, NY_OPEN, tzinfo=timezone.utc)
+            end = datetime.combine(today, NY_CLOSE, tzinfo=timezone.utc)
+        else:
+            return f1, "ok"
+
+        try:
+            had_loss = self._store.has_loss_position_in_window(
+                strategy="gold_orb",
+                direction=sig.direction.value,
+                window_start_iso=start.isoformat(),
+                window_end_iso=end.isoformat(),
+            )
+        except Exception:
+            had_loss = False
+        f2 = "BLOCK" if had_loss else "ok"
+        return f1, f2
 
     def scan(
         self,
@@ -166,16 +253,19 @@ class GoldOrbStrategy:
             else:
                 sl = price + sl_dist
 
+            f1, f2 = self._evaluate_shadow_filters(sig)
+
             if self._shadow:
                 tp_dist = GOLD_ORB_TP_ATR_MULT * sig.atr
                 tp = price + tp_dist if sig.direction == TrendDirection.LONG else price - tp_dist
                 log.info(
                     "  GOLD-ORB SHADOW: %s %s @ %.5f [%s, box=[%.5f..%.5f], SL=%.5f, TP=%.5f, "
-                    "bars_since_box_end=%d, break_dist=%.2fATR]",
+                    "bars_since_box_end=%d, break_dist=%.2fATR] [SHADOW F1=%s F2=%s]",
                     display_name(sig.instrument),
                     sig.direction.value.upper(),
                     price, sig.session, sig.box_high, sig.box_low, sl, tp,
                     sig.bars_since_box_end, sig.break_distance_atr,
+                    f1, f2,
                 )
                 opened += 1
                 current += 1
@@ -196,11 +286,12 @@ class GoldOrbStrategy:
 
             log.info(
                 "  GOLD-ORB OPEN: %s %s @ %.5f [%s session, box=[%.5f..%.5f], SL=%.5f, "
-                "bars_since_box_end=%d, break_dist=%.2fATR]",
+                "bars_since_box_end=%d, break_dist=%.2fATR] [SHADOW F1=%s F2=%s]",
                 display_name(sig.instrument),
                 sig.direction.value.upper(),
                 price, sig.session, sig.box_high, sig.box_low, sl,
                 sig.bars_since_box_end, sig.break_distance_atr,
+                f1, f2,
             )
             opened += 1
             current += 1

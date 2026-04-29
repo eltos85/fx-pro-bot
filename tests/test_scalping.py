@@ -317,6 +317,65 @@ class TestGoldOrbStrategy:
         opened2 = strat.process_signals([sig], {GOLD_ORB_INSTRUMENT: 2002.0})
         assert opened2 == 0
 
+    def test_shadow_f1_break_below_threshold(self, tmp_path):
+        """Shadow F1: break_distance_atr < 0.3 → BLOCK (только лог)."""
+        store = _store(tmp_path)
+        strat = GoldOrbStrategy(store)
+        sig = GoldOrbSignal(
+            instrument=GOLD_ORB_INSTRUMENT, direction=TrendDirection.LONG,
+            source=GOLD_ORB_SOURCE, entry_level=2001.0,
+            box_high=2001.0, box_low=1999.0, atr=5.0,
+            session="london", detail="test",
+            bars_since_box_end=2, break_distance_atr=0.10,
+        )
+        f1, f2 = strat._evaluate_shadow_filters(sig)
+        assert f1 == "BLOCK"
+        assert f2 == "ok"
+
+    def test_shadow_f1_break_above_threshold(self, tmp_path):
+        """Shadow F1: break_distance_atr >= 0.3 → ok."""
+        store = _store(tmp_path)
+        strat = GoldOrbStrategy(store)
+        sig = GoldOrbSignal(
+            instrument=GOLD_ORB_INSTRUMENT, direction=TrendDirection.LONG,
+            source=GOLD_ORB_SOURCE, entry_level=2001.0,
+            box_high=2001.0, box_low=1999.0, atr=5.0,
+            session="london", detail="test",
+            bars_since_box_end=2, break_distance_atr=0.50,
+        )
+        f1, f2 = strat._evaluate_shadow_filters(sig)
+        assert f1 == "ok"
+
+    def test_shadow_f2_off_session_returns_ok(self, tmp_path):
+        """Shadow F2: для несессионных сигналов вернуть ok (нет окна)."""
+        store = _store(tmp_path)
+        strat = GoldOrbStrategy(store)
+        sig = GoldOrbSignal(
+            instrument=GOLD_ORB_INSTRUMENT, direction=TrendDirection.LONG,
+            source=GOLD_ORB_SOURCE, entry_level=2001.0,
+            box_high=2001.0, box_low=1999.0, atr=5.0,
+            session="unknown", detail="test",
+            bars_since_box_end=0, break_distance_atr=0.50,
+        )
+        f1, f2 = strat._evaluate_shadow_filters(sig)
+        assert f1 == "ok"
+        assert f2 == "ok"
+
+    def test_shadow_does_not_block_open(self, tmp_path):
+        """Shadow F1=BLOCK не должен мешать реальному открытию позиции."""
+        store = _store(tmp_path)
+        strat = GoldOrbStrategy(store, shadow=False)
+        sig = GoldOrbSignal(
+            instrument=GOLD_ORB_INSTRUMENT, direction=TrendDirection.LONG,
+            source=GOLD_ORB_SOURCE, entry_level=2001.0,
+            box_high=2001.0, box_low=1999.0, atr=5.0,
+            session="london", detail="test",
+            bars_since_box_end=0, break_distance_atr=0.05,  # F1=BLOCK
+        )
+        opened = strat.process_signals([sig], {GOLD_ORB_INSTRUMENT: 2002.0})
+        assert opened == 1
+        assert store.count_open_positions(strategy="gold_orb") == 1
+
     def test_session_detection_london(self):
         base_london = datetime(2026, 3, 28, 9, 0, tzinfo=UTC)
         bars = [

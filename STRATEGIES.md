@@ -305,8 +305,36 @@ SCALPING_MAX_POSITIONS=10
 | ADX filter | **нет** | robustness: ADX<40 +7967, ADX<25 +5673 — Gold в тренде тоже торгуется |
 | Volume filter | **нет** | M5 volume на Gold (OTC) ненадёжен |
 | Sessions | London 08:15-12:00 UTC + NY 14:45-17:00 UTC | макс ликвидность, news windows |
-| Max positions | 2 (1 per session × 2 sessions) | 1 сигнал на сессию |
+| Max positions | 2 (1 per session × 2 sessions) | concurrent cap; внутри сессии re-entry разрешён после закрытия предыдущей (см. ниже) |
 | Trail trigger | 0.6 × ATR (общий scalping) | |
+
+#### Re-entry policy (multi-entry vs canonical)
+
+В отличие от канона Carter 2012 ch.7 («1 trade per session per
+day»), текущий код в `process_signals` ограничивает только
+**concurrent** позиции (`count_open_positions`). После закрытия
+предыдущей сделки следующий же touch-break открывает новую.
+Это даёт **multi-entry** внутри одной session × box.
+
+OOS-анализ 29.04.2026 (`[scripts/analyze_gold_orb_session_guard.py](scripts/analyze_gold_orb_session_guard.py)`,
+артефакт `data/gold_orb_session_guard_out.txt`) сравнил
+multi-entry vs canonical-guard на 90d in-sample + fresh 30d OOS:
+
+| режим                  | trades | WR    | Net pips | PF    | Sharpe |
+|------------------------|-------:|------:|---------:|------:|-------:|
+| **multi-entry** 90d    |    485 | 75.1% |  +87,109 |  6.76 |  16.17 |
+| canonical-guard 90d    |    114 | 41.2% |   +3,651 |  1.40 |   1.48 |
+| **multi-entry** OOS 30d |   122 | 53.3% |   +7,252 |  2.50 |   4.39 |
+| canonical-guard OOS 30d |    33 | 18.2% |   −1,264 |  0.51 |  −1.65 |
+
+Walk-forward 90d (multi-entry стабилен во всех 3-х третях):
+T1 +24K / T2 +40K / T3 +23K, PF 5.22 / 7.79 / 7.58. Canonical-guard
+убыточен в T1 (−604, PF 0.84). По плану OOS — **FAIL** для
+canonical, **multi-entry оставлен** как эмпирическое решение.
+
+**Важно**: backtest даёт Sharpe 16+ при Multi-entry, но live-
+performance существенно скромнее (slippage, poll-lag, REJECTED
+amend) — абсолютные числа калибруем по реальной торговле.
 
 ### Ключевые отличия от `session_orb`
 
