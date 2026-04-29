@@ -1,5 +1,106 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-04-29
+
+### chore(observation): крипто-апрель 2026 — двухлетний минимум волатильности
+`pending commit`
+
+**Без изменений в коде**, фиксация рыночного контекста для будущих
+срезов и обоснования невмешательства в параметры стратегий.
+
+**Контекст.** Пользователь спросил, нормально ли что Wave 6 (3 страты)
+за сутки 28-29.04 даёт ~1 сделку. Перепроверка реального рынка по
+независимым источникам подтверждает: апрель 2026 — это **самый тихий
+крипто-рынок за 2 года**.
+
+**Метрики (внешние источники, апрель 2026):**
+
+| Метрика | Значение | Источник |
+|---|---|---|
+| BTC 30-day Implied Volatility (BVIV) | **51.28% → 32.1%** (начало → середина апреля) | Phemex 04.2026, TrendXBit Week 16 |
+| BTC 30-day Realized Volatility (Binance VVI) | **0.38** — лоу с начала 2026 | CryptoQuant 13.04.2026 |
+| BTC 7-day Realized Vol | **18.2%** (-8.5pp WoW) | TrendXBit Week 16 |
+| BTC 14-day ATR | падает с середины марта | Phemex |
+| Bollinger Bandwidth (daily) | **<$3,500** — самое узкое с июля 2025 | Phemex |
+| BTC range за 50+ дней | $66k–$70k | Phemex |
+| BTC Daily Spot Volume WoW | **-21%** | TrendXBit |
+| Liquidations WoW | **-64%** ($428M) | TrendXBit |
+| Altcoin Season Index | **34-37** (для altseason нужно ≥75) | BYDFi 17.04, BeInCrypto |
+| BTC Dominance | **60.66%** (пробил 60%, цель 66%) | BeInCrypto 04.2026 |
+
+**Прямая цитата** (Phemex, апрель 2026):
+> "The 14-day Average True Range has been declining steadily since
+> mid-March, confirming what any trader watching the charts already
+> feels. **This is the quietest Bitcoin market in two years.**"
+
+**Двойной удар по альтам (наш whitelist ADA/SOL/SUI/TON/WIF):**
+1. **«ETF Liquidity Trap»** — институционалы покупают BTC через
+   спот-ETF, капитал не перетекает в альты. Раньше за рывком BTC шёл
+   alt-rally через 1-2 недели — в 2026 этот механизм сломан.
+2. **Altcoin Season Index 34** — альты системно отстают от BTC.
+3. **BTC Dominance прорвал 60%** (цель 66%) — капитал ещё больше
+   уходит из альтов.
+
+**Соответствие нашим логам:**
+- COF: ATR%/price у альтов **0.20-0.25%** при пороге 0.30 — фильтр
+  «низкая волатильность» режет 100% сигналов до фильтра RSI≥65.
+- VWAP: deviation от VWAP редко превышает 2 ATR (волатильность
+  сжата) — единичные сигналы только в часы 14-16 / 19-20 UTC.
+- ORB London: пробои коробки слабые, нет volume-spike 1.3×.
+
+Это **не баг порогов**, это рынок ещё ниже наших калибровочных
+порогов 90-day backtest'а (январь-март 2026).
+
+**Прогноз внешних аналитиков (когда волатильность вернётся):**
+- Phemex: «squeeze продолжается 50+ дней, исторический upper limit
+  ~60 дней (лето 2023). Breakout window — следующие 2-4 недели».
+- Volmex Labs: $3.5B BTC options delta на expiry 30 мая.
+- TrendXBit: триггеры — US CPI/PPI (23-24.04), 12 ETH ETF решений
+  SEC mid-May.
+
+**Решение по правилам.** По `sample-size.mdc` и `no-data-fitting.mdc`:
+- **НЕ** снижаем `COF_ATR_PCT_MIN=0.30` (research-anchor Variant E).
+- **НЕ** снижаем `DEVIATION_THRESHOLD=2.0` для VWAP (95% boundary HFT).
+- **НЕ** расширяем часы / символы / дни Wave 6 whitelist'а.
+- **НЕ** добавляем новые страты под текущий режим (curve-fitting к
+  одному регулярному эпизоду).
+
+Бот спроектирован под **trending+mean-reversion в нормальной
+волатильности**. В режиме сжатия волатильности он по дизайну стрелять
+не должен — это **feature, не bug** (избегает «death by a thousand
+cuts» на ложных пробоях, см. arongroups «Market Regime Trading»).
+
+**Что мониторим:**
+1. Funnel-логи COF: появятся ли ненулевые `low_rsi` (дойдём до RSI
+   проверки = ATR% поднялся ≥0.30)?
+2. Sigma BTC daily ranges: расширение из ~$3,500 в ≥$7,000 = выход из
+   squeeze.
+3. Внешние индексы: BVIV >50, Altcoin Season Index >50.
+
+При выходе из low-vol режима наши страты должны автоматически
+вернуться к ожидаемой по backtest'у частоте (~10 vwap-сделок/день,
+~1-2 cof-сделки/день/символ). Если **после** возврата волатильности
+n остаётся околонулевым — тогда есть основание для пересмотра
+параметров.
+
+**Источники:**
+- Phemex «Bitcoin Volatility Hits Two-Year Low» 04.2026:
+  https://phemex.com/blogs/bitcoin-volatility-lowest-in-two-years
+- TrendXBit Crypto Weekly Review Week 16 (14-20.04):
+  https://trendxbit.com/en/insights/2026-04-18-0858-insights/
+- CryptoQuant «BTC Vol on Binance Lowest Since Early 2026» 13.04:
+  https://cryptoquant.com/insights/quicktake/69dd01374217456e0a59b067
+- BeInCrypto «BTC Dominance 60.66%»:
+  https://beincrypto.com/bitcoin-dominance-explodes-to-60-66-and-buries-altseason-hopes-for-2026/
+- BYDFi Altcoin Season Index April 2026:
+  https://www.bydfi.com/en/cointalk/altcoin-season-index-april-2026-bitcoin-dominance-rotation
+- arongroups «Market Regime Trading Strategy Explained»:
+  https://arongroups.co/forex-articles/market-regime-trading/
+
+**Файлы:** только этот лог.
+
+---
+
 ## 2026-04-28
 
 ### feat(scalp_vwap): RR 1:0.75 → 1:1.5 (research-anchor Sword Red BTC / FMZQuant)
