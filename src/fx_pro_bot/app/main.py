@@ -8,7 +8,7 @@ import time
 from fx_pro_bot.advice.human import advice_for_signal
 from fx_pro_bot.analysis.scanner import active_signals, scan_instruments
 from fx_pro_bot.analysis.signals import TrendDirection, _atr
-from fx_pro_bot.config.settings import SCALPING_EXCLUDE_SYMBOLS, SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, calc_lot_size, display_name, is_crypto, pip_size, pip_value_usd, spread_cost_pips
+from fx_pro_bot.config.settings import SCALPING_EXCLUDE_SYMBOLS, SCALPING_EXTRA_SYMBOLS, Settings, broker_commission_usd, calc_lot_size, display_name, is_crypto, pip_size, pip_value_from_volume, pip_value_usd, spread_cost_pips
 from fx_pro_bot.strategies.monitor import (
     SCALPING_TP_PIPS, SCALPING_TRAIL_TRIGGER_PIPS, SCALPING_TRAIL_DISTANCE_PIPS,
     OUTSIDERS_CONFIRMED_AGGRESSIVE_TP,
@@ -1264,7 +1264,23 @@ def _update_broker_pnl(
     executor,
     closed_positions: list[tuple[str, int, str, str, float]],
 ) -> None:
-    """Запросить deal history и обновить P&L для закрытых брокером позиций."""
+    """Запросить deal history и обновить P&L для закрытых позиций.
+
+    Источник истины — `grossProfit` от cTrader API + реальный `volume`
+    из deal'а. Расчёт: `pnl_pips = grossProfit / pip_value_from_volume(symbol, vol)`.
+
+    Bug-fix 30.04.2026 (`fxpro-stats-baseline.mdc → ## Bug-fix'ы`):
+    - Раньше использовался `pip_value_usd(instrument)` (дефолт 0.01 lot
+      = $0.10/pip XAUUSD), что давало правильный P&L только если бот
+      открывал ровно `lot_size=0.01`. С переходом на ATR-scaled position
+      sizing (Tharp) volume стал переменным, и расчёт занижал/искажал
+      P&L (DID331537907 30.04: API +$12.40 = +62p, БД +33.1p).
+    - Раньше `executionPrice` (если был) использовался в первую очередь —
+      но это поле часто пустое и/или содержит entry initial position,
+      а не close fill. Теперь приоритет у `grossProfit` (он всегда точный).
+
+    Возвращает: ничего. Логирует обновлённые P&L.
+    """
     import time as _time
 
     now_ms = int(_time.time() * 1000)
@@ -1286,44 +1302,34 @@ def _update_broker_pnl(
             log.debug("_update_broker_pnl: no deal for broker #%d", broker_id)
             continue
 
+        gross = float(deal.get("grossProfit", 0) or 0)
+        vol = int(deal.get("volume", 0) or 0)
+        if vol <= 0:
+            log.warning(
+                "  BROKER PNL: broker #%d — volume=0 в deal, пропускаем sync",
+                broker_id,
+            )
+            continue
+
+        pv = pip_value_from_volume(instrument, vol)
+        if pv <= 0:
+            log.warning(
+                "  BROKER PNL: broker #%d — pip_value=0 для %s vol=%d",
+                broker_id, instrument, vol,
+            )
+            continue
+
+        pnl_pips = gross / pv
         ps = pip_size(instrument)
-        exec_price = deal.get("executionPrice", 0)
-        cpd_entry = deal.get("entryPrice", 0)
-        actual_entry = cpd_entry if cpd_entry else entry_price
+        actual_entry = deal.get("entryPrice", entry_price) or entry_price
+        pnl_pct = pnl_pips * ps / actual_entry * 100 if actual_entry else 0.0
 
-        pnl_pips: float | None = None
-
-        if exec_price and actual_entry and ps > 0:
-            price_diff = abs(exec_price - actual_entry)
-            if price_diff < actual_entry * 0.05:
-                if direction == "long":
-                    pnl_pips = (exec_price - actual_entry) / ps
-                else:
-                    pnl_pips = (actual_entry - exec_price) / ps
-            else:
-                log.warning(
-                    "  BROKER PNL: broker #%d exec=%.5f слишком далеко от entry=%.5f, "
-                    "используем grossProfit", broker_id, exec_price, actual_entry,
-                )
-
-        if pnl_pips is None:
-            gross = deal.get("grossProfit", 0)
-            if gross and ps > 0:
-                pv = pip_value_usd(instrument)
-                pnl_pips = gross / pv if pv > 0 else 0.0
-                log.info(
-                    "  BROKER PNL: broker #%d → %+.1f pips (from grossProfit $%.2f)",
-                    broker_id, pnl_pips, gross,
-                )
-
-        if pnl_pips is not None:
-            pnl_pct = pnl_pips * ps / actual_entry * 100 if actual_entry else 0.0
-            store.update_closed_pnl(pos_id, round(pnl_pips, 2), round(pnl_pct, 4))
-            if exec_price and abs(exec_price - actual_entry) < actual_entry * 0.05:
-                log.info(
-                    "  BROKER PNL: broker #%d → %+.1f pips (exec=%.5f, entry=%.5f)",
-                    broker_id, pnl_pips, exec_price, actual_entry,
-                )
+        store.update_closed_pnl(pos_id, round(pnl_pips, 2), round(pnl_pct, 4))
+        log.info(
+            "  BROKER PNL: broker #%d → %+.1f pips (gross=$%+.2f, vol=%d, "
+            "pip_value=$%.4f)",
+            broker_id, pnl_pips, gross, vol, pv,
+        )
 
 
 def _sync_broker_closes(
@@ -1344,6 +1350,7 @@ def _sync_broker_closes(
         return
 
     broker_positions = {bp.positionId: bp for bp in executor.get_open_positions()}
+    successfully_closed: list[tuple[str, int, str, str, float]] = []
 
     for pos in to_close:
         bp = broker_positions.get(pos.broker_position_id)
@@ -1351,6 +1358,10 @@ def _sync_broker_closes(
             log.info("  cTrader CLOSE: broker pos #%d уже закрыта", pos.broker_position_id)
             pnl = pos.profit_pips * pip_value_usd(pos.instrument, settings.lot_size)
             killswitch.record_trade_close(pnl)
+            successfully_closed.append((
+                pos.id, pos.broker_position_id, pos.instrument,
+                pos.direction, pos.entry_price,
+            ))
             continue
 
         vol = bp.tradeData.volume if hasattr(bp, "tradeData") else 0
@@ -1363,8 +1374,12 @@ def _sync_broker_closes(
         if result.success:
             pnl = pos.profit_pips * pip_value_usd(pos.instrument, settings.lot_size)
             killswitch.record_trade_close(pnl)
+            successfully_closed.append((
+                pos.id, pos.broker_position_id, pos.instrument,
+                pos.direction, pos.entry_price,
+            ))
             log.info(
-                "  cTrader CLOSE: broker pos #%d (%s), P&L $%.2f",
+                "  cTrader CLOSE: broker pos #%d (%s), P&L $%.2f (preliminary)",
                 pos.broker_position_id, pos.instrument, pnl,
             )
         else:
@@ -1372,6 +1387,19 @@ def _sync_broker_closes(
                 "  cTrader CLOSE FAILED: broker pos #%d — %s",
                 pos.broker_position_id, result.error,
             )
+
+    # Bug-fix 30.04.2026: после бот-инициированного close запросить deal-list
+    # и обновить `profit_pips`/`profit_pct` в БД из реального grossProfit
+    # брокера. До фикса БД содержала pnl на момент monitor cycle (перед
+    # close-командой), а реальный fill у брокера происходил позже на
+    # другой цене. Расхождение особенно заметно на `scalp_trail` exits
+    # (см. реконсилиация 27-30.04: 8/24 сделок с расхождением >1p,
+    # включая 3 сделки с разницей 27-47p и инверсию знака на одной).
+    if successfully_closed:
+        # Небольшая пауза чтобы deal успел появиться в API.
+        import time as _time
+        _time.sleep(2)
+        _update_broker_pnl(store, executor, successfully_closed)
 
     if killswitch.is_tripped:
         log.critical("KILL SWITCH: аварийное закрытие ВСЕХ позиций!")

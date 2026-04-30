@@ -4,6 +4,209 @@
 
 ---
 
+## 2026-04-30
+
+### bug-fix(main): `_update_broker_pnl` использовал неправильный pip_value + не вызывался для бот-закрытий
+
+`commit TBD` (file `src/fx_pro_bot/app/main.py`)
+
+**Симптом.** Реконсилиация cTrader API ↔ БД выявила **8 из 24 сделок**
+за окно 27.04 18:00 → 30.04 17:00 UTC с расхождением `profit_pips`
+больше 1 pip. Самый громкий пример — DID331537907 (30.04 16:27 UTC,
+gold_orb XAUUSD SHORT, broker pos #150203459):
+- API gross: +$12.40
+- API pips (factual): +62.0p
+- БД pips (stale): +33.1p
+- Ratio $/pip: $0.37/p вместо нормы $0.20/p (XAUUSD vol=200 = 0.02 lot).
+
+В двух сделках был инвертирован знак (БД +4.1p / API -23.1p,
+БД +1.6p / API -3.8p), что критически искажает любые downstream-анализы
+зависящие от знака `profit_pips` (например F2 sl_cooldown).
+
+**Причина.** Два независимых бага в `_update_broker_pnl` (main.py):
+
+1. **Pip-value без учёта volume.** Когда `executionPrice` пустой (а это
+   почти всегда), функция fallback'ила на `grossProfit` и делала:
+   ```python
+   pv = pip_value_usd(instrument)  # default 0.01 lot
+   pnl_pips = gross / pv
+   ```
+   `pip_value_usd(instrument)` без `lot_size` возвращает значение для
+   0.01 lot (= $0.10/pip XAUUSD). Бот же открывал позиции с
+   ATR-scaled position sizing (Tharp), где volume переменный (vol=100,
+   200, 300, etc.). Например, для vol=200 (= 0.02 lot) реальный pip_value
+   = $0.20, а функция считала $0.10 → **pnl_pips удваивался от
+   реальности** (или искажался для других size).
+
+2. **Не вызывался для бот-инициированных closures.** `_update_broker_pnl`
+   вызывался только из `_detect_broker_closures` (когда брокер сам
+   закрывает позицию по server-side TP/SL → `broker_tp_sl`). Когда бот
+   закрывал позицию сам через `_sync_broker_closes` (по `scalp_trail`,
+   `dead`, `scalp_tp`, time-stop) — sync с API **не делался**, и в БД
+   оставалось значение `profit_pips` со снимка цены на момент monitor
+   cycle (== цена ДО реального fill брокера, разница 5+ секунд +
+   slippage). Особенно сильно бьёт по `scalp_trail` (быстро движущаяся
+   цена в трейле).
+
+**Фикс.**
+
+1. `pv = pip_value_from_volume(instrument, deal["volume"])` — берём
+   реальный volume из API deal, всегда правильный pip_value.
+2. После `executor.close_position` в `_sync_broker_closes` собираем
+   список `successfully_closed`, ждём 2 сек (чтобы deal появился в API),
+   вызываем `_update_broker_pnl` для всех.
+3. Приоритет grossProfit над exec_price (последний часто пуст или
+   содержит initial entry, не close fill).
+
+**Эффект.**
+- Будущие `scalp_trail`/`dead`/`scalp_tp` сделки будут сохраняться с
+  реальным P&L из cTrader.
+- Все агрегаты (NET, WR, exit-reason distributions) станут
+  достоверными.
+- Backup БД до правки: `/data/advisor_stats.sqlite.backup-20260430T170228Z`
+  (на VPS).
+- Существующие данные за 27.04 18:00 → 30.04 17:00 UTC уже
+  скорректированы одноразовой реконсилиацией (см. ниже).
+
+**Тесты.** 347/347 pass. Логика стратегий не затронута — это правка
+**расчёта метрик**, не торговли. Bug-fix exception по
+`strategy-guard.mdc`.
+
+**Файлы:**
+- `src/fx_pro_bot/app/main.py` — `_update_broker_pnl` переписана,
+  `_sync_broker_closes` дёргает её после bot-close.
+- `.cursor/rules/fxpro-stats-baseline.mdc` — запись в «Bug-fix'ы, не
+  сдвигающие baseline».
+
+---
+
+### infra(reconcile): scripts/reconcile_db_vs_api.py — sync БД с cTrader API
+
+`commit TBD` (новый файл `scripts/reconcile_db_vs_api.py`)
+
+**Контекст.** Обнаружен баг расчёта pnl в БД (см. выше). Помимо
+forward-fix-а в `monitor.py`/`main.py`, нужен **разовый sync** уже
+накопленных данных. Скрипт:
+
+1. Тянет все cTrader deals за окно `--since` (по 7-дневным чанкам,
+   обходя API-лимит на размер запроса).
+2. Сопоставляет каждый deal с `broker_position_id` в БД.
+3. Пересчитывает `profit_pips` через `pip_value_from_volume` и
+   `current_price` из `entry + gross/units`.
+4. В `--dry-run` (default) — только показывает diff. В `--apply` —
+   обновляет БД с автобэкапом.
+
+**Применение.** Прогнан на VPS:
+- **Окно:** `--since 2026-04-27T18:00:00` (= последнее вмешательство в
+  торговую логику + safety buffer от окна невалидных данных 27.04
+  06-18 UTC, по `fxpro-stats-baseline.mdc`).
+- **Результат dry-run:** 24 closed в БД, 24 deals в API, 8 расхождений
+  (>1p, >2%) — все на `gold_orb`. Σ scalp_trail: БД +277.1p → API
+  +292.0p (Δ +14.9p). Σ dead: БД -71.2p → API -60.0p (Δ +11.2p).
+- **Apply:** 8 строк обновлены. Backup:
+  `/data/advisor_stats.sqlite.backup-20260430T170228Z`.
+
+**ВАЖНО.** Все аналитические выводы из `BUILDLOG.md` за период
+**24.04 → 30.04**, построенные на `profit_pips` из БД, **частично
+неверны** (F1/F2 shadow audit, sample audit от 30.04 утра). Особенно
+F2 (sl_cooldown), который зависит от знака `profit_pips` — две сделки
+имели инвертированный знак (БД +4.1p / API -23.1p, БД +1.6p / API
+-3.8p), что меняет F2-вердикты для сделок-наследниц. Перепрогон
+аналитики на корректной БД будет следующей задачей.
+
+**Артефакты:** `scripts/reconcile_db_vs_api.py`.
+
+**Файлы:** scripts/reconcile_db_vs_api.py (новый), BUILDLOG.md.
+
+---
+
+### audit(gold_orb): shadow-фильтры F1+F2 — реконструкция вердиктов на 40 сделках
+
+`no commit — observation only` (скрипт `scripts/audit_gold_orb_f1_f2_shadow.py`)
+
+**Контекст.** Через ~19 часов после деплоя shadow F1+F2 (commit `2fb0b65`,
+29.04 17:32 UTC) docker-логи были урезаны до ~22h из-за моего перезапуска
+контейнера в 12:08 UTC при деплое M1 shadow-trail. В live-логах остались
+только 4 GOLD-ORB-открытия 30.04 утра (london, все long). Для содержательного
+наблюдения реконструировал shadow-вердикты F1/F2 аналитически по DB +
+M5-барам (cTrader 7d) на **всех 40 закрытых gold_orb сделках** с 24.04 по
+30.04 (период с момента деплоя `gold_orb` в прод).
+
+**Метод.** Для каждой позиции из БД (`status='closed', strategy='gold_orb'`):
+1. Сессия — по `created_at - 5min` (last_bar.ts стратегии).
+2. ORB-box — первые 3 M5 свечи сессии (`session_range`).
+3. Бар пробоя — последний полностью закрытый M5 перед `created_at`
+   (что видел бот в момент scan).
+4. F1 = `break_distance_atr ≥ 0.30`. ATR на 50 предыдущих M5 барах.
+5. F2 = был ли в той же `session × direction × today` ранее закрытый
+   trade с `profit_pips < 0` (повторяет `_evaluate_shadow_filters`).
+
+**Результаты (n=40, 7 дней — `≪100 / 2 недели` по `sample-size.mdc`).**
+
+| Срез | n | NET pips | WR | avg pips |
+|---|---|---|---|---|
+| Реально (без фильтров) | 40 | **+67.7** | — | +1.7 |
+| F1=ok (прошёл фильтр) | 32 | -11.4 | 53.1% | -0.4 |
+| F1=BLOCK | 8 | **+79.1** | 50.0% | **+9.9** |
+| F2=ok | 21 | +44.6 | 47.6% | +2.1 |
+| F2=BLOCK | 19 | +23.1 | **57.9%** | +1.2 |
+
+| Кросс | n | NET | WR |
+|---|---|---|---|
+| F1=ok × F2=ok | 17 | +56.9 | 47.1% |
+| F1=ok × F2=BLOCK | 15 | -68.3 | 60.0% |
+| F1=BLOCK × F2=ok | 4 | -12.3 | 50.0% |
+| F1=BLOCK × F2=BLOCK | 4 | +91.4 | 50.0% |
+
+**Гипотетический эффект если включить фильтры в hard-режиме:**
+
+- **F1 hard (`break ≥ 0.3 ATR`): Δ NET = -79.1p** — фильтр отрезает
+  именно прибыльные сделки (n=8, средн. +9.9p). Противоречит OOS-backtest
+  до деплоя, где F1 давал +PF — но 7d/40 trades явно нерепрезентативны
+  (28.04 был аномальный short-london кластер с brk_ATR 2.96..6.43,
+  все прошли F1).
+- **F2 hard (`sl_cooldown` после первого SL в session×dir): Δ NET = -23.1p**
+  Фильтр блокирует 47.5% сделок и убивает прибыль.
+- **F1+F2 hard: Δ NET = -10.8p** (n=17). Меньше потерь, но всё равно
+  отрицательный знак.
+
+**Что НЕ значит этот результат.** На выборке 40 сделок / 7 дней
+отрицательная Δ может быть шумом. По `sample-size.mdc` для решения
+о включении/выключении фильтров требуется ≥100 сделок и ≥2 недели в
+разных режимах. **Никаких правок** в коде/стратегии не делается.
+
+**Что значит.** F1+F2 в shadow-режиме делают свою работу — пишут вердикт
+в логи. Live-данные собираются. После накопления ≥100 trades повторим
+аудит — текущие OOS-backtest гипотезы (F1: +PF; F2: нейтрально) пройдут
+честное столкновение с реальностью.
+
+**Любопытные наблюдения для будущего research (только наблюдения):**
+1. **F2 повышает WR (47.6% → 57.9%)** при снижении NET — фильтр даёт
+   более стабильный, но менее прибыльный поток. Возможно, кандидат на
+   режим «уменьшать size после SL» вместо hard-block.
+2. **`F1=BLOCK × F2=BLOCK` дал +91.4p / 4 trades (WR 50%)** — слишком
+   мало сделок для вывода, но любопытно: weak breakout *после* SL
+   может работать как mean-reversion edge.
+3. **28.04 short-london кластер** (8 сделок, 6 прибыльных, NET +118p):
+   все brk_ATR ≥ 0.92, многие 2..6 ATR. На этом дне F1 даже как
+   shadow ничего не блокировал — режим «strong breakouts работают».
+4. **30.04 long-london кластер** (n=4, NET +70.7p): два F2-block
+   на прибыльных сделках (+4.1, +10.5) — F2 не самый выгодный
+   guard в trend-day.
+
+**Артефакты:**
+- `scripts/audit_gold_orb_f1_f2_shadow.py` — скрипт аудита (PYTHONPATH=src).
+- `data/gold_orb_f1_f2_shadow_audit.csv` — per-trade вердикты F1/F2.
+- `data/gold_orb_f1_f2_shadow_audit_full_out.txt` — полный вывод.
+
+**Файлы:** scripts/audit_gold_orb_f1_f2_shadow.py (новый), BUILDLOG.md.
+
+**Связанные коммиты/правила:** `2fb0b65` (деплой shadow F1+F2),
+`fxpro-stats-baseline.mdc`, `sample-size.mdc`, `no-data-fitting.mdc`,
+`fxpro-audit.mdc`.
+
+---
+
 ## 2026-04-29
 
 ### analytics(gold_orb): разбор live-сессии 29.04 London (наблюдения, без правок)

@@ -22,20 +22,90 @@ alwaysApply: false
 3. **Состояние контейнера**: `ssh root@VPS "docker compose ps && docker
    logs fx-pro-bot-advisor-1 --tail 30"` — бот живой, ошибок нет.
 
-## 1. Live-факт (5 минут)
+## 1. Live-факт (5 минут) — ТРИ источника, всегда сверяем
 
-Реальные сделки и логи с момента baseline или с интересующего окна:
+> **Правило:** «проверить работу бота» = собрать **все три** источника
+> и **сопоставить** их между собой. Один источник в отрыве = неполный
+> аудит. БД может расходиться с API (manual close, partial fill,
+> bot-side bug — позиция исчезла из БД но осталась на бирже, или
+> наоборот).
 
-1. **P&L по стратегиям** — из периодических summary в логах
-   (формат `INFO P&L по стратегиям (cTrader, ...)`).
-2. **Последние N closed-сделок** конкретной стратегии — `pnl_report.py`,
-   `audit_recent.py`, либо прямой SQL по `advisor_stats.sqlite`:
-   `SELECT created_at, instrument, direction, profit_pips, current_price
-    FROM positions WHERE strategy='X' AND status='closed' ORDER BY created_at DESC LIMIT N;`.
-3. **Exit reasons distribution** — какие выходы доминируют (TP / SL /
+### 1.1. Логи бота (что бот реально делал)
+
+```bash
+ssh root@VPS "docker logs fx-pro-bot-advisor-1 --since 24h 2>&1 | \
+  grep -E 'GOLD-ORB OPEN|CLOSE GOLD_ORB|amend REJECTED|ERROR|SHADOW' | tail -50"
+```
+
+Что искать:
+- `GOLD-ORB OPEN ...` / `CLOSE GOLD_ORB ...` — фактический OPEN/CLOSE
+  с peak_pips, exit_reason, ATR.
+- `SHADOW F1=... F2=...` / `SHADOW-INTRABAR-...` — observability hints.
+- `ERROR amend REJECTED`, `ERROR open failed`, `WARNING TRADING_BAD_STOPS`
+  — операционные сбои (latency, broker reject, validation fail).
+- `INFO P&L по стратегиям (cTrader, ...)` — periodic summary.
+
+⚠️ Docker-логи **обрезаются** при перезапуске контейнера или
+переполнении буфера. Если логов меньше чем ожидалось — компенсируем
+из БД и API (см. ниже), но **отмечаем gap в отчёте**.
+
+### 1.2. БД бота `advisor_stats.sqlite` (что бот думает что произошло)
+
+```sql
+SELECT id, broker_position_id, created_at, closed_at, strategy,
+       instrument, direction, entry_price, current_price,
+       profit_pips, exit_reason
+FROM positions
+WHERE status='closed' AND closed_at >= '2026-04-30T00:00:00'
+ORDER BY closed_at DESC;
+```
+
+Поля: `broker_position_id` — связь с cTrader API (он же `position_id`
+в открытом ордере / `DID...` в deal'е).
+
+### 1.3. cTrader API (что **реально** случилось у брокера)
+
+Источник истины — это API, а **не БД бота**. БД может:
+- не успеть обновиться (race condition между monitor cycle и close).
+- не записать manual-close из cTrader UI.
+- иметь null `closed_at` для позиции уже закрытой брокером.
+- расходиться по `profit_pips` (разные методы расчёта pip).
+
+Команды для проверки (через `executor.client` / `ProtoOA*`):
+
+- `ProtoOAGetDealListReq` (или `executor.get_deal_list(from_ts, to_ts)`)
+  — все deal-ы аккаунта за период. Каждый deal = открытие или закрытие
+  с уникальным `dealId` (отображается в UI как `DID<число>`).
+- `ProtoOAReconcileReq` — все открытые позиции на стороне брокера.
+- `ProtoOAGetPositionListReq` — закрытые/открытые позиции списком.
+
+Скрипт-помощник для аудита: `scripts/audit_recent.py` (если нет —
+написать; `executor.client` + `SymbolCache`). Должен:
+1. Получить все deal'ы за окно `--since`.
+2. Сопоставить каждый `dealId` с `broker_position_id` в БД.
+3. Вывести **3 списка**: `только в логах`, `только в БД`, `только в API`.
+4. Для пересечения — сравнить `profit_pips`, `entry_price`, `closed_at`.
+
+### 1.4. Сводка трёх источников
+
+В отчёт обязательно — таблица «реконсилиация»:
+
+| dealId / pos_id | время API | в БД? | в логах? | P&L API | P&L БД | расхождение |
+|---|---|---|---|---|---|---|
+
+Если в любой строке `только в API` или расхождение P&L > 1 pip —
+**это red flag**, разбираться отдельно. БД молча разошедшаяся с API
+= баг в `monitor.py` или `executor`.
+
+### 1.5. Дополнительные срезы (после реконсилиации)
+
+1. **Exit reasons distribution** — какие выходы доминируют (TP / SL /
    scalp_trail / time / manual). Резкий перекос = сигнал копать.
-4. **Открытые позиции сейчас** — `get_open_positions(strategy='X')`.
-   Сравнить с разрешёнными лимитами из `STRATEGIES.md`.
+2. **Открытые позиции сейчас** — `get_open_positions(strategy='X')` +
+   `ProtoOAReconcileReq`. Должны совпасть. Расхождение = zombie или
+   потерянный fill.
+3. **P&L по стратегиям** — сверить агрегат логов с агрегатом
+   `SELECT SUM(profit_pips)` и `SUM` по deal-list API.
 
 ## 2. Backtest-сверка (10–30 минут)
 
@@ -110,6 +180,12 @@ alwaysApply: false
 - **НЕЛЬЗЯ** интерпретировать в одиночку противоречие
   «backtest +X / live −Y» как «backtest неверный». Сначала ищем
   **операционные** причины (slippage, rejected, latency, races).
+- **НЕЛЬЗЯ** делать выводы только из БД бота — БД может молча разойтись
+  с API (manual close, race condition, bug). Всегда проверяем 3 источника:
+  логи бота + `advisor_stats.sqlite` + cTrader API (`get_deal_list`).
+- **НЕЛЬЗЯ** утверждать «это последняя сделка» по одному источнику.
+  «Последняя» = последний deal в API + последняя строка с `closed_at`
+  в БД + последний `CLOSE` в логах. Если три не совпадают — gap.
 
 ## 7. Минимальный output аудита
 
