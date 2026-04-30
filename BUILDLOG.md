@@ -8,7 +8,7 @@
 
 ### feat(diag): `position_diagnostics` — структурное хранение F1/F2/close-метрик в БД
 
-`commit 8e9f57f`
+`commit ece0d42`
 
 **Зачем.** До этого F1/F2 shadow-вердикты, peak_pips, M1 shadow жили
 только в Docker-логах. Логи труда­читаемы, обрезаются rotation'ом и
