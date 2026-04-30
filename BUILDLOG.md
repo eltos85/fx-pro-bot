@@ -95,6 +95,111 @@ ORB box (08:00–08:15 UTC): `[4564.51, 4573.29]` = $8.78 = 88 pip =
 
 ---
 
+### feat(monitor): shadow INTRABAR-trail в monitor.py — observability ускоренного trail
+
+`pending commit`
+
+**Контекст.** Шаг Б плана «А → Б»: после M1-backtest (+32.3% NET,
+запись ниже) пользователь утвердил live shadow в `monitor.py` для
+накопления реальных данных перед deploy fast-trail цикла.
+
+**Что сделано.** В `monitor.py` добавлен **observability-механизм
+без изменения торговой логики**:
+
+1. **`ShadowTrailState` dataclass** — peak_price, peak_pips, triggered,
+   triggered_at_ts, triggered_at_peak_pips, triggered_exit_price,
+   triggered_exit_pips, last_bar_ts.
+2. **`_update_shadow_intrabar()`** — функция полного recalc state для
+   позиции по bar history от entry до текущего бара. Логика
+   синхронна с `_simulate_intrabar_trail` в backtest-скрипте:
+   - peak обновляется по bar.high (long) / bar.low (short)
+   - trigger если peak_pips ≥ scalp_trigger И в той же свече bar.low
+     ≤ trail_level (long) / bar.high ≥ trail_level (short)
+   - параметры идентичны live: SCALPING_TRAIL_TRIGGER/DISTANCE.
+3. **`PositionMonitor._shadow_states`** — in-memory dict
+   `position_id → ShadowTrailState`. Сбрасывается при рестарте бота
+   (recalc по bars).
+4. **`PositionMonitor.run(bars_map=None)`** — расширена сигнатура.
+   Bars прокидываются из `app/main.py`, для которого bars_map уже
+   собирается под scanner. Backward-compatible (None = не считать
+   shadow).
+5. **Логирование** только при важных событиях (не на каждом цикле):
+   - `SHADOW-INTRABAR-TRIGGER` при первом срабатывании в позиции
+   - `[SHADOW-INTRABAR: ...]` хвост при `CLOSE`-логе позиции
+6. **Cleanup** state по позициям, которые закрылись вне monitor
+   (broker-side TP/SL, manual close, force close).
+
+**Что НЕ изменилось:**
+
+- Торговая логика `_check_exits` идентична baseline 23.04.
+- Параметры стратегий (SL/TP/trail/sessions) не тронуты.
+- Реальный `peak` для DB-update остаётся по `price` (M5 close)
+  как было. Shadow живёт параллельно.
+- Crypto-инструменты пропущены (backtest не покрывал крипту).
+
+**Тесты:** +3 unit-теста в `tests/test_strategies.py`:
+
+- `test_monitor_shadow_intrabar_long_triggers` — long, retreat в
+  свече где peak обновился → state.triggered=True.
+- `test_monitor_shadow_intrabar_short_pending` — short без retreat
+  (bar high < trail_level) → state.triggered=False.
+- `test_monitor_shadow_does_not_change_trading` — F1=BLOCK не
+  блокирует реальное закрытие по SL.
+
+Все 347 тестов проходят (было 344 до добавления).
+
+**Что ожидать в логах** (пример):
+
+```
+INFO   SHADOW-INTRABAR-TRIGGER: GOLD_ORB Золото LONG
+   [peak=+15.4p would_exit=+12.4p @ 4583.42, ts=2026-04-30T13:35:00+00:00,
+    live_cur=+8.2p]
+
+INFO   CLOSE GOLD_ORB: Золото LONG → +5.4 pips (scalp_trail)
+   [peak=+12.1 tp_target=+90 trail_trigger=+6.0 trail_d=3.0 ATR=10.0p]
+   [SHADOW-INTRABAR: peak=+15.4p would_exit=+12.4p
+    @ 2026-04-30T13:35:00+00:00 Δ=+7.0p]
+```
+
+**План анализа:**
+
+- Накопить ≥1 недели live-shadow логов, сравнить:
+  - сколько TRIGGER случилось vs реальных scalp_trail close.
+  - средний `Δ` (would_exit - actual_pips) — сколько pips «потеряно»
+    из-за 5-мин полла.
+  - распределение по часам/сессиям/инструментам.
+- Если live INTRABAR показывает ~+127% NET (как в backtest) →
+  backtest валидный, M1 даст ~+32% (как обещано).
+- Если расхождение — backtest нужно пересмотреть до планирования
+  M1-deploy.
+
+**Compliance:**
+
+- `strategy-guard.mdc`: «технические улучшения без влияния на торговлю
+  (логирование) — допустимые правки без нового анализа». Shadow
+  НЕ влияет на торговлю.
+- `no-data-fitting.mdc`: shadow живёт параллельно реальной логике,
+  не подменяет. Параметры идентичны live (`SCALPING_TRAIL_*`).
+- `sample-size.mdc`: решение о deploy fast-trail цикла — после
+  накопления ≥30 trades с shadow-данными, ≥1 недели, OOS-проверки.
+  Сейчас только observability.
+- `fxpro-stats-baseline.mdc`: shadow не сдвигает baseline 23.04 —
+  это observability, как `analyze_gold_orb_trail_compare.py`.
+  После деплоя нужно добавить запись в раздел
+  «Инструменты мониторинга».
+
+**Файлы:**
+
+- `src/fx_pro_bot/strategies/monitor.py` — `ShadowTrailState`,
+  `_update_shadow_intrabar`, расширенный `run()` + cleanup.
+- `src/fx_pro_bot/app/main.py` — `monitor.run(..., bars_map=bars_map)`.
+- `tests/test_strategies.py` — 3 новых unit-теста.
+- `BUILDLOG.md` — эта запись.
+- `.cursor/rules/fxpro-stats-baseline.mdc` — pending update раздела
+  «Инструменты мониторинга» (после деплоя).
+
+---
+
 ### research(gold_orb): M1 backtest ускоренного trail — реалистичная оценка +32% NET
 
 `pending commit`

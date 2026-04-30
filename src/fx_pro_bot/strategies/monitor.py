@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fx_pro_bot.config.settings import display_name, is_crypto, pip_size
+from fx_pro_bot.market_data.models import Bar
 from fx_pro_bot.stats.store import PositionRow, StatsStore
 from fx_pro_bot.strategies.exits import update_paper_positions
 from fx_pro_bot.strategies.scalping.gold_orb import GOLD_ORB_TP_ATR_MULT
@@ -66,6 +68,94 @@ GLOBAL_HARD_STOP_HOURS = 72.0
 DEAD_ATR_MULT = 1.5
 
 
+@dataclass
+class ShadowTrailState:
+    """Shadow-state для оценки потенциала ускоренного trail (см. BUILDLOG
+    2026-04-30 «research(gold_orb): M1 backtest fast-trail»).
+
+    Не влияет на торговлю — только наблюдение. peak считается по bar
+    high/low (= INTRABAR upper bound, режим из
+    `analyze_gold_orb_trail_speedup.py`). Реальный M1 в backtest даёт
+    ~25% от INTRABAR; live-shadow позволит проверить эту аппроксимацию
+    на проде.
+    """
+    peak_price: float = 0.0          # peak по bar high (long) / low (short)
+    peak_pips: float = 0.0           # peak в pips от entry
+    triggered: bool = False           # сработал бы scalp_trail в INTRABAR
+    triggered_at_ts: datetime | None = None  # ts свечи trigger'a
+    triggered_at_peak_pips: float = 0.0      # peak_pips в момент trigger
+    triggered_exit_price: float = 0.0        # цена would-have-exit (peak ± trail_d)
+    triggered_exit_pips: float = 0.0         # net pips would-have-exit
+    last_bar_ts: datetime | None = None      # последний обработанный bar
+
+
+def _update_shadow_intrabar(
+    pos: PositionRow, bars: list[Bar], ps: float, atr_pips: float,
+    prev: ShadowTrailState | None,
+) -> ShadowTrailState:
+    """Пересчёт shadow INTRABAR-state от entry до current bar.
+
+    Полный recalc на каждом цикле (быстрее, проще, без race conditions).
+    Логика синхронна с `_simulate_intrabar_trail` в
+    `scripts/analyze_gold_orb_trail_speedup.py`.
+    """
+    state = ShadowTrailState(
+        peak_price=pos.entry_price,
+        peak_pips=0.0,
+    )
+    is_long = pos.direction == "long"
+    if not bars or pos.entry_price <= 0 or ps <= 0:
+        return state
+
+    try:
+        entry_ts = datetime.fromisoformat(pos.created_at)
+        if entry_ts.tzinfo is None:
+            entry_ts = entry_ts.replace(tzinfo=UTC)
+    except (ValueError, TypeError):
+        return state
+
+    trigger_pips = max(
+        SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips,
+        SCALPING_TRAIL_TRIGGER_PIPS,
+    )
+    trail_d_pips = max(
+        SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips,
+        SCALPING_TRAIL_DISTANCE_PIPS,
+    )
+
+    peak = pos.entry_price
+    for b in bars:
+        if b.ts <= entry_ts:
+            continue
+        peak = max(peak, b.high) if is_long else min(peak, b.low)
+        peak_pips = (peak - pos.entry_price) / ps if is_long else (pos.entry_price - peak) / ps
+        if not state.triggered and peak_pips >= trigger_pips:
+            trail_level = (
+                peak - trail_d_pips * ps if is_long
+                else peak + trail_d_pips * ps
+            )
+            retreat_in_bar = (
+                b.low <= trail_level if is_long else b.high >= trail_level
+            )
+            if retreat_in_bar:
+                state.triggered = True
+                state.triggered_at_ts = b.ts
+                state.triggered_at_peak_pips = round(peak_pips, 2)
+                state.triggered_exit_price = round(trail_level, 5)
+                state.triggered_exit_pips = round(
+                    peak_pips - trail_d_pips, 2,
+                )
+        state.last_bar_ts = b.ts
+
+    state.peak_price = peak
+    state.peak_pips = round(
+        (peak - pos.entry_price) / ps if is_long
+        else (pos.entry_price - peak) / ps,
+        2,
+    )
+    return state
+
+
 class PositionMonitor:
     """Мониторинг всех открытых позиций каждый цикл."""
 
@@ -73,12 +163,24 @@ class PositionMonitor:
         self._store = store
         self._outsiders_mode = outsiders_mode
         self._lot_size = lot_size
+        # In-memory shadow-trail state per position. Сбрасывается при
+        # рестарте бота — пересчитывается с нуля по bar history. Не
+        # влияет на торговую логику (см. ShadowTrailState docstring).
+        self._shadow_states: dict[str, ShadowTrailState] = {}
 
-    def run(self, prices: dict[str, float], atrs: dict[str, float]) -> dict[str, int]:
+    def run(
+        self,
+        prices: dict[str, float],
+        atrs: dict[str, float],
+        bars_map: dict[str, list[Bar]] | None = None,
+    ) -> dict[str, int]:
         """Обновить все позиции, проверить стопы. Возвращает статистику действий."""
         stats = {"updated": 0, "closed_sl": 0, "closed_trail": 0, "closed_time": 0, "closed_tp": 0}
+        scalping_strategies = ("vwap_reversion", "stat_arb", "session_orb", "gold_orb")
+        active_ids: set[str] = set()
 
         for pos in self._store.get_open_positions():
+            active_ids.add(pos.id)
             price = prices.get(pos.instrument)
             if price is None:
                 continue
@@ -95,6 +197,40 @@ class PositionMonitor:
             trail_price = pos.trail_price
             trail_activated = pos.trail_activated
             peak_pips = _calc_pips(pos.direction, pos.entry_price, peak, ps)
+
+            # Shadow INTRABAR (не влияет на торговлю): обновляем state
+            # для scalping-позиций FX (для крипты пропускаем —
+            # backtest проводился только на XAU/USD, см. BUILDLOG
+            # 2026-04-30).
+            if (
+                pos.strategy in scalping_strategies
+                and not is_crypto(pos.instrument)
+                and bars_map is not None
+                and ps > 0
+            ):
+                bars = bars_map.get(pos.instrument) or []
+                atr_pips_sh = atr / ps if ps > 0 else 0.0
+                prev = self._shadow_states.get(pos.id)
+                new_state = _update_shadow_intrabar(
+                    pos, bars, ps, atr_pips_sh, prev,
+                )
+                # Лог только при первом обнаружении trigger'а (не на
+                # каждом цикле) — иначе спам.
+                if new_state.triggered and (prev is None or not prev.triggered):
+                    log.info(
+                        "  SHADOW-INTRABAR-TRIGGER: %s %s %s "
+                        "[peak=%+.1fp would_exit=%+.1fp @ %.5f, ts=%s, "
+                        "live_cur=%+.1fp]",
+                        pos.strategy.upper(), display_name(pos.instrument),
+                        pos.direction.upper(),
+                        new_state.triggered_at_peak_pips,
+                        new_state.triggered_exit_pips,
+                        new_state.triggered_exit_price,
+                        new_state.triggered_at_ts.isoformat()
+                        if new_state.triggered_at_ts else "—",
+                        pips,
+                    )
+                self._shadow_states[pos.id] = new_state
 
             if pos.strategy == "leaders" and trail_price > 0 and peak_pips > 0:
                 trail_activated = True
@@ -125,6 +261,22 @@ class PositionMonitor:
                 # для оценки, насколько scalp_trail режет winners в gold_orb /
                 # session_orb. Источник: дискуссия 28.04.2026 + аналитика
                 # `scripts/analyze_gold_orb_trail_compare.py`.
+                shadow = self._shadow_states.get(pos.id)
+                shadow_tag = ""
+                if shadow is not None:
+                    if shadow.triggered:
+                        delta = round(shadow.triggered_exit_pips - pips, 1)
+                        shadow_tag = (
+                            f" [SHADOW-INTRABAR: peak=+{shadow.peak_pips:.1f}p "
+                            f"would_exit={shadow.triggered_exit_pips:+.1f}p "
+                            f"@ {shadow.triggered_at_ts.isoformat() if shadow.triggered_at_ts else '—'} "
+                            f"Δ={delta:+.1f}p]"
+                        )
+                    else:
+                        shadow_tag = (
+                            f" [SHADOW-INTRABAR: peak=+{shadow.peak_pips:.1f}p "
+                            f"trail=PENDING]"
+                        )
                 if "scalp" in exit_reason and ps > 0:
                     atr_pips = atr / ps
                     trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips,
@@ -140,22 +292,32 @@ class PositionMonitor:
                     tp_target = max(tp_mult * atr_pips, SCALPING_TP_PIPS)
                     log.info(
                         "  CLOSE %s: %s %s → %+.1f pips (%s) "
-                        "[peak=%+.1f tp_target=%+.1f trail_trigger=%+.1f trail_d=%.1f ATR=%.1fp]",
+                        "[peak=%+.1f tp_target=%+.1f trail_trigger=%+.1f "
+                        "trail_d=%.1f ATR=%.1fp]%s",
                         pos.strategy.upper(), display_name(pos.instrument),
                         pos.direction.upper(), pips, exit_reason,
                         peak_pips, tp_target, trail_trigger, trail_d, atr_pips,
+                        shadow_tag,
                     )
                 else:
                     log.info(
-                        "  CLOSE %s: %s %s → %+.1f pips (%s)",
+                        "  CLOSE %s: %s %s → %+.1f pips (%s)%s",
                         pos.strategy.upper(), display_name(pos.instrument),
                         pos.direction.upper(), pips, exit_reason,
+                        shadow_tag,
                     )
+                self._shadow_states.pop(pos.id, None)
             else:
                 update_paper_positions(
                     self._store, pos.id, price, pos.direction,
                     atr, ps, pos.entry_price, pos.created_at,
                 )
+
+        # Cleanup shadow-state для позиций, которые закрылись вне
+        # monitor (broker-side TP/SL, manual close, force close).
+        for stale_id in list(self._shadow_states.keys()):
+            if stale_id not in active_ids:
+                self._shadow_states.pop(stale_id, None)
 
         return stats
 

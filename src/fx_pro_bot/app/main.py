@@ -648,7 +648,7 @@ def _run_cycle(
     # 4b. Monitor all positions
     log.info("── Мониторинг позиций ──")
     positions_before_close = {p.id: p for p in store.get_open_positions()}
-    mon_stats = monitor.run(prices, atrs)
+    mon_stats = monitor.run(prices, atrs, bars_map=bars_map)
     open_total = store.count_open_positions()
     log.info(
         "  Позиций: %d открыто, обновлено %d, закрыто: SL=%d trail=%d TP=%d time=%d",

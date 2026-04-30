@@ -218,6 +218,93 @@ def test_monitor_updates_price(tmp_path) -> None:
     assert positions[0].current_price == 1.11
 
 
+def _make_bar(symbol: str, ts: datetime, o: float, h: float, l: float, c: float) -> Bar:
+    return Bar(
+        instrument=InstrumentId(symbol=symbol),
+        ts=ts, open=o, high=h, low=l, close=c, volume=100.0,
+    )
+
+
+def test_monitor_shadow_intrabar_long_triggers(tmp_path) -> None:
+    """Shadow INTRABAR: long, peak по bar.high, trigger в свече где
+    (peak - low) >= trail_d (для XAU pip_size=0.10, atr=1.0 → atr_pips=10,
+    trail_d = max(0.3*10, 3) = 3 pips = 0.3 цены).
+    Не влияет на торговлю."""
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="gold_orb", source="orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4500.0, stop_loss_price=4495.0,
+    )
+    pos = store.get_open_positions()[0]
+    entry_ts = datetime.fromisoformat(pos.created_at).replace(tzinfo=UTC)
+
+    bars = [
+        _make_bar("GC=F", entry_ts + timedelta(minutes=5),
+                  4500.5, 4502.0, 4501.85, 4501.95),
+        _make_bar("GC=F", entry_ts + timedelta(minutes=10),
+                  4501.95, 4509.5, 4500.0, 4502.0),
+    ]
+    mon = PositionMonitor(store)
+    mon.run(
+        {"GC=F": 4502.0}, {"GC=F": 1.0},
+        bars_map={"GC=F": bars},
+    )
+    state = mon._shadow_states.get(pid)
+    assert state is not None
+    assert state.peak_price == 4509.5
+    assert state.peak_pips > 0
+    assert state.triggered is True
+    assert state.triggered_at_ts == bars[-1].ts
+
+
+def test_monitor_shadow_intrabar_short_pending(tmp_path) -> None:
+    """Shadow INTRABAR для short без retreat — state не triggered.
+    Bar high всегда < (peak + trail_d), retreat не зафиксирован."""
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="gold_orb", source="orb_breakout", instrument="GC=F",
+        direction="short", entry_price=4500.0, stop_loss_price=4505.0,
+    )
+    pos = store.get_open_positions()[0]
+    entry_ts = datetime.fromisoformat(pos.created_at).replace(tzinfo=UTC)
+
+    bars = [
+        _make_bar("GC=F", entry_ts + timedelta(minutes=5),
+                  4499.5, 4498.2, 4498.0, 4498.1),
+        _make_bar("GC=F", entry_ts + timedelta(minutes=10),
+                  4498.1, 4497.2, 4497.0, 4497.1),
+    ]
+    mon = PositionMonitor(store)
+    mon.run(
+        {"GC=F": 4497.1}, {"GC=F": 1.0},
+        bars_map={"GC=F": bars},
+    )
+    state = mon._shadow_states.get(pid)
+    assert state is not None
+    assert state.peak_price == 4497.0
+    assert state.triggered is False
+
+
+def test_monitor_shadow_does_not_change_trading(tmp_path) -> None:
+    """Shadow F1=BLOCK не должен мешать реальному закрытию по SL."""
+    store = StatsStore(tmp_path / "t.db")
+    store.open_position(
+        strategy="gold_orb", source="orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4500.0, stop_loss_price=4495.0,
+    )
+    pos = store.get_open_positions()[0]
+    entry_ts = datetime.fromisoformat(pos.created_at).replace(tzinfo=UTC)
+    bars = [_make_bar("GC=F", entry_ts + timedelta(minutes=5),
+                      4500.0, 4502.0, 4493.0, 4494.0)]
+    mon = PositionMonitor(store)
+    stats = mon.run(
+        {"GC=F": 4494.0}, {"GC=F": 1.0},
+        bars_map={"GC=F": bars},
+    )
+    assert stats["closed_sl"] == 1
+    assert store.count_open_positions() == 0
+
+
 # ── Shadow ───────────────────────────────────────────────────
 
 
