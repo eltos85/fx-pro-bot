@@ -8,7 +8,7 @@
 
 ### feat(diag-v2): close-diagnostics centralized в `app/main.py` (M1 для всех exit-types)
 
-`commit TBD`
+`commit 1376037`
 
 **Зачем.** В первой версии (`ece0d42`) запись close-diag была в
 `monitor.py::run()::exit-block` и срабатывала только для бот-side
