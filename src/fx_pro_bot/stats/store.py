@@ -525,6 +525,15 @@ class StatsStore:
             ).fetchone()
             return _row_to_position(row) if row else None
 
+    def get_position(self, position_id: str) -> PositionRow | None:
+        """Получить позицию по ID независимо от статуса (open/closed)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM positions WHERE id=?",
+                (position_id,),
+            ).fetchone()
+            return _row_to_position(row) if row else None
+
     def close_position(self, position_id: str, exit_reason: str) -> None:
         now = datetime.now(tz=UTC).isoformat()
         with self._connect() as conn:

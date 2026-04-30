@@ -24,7 +24,7 @@ from fx_pro_bot.stats.cost_model import estimate_entry_cost
 from fx_pro_bot.stats.store import StatsStore
 from fx_pro_bot.stats.verifier import run_verification
 from fx_pro_bot.strategies.leaders import LeadersStrategy, aggregate_leader_signals
-from fx_pro_bot.strategies.monitor import PositionMonitor
+from fx_pro_bot.strategies.monitor import PositionMonitor, compute_close_diagnostics
 from fx_pro_bot.strategies.exits import create_paper_positions
 from fx_pro_bot.strategies.outsiders import ADX_MAX_FOR_MEAN_REVERSION, CONFIRMED_SL_ATR, OUTSIDERS_EXCLUDE_SYMBOLS, OutsidersStrategy, detect_extreme_setups
 from fx_pro_bot.strategies.shadow import ShadowTracker
@@ -642,6 +642,8 @@ def _run_cycle(
             log.exception("Ошибка скальпинг/свинг-стратегий")
 
     # 4. Detect broker-side closures (server-side TP/SL hit by cTrader)
+    # Снимаем snapshot ДО detect — для diff just_closed на шаге 4f.
+    cycle_open_before = {p.id: p for p in store.get_open_positions()}
     if executor:
         _detect_broker_closures(store, executor)
 
@@ -668,6 +670,17 @@ def _run_cycle(
     # 4e. cTrader: закрыть реальные позиции, если бот закрыл виртуальные
     if executor and killswitch:
         _sync_broker_closes(store, executor, killswitch, positions_before_close, prices, settings)
+
+    # 4f. Persist close-diagnostics в БД для всех just-closed позиций цикла
+    # (broker_tp_sl, scalp_trail, dead, slippage_guard) — единый источник
+    # правды, независимо от того кто закрыл (брокер по TP/SL, monitor.py
+    # по trail/time, или _sync_broker_closes по бот-команде).
+    final_open_ids = {p.id for p in store.get_open_positions()}
+    just_closed_ids = set(cycle_open_before.keys()) - final_open_ids
+    if just_closed_ids:
+        _persist_close_diagnostics(
+            store, monitor, just_closed_ids, atrs,
+        )
 
     # 5. Shadow
     if settings.shadow_enabled:
@@ -1330,6 +1343,46 @@ def _update_broker_pnl(
             "pip_value=$%.4f)",
             broker_id, pnl_pips, gross, vol, pv,
         )
+
+
+def _persist_close_diagnostics(
+    store: StatsStore,
+    monitor: PositionMonitor,
+    just_closed_ids: set[str],
+    atrs: dict[str, float],
+) -> None:
+    """Записать close-diagnostics в БД для всех only-just-closed позиций.
+
+    Вызывается ПОСЛЕ всех источников close (broker_tp_sl,
+    monitor.run, _sync_broker_closes). Единый источник правды для
+    `position_diagnostics` close-блока — независимо от exit_reason.
+
+    Источник close-метрик:
+    - peak_pips: считается по `peak_price` из БД (обновляется
+      `monitor.update_position_price` каждый цикл).
+    - tp_target/trail_*: формулы `compute_close_diagnostics` (синхронны
+      с `_check_exits` в `monitor.py`).
+    - shadow_intrabar_*: state из `monitor.pop_shadow_state(pos_id)`.
+    """
+    for pos_id in just_closed_ids:
+        pos = store.get_position(pos_id)
+        if pos is None:
+            continue
+        ps = pip_size(pos.instrument)
+        atr = atrs.get(pos.instrument, 0.0)
+        shadow = monitor.pop_shadow_state(pos_id)
+        diag = compute_close_diagnostics(
+            pos, atr=atr, ps=ps, shadow=shadow, exit_reason=pos.exit_reason,
+        )
+        if not diag:
+            continue
+        try:
+            store.save_close_diagnostics(pos_id, **diag)
+        except Exception as exc:
+            log.warning(
+                "save_close_diagnostics failed for %s (%s): %s",
+                pos_id, pos.exit_reason, exc,
+            )
 
 
 def _sync_broker_closes(

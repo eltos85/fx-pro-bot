@@ -156,6 +156,89 @@ def _update_shadow_intrabar(
     return state
 
 
+SCALPING_STRATEGIES = ("vwap_reversion", "stat_arb", "session_orb", "gold_orb")
+
+
+def compute_close_diagnostics(
+    pos: PositionRow,
+    *,
+    atr: float,
+    ps: float,
+    shadow: ShadowTrailState | None,
+    exit_reason: str | None = None,
+) -> dict:
+    """Собрать close-диагностику для уже закрытой позиции.
+
+    Вынесено в module-level чтобы вызывать как из `PositionMonitor`,
+    так и из `app/main.py` после `_detect_broker_closures` /
+    `_sync_broker_closes` — единый источник правды для записи
+    `position_diagnostics` close-блока.
+
+    Параметры:
+        pos: позиция (актуальные `entry_price`, `peak_price`).
+        atr: текущее ATR в цене (как в `monitor.run`).
+        ps: pip_size инструмента.
+        shadow: shadow-state из `PositionMonitor.get_shadow_state(pos.id)`,
+            может быть None (для не-scalping стратегий).
+        exit_reason: для совместимости (раньше peak/tp/trail писались
+            только для "scalp" exits; теперь — для всех scalping
+            стратегий, т.к. broker_tp_sl тоже валидный close).
+
+    Возвращает dict с полями для `StatsStore.save_close_diagnostics`.
+    Пустой dict — если ничего полезного не собрали.
+    """
+    if ps <= 0 or pos.entry_price <= 0:
+        return {}
+
+    out: dict = {}
+    is_scalping = pos.strategy in SCALPING_STRATEGIES and not is_crypto(
+        pos.instrument,
+    )
+
+    if is_scalping and atr > 0:
+        atr_pips = atr / ps
+        trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips,
+                      SCALPING_TRAIL_DISTANCE_PIPS)
+        trail_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips,
+                            SCALPING_TRAIL_TRIGGER_PIPS)
+        if pos.strategy == "session_orb":
+            tp_mult = ORB_TP_ATR_MULT
+        elif pos.strategy == "gold_orb":
+            tp_mult = GOLD_ORB_TP_ATR_MULT
+        else:
+            tp_mult = SCALPING_TP_ATR_MULT
+        tp_target = max(tp_mult * atr_pips, SCALPING_TP_PIPS)
+
+        peak_pips = (
+            (pos.peak_price - pos.entry_price) / ps
+            if pos.direction == "long"
+            else (pos.entry_price - pos.peak_price) / ps
+        )
+        out.update(
+            peak_pips=round(peak_pips, 1),
+            tp_target_pips=round(tp_target, 1),
+            trail_trigger_pips=round(trail_trigger, 1),
+            trail_distance_pips=round(trail_d, 1),
+            atr_at_close_pips=round(atr_pips, 1),
+        )
+
+    if shadow is not None:
+        out.update(
+            shadow_intrabar_triggered=bool(shadow.triggered),
+            shadow_intrabar_peak_pips=round(shadow.peak_pips, 1),
+        )
+        if shadow.triggered:
+            out["shadow_intrabar_would_exit_pips"] = round(
+                shadow.triggered_exit_pips, 1,
+            )
+            if shadow.triggered_at_ts:
+                out["shadow_intrabar_triggered_at_ts"] = (
+                    shadow.triggered_at_ts.isoformat()
+                )
+
+    return out
+
+
 class PositionMonitor:
     """Мониторинг всех открытых позиций каждый цикл."""
 
@@ -167,6 +250,20 @@ class PositionMonitor:
         # рестарте бота — пересчитывается с нуля по bar history. Не
         # влияет на торговую логику (см. ShadowTrailState docstring).
         self._shadow_states: dict[str, ShadowTrailState] = {}
+
+    def get_shadow_state(self, pos_id: str) -> ShadowTrailState | None:
+        """Текущий shadow INTRABAR-state для позиции (read-only).
+
+        Используется `app/main.py` для записи close-diag после
+        `_detect_broker_closures` / `_sync_broker_closes`. Pop делать
+        не нужно — `run()` сам очистит stale-state на следующем цикле.
+        """
+        return self._shadow_states.get(pos_id)
+
+    def pop_shadow_state(self, pos_id: str) -> ShadowTrailState | None:
+        """Извлечь и удалить shadow-state (для явной очистки после
+        записи close-diag во внешнем коде)."""
+        return self._shadow_states.pop(pos_id, None)
 
     def run(
         self,
@@ -256,56 +353,13 @@ class PositionMonitor:
                     )
                 )
                 stats[category] = stats.get(category, 0) + 1
-                # Расширенный диагностический лог для scalp-exit'ов: показывает
-                # peak vs current и пороги trail/TP. Чисто информационно — нужно
-                # для оценки, насколько scalp_trail режет winners в gold_orb /
-                # session_orb. Источник: дискуссия 28.04.2026 + аналитика
-                # `scripts/analyze_gold_orb_trail_compare.py`.
+                # Запись close-diag в БД централизована в `app/main.py`
+                # после `_detect_broker_closures`/`_sync_broker_closes`,
+                # чтобы единый источник правды покрывал ВСЕ типы closes
+                # (broker_tp_sl, scalp_trail, dead, slippage_guard).
+                # Здесь — только короткий лог + сохранение shadow-state
+                # в self._shadow_states (main.py его потом прочитает).
                 shadow = self._shadow_states.get(pos.id)
-
-                # Структурированная диагностика → БД (persisted, для audit).
-                # Логи остаются короткими (для онлайн-наблюдения).
-                close_diag: dict = {}
-                if "scalp" in exit_reason and ps > 0:
-                    atr_pips = atr / ps
-                    trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips,
-                                  SCALPING_TRAIL_DISTANCE_PIPS)
-                    trail_trigger = max(SCALPING_TRAIL_TRIGGER_ATR_MULT * atr_pips,
-                                        SCALPING_TRAIL_TRIGGER_PIPS)
-                    if pos.strategy == "session_orb":
-                        tp_mult = ORB_TP_ATR_MULT
-                    elif pos.strategy == "gold_orb":
-                        tp_mult = GOLD_ORB_TP_ATR_MULT
-                    else:
-                        tp_mult = SCALPING_TP_ATR_MULT
-                    tp_target = max(tp_mult * atr_pips, SCALPING_TP_PIPS)
-                    close_diag.update(
-                        peak_pips=round(peak_pips, 1),
-                        tp_target_pips=round(tp_target, 1),
-                        trail_trigger_pips=round(trail_trigger, 1),
-                        trail_distance_pips=round(trail_d, 1),
-                        atr_at_close_pips=round(atr_pips, 1),
-                    )
-                if shadow is not None:
-                    close_diag.update(
-                        shadow_intrabar_triggered=bool(shadow.triggered),
-                        shadow_intrabar_peak_pips=round(shadow.peak_pips, 1),
-                    )
-                    if shadow.triggered:
-                        close_diag["shadow_intrabar_would_exit_pips"] = round(
-                            shadow.triggered_exit_pips, 1,
-                        )
-                        if shadow.triggered_at_ts:
-                            close_diag["shadow_intrabar_triggered_at_ts"] = (
-                                shadow.triggered_at_ts.isoformat()
-                            )
-                if close_diag:
-                    try:
-                        self._store.save_close_diagnostics(pos.id, **close_diag)
-                    except Exception as exc:
-                        log.warning("save_close_diagnostics failed for %s: %s", pos.id, exc)
-
-                # Лог: только короткий маркер. Полные метрики — в БД.
                 shadow_tag = ""
                 if shadow is not None:
                     if shadow.triggered:
@@ -322,7 +376,9 @@ class PositionMonitor:
                     pos.direction.upper(), pips, exit_reason,
                     shadow_tag,
                 )
-                self._shadow_states.pop(pos.id, None)
+                # shadow_state НЕ сбрасываем здесь — main.py заберёт
+                # его через pop_shadow_state после persist close-diag.
+                # Stale-cleanup ниже в run() = safety net.
             else:
                 update_paper_positions(
                     self._store, pos.id, price, pos.direction,

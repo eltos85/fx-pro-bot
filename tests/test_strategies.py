@@ -305,10 +305,10 @@ def test_monitor_shadow_does_not_change_trading(tmp_path) -> None:
     assert store.count_open_positions() == 0
 
 
-def test_monitor_close_persists_diagnostics(tmp_path) -> None:
-    """При scalp_trail-close monitor должен сохранить close-метрики
-    (peak_pips, tp_target_pips, trail_*, atr) и shadow_intrabar в БД.
-    Это гарантирует что shadow-данные переживут перезапуск контейнера."""
+def test_monitor_keeps_shadow_state_after_close(tmp_path) -> None:
+    """При close monitor НЕ пишет в БД (это делает app/main.py через
+    _persist_close_diagnostics), но обязан сохранить shadow_intrabar
+    state доступным через get_shadow_state до явного pop."""
     store = StatsStore(tmp_path / "t.db")
     pid = store.open_position(
         strategy="gold_orb", source="orb_breakout", instrument="GC=F",
@@ -318,8 +318,7 @@ def test_monitor_close_persists_diagnostics(tmp_path) -> None:
     entry_ts = datetime.fromisoformat(pos.created_at).replace(tzinfo=UTC)
 
     # ATR=1.0 → atr_pips=10, scalp_tp=3*10=30p, trigger=max(0.3*10,5)=5p,
-    # trail_d=max(0.3*10,3)=3p. Делаем peak +15p (выше trigger, ниже tp),
-    # потом откат до +4p (peak-cur=11p > trail_d=3p) → scalp_trail.
+    # trail_d=max(0.3*10,3)=3p. Peak +15p, потом откат +4p → scalp_trail.
     bars = [
         _make_bar("GC=F", entry_ts + timedelta(minutes=5),
                   4500.0, 4501.5, 4500.0, 4501.5),
@@ -338,15 +337,54 @@ def test_monitor_close_persists_diagnostics(tmp_path) -> None:
         bars_map={"GC=F": bars2},
     )
     assert stats["closed_trail"] == 1
+    # БД close-diag НЕ записан monitor'ом (это теперь делает main.py).
     diag = store.get_diagnostics(pid)
-    assert diag is not None
-    assert diag["peak_pips"] is not None and diag["peak_pips"] > 0
-    assert diag["tp_target_pips"] is not None
-    assert diag["trail_trigger_pips"] is not None
-    assert diag["trail_distance_pips"] is not None
-    assert diag["atr_at_close_pips"] is not None
-    # Shadow intrabar должен зафиксироваться (peak по high)
-    assert diag["shadow_intrabar_peak_pips"] is not None
+    assert diag is None or diag.get("peak_pips") is None
+    # Но shadow-state доступен — main.py его подтянет через pop_shadow_state.
+    sh = mon.get_shadow_state(pid)
+    assert sh is not None
+    assert sh.peak_pips > 0
+    popped = mon.pop_shadow_state(pid)
+    assert popped is sh
+    assert mon.get_shadow_state(pid) is None
+
+
+def test_compute_close_diagnostics_gold_orb_with_shadow(tmp_path) -> None:
+    """compute_close_diagnostics возвращает peak/tp/trail/atr для
+    gold_orb scalping и shadow_intrabar блок если shadow != None."""
+    from fx_pro_bot.strategies.monitor import (
+        ShadowTrailState, compute_close_diagnostics,
+    )
+
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="gold_orb", source="orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4500.0, stop_loss_price=4495.0,
+    )
+    store.update_position_price(
+        pid, current_price=4500.4, profit_pips=4.0, profit_pct=0.0,
+        peak_price=4501.5, trough_price=4499.5,
+        trail_price=0.0, trail_activated=False,
+    )
+    store.close_position(pid, "scalp_trail")
+    pos = store.get_position(pid)
+    assert pos is not None and pos.peak_price > pos.entry_price
+
+    shadow = ShadowTrailState(
+        peak_price=4501.5, peak_pips=15.0,
+        triggered=True, triggered_exit_pips=12.0,
+    )
+    diag = compute_close_diagnostics(
+        pos, atr=1.0, ps=0.1, shadow=shadow, exit_reason=pos.exit_reason,
+    )
+    assert diag["peak_pips"] == 15.0    # (4501.5 - 4500) / 0.1
+    assert diag["tp_target_pips"] == 30.0  # GOLD_ORB_TP_ATR_MULT (3.0) * 10
+    assert diag["trail_trigger_pips"] == 6.0  # max(0.6*10, 5) = 6
+    assert diag["trail_distance_pips"] == 3.0  # max(0.3*10, 3) = 3
+    assert diag["atr_at_close_pips"] == 10.0
+    assert diag["shadow_intrabar_triggered"] is True
+    assert diag["shadow_intrabar_peak_pips"] == 15.0
+    assert diag["shadow_intrabar_would_exit_pips"] == 12.0
 
 
 # ── Shadow ───────────────────────────────────────────────────
