@@ -1,0 +1,132 @@
+---
+description: Чеклист проведения аудита fx_pro_bot — что собрать, как сверить с backtest, что записать. Активируется при запросе "проведи аудит" / "проверь как работает бот" / "разбери логи".
+globs: ["src/fx_pro_bot/**/*", "BUILDLOG.md", "STRATEGIES.md", "scripts/analyze_gold_orb_*", "scripts/backtest_fxpro_*", "scripts/audit_*.py", "scripts/pnl_report.py", "data/fxpro_*", "data/gold_orb_*"]
+alwaysApply: false
+---
+
+# FxPro / advisor: процедура аудита
+
+> Применяется когда пользователь просит «провести аудит», «разобрать
+> логи», «проверить как работает бот», «изучить статистику», или после
+> подозрительных live-сделок. Цель — получить **факт** и зафиксировать
+> его в `BUILDLOG.md`, **не** менять торговую логику.
+
+## 0. Pre-flight (1 минута)
+
+Прежде чем запускать что-либо — собрать контекст:
+
+1. **Текущий baseline**: прочитать `.cursor/rules/fxpro-stats-baseline.mdc`
+   — дата baseline и список **окон невалидных данных** (их исключаем).
+2. **Recent commits в BUILDLOG**: последние 3–5 записей в `BUILDLOG.md`.
+   Что менялось, не введён ли bug-fix, не было ли rollback.
+3. **Состояние контейнера**: `ssh root@VPS "docker compose ps && docker
+   logs fx-pro-bot-advisor-1 --tail 30"` — бот живой, ошибок нет.
+
+## 1. Live-факт (5 минут)
+
+Реальные сделки и логи с момента baseline или с интересующего окна:
+
+1. **P&L по стратегиям** — из периодических summary в логах
+   (формат `INFO P&L по стратегиям (cTrader, ...)`).
+2. **Последние N closed-сделок** конкретной стратегии — `pnl_report.py`,
+   `audit_recent.py`, либо прямой SQL по `advisor_stats.sqlite`:
+   `SELECT created_at, instrument, direction, profit_pips, current_price
+    FROM positions WHERE strategy='X' AND status='closed' ORDER BY created_at DESC LIMIT N;`.
+3. **Exit reasons distribution** — какие выходы доминируют (TP / SL /
+   scalp_trail / time / manual). Резкий перекос = сигнал копать.
+4. **Открытые позиции сейчас** — `get_open_positions(strategy='X')`.
+   Сравнить с разрешёнными лимитами из `STRATEGIES.md`.
+
+## 2. Backtest-сверка (10–30 минут)
+
+Что **должно** происходить по идеальной модели:
+
+1. **Свежие kline-данные**: если `data/fxpro_klines/` старше 7 дней —
+   скачать (`scripts/fetch_fxpro_history.py --days 90`, через docker
+   на VPS — там cTrader-токен).
+2. **Прогнать релевантный backtest**:
+   - `analyze_gold_orb_trail_compare.py` — gold_orb canon vs live trail.
+   - `analyze_gold_orb_trail_speedup.py` — gold_orb 5-min vs M1 trail.
+   - `analyze_gold_orb_filters.py` — F1/F2/F3 фильтры качества входа.
+   - `analyze_gold_orb_session_guard.py` — multi-entry vs canonical.
+   - `backtest_fxpro_all.py` — полный backtest всех стратегий.
+3. **Walk-forward (трети по времени)** — backtest должен быть
+   **стабильно положителен** во всех трёх периодах. Если T3 (свежий)
+   проседает — edge деградирует, тревога.
+
+## 3. Сверка live vs backtest (главное)
+
+Где расходится — туда копать. Типовые расхождения:
+
+- **WR live ниже backtest на ≥10 п.п.** → возможно баг в исполнении
+  (slippage / rejected amends / неправильные SL/TP). Смотреть
+  `WARNING amend REJECTED`, `ERROR open failed`, `TRADING_BAD_STOPS`.
+- **avg_win live ниже backtest** → trail режет крупные тренды или
+  spread выше расчётного. Смотреть `CLOSE ... scalp_trail` логи с
+  `peak_pips` / `trail_d` / `ATR`.
+- **Exit-reason live ≠ backtest** (например, в backtest 10% SL,
+  в live 30%) → SL слишком плотный / нет HTF-фильтра / news-окно.
+- **Открытые позиции > лимита** → race condition в `count_open_positions`.
+
+## 4. Соблюдение правил
+
+Для **любого** вывода аудита проверить:
+
+1. **`sample-size.mdc`**: нельзя рекомендовать **изменение стратегии**
+   на <100 сделок / <2 недель / без p-value. Если выборка меньше —
+   только наблюдение, без правок.
+2. **`no-data-fitting.mdc`**: вывод обоснован **артефактом**
+   (csv/txt в `data/`, скрипт в `scripts/`). «Я думаю что» — не довод.
+3. **`strategy-guard.mdc`**: bug-fix vs feature-change. Bug-fix
+   разрешён сразу с обоснованием «симптом → причина → фикс».
+   Feature-change требует research-обоснования и согласования.
+4. **Окна невалидных данных** (`fxpro-stats-baseline.mdc`) исключены
+   из анализа — иначе цифры искажены.
+
+## 5. Запись в BUILDLOG
+
+Любой аудит **должен** оставить запись в `BUILDLOG.md` (заголовок
+`### audit(...)` или `### research(...)`) с:
+
+- Период аудита (`2026-04-29 → 2026-04-30`).
+- Конкретные числа (n trades, WR, PF, NET, p-value если есть).
+- Артефакты (`scripts/...`, `data/...`).
+- Найденные расхождения live vs backtest.
+- **Рекомендация** или **observation only** (если выборка мала).
+- Compliance-блок: ссылка на правила, под которые попадает решение.
+
+## 6. Anti-patterns (что НЕЛЬЗЯ)
+
+- **НЕЛЬЗЯ** менять параметры стратегии «по итогам аудита» без OOS
+  forward-test и согласования.
+- **НЕЛЬЗЯ** делать выводы на одной плохой сессии или 5 сделках —
+  это шум, не сигнал.
+- **НЕЛЬЗЯ** ограничиваться одним инструментом / одной сессией / одним
+  режимом рынка — backtest должен покрывать тренд + флет + новости.
+- **НЕЛЬЗЯ** сдвигать baseline молча. Любой sweep baseline-даты —
+  явное обновление `fxpro-stats-baseline.mdc` с обоснованием.
+- **НЕЛЬЗЯ** трогать `predictions_track.csv`, `paper_*` или
+  `whales_*` — это не торговые таблицы.
+- **НЕЛЬЗЯ** интерпретировать в одиночку противоречие
+  «backtest +X / live −Y» как «backtest неверный». Сначала ищем
+  **операционные** причины (slippage, rejected, latency, races).
+
+## 7. Минимальный output аудита
+
+После аудита у пользователя должны остаться:
+
+- 1 запись в `BUILDLOG.md` с цифрами + артефактами.
+- 1 короткое summary (≤10 строк) в чате: что нашли, что предлагаем,
+  чего НЕ предлагаем.
+- При наличии решения о changes — следующий шаг плана (А → Б),
+  не сразу патч.
+
+## Связь с другими правилами
+
+- `fxpro-persona.mdc` — режим мышления при аудите (трейдер + senior dev).
+- `fxpro-stats-baseline.mdc` — текущая дата отсчёта и окна невалидных
+  данных.
+- `sample-size.mdc` — пороги выборки для рекомендаций.
+- `no-data-fitting.mdc` — запрет интерпретаций без артефактов.
+- `strategy-guard.mdc` — что считать bug-fix-ом vs изменением стратегии.
+- `buildlog.mdc` — формат записи (FxPro → `BUILDLOG.md`, не `BUILDLOG_BYBIT.md`).
