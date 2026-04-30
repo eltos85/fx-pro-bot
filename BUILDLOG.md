@@ -95,6 +95,270 @@ ORB box (08:00–08:15 UTC): `[4564.51, 4573.29]` = $8.78 = 88 pip =
 
 ---
 
+### research(gold_orb): M1 backtest ускоренного trail — реалистичная оценка +32% NET
+
+`pending commit`
+
+**Контекст.** Продолжение upper-bound INTRABAR backtest (запись ниже).
+Пользователь утвердил план «А → потом Б»: сначала честный M1-backtest,
+затем live shadow на проде. Эта запись закрывает шаг А.
+
+**Скачано:** 86821 M1 баров XAUUSD (`GC_F_M1.csv`) через cTrader Open API
+за тот же 90-дневный период (2026-01-30 → 2026-04-30). Окно fetch
+автоподобрано (3 дня = 4320 M1 / запрос, 30 окон, 30.8с total).
+
+**Скрипт:** `scripts/analyze_gold_orb_trail_speedup.py` расширен
+функцией `_simulate_m1_trail`:
+- SL/TP проверяются на каждом M1-баре intra-bar (high/low) — broker-side.
+- peak обновляется по close M1 (= live trail-цикл с минутной частотой
+  получает last close M1 при poll'е).
+- Exit по trail сразу как только peak_pips ≥ trigger И
+  (peak_pips - cur_pips) ≥ trail_d на M1 close.
+- Time-stop = SCALPING_HARD_STOP_BARS × 5 = 240 M1.
+
+**Сравнение четырёх режимов (114 сделок, 90d):**
+
+| Метрика | CANON | LIVE 5-мин | **M1 1-мин** | INTRABAR (UB) |
+|---|---:|---:|---:|---:|
+| trades | 114 | 114 | 114 | 114 |
+| win-rate % | 40.35 | 65.79 | **74.56** | 85.96 |
+| net pips | 3459.6 | 3440.3 | **4549.8** | 7803.5 |
+| profit factor | 1.38 | 1.76 | **2.31** | 4.46 |
+| avg pip | 30.35 | 30.18 | 39.91 | 68.45 |
+| median pip | -79.50 | 27.20 | 38.15 | 55.09 |
+| avg win | 275.28 | 106.26 | 94.25 | 102.61 |
+| avg loss | -135.34 | -116.13 | -119.36 | -140.79 |
+| peak captured% | 45.1 | 46.8 | 46.4 | 63.7 |
+
+**Δ M1 - LIVE: +1109.5 NET pips (+32.3%), PF +0.55.**
+INTRABAR (upper bound) был +126.8%, реальный M1 ≈ 25% от UB.
+
+**Распределение exit reasons:**
+
+| reason | CANON | LIVE | **M1** | INTRABAR |
+|---|---:|---:|---:|---:|
+| scalp_trail | 0 | 69 | **86** | 95 |
+| sl | 67 | 31 | **24** | 16 |
+| tp | 44 | 14 | **4** | 3 |
+| time | 3 | 0 | 0 | 0 |
+
+**Walk-forward (трети, NET pips):**
+
+| период | n | NET_LIVE | NET_M1 | Δ% | PF_LIVE | PF_M1 |
+|---|---:|---:|---:|---:|---:|---:|
+| T1 | 38 | 477 | 847 | +78% | 1.27 | 1.52 |
+| T2 | 38 | 1529 | 2017 | +32% | 1.77 | 2.46 |
+| T3 | 38 | 1434 | 1685 | +17% | 2.79 | 4.91 |
+
+M1 положителен во всех трёх периодах. В свежем T3 (apr 2026) gap
+уменьшается (+17%) — на «спокойном» рынке trail-cycle менее критичен.
+Walk-forward стабилен, не deteriorating.
+
+**Интерпретация:**
+
+1. **Реальный прирост +32.3% NET** — значимо, выше порога `sample-size.mdc`
+   для рассмотрения изменений (≥10%).
+2. **Profit Factor +0.55** (1.76 → 2.31) — устойчивее, лучше риск-метрика.
+3. **Win-rate +8.8 п.п.** (66% → 74%) — главный источник прироста.
+4. **Скрытая цена: avg_win УМЕНЬШИЛСЯ** (106 → 94), TP-exits с 14 до 4.
+   Trail режет крупные тренды раньше TP. Прибыль приходит от **частоты**
+   мелких выигрышей, не от размера.
+5. **peak captured% практически не вырос** (46.8 → 46.4) — счётчик
+   показывает что мы НЕ лучше захватываем peak. Просто чаще закрываемся
+   в плюс **до** разворота в SL.
+6. **Природа улучшения**: это **risk-management**, не profit maximization.
+   M1-trail спасает от reversal, превращая SL в малые плюсы.
+
+**Что НЕ учтено в backtest и снизит реальный prof:**
+
+- **Slippage на amend SL**: реально cTrader trail amend исполняется не
+  на close M1, а через 100-500ms latency + spread. Оценка: ~0.3-0.5 pip
+  per amend × 86 trail-exits ≈ **25-43 NET pips потери**.
+- **Rejected amends**: исторически на live были `TRADING_BAD_STOPS`
+  при попытке передвинуть SL слишком близко (исправлено 28.04 в
+  `_validate_sl_tp_side`, но не идеально).
+- **Дополнительные cTrader requests**: поллить open positions раз в
+  минуту вместо раз в 5 = 5× больше запросов на открытые позиции.
+  Внутри лимита cTrader, но добавляет нагрузку на event loop.
+- **Сложность реализации**: отдельный async-task для trail с
+  собственным циклом. Это операционный риск (как откатанный 28.04
+  Variant 2).
+
+**Реалистичная оценка после операционных потерь**: +20–28% NET
+(чуть меньше +32.3% из backtest).
+
+**Decision pending.** Если идём на step Б (live shadow):
+
+- Добавить в `monitor.py` shadow-логирование: «вот peak-pips сейчас на
+  close M5; вот peak-pips если бы поллили M1; вот trail-trigger M1
+  (would-have-fired)».
+- Накопить 1–2 недели live-данных, сравнить shadow-вердикты с
+  фактическими exits.
+- Если shadow подтверждает backtest (+20%+ NET hypothetically) —
+  тогда планировать реальную реализацию fast-trail цикла, с
+  отдельным OOS на свежих данных по `sample-size.mdc`.
+
+**Compliance:**
+
+- `strategy-guard.mdc`: backtest аналитика, торговая логика не
+  тронута. Код shadow-режима (если делать) — observability, тоже
+  разрешён.
+- `no-data-fitting.mdc`: вывод подкреплён артефактом
+  `data/gold_orb_trail_speedup.csv` (456 сделок × 4 режима),
+  walk-forward подтверждает стабильность edge.
+- `sample-size.mdc`: 114 сделок XAUUSD за 90d, 3 walk-forward
+  периода × 38 — выборка достаточна для оценки **тренда**, но НЕ
+  для решения о deploy. Решение о deploy fast-trail цикла требует:
+  - Live shadow ≥1 месяц, ≥30 trades с зафиксированным «shadow vs
+    actual» сравнением.
+  - p-value < 0.05 для разницы NET в shadow vs LIVE.
+  - Out-of-sample на ещё свежих данных (после 30.04).
+  - Согласование с пользователем.
+
+**Файлы:**
+
+- `scripts/fetch_fxpro_history.py` — добавлен `--window-days` параметр
+  + `_default_window_days()` (auto-подбор окна по интервалу).
+- `scripts/analyze_gold_orb_trail_speedup.py` — добавлены
+  `load_m1_bars()` и `_simulate_m1_trail()`, расширен вывод 4-колоночный.
+- `data/fxpro_klines/GC_F_M1.csv` — 86821 M1 баров (gitignored,
+  локальный артефакт).
+- `data/gold_orb_trail_speedup.csv` — 456 trades × 4 variants для аудита.
+- `data/gold_orb_trail_speedup_out.txt` — текстовый отчёт.
+- `BUILDLOG.md` — эта запись.
+
+---
+
+### research(gold_orb): upper-bound ускорения trail с 5 мин до 1 мин — INTRABAR backtest
+
+`pending commit`
+
+**Контекст.** Поднимался вопрос: «бары и trail обновляются раз в 5 минут,
+почему не каждую минуту?». Источник баров — cTrader Open API (с 20.04),
+yfinance остался как fallback, rate-limit перестал быть аргументом.
+Главный кандидат на ускорение — `scalp_trail` в `monitor.py` (peak
+обновляется на close M5, trail-amend SL делается раз в 5 мин).
+
+Чтобы ответить «стоит ли копать в сторону M1-данных и реализации
+fast-trail цикла» — провёл backtest **верхней границы** ускорения
+trail на 90d cTrader M5 (XAUUSD, 17366 баров, 114 сигналов).
+
+**Скрипт:** `scripts/analyze_gold_orb_trail_speedup.py`
+
+**Три симулятора** на одном и том же наборе сигналов:
+
+- **CANON** — ATR-SL/TP only (без trail), baseline +6146-pip из
+  STRATEGIES.md §3b-bis.
+- **LIVE** — те же SL/TP + bot-side `scalp_trail` на close M5
+  (peak только по close, exit в следующем баре после trigger+retreat).
+  Текущая live-логика.
+- **INTRABAR (idealized 1-мин upper bound)** — те же SL/TP + bot-side
+  `scalp_trail`, **но peak обновляется по bar high/low** (= ровно по
+  моменту экстремума внутри M5), и exit срабатывает в той же свече при
+  касании trail-level. Допущение порядка: для long high ПЕРВЫМ,
+  для short low ПЕРВЫМ — это даёт **верхнюю** границу.
+
+**Результаты (90d, период 2026-01-28 → 2026-04-28):**
+
+| Метрика | CANON | LIVE | INTRABAR | Δ INTRA-LIVE |
+|---|---:|---:|---:|---:|
+| trades | 114 | 114 | 114 | 0 |
+| win-rate % | 40.35 | 65.79 | **85.96** | +20.18 |
+| net pips | 3459.6 | 3440.3 | **7803.5** | **+4363.2 (+126.8%)** |
+| profit factor | 1.38 | 1.76 | **4.46** | +2.70 |
+| avg pip | 30.35 | 30.18 | **68.45** | +38.27 |
+| avg win | 275.28 | 106.26 | 102.61 | -3.65 |
+| avg loss | -135.34 | -116.13 | -140.79 | -24.66 |
+| max win | 772.3 | 772.3 | 772.3 | 0.0 |
+| max loss | -372.0 | -365.3 | -365.3 | 0.0 |
+| peak captured% | 45.1 | 46.8 | **63.7** | +16.9 |
+
+**Распределение exit reasons:**
+
+| reason | CANON | LIVE | INTRABAR |
+|---|---:|---:|---:|
+| scalp_trail | 0 | 69 | **95** |
+| sl | 67 | 31 | **16** |
+| tp | 44 | 14 | **3** |
+| time | 3 | 0 | 0 |
+
+**Walk-forward (трети по времени, NET pips):**
+
+| период | n | NET_C | NET_L | NET_I | PF_L | PF_I |
+|---|---:|---:|---:|---:|---:|---:|
+| T1 | 38 | -827 | 477 | **1830** | 1.27 | 2.54 |
+| T2 | 38 | 1808 | 1529 | **3779** | 1.77 | 6.95 |
+| T3 | 38 | 2479 | 1434 | **2194** | 2.79 | 6.13 |
+
+INTRABAR positive и значимо лучше LIVE во всех трёх периодах.
+В T3 (свежий месяц) gap меньше (+53% vs +146%/T2) — возможно,
+последний месяц менее благоприятен для trail, но всё ещё положителен.
+
+**Интерпретация:**
+
+1. **Upper bound показывает огромный потенциал**: +126.8% NET. Это
+   значит — если бы trail был мгновенным, мы бы удвоили прибыль на
+   `gold_orb` за 90 дней. peak_captured% растёт с 47% до 64% — то есть
+   текущий 5-мин trail оставляет на столе ~17 п.п. peak-движения.
+2. **Win-rate +20 п.п.** (66% → 86%) — много сделок которые в LIVE
+   возвращаются в SL после плюса, в INTRABAR фиксируются мини-trail-выходом.
+3. **Скрытая цена ускорения**: TP-сделок с 14 до 3. Большие тренды
+   режутся trail-stop'ом раньше TP. avg_win почти не вырос (102 vs 106) —
+   прибыль приходит от **частоты** мелких выигрышей, не от размера.
+4. **avg_loss ухудшился** (-116 → -140) — на оставшихся хвостовых
+   убытках trail срабатывает позже SL и не помогает.
+5. **Это IDEALIZED upper bound, не реальность.** Допущение «high первым,
+   потом low» (long) почти всегда ложное в момент. Реальный M1-trail
+   будет:
+   - Чаще ловить retreat первым → peak недозафиксирован → exit как в LIVE.
+   - Иметь slippage и delay 30-60 сек → exit на 1-3 пипса хуже trail_level.
+   - Попадать на отказы amend SL у брокера (как было в живых данных).
+
+**Реалистичная оценка реального M1-улучшения**: примерно 30–60% от
+upper bound, то есть +1300…+2600 NET pips за 90 дней (≈ +40–75% к
+текущему LIVE). Это всё равно **значимое** улучшение.
+
+**Решение пользователя ожидается.** Варианты:
+
+- **A. Идти в M1 backtest** — скачать M1 cTrader-данные XAUUSD за 90d
+  (~130k баров, ~10 cTrader-запросов через `scripts/fetch_fxpro_history.py`,
+  скрипт уже умеет M1 при параметре `--period M1`). Реализовать
+  `_simulate_m1_trail` (peak/exit на M1-барах). Получить **честное**
+  число вместо upper bound. ~1.5–2 часа работы.
+- **B. Live shadow-режим** — добавить в `monitor.py` лог
+  «текущий peak-pips на close M5 vs gипотетический peak-pips intrabar».
+  Накопить 1–2 недели live, сравнить. Не меняет торговую логику,
+  но даёт реальные числа. ~30 минут работы.
+- **C. Закрыть тему** — текущий `scalp_trail` приносит +3440 pips за
+  90d, baseline стабилен, лезть в trail-cycle = риск регрессии (как
+  в апрельском «Variant 2» откате).
+
+**Compliance:**
+
+- `strategy-guard.mdc`: backtest не меняет торговую логику, добавление
+  скрипта analytics — разрешено.
+- `no-data-fitting.mdc`: вывод подкреплён артефактом
+  (`data/gold_orb_trail_speedup.csv`, `data/gold_orb_trail_speedup_out.txt`),
+  идеализация явно отмечена как upper bound (не reality).
+- `sample-size.mdc`: 114 сделок за 90d, walk-forward 3×38 — выборка
+  достаточна для оценки тренда, но **не для решения о deploy**. Решение
+  о deploy ускоренного trail требует:
+  - M1 backtest (variant A) или ≥1 месяца live shadow (variant B).
+  - Out-of-sample на свежих данных.
+  - p-value сравнения NET LIVE vs M1-trail.
+  - Согласование с пользователем.
+
+**Файлы:**
+
+- `scripts/analyze_gold_orb_trail_speedup.py` — новый аналитический
+  скрипт (3 симулятора, walk-forward, peak_capture метрика).
+- `data/gold_orb_trail_speedup.csv` — per-trade результаты для
+  аудита (114×3 = 342 строки).
+- `data/gold_orb_trail_speedup_out.txt` — текстовый отчёт.
+- `BUILDLOG.md` — эта запись.
+
+---
+
 ### feat(gold_orb): shadow-логирование фильтров F1 + F2 (только observability)
 
 `pending commit`

@@ -41,8 +41,20 @@ log = logging.getLogger("fetch_fxpro_history")
 
 DEFAULT_INTERVAL_MIN = 5
 # 20 дней × 24h × 12 баров/час = 5760 баров — в пределах cTrader лимита
+# для M5. Для M1 нужно меньшее окно (~3-4 дня), чтобы не упереться в лимит.
 WINDOW_DAYS = 20
 SLEEP_BETWEEN_REQUESTS_SEC = 0.25  # throttle: ~4 req/s
+
+
+def _default_window_days(interval_min: int) -> int:
+    """Подбирает размер окна так, чтобы было ~5000 баров на запрос
+    (запас под cTrader лимит ~10000)."""
+    if interval_min <= 0:
+        return WINDOW_DAYS
+    bars_per_day = 1440 // interval_min
+    if bars_per_day <= 0:
+        return WINDOW_DAYS
+    return max(1, 5000 // bars_per_day)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +86,7 @@ def _fetch_symbol(
     from_ms: int,
     to_ms: int,
     interval_min: int,
+    window_days: int = WINDOW_DAYS,
 ) -> list[tuple[int, float, float, float, float, float]]:
     """Пагинированный fetch одного символа. Возвращает отсортированный дедуп-список."""
     sym = symbol_cache.resolve_yfinance(yf_symbol)
@@ -81,7 +94,7 @@ def _fetch_symbol(
         log.warning("  %s не найден в cTrader каталоге, пропускаем", yf_symbol)
         return []
 
-    window_ms = WINDOW_DAYS * 86400 * 1000
+    window_ms = window_days * 86400 * 1000
     seen: dict[int, tuple[int, float, float, float, float, float]] = {}
     windows = 0
 
@@ -140,13 +153,16 @@ def main() -> int:
     p.add_argument("--out", default="data/fxpro_klines", help="Выходная папка для CSV")
     p.add_argument("--symbols", default="",
                    help="Разделитель-запятые список символов; по умолчанию DEFAULT_SYMBOLS")
+    p.add_argument("--window-days", type=int, default=0,
+                   help="Размер окна fetch в днях (0=auto по интервалу)")
     args = p.parse_args()
 
     symbols = tuple(s.strip() for s in args.symbols.split(",") if s.strip()) or DEFAULT_SYMBOLS
     out_dir = Path(args.out)
+    window_days = args.window_days or _default_window_days(args.interval)
 
-    log.info("Fetching %d symbols × %dd M%d → %s",
-             len(symbols), args.days, args.interval, out_dir)
+    log.info("Fetching %d symbols × %dd M%d (window=%dd) → %s",
+             len(symbols), args.days, args.interval, window_days, out_dir)
 
     s = Settings()
     ts = TokenStore(s.ctrader_token_path)
@@ -174,7 +190,10 @@ def main() -> int:
 
     for yf_sym in symbols:
         t0 = time.monotonic()
-        bars = _fetch_symbol(client, sc, yf_sym, from_ms, now_ms, args.interval)
+        bars = _fetch_symbol(
+            client, sc, yf_sym, from_ms, now_ms, args.interval,
+            window_days=window_days,
+        )
         if not bars:
             continue
         filename = yf_sym.replace("=X", "").replace("=F", "_F").replace("-", "_")
@@ -183,7 +202,7 @@ def main() -> int:
         stats.append(FetchStats(
             symbol=yf_sym,
             bars=len(bars),
-            windows=(args.days + WINDOW_DAYS - 1) // WINDOW_DAYS,
+            windows=(args.days + window_days - 1) // window_days,
             gaps_filled=0,
             elapsed_sec=time.monotonic() - t0,
         ))
