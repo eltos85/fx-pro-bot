@@ -305,6 +305,50 @@ def test_monitor_shadow_does_not_change_trading(tmp_path) -> None:
     assert store.count_open_positions() == 0
 
 
+def test_monitor_close_persists_diagnostics(tmp_path) -> None:
+    """При scalp_trail-close monitor должен сохранить close-метрики
+    (peak_pips, tp_target_pips, trail_*, atr) и shadow_intrabar в БД.
+    Это гарантирует что shadow-данные переживут перезапуск контейнера."""
+    store = StatsStore(tmp_path / "t.db")
+    pid = store.open_position(
+        strategy="gold_orb", source="orb_breakout", instrument="GC=F",
+        direction="long", entry_price=4500.0, stop_loss_price=4495.0,
+    )
+    pos = store.get_open_positions()[0]
+    entry_ts = datetime.fromisoformat(pos.created_at).replace(tzinfo=UTC)
+
+    # ATR=1.0 → atr_pips=10, scalp_tp=3*10=30p, trigger=max(0.3*10,5)=5p,
+    # trail_d=max(0.3*10,3)=3p. Делаем peak +15p (выше trigger, ниже tp),
+    # потом откат до +4p (peak-cur=11p > trail_d=3p) → scalp_trail.
+    bars = [
+        _make_bar("GC=F", entry_ts + timedelta(minutes=5),
+                  4500.0, 4501.5, 4500.0, 4501.5),
+    ]
+    mon = PositionMonitor(store)
+    mon.run(
+        {"GC=F": 4501.5}, {"GC=F": 1.0},
+        bars_map={"GC=F": bars},
+    )
+    bars2 = bars + [
+        _make_bar("GC=F", entry_ts + timedelta(minutes=10),
+                  4501.5, 4501.5, 4500.4, 4500.4),
+    ]
+    stats = mon.run(
+        {"GC=F": 4500.4}, {"GC=F": 1.0},
+        bars_map={"GC=F": bars2},
+    )
+    assert stats["closed_trail"] == 1
+    diag = store.get_diagnostics(pid)
+    assert diag is not None
+    assert diag["peak_pips"] is not None and diag["peak_pips"] > 0
+    assert diag["tp_target_pips"] is not None
+    assert diag["trail_trigger_pips"] is not None
+    assert diag["trail_distance_pips"] is not None
+    assert diag["atr_at_close_pips"] is not None
+    # Shadow intrabar должен зафиксироваться (peak по high)
+    assert diag["shadow_intrabar_peak_pips"] is not None
+
+
 # ── Shadow ───────────────────────────────────────────────────
 
 

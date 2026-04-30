@@ -6,6 +6,88 @@
 
 ## 2026-04-30
 
+### feat(diag): `position_diagnostics` — структурное хранение F1/F2/close-метрик в БД
+
+`commit 8e9f57f`
+
+**Зачем.** До этого F1/F2 shadow-вердикты, peak_pips, M1 shadow жили
+только в Docker-логах. Логи труда­читаемы, обрезаются rotation'ом и
+часто недоступны после перезапуска контейнера (см. инцидент с аудитом
+F1/F2 — пришлось реконструировать вердикты из M5+БД, что и привело к
+обнаружению bug'а в `_update_broker_pnl`).
+
+**Решение.** Новая таблица `position_diagnostics` (PK = `position_id`)
+со схемой:
+
+| Колонка | Тип | Источник |
+|---|---|---|
+| `shadow_f1_status` / `shadow_f2_status` | TEXT | `gold_orb.process_signals` (open) |
+| `break_distance_atr` / `bars_since_box_end` | REAL/INT | open |
+| `atr_at_open_pips` | REAL | open |
+| `peak_pips` / `tp_target_pips` | REAL | `monitor.run` (close) |
+| `trail_trigger_pips` / `trail_distance_pips` | REAL | close |
+| `atr_at_close_pips` | REAL | close |
+| `shadow_intrabar_triggered` (0/1) | INT | close |
+| `shadow_intrabar_peak_pips` | REAL | close |
+| `shadow_intrabar_would_exit_pips` | REAL | close |
+| `shadow_intrabar_triggered_at_ts` | TEXT (ISO) | close |
+
+**Изменения кода:**
+
+- `src/fx_pro_bot/stats/store.py`: добавлены `save_open_diagnostics`,
+  `save_close_diagnostics`, `get_diagnostics`. Используют `INSERT INTO
+  ... ON CONFLICT(position_id) DO UPDATE SET` чтобы open- и close-блоки
+  независимо обновлялись.
+- `src/fx_pro_bot/strategies/scalping/gold_orb.py`: после успешного
+  открытия зовёт `save_open_diagnostics(...)`. Длинный лог `GOLD-ORB
+  OPEN [SHADOW F1=... F2=... break=... age=...]` сокращён — детали
+  теперь в БД.
+- `src/fx_pro_bot/strategies/monitor.py`: при close-event собирает
+  close-метрики (peak/tp/trail/atr_close + shadow_intrabar state) и
+  пишет через `save_close_diagnostics(...)`. Лог `CLOSE` тоже сокращён
+  до короткого маркера `[SH-INTRABAR Δ=... peak=...]`.
+- `tests/test_scalping.py::test_open_diagnostics_persisted_to_db` —
+  smoke-тест что `gold_orb` пишет F1/F2 в БД.
+- `tests/test_strategies.py::test_monitor_close_persists_diagnostics` —
+  smoke-тест что `monitor` пишет close-метрики при `scalp_trail` exit.
+
+**Аудит / backfill:**
+
+- `scripts/audit_gold_orb_f1_f2_shadow.py` переписан: основной источник
+  — `position_diagnostics` (LEFT JOIN). Если diag-записи нет (старые
+  сделки) — fallback к реконструкции из M5 с пометкой `[recon]`.
+  Колонка `source` (db/recon) и close-метрики добавлены в CSV-выход.
+- `scripts/backfill_gold_orb_diagnostics.py` (новый) — разовый
+  backfill F1/F2/break_dist/bars_since/atr для исторических сделок:
+  читает `positions LEFT JOIN position_diagnostics`, реконструирует
+  open-метрики из M5, пишет через `save_open_diagnostics`.
+  Поддерживает `--dry-run` (default) и `--apply`. Close-метрики
+  (peak/shadow_intrabar) — runtime-only, в backfill не входят.
+
+**Тесты.** Все 349 проходят.
+
+**Что дальше.**
+1. Деплой на VPS (этот commit).
+2. На VPS: запустить `backfill_gold_orb_diagnostics --apply` для 22
+   исторических сделок (база — DB-snapshot после bug-fix реконсилиации).
+3. Через 1–2 недели сравнить shadow-вердикты записанные **самой
+   стратегией live** (а не реконструкцией) с реальным P&L. По
+   `sample-size.mdc` нужно ≥100 сделок для решения о включении
+   F1/F2 как hard-filter.
+
+**Compliance.** Только observability + код-инфраструктура. Торговая
+логика не меняется (F1/F2 остаются shadow-only). По
+`fxpro-stats-baseline.mdc` — bug-fix/diag, baseline не сдвигает.
+
+**Файлы:** `src/fx_pro_bot/stats/store.py`,
+`src/fx_pro_bot/strategies/scalping/gold_orb.py`,
+`src/fx_pro_bot/strategies/monitor.py`,
+`scripts/audit_gold_orb_f1_f2_shadow.py`,
+`scripts/backfill_gold_orb_diagnostics.py`,
+`tests/test_scalping.py`, `tests/test_strategies.py`.
+
+---
+
 ### bug-fix(main): `_update_broker_pnl` использовал неправильный pip_value + не вызывался для бот-закрытий
 
 `commit TBD` (file `src/fx_pro_bot/app/main.py`)

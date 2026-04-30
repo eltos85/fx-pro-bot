@@ -262,21 +262,10 @@ class PositionMonitor:
                 # session_orb. Источник: дискуссия 28.04.2026 + аналитика
                 # `scripts/analyze_gold_orb_trail_compare.py`.
                 shadow = self._shadow_states.get(pos.id)
-                shadow_tag = ""
-                if shadow is not None:
-                    if shadow.triggered:
-                        delta = round(shadow.triggered_exit_pips - pips, 1)
-                        shadow_tag = (
-                            f" [SHADOW-INTRABAR: peak=+{shadow.peak_pips:.1f}p "
-                            f"would_exit={shadow.triggered_exit_pips:+.1f}p "
-                            f"@ {shadow.triggered_at_ts.isoformat() if shadow.triggered_at_ts else '—'} "
-                            f"Δ={delta:+.1f}p]"
-                        )
-                    else:
-                        shadow_tag = (
-                            f" [SHADOW-INTRABAR: peak=+{shadow.peak_pips:.1f}p "
-                            f"trail=PENDING]"
-                        )
+
+                # Структурированная диагностика → БД (persisted, для audit).
+                # Логи остаются короткими (для онлайн-наблюдения).
+                close_diag: dict = {}
                 if "scalp" in exit_reason and ps > 0:
                     atr_pips = atr / ps
                     trail_d = max(SCALPING_TRAIL_DISTANCE_ATR_MULT * atr_pips,
@@ -290,22 +279,49 @@ class PositionMonitor:
                     else:
                         tp_mult = SCALPING_TP_ATR_MULT
                     tp_target = max(tp_mult * atr_pips, SCALPING_TP_PIPS)
-                    log.info(
-                        "  CLOSE %s: %s %s → %+.1f pips (%s) "
-                        "[peak=%+.1f tp_target=%+.1f trail_trigger=%+.1f "
-                        "trail_d=%.1f ATR=%.1fp]%s",
-                        pos.strategy.upper(), display_name(pos.instrument),
-                        pos.direction.upper(), pips, exit_reason,
-                        peak_pips, tp_target, trail_trigger, trail_d, atr_pips,
-                        shadow_tag,
+                    close_diag.update(
+                        peak_pips=round(peak_pips, 1),
+                        tp_target_pips=round(tp_target, 1),
+                        trail_trigger_pips=round(trail_trigger, 1),
+                        trail_distance_pips=round(trail_d, 1),
+                        atr_at_close_pips=round(atr_pips, 1),
                     )
-                else:
-                    log.info(
-                        "  CLOSE %s: %s %s → %+.1f pips (%s)%s",
-                        pos.strategy.upper(), display_name(pos.instrument),
-                        pos.direction.upper(), pips, exit_reason,
-                        shadow_tag,
+                if shadow is not None:
+                    close_diag.update(
+                        shadow_intrabar_triggered=bool(shadow.triggered),
+                        shadow_intrabar_peak_pips=round(shadow.peak_pips, 1),
                     )
+                    if shadow.triggered:
+                        close_diag["shadow_intrabar_would_exit_pips"] = round(
+                            shadow.triggered_exit_pips, 1,
+                        )
+                        if shadow.triggered_at_ts:
+                            close_diag["shadow_intrabar_triggered_at_ts"] = (
+                                shadow.triggered_at_ts.isoformat()
+                            )
+                if close_diag:
+                    try:
+                        self._store.save_close_diagnostics(pos.id, **close_diag)
+                    except Exception as exc:
+                        log.warning("save_close_diagnostics failed for %s: %s", pos.id, exc)
+
+                # Лог: только короткий маркер. Полные метрики — в БД.
+                shadow_tag = ""
+                if shadow is not None:
+                    if shadow.triggered:
+                        delta = round(shadow.triggered_exit_pips - pips, 1)
+                        shadow_tag = (
+                            f" [SH-INTRABAR Δ={delta:+.1f}p "
+                            f"peak=+{shadow.peak_pips:.1f}p]"
+                        )
+                    else:
+                        shadow_tag = f" [SH-INTRABAR peak=+{shadow.peak_pips:.1f}p PENDING]"
+                log.info(
+                    "  CLOSE %s: %s %s → %+.1f pips (%s)%s",
+                    pos.strategy.upper(), display_name(pos.instrument),
+                    pos.direction.upper(), pips, exit_reason,
+                    shadow_tag,
+                )
                 self._shadow_states.pop(pos.id, None)
             else:
                 update_paper_positions(

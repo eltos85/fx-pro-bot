@@ -188,6 +188,32 @@ class StatsStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS position_diagnostics (
+                    position_id TEXT PRIMARY KEY REFERENCES positions(id),
+                    -- На момент OPEN (заполняется стратегией)
+                    shadow_f1_status TEXT,
+                    shadow_f2_status TEXT,
+                    break_distance_atr REAL,
+                    bars_since_box_end INTEGER,
+                    atr_at_open_pips REAL,
+                    -- На момент CLOSE (заполняется monitor.py при exit)
+                    peak_pips REAL,
+                    tp_target_pips REAL,
+                    trail_trigger_pips REAL,
+                    trail_distance_pips REAL,
+                    atr_at_close_pips REAL,
+                    -- INTRABAR / M1 shadow trail (см. shadow INTRABAR-trail
+                    -- в monitor.py, fxpro-stats-baseline.mdc → инструменты
+                    -- мониторинга)
+                    shadow_intrabar_triggered INTEGER,
+                    shadow_intrabar_peak_pips REAL,
+                    shadow_intrabar_would_exit_pips REAL,
+                    shadow_intrabar_triggered_at_ts TEXT
+                )
+                """
+            )
             self._migrate_add_source(conn)
             self._migrate_add_broker_position_id(conn)
             self._migrate_add_estimated_cost_pips(conn)
@@ -545,6 +571,110 @@ class StatsStore:
                 (profit_pips, profit_pct, position_id),
             )
             conn.commit()
+
+    # ── Position diagnostics (shadow F1/F2 + INTRABAR + close-метрики) ──
+
+    def save_open_diagnostics(
+        self,
+        position_id: str,
+        *,
+        shadow_f1_status: str | None = None,
+        shadow_f2_status: str | None = None,
+        break_distance_atr: float | None = None,
+        bars_since_box_end: int | None = None,
+        atr_at_open_pips: float | None = None,
+    ) -> None:
+        """Сохранить диагностику на момент открытия позиции.
+
+        Используется стратегиями (gold_orb / session_orb / etc.) сразу
+        после `record_position`. Позволяет в БД хранить shadow-вердикты
+        фильтров F1 / F2 и контекст entry без зависимости от docker-логов
+        (которые ротируются и теряются при рестарте контейнера).
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO position_diagnostics (
+                    position_id, shadow_f1_status, shadow_f2_status,
+                    break_distance_atr, bars_since_box_end, atr_at_open_pips
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(position_id) DO UPDATE SET
+                    shadow_f1_status = excluded.shadow_f1_status,
+                    shadow_f2_status = excluded.shadow_f2_status,
+                    break_distance_atr = excluded.break_distance_atr,
+                    bars_since_box_end = excluded.bars_since_box_end,
+                    atr_at_open_pips = excluded.atr_at_open_pips
+                """,
+                (
+                    position_id, shadow_f1_status, shadow_f2_status,
+                    break_distance_atr, bars_since_box_end, atr_at_open_pips,
+                ),
+            )
+            conn.commit()
+
+    def save_close_diagnostics(
+        self,
+        position_id: str,
+        *,
+        peak_pips: float | None = None,
+        tp_target_pips: float | None = None,
+        trail_trigger_pips: float | None = None,
+        trail_distance_pips: float | None = None,
+        atr_at_close_pips: float | None = None,
+        shadow_intrabar_triggered: bool | None = None,
+        shadow_intrabar_peak_pips: float | None = None,
+        shadow_intrabar_would_exit_pips: float | None = None,
+        shadow_intrabar_triggered_at_ts: str | None = None,
+    ) -> None:
+        """Сохранить close-метрики и финальный snapshot INTRABAR shadow.
+
+        Вызывается из `monitor.py._check_exits` после того как exit_reason
+        определён. Не перезаписывает open-поля (использует UPSERT по
+        position_id с COALESCE для сохранения уже записанных значений).
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO position_diagnostics (
+                    position_id,
+                    peak_pips, tp_target_pips, trail_trigger_pips,
+                    trail_distance_pips, atr_at_close_pips,
+                    shadow_intrabar_triggered,
+                    shadow_intrabar_peak_pips,
+                    shadow_intrabar_would_exit_pips,
+                    shadow_intrabar_triggered_at_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(position_id) DO UPDATE SET
+                    peak_pips = excluded.peak_pips,
+                    tp_target_pips = excluded.tp_target_pips,
+                    trail_trigger_pips = excluded.trail_trigger_pips,
+                    trail_distance_pips = excluded.trail_distance_pips,
+                    atr_at_close_pips = excluded.atr_at_close_pips,
+                    shadow_intrabar_triggered = excluded.shadow_intrabar_triggered,
+                    shadow_intrabar_peak_pips = excluded.shadow_intrabar_peak_pips,
+                    shadow_intrabar_would_exit_pips = excluded.shadow_intrabar_would_exit_pips,
+                    shadow_intrabar_triggered_at_ts = excluded.shadow_intrabar_triggered_at_ts
+                """,
+                (
+                    position_id,
+                    peak_pips, tp_target_pips, trail_trigger_pips,
+                    trail_distance_pips, atr_at_close_pips,
+                    int(shadow_intrabar_triggered) if shadow_intrabar_triggered is not None else None,
+                    shadow_intrabar_peak_pips,
+                    shadow_intrabar_would_exit_pips,
+                    shadow_intrabar_triggered_at_ts,
+                ),
+            )
+            conn.commit()
+
+    def get_diagnostics(self, position_id: str) -> dict | None:
+        """Прочитать диагностику позиции (для аудит-скриптов)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM position_diagnostics WHERE position_id=?",
+                (position_id,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def update_stop_loss(self, position_id: str, new_sl: float) -> None:
         with self._connect() as conn:

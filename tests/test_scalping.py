@@ -376,6 +376,28 @@ class TestGoldOrbStrategy:
         assert opened == 1
         assert store.count_open_positions(strategy="gold_orb") == 1
 
+    def test_open_diagnostics_persisted_to_db(self, tmp_path):
+        """gold_orb после открытия позиции должен сохранить F1/F2/break_dist в БД."""
+        store = _store(tmp_path)
+        strat = GoldOrbStrategy(store, shadow=False)
+        sig = GoldOrbSignal(
+            instrument=GOLD_ORB_INSTRUMENT, direction=TrendDirection.LONG,
+            source=GOLD_ORB_SOURCE, entry_level=2001.0,
+            box_high=2001.0, box_low=1999.0, atr=5.0,
+            session="london", detail="test",
+            bars_since_box_end=7, break_distance_atr=0.45,
+        )
+        strat.process_signals([sig], {GOLD_ORB_INSTRUMENT: 2002.0})
+        positions = store.get_open_positions(strategy="gold_orb")
+        assert len(positions) == 1
+        diag = store.get_diagnostics(positions[0].id)
+        assert diag is not None
+        assert diag["shadow_f1_status"] == "ok"
+        assert diag["shadow_f2_status"] == "ok"
+        assert abs(diag["break_distance_atr"] - 0.45) < 1e-9
+        assert diag["bars_since_box_end"] == 7
+        assert diag["atr_at_open_pips"] is not None
+
     def test_session_detection_london(self):
         base_london = datetime(2026, 3, 28, 9, 0, tzinfo=UTC)
         bars = [

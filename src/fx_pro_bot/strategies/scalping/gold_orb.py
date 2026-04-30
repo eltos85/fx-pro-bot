@@ -284,14 +284,26 @@ class GoldOrbStrategy:
             cost = estimate_entry_cost(sig.instrument, sig.source, sig.atr, ps)
             self._store.set_estimated_cost(pid, cost.round_trip_pips)
 
+            atr_pips = round(sig.atr / ps, 1) if ps > 0 else 0.0
+            try:
+                self._store.save_open_diagnostics(
+                    pid,
+                    shadow_f1_status=f1,
+                    shadow_f2_status=f2,
+                    break_distance_atr=sig.break_distance_atr,
+                    bars_since_box_end=sig.bars_since_box_end,
+                    atr_at_open_pips=atr_pips,
+                )
+            except Exception as exc:
+                log.warning("save_open_diagnostics failed for %s: %s", pid, exc)
+
             log.info(
-                "  GOLD-ORB OPEN: %s %s @ %.5f [%s session, box=[%.5f..%.5f], SL=%.5f, "
-                "bars_since_box_end=%d, break_dist=%.2fATR] [SHADOW F1=%s F2=%s]",
+                "  GOLD-ORB OPEN: %s %s @ %.5f [%s, box=[%.2f..%.2f], SL=%.2f] "
+                "[SHADOW F1=%s F2=%s break=%.2fATR age=%db]",
                 display_name(sig.instrument),
                 sig.direction.value.upper(),
                 price, sig.session, sig.box_high, sig.box_low, sl,
-                sig.bars_since_box_end, sig.break_distance_atr,
-                f1, f2,
+                f1, f2, sig.break_distance_atr, sig.bars_since_box_end,
             )
             opened += 1
             current += 1
