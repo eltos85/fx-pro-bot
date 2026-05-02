@@ -3,7 +3,7 @@
 ## 2026-05-02
 
 ### chore(observation): Wave 6 срез T+7d — второй alt-selloff эпизод (01.05)
-`pending commit`
+`3fb5e94`
 
 **Без изменений в коде**, статистический срез на середину Wave 6 +
 фиксация второго alt-selloff regime event.
