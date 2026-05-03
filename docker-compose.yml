@@ -108,5 +108,47 @@ services:
       - bybit_data:/data
       - /root/fx-pro-bot-data:/ab-data
 
+  ai-trader:
+    build:
+      context: .
+      dockerfile: Dockerfile.ai-trader
+    image: ai-trader:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      AI_TRADER_DATA_DIR: /data
+      AI_TRADER_LOG_LEVEL: ${AI_TRADER_LOG_LEVEL:-INFO}
+      # Эксперимент 14 дней. ВСЕ параметры заморожены — менять = curve-fitting.
+      AI_TRADER_POLL_INTERVAL_SEC: ${AI_TRADER_POLL_INTERVAL_SEC:-900}
+      AI_TRADER_VIRTUAL_CAPITAL: ${AI_TRADER_VIRTUAL_CAPITAL:-500}
+      AI_TRADER_SYMBOLS: ${AI_TRADER_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
+      # Killswitch: суровее чем у основного бота, потому что capital меньше.
+      AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-50}
+      AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-200}
+      AI_TRADER_MAX_POSITIONS: ${AI_TRADER_MAX_POSITIONS:-3}
+      AI_TRADER_MAX_LEVERAGE: ${AI_TRADER_MAX_LEVERAGE:-5}
+      # Bybit — ОТДЕЛЬНЫЕ ключи от bybit-bot (см. .env: AI_TRADER_BYBIT_API_KEY).
+      # Можно использовать те же что у bybit-bot, но рекомендуется завести
+      # отдельные subaccount или хотя бы переменные с другим именем для аудита.
+      AI_TRADER_BYBIT_DEMO: ${AI_TRADER_BYBIT_DEMO:-true}
+      AI_TRADER_BYBIT_CATEGORY: ${AI_TRADER_BYBIT_CATEGORY:-linear}
+      # DeepSeek-V4 через Anthropic-compatible endpoint.
+      # Free tier даёт 5M входных + 5M выходных tokens.
+      AI_TRADER_DEEPSEEK_MODEL: ${AI_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}
+      AI_TRADER_DEEPSEEK_BASE_URL: ${AI_TRADER_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
+      AI_TRADER_DEEPSEEK_THINKING: ${AI_TRADER_DEEPSEEK_THINKING:-true}
+      # PAPER mode по умолчанию: ставки НЕ ставятся на биржу, только логируются.
+      # Включать в LIVE только после проверки первых 1-2 циклов под наблюдением.
+      AI_TRADER_TRADING_ENABLED: ${AI_TRADER_TRADING_ENABLED:-false}
+    volumes:
+      - ai_trader_data:/data
+
 volumes:
   bybit_data:
+  ai_trader_data:

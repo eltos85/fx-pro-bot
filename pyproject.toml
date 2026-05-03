@@ -20,6 +20,7 @@ dependencies = [
   "service-identity>=24.1.0",
   "pybit>=5.9.0",
   "statsmodels>=0.14",
+  "anthropic>=0.39.0",
 ]
 
 [project.optional-dependencies]
@@ -30,9 +31,10 @@ fx-pro-bot = "fx_pro_bot.app.main:main"
 fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
 fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
 bybit-bot = "bybit_bot.app.main:main"
+ai-trader = "ai_trader.app.main:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fx_pro_bot", "src/bybit_bot"]
+packages = ["src/fx_pro_bot", "src/bybit_bot", "src/ai_trader"]
 
 [tool.ruff]
 line-length = 100

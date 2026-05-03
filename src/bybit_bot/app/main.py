@@ -64,11 +64,20 @@ def _handle_signal(signum: int, frame: object) -> None:
     log.info("Получен сигнал %d, завершаю...", signum)
 
 
-def _sync_positions_on_startup(client: BybitClient, stats: StatsStore) -> None:
+def _sync_positions_on_startup(
+    client: BybitClient,
+    stats: StatsStore,
+    managed_symbols: set[str] | tuple[str, ...] | frozenset[str] | None = None,
+) -> None:
     """При старте: восстановить в БД позиции, открытые на бирже но потерянные ботом.
 
-    Все позиции с биржи добавляются в БД (даже если символ не в scan_symbols),
-    чтобы exit-логика (trailing, time-stop) могла ими управлять.
+    Подбираются ТОЛЬКО позиции по символам из managed_symbols (обычно scan_symbols).
+    Это защита от перехвата позиций других ботов (например AI-трейдера на том же
+    аккаунте), торгующих на парах вне нашего whitelist'а. Чужие позиции
+    логируются и игнорируются — не попадают в нашу exit-логику.
+
+    Если managed_symbols не передан, восстанавливаются все позиции (старое
+    поведение для обратной совместимости).
     """
     try:
         api_positions = client.get_positions()
@@ -81,10 +90,19 @@ def _sync_positions_on_startup(client: BybitClient, stats: StatsStore) -> None:
 
     db_open = stats.get_open_positions()
     db_symbols = {p.symbol for p in db_open}
+    managed = frozenset(managed_symbols) if managed_symbols is not None else None
 
     recovered = 0
+    ignored = 0
     for ap in api_positions:
         if ap.symbol in db_symbols:
+            continue
+        if managed is not None and ap.symbol not in managed:
+            ignored += 1
+            log.info(
+                "SYNC IGNORE: %s %s qty=%s — символ вне scan_symbols (чужая позиция)",
+                ap.side, ap.symbol, ap.size,
+            )
             continue
         stats.open_position(
             symbol=ap.symbol,
@@ -100,8 +118,9 @@ def _sync_positions_on_startup(client: BybitClient, stats: StatsStore) -> None:
             ap.side, ap.symbol, ap.size, ap.entry_price, ap.unrealised_pnl,
         )
 
-    if recovered:
-        log.info("Синхронизация при старте: восстановлено %d позиций", recovered)
+    if recovered or ignored:
+        log.info("Синхронизация при старте: восстановлено %d, проигнорировано %d (не наши)",
+                 recovered, ignored)
 
 
 def run_bot() -> None:
@@ -191,7 +210,9 @@ def run_bot() -> None:
         log.info("Торговля отключена — работаю в режиме сигналов")
 
     if client and stats:
-        _sync_positions_on_startup(client, stats)
+        _sync_positions_on_startup(
+            client, stats, managed_symbols=set(settings.scan_symbols)
+        )
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)

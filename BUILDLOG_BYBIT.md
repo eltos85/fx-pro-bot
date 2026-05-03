@@ -2,6 +2,30 @@
 
 ## 2026-05-03
 
+### feat(sync): _sync_positions_on_startup теперь фильтрует по scan_symbols
+`<pending>`
+
+**Контекст.** Запускаем параллельно отдельный AI-trader (DeepSeek-V4) на
+том же Bybit-аккаунте, торгующий на парах вне `scan_symbols` основного
+бота (BTC/ETH/BNB/XRP/DOGE против SOL/ADA/LINK/SUI/TON/WIF/TIA/DOT —
+пересечений нет). Без правки `_sync_positions_on_startup` основной бот
+при рестарте подбирал бы любые открытые позиции на бирже как `recovered` и
+включал бы их в свою exit-логику (trailing/time-stop), что ломало бы
+позиции AI-трейдера.
+
+**Правка.** `_sync_positions_on_startup(client, stats, managed_symbols=None)`:
+- Если `managed_symbols` передан (что и происходит в `run_bot`, передаём
+ `set(settings.scan_symbols)`) — позиции на символах вне whitelist'а
+ игнорируются, лог `SYNC IGNORE: <side> <symbol> qty=… — символ вне
+ scan_symbols`.
+- Если `managed_symbols=None` — старое поведение, для обратной совместимости.
+
+**Файлы:** `src/bybit_bot/app/main.py`. Тесты не ломаются (350/350 + 17 новых
+для AI-trader).
+
+**См. также:** `BUILDLOG_AI_TRADER.md` (новый файл) — отдельный лог
+эксперимента DeepSeek-V4.
+
 ### feat(observability): poll_interval 300с → 60с + funnel-период от секунд
 `d8a373c`
 
