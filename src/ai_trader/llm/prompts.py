@@ -20,7 +20,8 @@ CAPITAL RULES:
 - Virtual capital: $500 USD (use this for position sizing, not real wallet equity)
 - Maximum 3 simultaneous open positions
 - Maximum leverage: 5x per position
-- Maximum risk per trade: 2% of capital ($10 max risk per trade)
+- Maximum risk per trade: 5% of capital ($25 max risk per trade)
+- Daily loss limit: $125 (after that trading blocks until next day)
 - Each new position MUST have stop_loss and take_profit prices
 
 ALLOWED PAIRS (only these):

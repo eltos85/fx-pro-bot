@@ -128,9 +128,11 @@ services:
       AI_TRADER_POLL_INTERVAL_SEC: ${AI_TRADER_POLL_INTERVAL_SEC:-900}
       AI_TRADER_VIRTUAL_CAPITAL: ${AI_TRADER_VIRTUAL_CAPITAL:-500}
       AI_TRADER_SYMBOLS: ${AI_TRADER_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
-      # Killswitch: суровее чем у основного бота, потому что capital меньше.
-      AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-50}
-      AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-200}
+      # Killswitch (v0.2.1, 5%-риск): паритет — 5 убыточных сделок до блока.
+      # При 5% риска на сделку = $25 макс убыток × 5 = $125/день.
+      # Total $500 = virtual capital, "доедание депо" триггер.
+      AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-125}
+      AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-500}
       AI_TRADER_MAX_POSITIONS: ${AI_TRADER_MAX_POSITIONS:-3}
       AI_TRADER_MAX_LEVERAGE: ${AI_TRADER_MAX_LEVERAGE:-5}
       # Bybit — ОТДЕЛЬНЫЕ ключи от bybit-bot (см. .env: AI_TRADER_BYBIT_API_KEY).

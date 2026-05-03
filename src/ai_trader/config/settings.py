@@ -73,11 +73,14 @@ class AiTraderSettings(BaseSettings):
     )
 
     # ─── KillSwitch ──────────────────────────────────────────────────────
+    # При risk-per-trade 5% ($25) и max-pos 3:
+    # - $125/день = 5 убыточных сделок до блока (паритет с прошлой 2%/$50)
+    # - $500 total = полный virtual capital, "доедание депо" триггер
     max_daily_loss_usd: float = Field(
-        default=50.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
+        default=125.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
     )
     max_total_loss_usd: float = Field(
-        default=200.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
+        default=500.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
     )
     max_open_positions: int = Field(
         default=3, validation_alias="AI_TRADER_MAX_POSITIONS"
