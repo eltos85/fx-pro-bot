@@ -94,8 +94,11 @@ class AiTraderSettings(BaseSettings):
     telegram_bot_token: str = Field(
         default="", validation_alias="TELEGRAM_BOT_TOKEN"
     )
-    telegram_chat_id: int | None = Field(
-        default=None, validation_alias="TELEGRAM_CHAT_ID"
+    # Принимаем chat_id как строку: пустая = None (auto-detect),
+    # любое число = фиксированный chat_id. pydantic int|None ломается на
+    # пустой строке из docker-compose ENV interpolation.
+    telegram_chat_id_raw: str = Field(
+        default="", validation_alias="TELEGRAM_CHAT_ID"
     )
     telegram_enabled: bool = Field(
         default=True, validation_alias="AI_TRADER_TELEGRAM_ENABLED"
@@ -130,3 +133,13 @@ class AiTraderSettings(BaseSettings):
         from pathlib import Path
 
         return str(Path(self.data_dir) / self.db_filename)
+
+    @property
+    def telegram_chat_id(self) -> int | None:
+        v = self.telegram_chat_id_raw.strip()
+        if not v:
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            return None
