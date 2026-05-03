@@ -62,6 +62,12 @@ services:
       # /root/fx-pro-bot-data (bind mount ниже). Рестарт контейнера и
       # docker volume rm не трогают этот файл.
       AB_SNAPSHOTS_DB_PATH: /ab-data/ab_snapshots.sqlite
+      # Главный цикл: 60с (было 300с). Сигналы по-прежнему считаются на
+      # 5m свечах, но мы быстрее ловим момент закрытия бара и точнее
+      # срабатывает trailing stop / time-stop / EXIT-CHECK.
+      # Нагрузка на API: ~10 calls/cycle × 60s = 0.17 req/sec
+      # (limit Bybit 10 req/sec — запас 60×). Торговая логика не меняется.
+      BYBIT_BOT_POLL_INTERVAL_SEC: ${BYBIT_BOT_POLL_INTERVAL_SEC:-60}
       # После backtest 90д / 9K сделок (см. BUILDLOG_BYBIT.md 2026-04-23):
       # 5 страт (VWAP/StatArb/Volume/Turtle/LeadLag) подтверждённо убыточны
       # на истории (PnL от -49% до -280%). Код не удалён — только флаг.

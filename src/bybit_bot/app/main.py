@@ -336,9 +336,10 @@ def _run_cycle(
         tradeable_symbols=tradeable_symbols,
     )
 
-    # Почасовой filter-funnel COF (один раз в 12 циклов = 1ч при cycle=5m).
+    # Почасовой filter-funnel COF — раз в ~1ч независимо от poll-частоты.
     # Помогает мониторить "подходит ли рыночный режим" без grep'а DEBUG-логов.
-    if scalp_cof is not None and cycle > 0 and cycle % 12 == 0:
+    cycles_per_hour = max(1, 3600 // max(1, settings.poll_interval_sec))
+    if scalp_cof is not None and cycle > 0 and cycle % cycles_per_hour == 0:
         funnel = scalp_cof.get_funnel_and_reset()
         log.info(
             "COF funnel за час: scans=%d → outside_session=%d low_atr=%d "
