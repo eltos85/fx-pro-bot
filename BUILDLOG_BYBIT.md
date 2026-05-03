@@ -3,7 +3,7 @@
 ## 2026-05-03
 
 ### feat(sync): _sync_positions_on_startup теперь фильтрует по scan_symbols
-`<pending>`
+`7d4b9bb`
 
 **Контекст.** Запускаем параллельно отдельный AI-trader (DeepSeek-V4) на
 том же Bybit-аккаунте, торгующий на парах вне `scan_symbols` основного
