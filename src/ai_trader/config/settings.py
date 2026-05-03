@@ -90,6 +90,28 @@ class AiTraderSettings(BaseSettings):
         default="ai_trader.sqlite", validation_alias="AI_TRADER_DB_FILENAME"
     )
 
+    # ─── Telegram ────────────────────────────────────────────────────────
+    telegram_bot_token: str = Field(
+        default="", validation_alias="TELEGRAM_BOT_TOKEN"
+    )
+    telegram_chat_id: int | None = Field(
+        default=None, validation_alias="TELEGRAM_CHAT_ID"
+    )
+    telegram_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_TELEGRAM_ENABLED"
+    )
+
+    # ─── News ────────────────────────────────────────────────────────────
+    news_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_NEWS_ENABLED"
+    )
+    news_max_age_hours: int = Field(
+        default=6, validation_alias="AI_TRADER_NEWS_MAX_AGE_HOURS"
+    )
+    news_max_items: int = Field(
+        default=8, validation_alias="AI_TRADER_NEWS_MAX_ITEMS"
+    )
+
     # ─── Misc ────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", validation_alias="AI_TRADER_LOG_LEVEL")
     trading_enabled: bool = Field(

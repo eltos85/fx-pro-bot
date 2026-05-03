@@ -21,6 +21,7 @@ dependencies = [
   "pybit>=5.9.0",
   "statsmodels>=0.14",
   "anthropic>=0.39.0",
+  "feedparser>=6.0",
 ]
 
 [project.optional-dependencies]

@@ -146,6 +146,18 @@ services:
       # PAPER mode по умолчанию: ставки НЕ ставятся на биржу, только логируются.
       # Включать в LIVE только после проверки первых 1-2 циклов под наблюдением.
       AI_TRADER_TRADING_ENABLED: ${AI_TRADER_TRADING_ENABLED:-false}
+      # News (Wave 3): RSS-агрегатор CoinDesk/CoinTelegraph/Decrypt, без auth.
+      # Кэш в памяти 10 мин, фильтр по символам (BTC/ETH/BNB/XRP/DOGE) +
+      # generic-keywords (ETF, Fed, regulation). Top-N свежих за last_age_hours.
+      AI_TRADER_NEWS_ENABLED: ${AI_TRADER_NEWS_ENABLED:-true}
+      AI_TRADER_NEWS_MAX_AGE_HOURS: ${AI_TRADER_NEWS_MAX_AGE_HOURS:-6}
+      AI_TRADER_NEWS_MAX_ITEMS: ${AI_TRADER_NEWS_MAX_ITEMS:-8}
+      # Telegram (Wave 4): если TELEGRAM_BOT_TOKEN пустой — TG-модуль молчит.
+      # TELEGRAM_CHAT_ID опционален (auto-detect при первой команде /start),
+      # но если задан — отключает auto-bind для безопасности.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      AI_TRADER_TELEGRAM_ENABLED: ${AI_TRADER_TELEGRAM_ENABLED:-true}
     volumes:
       - ai_trader_data:/data
 

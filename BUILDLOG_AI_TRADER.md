@@ -1,5 +1,145 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-03 — v0.2: Wave 2 + Wave 3 + Wave 4 (полный сброс n=0)
+
+**Контекст.** v0.1 (запущен этим же утром) был MVP: голый LLM на ценах +
+funding rate, без новостей и без Telegram. Прошёл 1 успешный LIVE-цикл
+(HOLD), но после ревью `BUILDLOG_AI_TRADER.md` пользователь напомнил
+исходный запрос: «опытный криптотрейдер, следит за новостями, …, подключён
+к telegram». v0.1 был слишком урезан. Расширяем до полного спека за один
+заход и стартуем заново.
+
+**Сброс эксперимента.** v0.1 → выбрасываем (n=1, статистически бесполезно
++ промпт изменён). Эксперимент v0.2 стартует с n=0. 14 дней forward-test
+(до 17.05) — на этих условиях промпт и контекст ЗАМОРОЖЕНЫ
+(`no-data-fitting.mdc`).
+
+**Что добавилось в v0.2:**
+
+### Wave 2 — Технические индикаторы
+
+`src/ai_trader/analysis/indicators.py`. Канонические реализации без
+внешних зависимостей:
+- RSI(14) — Wilder's smoothing
+- MACD(12/26/9) — EMA-based
+- ATR(14) — Wilder + ATR%
+- EMA20 / EMA50 — для определения тренда
+- Bollinger Bands(20, 2σ) — для overbought/oversold
+
+В контекст вкладывается **на двух TF**:
+- **1H** × 100 свечей (краткосрочные сигналы)
+- **4H** × 50 свечей (крупный тренд)
+
+В `format_snapshot()` добавлены человекочитаемые метки:
+`[OVERBOUGHT]`/`[OVERSOLD]` (RSI), `[bullish]`/`[bearish]` (MACD),
+`[uptrend]`/`[downtrend]`/`[mixed]` (EMA), `[above/below upper/lower BB]`.
+
+**Research basis:** Wilder (1978) RSI/ATR; Appel (2005) MACD; Bollinger
+(2001) BB. Параметры — канонические, не подкручивались.
+
+### Wave 3 — News feed
+
+`src/ai_trader/news/rss.py`. RSS-агрегатор с фильтрацией:
+- Источники по умолчанию: CoinDesk, CoinTelegraph, Decrypt (RSS, без auth)
+- Кэш в памяти 10 минут (1-2 fetch на цикл, не нагружаем источники)
+- Фильтр по ключевым словам:
+  - `BTCUSDT` ← bitcoin/btc/satoshi
+  - `ETHUSDT` ← ethereum/eth/vitalik
+  - `BNBUSDT` ← binance coin/bnb
+  - `XRPUSDT` ← xrp/ripple
+  - `DOGEUSDT` ← dogecoin/doge
+  - Generic crypto: ETF, SEC, Fed, FOMC, stablecoin
+- Top-N (default 8) свежих за last 6h, дедуп по URL
+- Если `feedparser` недоступен / RSS падает — блок news просто пустой,
+  торговля продолжается без него (graceful degradation)
+
+В system prompt добавлена инструкция: *«News sensitivity: major bullish
+news on a coin during weakness = potential long setup; bearish news during
+strength = potential short setup. Ignore headlines unrelated to your
+symbols.»*
+
+### Wave 4 — Telegram
+
+`src/ai_trader/telegram/bot.py`. Минимальный клиент **на чистом requests**
+(без `python-telegram-bot` SDK — меньше зависимостей, нет async-сложности).
+Polling в отдельном daemon-thread, 30-сек long-poll.
+
+**Команды:**
+- `/start`, `/help` — приветствие + справка
+- `/status` — режим, баланс, позиции, killswitch
+- `/pnl` — daily/total PnL, WR, кол-во сделок
+- `/last_decision` (alias `/last`) — последнее решение LLM с reasoning
+- `/history [N]` — последние N решений (default 5, max 20)
+- `/pause` — приостановить торговлю (флаг `paused` в kv_state)
+- `/resume` — возобновить
+
+**Push-уведомления:**
+- 🟢 при открытии позиции (`apply.executed`)
+- 🔴 при закрытии (по reconcile или /close)
+- ⚠️ при срабатывании killswitch
+- ❌ при ошибках (LLM API, парсинг, crash цикла)
+
+**Auto-detect chat_id:** при первой команде от пользователя бот сохраняет
+`chat_id` в `kv_state.telegram_chat_id` и далее шлёт push туда. Если
+`TELEGRAM_CHAT_ID` задан в .env — используется он (фиксированный режим
+для безопасности на проде).
+
+**Graceful degradation:** если `TELEGRAM_BOT_TOKEN` пустой — модуль
+просто не стартует. Никаких ошибок, основной цикл работает как обычно.
+
+### Прочие изменения
+
+- `state/db.py` — новая таблица `kv_state` (key→value), методы
+  `is_paused()/set_paused()`, `get/set_telegram_chat_id()`,
+  `get_recent_decisions()`, `get_closed_positions_count()`.
+- `app/main.py` — интеграция всех модулей: pause-проверка перед LLM,
+  передача `news_provider` в context-сборщик, `tg.notify_*` на ключевых
+  событиях, push при `cycle crashed`.
+- `pyproject.toml` — добавлен `feedparser>=6.0`.
+- `docker-compose.yml` — добавлены env vars: `AI_TRADER_NEWS_*`,
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `AI_TRADER_TELEGRAM_ENABLED`.
+
+### Тестовое покрытие
+
+Всего по AI-trader:
+- `test_ai_trader.py` — 17 тестов (parser, killswitch, store)
+- `test_ai_trader_indicators.py` — 22 теста (RSI/MACD/ATR/EMA/BB +
+  edge cases на коротких рядах, чистом тренде, постоянстве)
+- `test_ai_trader_news.py` — 14 тестов (классификация, фильтр по
+  символам, generic-relevance, dedup, кэш, fixture-RSS через mock
+  `feedparser.parse`)
+- `test_ai_trader_telegram.py` — 22 теста (split_message, KV-state,
+  все команды на пустой и наполненной БД, mock TelegramBot)
+
+Итого 75 unit-тестов на AI-trader. Полный проект: 425 / 425 ✓.
+
+### План v0.2 наблюдения
+
+1. **Cycle 1** — sanity-проверка: индикаторы посчитались (RSI/MACD не None
+   на 5 символах × 2 TF = 10 snapshot'ов), новости пришли (хотя бы
+   1 заголовок в кэше), Telegram молчит (token пуст — это норма).
+2. **Day 1-3** — наблюдаем как часто LLM ссылается на индикаторы и новости
+   в `reason` поле. Если игнорирует — значит system prompt недоучёл, можем
+   усилить (но это reset n=0!).
+3. **Day 14** (17.05) — финальный анализ: total PnL, WR, PF, сравнение с
+   v0.1 baseline (если данных хватит) и HODL BTC за тот же период.
+
+**Файлы (новые/изменённые):**
+- `src/ai_trader/analysis/{__init__,indicators}.py`
+- `src/ai_trader/news/{__init__,rss}.py`
+- `src/ai_trader/telegram/{__init__,bot}.py`
+- `src/ai_trader/state/db.py` (kv_state, helpers)
+- `src/ai_trader/trading/context.py` (intregration)
+- `src/ai_trader/llm/prompts.py` (расширен)
+- `src/ai_trader/app/main.py` (TG + news + pause)
+- `src/ai_trader/config/settings.py` (telegram + news vars)
+- `tests/test_ai_trader_indicators.py`, `test_ai_trader_news.py`,
+  `test_ai_trader_telegram.py`
+- `pyproject.toml`, `docker-compose.yml`
+
+---
+
+
 Изолированный экспериментальный модуль. Не пересекается с `fx_pro_bot` и
 `bybit_bot` (см. правило `strategy-guard.mdc` про разделение модулей).
 

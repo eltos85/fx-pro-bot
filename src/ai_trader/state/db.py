@@ -84,6 +84,12 @@ CREATE TABLE IF NOT EXISTS daily_pnl (
     n_wins INTEGER NOT NULL DEFAULT 0,
     api_cost_usd REAL NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS kv_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -264,3 +270,66 @@ class AiTraderStore:
                 """,
                 (today, cost_usd),
             )
+
+    # ─── KV state (chat_id, paused, etc) ──────────────────────────────────
+
+    def kv_get(self, key: str) -> str | None:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT value FROM kv_state WHERE key = ?", (key,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def kv_set(self, key: str, value: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                """
+                INSERT INTO kv_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (key, value, datetime.now(tz=UTC).isoformat()),
+            )
+
+    def is_paused(self) -> bool:
+        return self.kv_get("paused") == "1"
+
+    def set_paused(self, value: bool) -> None:
+        self.kv_set("paused", "1" if value else "0")
+
+    def get_telegram_chat_id(self) -> int | None:
+        v = self.kv_get("telegram_chat_id")
+        try:
+            return int(v) if v else None
+        except (TypeError, ValueError):
+            return None
+
+    def set_telegram_chat_id(self, chat_id: int) -> None:
+        self.kv_set("telegram_chat_id", str(chat_id))
+
+    def get_recent_decisions(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT cycle, ts, parsed_action, executed, error
+                FROM decisions
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_closed_positions_count(self) -> tuple[int, int]:
+        """Возвращает (всего закрытых, прибыльных)."""
+        with self._conn() as c:
+            row = c.execute(
+                """
+                SELECT COUNT(*) AS total,
+                       COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) AS wins
+                FROM positions WHERE closed_at IS NOT NULL
+                """
+            ).fetchone()
+        return (int(row[0]) if row else 0, int(row[1]) if row else 0)

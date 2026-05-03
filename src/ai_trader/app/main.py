@@ -1,14 +1,15 @@
-"""AI-Trader main loop.
+"""AI-Trader main loop (v0.2 — Wave 2+3+4).
 
 Раз в `poll_interval_sec` (default 15 минут):
 1. Сверяем закрытые на бирже позиции (наши, по orderLinkId) с БД,
-   обновляем PnL.
+   обновляем PnL. Push в Telegram если позиция закрылась.
 2. Killswitch check — если daily/total лимит — спим до следующего цикла.
-3. Собираем market context.
-4. Спрашиваем DeepSeek-V4.
-5. Парсим JSON, валидируем, записываем decision (audit-trail).
-6. Применяем действие (open/close/hold).
-7. Логируем результат + спим.
+3. Pause check — если /pause из Telegram — спим, не дёргаем LLM.
+4. Собираем market context (с индикаторами 1h/4h и свежими новостями).
+5. Спрашиваем DeepSeek-V4.
+6. Парсим JSON, валидируем, записываем decision (audit-trail).
+7. Применяем действие (open/close/hold). Push в Telegram если open/close.
+8. Логируем результат + спим.
 
 Запускается как `python -m ai_trader.app.main` в Docker-контейнере.
 """
@@ -22,8 +23,10 @@ from datetime import UTC, datetime
 from ai_trader.config.settings import AiTraderSettings
 from ai_trader.llm.client import DeepSeekClient
 from ai_trader.llm.prompts import SYSTEM_PROMPT, build_user_prompt
+from ai_trader.news.rss import RssNewsProvider
 from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from ai_trader.state.db import AiTraderStore
+from ai_trader.telegram.bot import TelegramBot, TelegramConfig, build_command_handlers
 from ai_trader.trading.client import AiBybitClient
 from ai_trader.trading.context import collect_market_context, format_context_for_prompt
 from ai_trader.trading.executor import apply_action, parse_action
@@ -39,8 +42,10 @@ def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
     log.info("Получен сигнал %d, завершаю...", signum)
 
 
-def _reconcile_closed_positions(client: AiBybitClient, store: AiTraderStore) -> None:
-    """Если SL/TP закрыли позицию на бирже — обновим её в БД."""
+def _reconcile_closed_positions(
+    client: AiBybitClient, store: AiTraderStore, tg: TelegramBot | None = None
+) -> None:
+    """Если SL/TP закрыли позицию на бирже — обновим её в БД + push в TG."""
     open_db = store.get_open_positions()
     if not open_db:
         return
@@ -51,10 +56,6 @@ def _reconcile_closed_positions(client: AiBybitClient, store: AiTraderStore) -> 
             api_positions_by_symbol.setdefault(p.symbol, []).append(p)
 
     for db_pos in open_db:
-        # Если на бирже нет открытой позиции в этом символе с тем же size+side,
-        # считаем закрытой. Берём последний ticker как exit price (грубое
-        # приближение; точную цену забора можно достать из get_closed_pnl
-        # по orderLinkId, добавим в v0.2).
         api_list = api_positions_by_symbol.get(db_pos.symbol, [])
         still_open = any(
             p.side == db_pos.side and abs(p.size - db_pos.qty) < 1e-6 for p in api_list
@@ -73,11 +74,15 @@ def _reconcile_closed_positions(client: AiBybitClient, store: AiTraderStore) -> 
             realized_pnl_usd=pnl,
             close_reason="exchange_closed (SL/TP/manual)",
         )
-        log.info(
-            "RECONCILE closed: id=%d %s %s qty=%s entry=$%.6g exit=$%.6g pnl=$%+.2f",
-            db_pos.id, db_pos.side, db_pos.symbol, db_pos.qty,
-            db_pos.entry_price, exit_price, pnl,
+        msg = (
+            f"id={db_pos.id} {db_pos.side} {db_pos.symbol} qty={db_pos.qty}\n"
+            f"entry=${db_pos.entry_price:.6g} exit=${exit_price:.6g}\n"
+            f"PnL: ${pnl:+.2f}\n"
+            f"Reason: exchange_closed (SL/TP)"
         )
+        log.info("RECONCILE closed: %s", msg.replace("\n", " | "))
+        if tg:
+            tg.notify_close(msg)
 
 
 def run() -> None:
@@ -89,7 +94,7 @@ def run() -> None:
     )
 
     log.info("=" * 60)
-    log.info("AI-Trader запущен (DeepSeek-V4 experiment)")
+    log.info("AI-Trader v0.2 запущен (DeepSeek-V4 + indicators + news + telegram)")
     log.info("Demo: %s | Symbols: %s", settings.bybit_demo, ", ".join(settings.symbols))
     log.info("Virtual capital: $%.2f | Poll: %ds", settings.virtual_capital_usd, settings.poll_interval_sec)
     log.info(
@@ -98,6 +103,9 @@ def run() -> None:
         settings.max_open_positions, settings.max_leverage,
     )
     log.info("Trading mode: %s", "LIVE" if settings.trading_enabled else "PAPER (decisions only)")
+    log.info("News: %s | Telegram: %s",
+             "ON" if settings.news_enabled else "OFF",
+             "ON" if (settings.telegram_enabled and settings.telegram_bot_token) else "OFF")
     log.info("=" * 60)
 
     if not settings.deepseek_api_key:
@@ -131,6 +139,36 @@ def run() -> None:
         store,
     )
 
+    # ─── News ────────────────────────────────────────────────────────────
+    news_provider: RssNewsProvider | None = None
+    if settings.news_enabled:
+        news_provider = RssNewsProvider(
+            cache_ttl_sec=600,
+            max_items=settings.news_max_items,
+            max_age_hours=settings.news_max_age_hours,
+        )
+
+    # ─── Telegram ────────────────────────────────────────────────────────
+    tg: TelegramBot | None = None
+    if settings.telegram_enabled and settings.telegram_bot_token:
+        tg_cfg = TelegramConfig(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+            enabled=True,
+        )
+        tg = TelegramBot(
+            tg_cfg, store, build_command_handlers(store, settings, killswitch)
+        )
+        tg.start()
+        # Welcome message — отправится только если chat_id уже привязан
+        tg.send(
+            "🚀 *AI-Trader v0.2 started*\n\n"
+            f"Mode: `{'LIVE' if settings.trading_enabled else 'PAPER'}`\n"
+            f"Symbols: {', '.join(settings.symbols)}\n"
+            f"Poll: {settings.poll_interval_sec}s\n\n"
+            "Send /help to see commands."
+        )
+
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
@@ -138,16 +176,19 @@ def run() -> None:
     while not _shutdown:
         cycle += 1
         try:
-            _run_cycle(cycle, settings, store, bybit, llm, killswitch)
-        except Exception:
+            _run_cycle(cycle, settings, store, bybit, llm, killswitch, news_provider, tg)
+        except Exception as e:
             log.exception("Cycle %d crashed (продолжаю)", cycle)
+            if tg:
+                tg.notify_error(f"cycle {cycle}", str(e))
 
-        # Сон с проверкой shutdown каждую секунду
         for _ in range(settings.poll_interval_sec):
             if _shutdown:
                 break
             time.sleep(1)
 
+    if tg:
+        tg.stop()
     log.info("AI-Trader остановлен")
 
 
@@ -158,24 +199,32 @@ def _run_cycle(
     bybit: AiBybitClient,
     llm: DeepSeekClient,
     killswitch: KillSwitch,
+    news_provider: RssNewsProvider | None,
+    tg: TelegramBot | None,
 ) -> None:
     log.info("─── Cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
 
-    _reconcile_closed_positions(bybit, store)
+    _reconcile_closed_positions(bybit, store, tg)
+
+    if store.is_paused():
+        log.info("PAUSED (через /pause из Telegram) — пропускаю цикл")
+        return
 
     gen = killswitch.check_can_trade()
     if not gen.allowed:
         log.warning("KILLSWITCH: %s — пропускаю цикл", gen.reason)
+        if tg:
+            tg.notify_killswitch(gen.reason)
         return
 
     ctx = collect_market_context(
-        bybit, store, settings.symbols, settings.virtual_capital_usd
+        bybit, store, settings.symbols, settings.virtual_capital_usd, news_provider
     )
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
 
     log.info(
-        "LLM call: positions=%d real_equity=$%.2f",
-        len(ctx.open_positions), ctx.real_equity_usd,
+        "LLM call: positions=%d real_equity=$%.2f news=%d",
+        len(ctx.open_positions), ctx.real_equity_usd, len(ctx.news),
     )
     resp = llm.ask(SYSTEM_PROMPT, user_prompt)
     store.add_api_cost(resp.cost_usd)
@@ -194,6 +243,8 @@ def _run_cycle(
             cost_usd=resp.cost_usd,
         )
         log.error("LLM error: %s", resp.error)
+        if tg:
+            tg.notify_error("LLM", resp.error)
         return
 
     log.info(
@@ -238,6 +289,11 @@ def _run_cycle(
         log.error("Apply error: %s", apply.error)
     elif apply.summary:
         log.info("APPLY: %s", apply.summary)
+        if tg and apply.executed:
+            if parsed.action == "open":
+                tg.notify_open(apply.summary)
+            elif parsed.action == "close":
+                tg.notify_close(apply.summary)
 
 
 if __name__ == "__main__":
