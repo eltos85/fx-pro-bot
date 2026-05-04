@@ -1,0 +1,43 @@
+Loaded 493 rows from data/gold_orb_h1_h5_enriched_wick.csv
+
+─── BASELINE ───
+ALL                                              n= 493  WR= 44.0%  net= +13647p  avg= +27.7p  avg_w=+174.1  avg_l= -87.5  PF=1.57
+  IS                                             n= 341  WR= 45.5%  net=  +5348p  avg= +15.7p  avg_w=+115.9  avg_l= -67.8  PF=1.42
+  OOS                                            n= 152  WR= 40.8%  net=  +8299p  avg= +54.6p  avg_w=+319.8  avg_l=-128.1  PF=1.72
+
+─── H1: ORB internal direction ───
+  --- ALL ---
+    [aligned] trade-dir == orb-dir               n= 333  WR= 45.6%  net= +11735p  avg= +35.2p  avg_w=+179.4  avg_l= -85.8  PF=1.76
+    [contra]  trade-dir != orb-dir               n= 160  WR= 40.6%  net=  +1913p  avg= +12.0p  avg_w=+161.9  avg_l= -90.6  PF=1.22
+  --- IS ---
+    [aligned] trade-dir == orb-dir               n= 230  WR= 44.3%  net=  +2393p  avg= +10.4p  avg_w=+108.5  avg_l= -67.8  PF=1.28
+    [contra]  trade-dir != orb-dir               n= 111  WR= 47.7%  net=  +2955p  avg= +26.6p  avg_w=+130.0  avg_l= -67.8  PF=1.75
+  --- OOS ---
+    [aligned] trade-dir == orb-dir               n= 103  WR= 48.5%  net=  +9341p  avg= +90.7p  avg_w=+323.9  avg_l=-129.3  PF=2.36
+    [contra]  trade-dir != orb-dir               n=  49  WR= 24.5%  net=  -1042p  avg= -21.3p  avg_w=+302.9  avg_l=-126.4  PF=0.78
+
+─── H2: ATR percentile regime ───
+  --- ALL ---
+    [compression] ATR pct < 30                   n= 211  WR= 40.8%  net=  +1872p  avg=  +8.9p  avg_w=+127.0  avg_l= -72.4  PF=1.21
+    [normal]      ATR pct 30..70                 n=  94  WR= 42.6%  net=  +1057p  avg= +11.2p  avg_w=+140.9  avg_l= -84.8  PF=1.23
+    [expansion]   ATR pct > 70                   n= 188  WR= 48.4%  net= +10719p  avg= +57.0p  avg_w=+233.3  avg_l=-108.3  PF=2.02
+  --- IS ---
+    [compression] ATR pct < 30                   n= 154  WR= 42.9%  net=  +1739p  avg= +11.3p  avg_w=+103.1  avg_l= -57.6  PF=1.34
+    [normal]      ATR pct 30..70                 n=  64  WR= 48.4%  net=  +1045p  avg= +16.3p  avg_w=+103.1  avg_l= -65.2  PF=1.49
+    [expansion]   ATR pct > 70                   n= 123  WR= 47.2%  net=  +2564p  avg= +20.8p  avg_w=+137.2  avg_l= -83.0  PF=1.48
+  --- OOS ---
+    [compression] ATR pct < 30                   n=  57  WR= 35.1%  net=   +133p  avg=  +2.3p  avg_w=+205.9  avg_l=-107.7  PF=1.03
+    [normal]      ATR pct 30..70                 n=  30  WR= 30.0%  net=    +12p  avg=  +0.4p  avg_w=+271.2  avg_l=-115.7  PF=1.00
+    [expansion]   ATR pct > 70                   n=  65  WR= 50.8%  net=  +8155p  avg=+125.5p  avg_w=+402.2  avg_l=-159.9  PF=2.59
+
+─── H1 × H2 интеракция ───
+  H1=aligned    H2=compression                   n= 143  WR= 41.3%  net=  +1807p  avg= +12.6p  avg_w=+128.8  avg_l= -68.9  PF=1.31
+  H1=aligned    H2=normal                        n=  57  WR= 47.4%  net=  +1519p  avg= +26.6p  avg_w=+145.6  avg_l= -80.4  PF=1.63
+  H1=aligned    H2=expansion                     n= 133  WR= 49.6%  net=  +8408p  avg= +63.2p  avg_w=+238.4  avg_l=-109.4  PF=2.15
+  H1=contra     H2=compression                   n=  68  WR= 39.7%  net=    +65p  avg=  +0.9p  avg_w=+123.3  avg_l= -79.6  PF=1.02
+  H1=contra     H2=normal                        n=  37  WR= 35.1%  net=   -462p  avg= -12.5p  avg_w=+131.1  avg_l= -90.3  PF=0.79
+  H1=contra     H2=expansion                     n=  55  WR= 45.5%  net=  +2310p  avg= +42.0p  avg_w=+219.6  avg_l=-106.0  PF=1.73
+
+─── Session breakdown ───
+  session=london                                 n= 252  WR= 41.7%  net=  +4887p  avg= +19.4p  avg_w=+142.4  avg_l= -68.5  PF=1.49
+  session=ny                                     n= 241  WR= 46.5%  net=  +8761p  avg= +36.4p  avg_w=+203.9  avg_l=-109.1  PF=1.62

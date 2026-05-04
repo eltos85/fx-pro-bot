@@ -1,0 +1,18 @@
+19:39:23 INFO Loading bars from data/fxpro_klines/GC_F_M5.csv ...
+19:39:23 INFO Loaded 70698 bars 2025-05-04 → 2026-05-04
+19:39:23 INFO Building daily ATR index ...
+19:39:23 INFO Daily ATR index: 243 days
+19:39:23 INFO IS/OOS split: 2026-01-14T15:10:00+00:00 (is_fraction=0.70)
+19:39:23 INFO Running baseline gold_orb mode=wick ...
+19:39:26 INFO Trades produced: 493
+19:39:26 INFO ─── Performance baseline (no filters) ───
+19:39:26 INFO ALL [wick]: n=493 WR=44.0% net=+13647p avg=+27.7p avg_w=+174.1 avg_l=-87.5 PF=1.57
+19:39:26 INFO   IS: n=341 WR=45.5% net=+5348p avg=+15.7p avg_w=+115.9 avg_l=-67.8 PF=1.42
+19:39:26 INFO   OOS: n=152 WR=40.8% net=+8299p avg=+54.6p avg_w=+319.8 avg_l=-128.1 PF=1.72
+19:39:26 INFO ─── Meta-distribution (all 493 trades) ───
+19:39:26 INFO H1 aligned (trade dir == orb dir): 333/493 (67.5%)
+19:39:26 INFO H2 regimes: {'normal': 94, 'compression': 211, 'expansion': 188}
+19:39:26 INFO H3 tiers: {'narrow': 471, 'normal': 21, 'wide': 1}
+19:39:26 INFO H5 swept_pre: 42/493 (8.5%)
+19:39:26 INFO IS/OOS: IS=341, OOS=152
+19:39:26 INFO → data/gold_orb_h1_h5_enriched_wick.csv (493 rows, 23 cols)

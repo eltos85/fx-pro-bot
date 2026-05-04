@@ -771,3 +771,218 @@ def test_open_broker_for_new_slippage_no_broker_id_falls_back(
     assert executor.deal_calls == 0, (
         "без broker_position_id нет смысла дёргать deal_list"
     )
+
+
+# ── Gold ORB H2 (ATR-regime) + H5 (liquidity-sweep) фильтры ──
+
+
+def _make_orb_bars(
+    *,
+    base: datetime,
+    box_low: float,
+    box_high: float,
+    after_box_close: float,
+    breakout_high: float,
+    breakout_low: float | None = None,
+    baseline_low: float | None = None,
+) -> list[Bar]:
+    """Конструктор баров для теста gold_orb _check_orb.
+
+    Структура: 50 baseline баров + 3 ORB-бара + signal-бар.
+
+    Чтобы H5 sweep НЕ возникал автоматически — baseline_low по
+    умолчанию < box_low (prior_low ниже recent_low ORB-баров, sweep
+    не выполняется). Для теста sweep-сценария передаётся baseline_low
+    выше box_low.
+    """
+    inst = InstrumentId(symbol="GC=F")
+    bars: list[Bar] = []
+    bl = baseline_low if baseline_low is not None else (box_low - 1.0)
+    for i in range(50):
+        bars.append(Bar(
+            instrument=inst,
+            ts=base - timedelta(minutes=5 * (50 - i)),
+            open=after_box_close, high=after_box_close + 0.5,
+            low=bl, close=after_box_close, volume=100.0,
+        ))
+    box_open = base.replace(hour=8, minute=0, second=0, microsecond=0)
+    for i in range(3):
+        bars.append(Bar(
+            instrument=inst, ts=box_open + timedelta(minutes=5 * i),
+            open=(box_low + box_high) / 2,
+            high=box_high, low=box_low,
+            close=(box_low + box_high) / 2, volume=200.0,
+        ))
+    if breakout_low is not None:
+        sig_high, sig_low = box_high - 0.1, breakout_low
+    else:
+        sig_high, sig_low = breakout_high, box_low + 0.1
+    bars.append(Bar(
+        instrument=inst, ts=box_open + timedelta(minutes=15),
+        open=after_box_close, high=sig_high, low=sig_low,
+        close=after_box_close, volume=200.0,
+    ))
+    return bars
+
+
+def test_gold_orb_filters_disabled_passthrough(tmp_path) -> None:
+    """Когда regime/sweep filters выключены — signal всегда проходит,
+    H2/H5 поля заполняются для логирования но не влияют."""
+    from fx_pro_bot.strategies.scalping.gold_orb import GoldOrbStrategy
+
+    store = StatsStore(tmp_path / "t.db")
+    strat = GoldOrbStrategy(store, regime_filter=False, sweep_filter=False)
+
+    base = datetime(2026, 5, 5, 8, 15, tzinfo=UTC)
+    bars = _make_orb_bars(
+        base=base, box_low=2400.0, box_high=2402.0,
+        after_box_close=2401.0, breakout_high=2403.0,
+    )
+    sigs = strat.scan({"GC=F": bars}, {"GC=F": 2403.0})
+    assert len(sigs) == 1, "filters off — signal должен пройти"
+    sig = sigs[0]
+    assert sig.direction == TrendDirection.LONG
+    assert sig.h2_regime in {"unknown", "expansion", "normal", "compression"}
+    assert isinstance(sig.h5_swept_pre, bool)
+
+
+def test_gold_orb_h2_blocks_compression(tmp_path) -> None:
+    """H2 regime_filter блокирует signal в compression-режиме."""
+    from fx_pro_bot.strategies.scalping.gold_orb import (
+        GoldOrbStrategy, H2_DAILY_ATR_WINDOW,
+    )
+
+    store = StatsStore(tmp_path / "t.db")
+    strat = GoldOrbStrategy(store, regime_filter=True, sweep_filter=False)
+
+    inst = InstrumentId(symbol="GC=F")
+    daily_bars: list[Bar] = []
+    base_day = datetime(2026, 4, 1, tzinfo=UTC)
+    for i in range(H2_DAILY_ATR_WINDOW + 20):
+        rng = 5.0 if i < H2_DAILY_ATR_WINDOW + 19 else 0.5
+        daily_bars.append(Bar(
+            instrument=inst, ts=base_day + timedelta(days=i),
+            open=2400.0, high=2400.0 + rng, low=2400.0 - rng,
+            close=2400.0, volume=10000.0,
+        ))
+    strat.update_daily_atr_history(daily_bars)
+    regime, pct = strat._h2_regime()
+    assert regime == "compression", f"ожидали compression, получили {regime} {pct}"
+
+    base = datetime(2026, 5, 5, 8, 15, tzinfo=UTC)
+    bars = _make_orb_bars(
+        base=base, box_low=2400.0, box_high=2402.0,
+        after_box_close=2401.0, breakout_high=2403.0,
+    )
+    sigs = strat.scan({"GC=F": bars}, {"GC=F": 2403.0})
+    assert len(sigs) == 0, "H2 compression — signal должен быть заблокирован"
+
+
+def test_gold_orb_h2_passes_expansion(tmp_path) -> None:
+    """H2 пропускает signal когда current ATR в expansion (top P70)."""
+    from fx_pro_bot.strategies.scalping.gold_orb import (
+        GoldOrbStrategy, H2_DAILY_ATR_WINDOW,
+    )
+
+    store = StatsStore(tmp_path / "t.db")
+    strat = GoldOrbStrategy(store, regime_filter=True, sweep_filter=False)
+
+    inst = InstrumentId(symbol="GC=F")
+    daily_bars: list[Bar] = []
+    base_day = datetime(2026, 4, 1, tzinfo=UTC)
+    for i in range(H2_DAILY_ATR_WINDOW + 20):
+        rng = 0.5 if i < H2_DAILY_ATR_WINDOW + 19 else 10.0
+        daily_bars.append(Bar(
+            instrument=inst, ts=base_day + timedelta(days=i),
+            open=2400.0, high=2400.0 + rng, low=2400.0 - rng,
+            close=2400.0, volume=10000.0,
+        ))
+    strat.update_daily_atr_history(daily_bars)
+    regime, _pct = strat._h2_regime()
+    assert regime == "expansion", f"ожидали expansion, получили {regime}"
+
+    base = datetime(2026, 5, 5, 8, 15, tzinfo=UTC)
+    bars = _make_orb_bars(
+        base=base, box_low=2400.0, box_high=2402.0,
+        after_box_close=2401.0, breakout_high=2403.0,
+    )
+    sigs = strat.scan({"GC=F": bars}, {"GC=F": 2403.0})
+    assert len(sigs) == 1, "H2 expansion — signal должен пройти"
+    assert sigs[0].h2_regime == "expansion"
+
+
+def test_gold_orb_h2_unknown_failsafe(tmp_path) -> None:
+    """Без daily history regime='unknown' → signal проходит (fail-safe)."""
+    from fx_pro_bot.strategies.scalping.gold_orb import GoldOrbStrategy
+
+    store = StatsStore(tmp_path / "t.db")
+    strat = GoldOrbStrategy(store, regime_filter=True, sweep_filter=False)
+
+    base = datetime(2026, 5, 5, 8, 15, tzinfo=UTC)
+    bars = _make_orb_bars(
+        base=base, box_low=2400.0, box_high=2402.0,
+        after_box_close=2401.0, breakout_high=2403.0,
+    )
+    sigs = strat.scan({"GC=F": bars}, {"GC=F": 2403.0})
+    assert len(sigs) == 1, "regime=unknown → fail-safe passthrough"
+    assert sigs[0].h2_regime == "unknown"
+
+
+def test_gold_orb_h5_blocks_no_sweep(tmp_path) -> None:
+    """H5 sweep_filter блокирует signal без liquidity-sweep."""
+    from fx_pro_bot.strategies.scalping.gold_orb import GoldOrbStrategy
+
+    store = StatsStore(tmp_path / "t.db")
+    strat = GoldOrbStrategy(store, regime_filter=False, sweep_filter=True)
+
+    base = datetime(2026, 5, 5, 8, 15, tzinfo=UTC)
+    bars = _make_orb_bars(
+        base=base, box_low=2400.0, box_high=2402.0,
+        after_box_close=2401.0, breakout_high=2403.0,
+    )
+    sigs = strat.scan({"GC=F": bars}, {"GC=F": 2403.0})
+    assert len(sigs) == 0, "H5 без sweep — signal должен быть заблокирован"
+
+
+def test_gold_orb_h5_passes_with_sweep(tmp_path) -> None:
+    """H5 пропускает signal когда recent_window выкосил prior_low (long).
+
+    Layout (54 баров, signal_idx=53):
+      bars[0..42]   baseline-prior, low=2399.0  → prior_low = 2399.0
+      bars[43..49]  baseline-recent, low=2398.0 → выкос ниже prior_low
+      bars[50..52]  ORB, low=2400.0
+      bars[53]      signal: high=2403, low=2400.5, close=2401
+                    close >= prior_low (2399) → signal вернулся в prior range
+    """
+    from fx_pro_bot.strategies.scalping.gold_orb import GoldOrbStrategy
+
+    store = StatsStore(tmp_path / "t.db")
+    strat = GoldOrbStrategy(store, regime_filter=False, sweep_filter=True)
+
+    inst = InstrumentId(symbol="GC=F")
+    base = datetime(2026, 5, 5, 8, 15, tzinfo=UTC)
+    bars: list[Bar] = []
+    for i in range(50):
+        low_v = 2398.0 if i >= 43 else 2399.0
+        bars.append(Bar(
+            instrument=inst, ts=base - timedelta(minutes=5 * (50 - i)),
+            open=2401.0, high=2401.5, low=low_v,
+            close=2401.0, volume=100.0,
+        ))
+    box_open = base.replace(hour=8, minute=0)
+    for i in range(3):
+        bars.append(Bar(
+            instrument=inst, ts=box_open + timedelta(minutes=5 * i),
+            open=2401.0, high=2402.0, low=2400.0,
+            close=2401.0, volume=200.0,
+        ))
+    bars.append(Bar(
+        instrument=inst, ts=box_open + timedelta(minutes=15),
+        open=2401.0, high=2403.0, low=2400.5,
+        close=2401.0, volume=200.0,
+    ))
+
+    sigs = strat.scan({"GC=F": bars}, {"GC=F": 2403.0})
+    assert len(sigs) == 1, "H5 с sweep — signal должен пройти"
+    assert sigs[0].h5_swept_pre is True
+    assert sigs[0].direction == TrendDirection.LONG

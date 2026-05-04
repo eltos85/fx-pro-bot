@@ -407,6 +407,16 @@ class Settings(BaseSettings):
     # удалены 2026-04-24: стратегии архивированы (strategies/_archive/).
     scalping_gold_orb_enabled: bool = Field(default=True, validation_alias="SCALPING_GOLD_ORB_ENABLED")
     scalping_gold_orb_shadow: bool = Field(default=True, validation_alias="SCALPING_GOLD_ORB_SHADOW")
+    # H2 (ATR-regime expansion) + H5 (liquidity sweep) фильтры —
+    # активированы 2026-05-04 на демо-счёте по решению пользователя
+    # (user-override Bonferroni). См. BUILDLOG 2026-05-04 «activate(H2+H5)»
+    # и docstring `gold_orb.py`.
+    scalping_gold_orb_h2_regime_filter: bool = Field(
+        default=True, validation_alias="SCALPING_GOLD_ORB_H2_REGIME_FILTER",
+    )
+    scalping_gold_orb_h5_sweep_filter: bool = Field(
+        default=True, validation_alias="SCALPING_GOLD_ORB_H5_SWEEP_FILTER",
+    )
     scalping_max_positions: int = Field(default=10, validation_alias="SCALPING_MAX_POSITIONS")
 
     # Variant 2 (см. BUILDLOG.md 2026-04-16):

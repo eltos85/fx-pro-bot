@@ -210,7 +210,13 @@ class StatsStore:
                     shadow_intrabar_triggered INTEGER,
                     shadow_intrabar_peak_pips REAL,
                     shadow_intrabar_would_exit_pips REAL,
-                    shadow_intrabar_triggered_at_ts TEXT
+                    shadow_intrabar_triggered_at_ts TEXT,
+                    -- H2 (ATR-regime) / H5 (liquidity-sweep) фильтры,
+                    -- активированы 2026-05-04 для gold_orb.
+                    -- См. BUILDLOG 2026-05-04 «activate(H2+H5)».
+                    h2_regime TEXT,
+                    h2_atr_percentile REAL,
+                    h5_swept_pre INTEGER
                 )
                 """
             )
@@ -218,6 +224,7 @@ class StatsStore:
             self._migrate_add_broker_position_id(conn)
             self._migrate_add_estimated_cost_pips(conn)
             self._migrate_add_broker_volume(conn)
+            self._migrate_add_h2_h5_diagnostics(conn)
             conn.commit()
 
     def _migrate_add_source(self, conn: sqlite3.Connection) -> None:
@@ -254,6 +261,23 @@ class StatsStore:
         if "broker_volume" not in columns:
             conn.execute(
                 "ALTER TABLE positions ADD COLUMN broker_volume INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def _migrate_add_h2_h5_diagnostics(self, conn: sqlite3.Connection) -> None:
+        """Добавить H2/H5 поля в position_diagnostics (gold_orb 2026-05-04)."""
+        cur = conn.execute("PRAGMA table_info(position_diagnostics)")
+        columns = {row[1] for row in cur.fetchall()}
+        if "h2_regime" not in columns:
+            conn.execute(
+                "ALTER TABLE position_diagnostics ADD COLUMN h2_regime TEXT"
+            )
+        if "h2_atr_percentile" not in columns:
+            conn.execute(
+                "ALTER TABLE position_diagnostics ADD COLUMN h2_atr_percentile REAL"
+            )
+        if "h5_swept_pre" not in columns:
+            conn.execute(
+                "ALTER TABLE position_diagnostics ADD COLUMN h5_swept_pre INTEGER"
             )
 
     # ── Suggestions ──────────────────────────────────────────────
@@ -592,6 +616,9 @@ class StatsStore:
         break_distance_atr: float | None = None,
         bars_since_box_end: int | None = None,
         atr_at_open_pips: float | None = None,
+        h2_regime: str | None = None,
+        h2_atr_percentile: float | None = None,
+        h5_swept_pre: bool | None = None,
     ) -> None:
         """Сохранить диагностику на момент открытия позиции.
 
@@ -600,23 +627,29 @@ class StatsStore:
         фильтров F1 / F2 и контекст entry без зависимости от docker-логов
         (которые ротируются и теряются при рестарте контейнера).
         """
+        h5_int = None if h5_swept_pre is None else int(bool(h5_swept_pre))
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO position_diagnostics (
                     position_id, shadow_f1_status, shadow_f2_status,
-                    break_distance_atr, bars_since_box_end, atr_at_open_pips
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    break_distance_atr, bars_since_box_end, atr_at_open_pips,
+                    h2_regime, h2_atr_percentile, h5_swept_pre
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(position_id) DO UPDATE SET
                     shadow_f1_status = excluded.shadow_f1_status,
                     shadow_f2_status = excluded.shadow_f2_status,
                     break_distance_atr = excluded.break_distance_atr,
                     bars_since_box_end = excluded.bars_since_box_end,
-                    atr_at_open_pips = excluded.atr_at_open_pips
+                    atr_at_open_pips = excluded.atr_at_open_pips,
+                    h2_regime = excluded.h2_regime,
+                    h2_atr_percentile = excluded.h2_atr_percentile,
+                    h5_swept_pre = excluded.h5_swept_pre
                 """,
                 (
                     position_id, shadow_f1_status, shadow_f2_status,
                     break_distance_atr, bars_since_box_end, atr_at_open_pips,
+                    h2_regime, h2_atr_percentile, h5_int,
                 ),
             )
             conn.commit()

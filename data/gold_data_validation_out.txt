@@ -1,0 +1,32 @@
+─── BASIC ───
+file:         data/fxpro_klines/GC_F_M5.csv
+bars:         70,698
+first ts:     2025-05-04T22:00:00+00:00
+last ts:      2026-05-04T16:15:00+00:00
+span:         364.8 days
+coverage:     94.2% of theoretical 5d/week
+─── OHLC sanity ───
+bad bars:     0 (0.0000%)
+zero volume:  0 (0.0000%)
+median vol:   1513
+─── GAPS ───
+  normal_5m             70440
+  30min-4h                202
+  4h-50h_weekend           51
+  >50h_unusual              4
+  unusual gaps (>50h, n=4, top 3):
+    2025-07-04T16:40:00+00:00 → 2025-07-06T22:00:00+00:00 = 53.3h
+    2025-10-31T20:55:00+00:00 → 2025-11-02T23:00:00+00:00 = 50.1h
+    2025-11-28T19:35:00+00:00 → 2025-11-30T23:00:00+00:00 = 51.4h
+─── PRICE ───
+min close:    $3125.39
+max close:    $5588.53
+first close:  $3238.34
+last close:   $4522.42
+return:       +39.7%
+─── IS / OOS SPLIT ───
+IS:           bars 49,488 | 2025-05-04 → 2026-01-14 | 255 days
+OOS:          bars 21,210 | 2026-01-14 → 2026-05-04 | 110 days
+split ts:     1768403100000  (2026-01-14T15:05:00+00:00)
+─── VERDICT ───
+OK ✓ — данные пригодны для H1-H5 backtest

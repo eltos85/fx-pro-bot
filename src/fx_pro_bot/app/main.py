@@ -176,6 +176,45 @@ def _log_scalping_stats(store: StatsStore, settings: Settings) -> None:
     pass
 
 
+_GOLD_DAILY_ATR_LAST_FETCH_TS: float = 0.0
+_GOLD_DAILY_ATR_FETCH_INTERVAL_SEC = 3600.0  # раз в час
+
+
+def _maybe_update_gold_daily_atr(gold_orb_strat, bar_fetcher) -> None:
+    """Раз в час обновить cache daily ATR для H2-фильтра gold_orb.
+
+    Использует общий bar_fetcher (cTrader → yfinance fallback). Fetch
+    period="120d" interval="1d" → ~120 daily bars; стратегии нужно
+    минимум 30+14=44 бара для 30-day rolling P70.
+
+    Если bar_fetcher недоступен — silently skip; H2 фильтр в стратегии
+    fail-safe (regime="unknown" → signal проходит, см. _allow_signal).
+    """
+    global _GOLD_DAILY_ATR_LAST_FETCH_TS
+    if bar_fetcher is None:
+        return
+    if not getattr(gold_orb_strat, "_regime_filter", False):
+        return
+    now = time.time()
+    if now - _GOLD_DAILY_ATR_LAST_FETCH_TS < _GOLD_DAILY_ATR_FETCH_INTERVAL_SEC:
+        return
+    try:
+        daily_bars = bar_fetcher("GC=F", "120d", "1d")
+    except Exception as exc:
+        log.warning("Gold daily-ATR fetch failed: %s", exc)
+        _GOLD_DAILY_ATR_LAST_FETCH_TS = now
+        return
+    if daily_bars and len(daily_bars) >= 30:
+        gold_orb_strat.update_daily_atr_history(daily_bars)
+        _GOLD_DAILY_ATR_LAST_FETCH_TS = now
+    else:
+        log.warning(
+            "Gold daily-ATR fetch returned %d bars (<30) — H2 filter не активен",
+            len(daily_bars) if daily_bars else 0,
+        )
+        _GOLD_DAILY_ATR_LAST_FETCH_TS = now
+
+
 def _make_bar_fetcher(executor):
     """Создать bar_fetcher для scan_instruments: cTrader с fallback на yfinance.
 
@@ -317,6 +356,8 @@ def run_advisor() -> None:
             max_positions=2,
             max_per_instrument=1,
             shadow=settings.scalping_gold_orb_shadow,
+            regime_filter=settings.scalping_gold_orb_h2_regime_filter,
+            sweep_filter=settings.scalping_gold_orb_h5_sweep_filter,
         )
         if settings.scalping_gold_orb_enabled else None
     )
@@ -592,6 +633,7 @@ def _run_cycle(
                         atrs[r.symbol] = _atr(r.bars)
 
             if gold_orb_strat:
+                _maybe_update_gold_daily_atr(gold_orb_strat, bar_fetcher)
                 g_sigs = gold_orb_strat.scan(scalping_bars, scalping_prices)
                 before_ids = {p.id for p in store.get_open_positions()}
                 g_opened = gold_orb_strat.process_signals(g_sigs, scalping_prices) if g_sigs else 0

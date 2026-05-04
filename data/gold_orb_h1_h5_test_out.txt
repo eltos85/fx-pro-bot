@@ -1,0 +1,103 @@
+19:41:54 → data/gold_orb_h1_h5_test_report.txt
+==============================================================================
+STATISTICAL TEST H1/H2/H5 — gold_orb 365d M5 GC=F
+==============================================================================
+Bonferroni p-threshold: 0.0100 (0.05 / 5 hypotheses)
+Total trades: 493
+  IS:  341  |  OOS: 152
+
+BASELINE (no filter):
+  ALL: n= 493  WR= 44.0%  net= +13647p  avg=  +27.7p  avg_w=+174.1 avg_l= -87.5  PF=1.57
+  IS:  n= 341  WR= 45.5%  net=  +5348p  avg=  +15.7p  avg_w=+115.9 avg_l= -67.8  PF=1.42
+  OOS: n= 152  WR= 40.8%  net=  +8299p  avg=  +54.6p  avg_w=+319.8 avg_l=-128.1  PF=1.72
+
+──────────────────────────────────────────────────────────────────────────────
+H1: ORB Internal Direction (only aligned)
+  Rationale: Trade direction совпадает с close-direction ORB-свечи (aggregated) — research-claim 77-80% align + 6.5p continuation.
+  Source:    tradingstats.net/orb-strategy-research, Filter #4
+
+  ALL:
+    baseline:   n= 493  WR= 44.0%  net= +13647p  avg=  +27.7p  avg_w=+174.1 avg_l= -87.5  PF=1.57
+    kept   :    n= 333  WR= 45.6%  net= +11735p  avg=  +35.2p  avg_w=+179.4 avg_l= -85.8  PF=1.76  Δpf=+0.19
+    blocked:    n= 160  WR= 40.6%  net=  +1913p  avg=  +12.0p  avg_w=+161.9 avg_l= -90.6  PF=1.22
+    p(WR)  Fisher: 0.3327  
+    p(PnL) MWU:    0.2024  
+
+  IS:
+    baseline:   n= 341  WR= 45.5%  net=  +5348p  avg=  +15.7p  avg_w=+115.9 avg_l= -67.8  PF=1.42
+    kept   :    n= 230  WR= 44.3%  net=  +2393p  avg=  +10.4p  avg_w=+108.5 avg_l= -67.8  PF=1.28  Δpf=-0.15
+    p(WR)/p(PnL): 0.5639 / 0.3723
+
+  OOS:
+    baseline:   n= 152  WR= 40.8%  net=  +8299p  avg=  +54.6p  avg_w=+319.8 avg_l=-128.1  PF=1.72
+    kept   :    n= 103  WR= 48.5%  net=  +9341p  avg=  +90.7p  avg_w=+323.9 avg_l=-129.3  PF=2.36  Δpf=+0.64
+    p(WR)/p(PnL): 0.0050 / 0.0483
+
+  VERDICT: **REJECT**
+    - IS/OOS PF-edge sign-flip: IS=-0.15, OOS=+0.64
+    - min p-value on ALL = 0.2024 >= 0.0100 (Bonferroni)
+
+──────────────────────────────────────────────────────────────────────────────
+H2: ATR Regime Filter (only expansion)
+  Rationale: Торгуем только когда ATR-14d > P70 на 30-day rolling window (volatile expansion regime). По research'у trend-following выживает только в expansion.
+  Source:    mql5/769030 «Regime Mismatch» + XAU SENTINEL v2.2
+
+  ALL:
+    baseline:   n= 493  WR= 44.0%  net= +13647p  avg=  +27.7p  avg_w=+174.1 avg_l= -87.5  PF=1.57
+    kept   :    n= 188  WR= 48.4%  net= +10719p  avg=  +57.0p  avg_w=+233.3 avg_l=-108.3  PF=2.02  Δpf=+0.45
+    blocked:    n= 305  WR= 41.3%  net=  +2929p  avg=   +9.6p  avg_w=+131.5 avg_l= -76.2  PF=1.21
+    p(WR)  Fisher: 0.1354  
+    p(PnL) MWU:    0.4206  
+
+  IS:
+    baseline:   n= 341  WR= 45.5%  net=  +5348p  avg=  +15.7p  avg_w=+115.9 avg_l= -67.8  PF=1.42
+    kept   :    n= 123  WR= 47.2%  net=  +2564p  avg=  +20.8p  avg_w=+137.2 avg_l= -83.0  PF=1.48  Δpf=+0.05
+    p(WR)/p(PnL): 0.6520 / 0.9334
+
+  OOS:
+    baseline:   n= 152  WR= 40.8%  net=  +8299p  avg=  +54.6p  avg_w=+319.8 avg_l=-128.1  PF=1.72
+    kept   :    n=  65  WR= 50.8%  net=  +8155p  avg= +125.5p  avg_w=+402.2 avg_l=-159.9  PF=2.59  Δpf=+0.87
+    p(WR)/p(PnL): 0.0449 / 0.3615
+
+  VERDICT: **REJECT**
+    - min p-value on ALL = 0.1354 >= 0.0100 (Bonferroni)
+
+──────────────────────────────────────────────────────────────────────────────
+H5: Liquidity Sweep Pre-Break (only swept)
+  Rationale: Перед ORB-пробоем должен быть выкос «equal-low/high» за last 50 баров (institutional liquidity grab). Без sweep-а пробой = trap.
+  Source:    ICT/SMC 2026 paradigm
+
+  ALL:
+    baseline:   n= 493  WR= 44.0%  net= +13647p  avg=  +27.7p  avg_w=+174.1 avg_l= -87.5  PF=1.57
+    kept   :    n=  42  WR= 57.1%  net=  +2935p  avg=  +69.9p  avg_w=+184.0 avg_l= -82.3  PF=2.98  Δpf=+1.42
+    blocked:    n= 451  WR= 42.8%  net= +10712p  avg=  +23.8p  avg_w=+172.9 avg_l= -87.8  PF=1.47
+    p(WR)  Fisher: 0.0765  
+    p(PnL) MWU:    0.0501  
+
+  IS:
+    baseline:   n= 341  WR= 45.5%  net=  +5348p  avg=  +15.7p  avg_w=+115.9 avg_l= -67.8  PF=1.42
+    kept   :    n=  29  WR= 55.2%  net=  +1171p  avg=  +40.4p  avg_w=+120.0 avg_l= -57.6  PF=2.56  Δpf=+1.14
+    p(WR)/p(PnL): 0.3307 / 0.1831
+
+  OOS:
+    baseline:   n= 152  WR= 40.8%  net=  +8299p  avg=  +54.6p  avg_w=+319.8 avg_l=-128.1  PF=1.72
+    kept   :    n=  13  WR= 61.5%  net=  +1764p  avg= +135.7p  avg_w=+312.1 avg_l=-146.5  PF=3.41  Δpf=+1.69
+    p(WR)/p(PnL): 0.1427 / 0.3394
+
+  VERDICT: **REJECT**
+    - min p-value on ALL = 0.0501 >= 0.0100 (Bonferroni)
+    - OOS kept n=13 < 30 (sample-size)
+
+══════════════════════════════════════════════════════════════════════════════
+COMBINED FILTERS (применяются ТОЛЬКО если individual прошли)
+══════════════════════════════════════════════════════════════════════════════
+
+  Approved individually: []
+  (нужно >=2 для combined-теста; пропускаем)
+
+══════════════════════════════════════════════════════════════════════════════
+FINAL SUMMARY
+══════════════════════════════════════════════════════════════════════════════
+  ✗ H1: REJECT
+  ✗ H2: REJECT
+  ✗ H5: REJECT

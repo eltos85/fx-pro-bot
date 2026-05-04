@@ -1,0 +1,17 @@
+19:35:25 INFO Loading bars from data/fxpro_klines/GC_F_M5.csv ...
+19:35:25 INFO Loaded 70698 bars 2025-05-04 → 2026-05-04
+19:35:25 INFO Building daily ATR index ...
+19:35:25 INFO Daily ATR index: 243 days
+19:35:25 INFO IS/OOS split: 2026-01-14T15:10:00+00:00 (is_fraction=0.70)
+19:35:25 INFO Running baseline gold_orb mode=close_confirm ...
+19:35:29 INFO Trades produced: 483
+19:35:29 INFO ─── Performance baseline (no filters) ───
+19:35:29 INFO ALL [close_confirm]: n=483 WR=33.1% net=-4048p avg=-8.4p avg_w=+155.2 avg_l=-89.4 PF=0.86
+19:35:29 INFO   IS: n=335 WR=35.2% net=-1813p avg=-5.4p avg_w=+105.7 avg_l=-65.8 PF=0.87
+19:35:29 INFO   OOS: n=148 WR=28.4% net=-2235p avg=-15.1p avg_w=+294.2 avg_l=-137.7 PF=0.85
+19:35:29 INFO ─── Meta-distribution (all 483 trades) ───
+19:35:29 INFO H1 aligned (trade dir == orb dir): 328/483 (67.9%)
+19:35:29 INFO H2 regimes: {'normal': 92, 'compression': 206, 'expansion': 185}
+19:35:29 INFO H3 tiers: {'narrow': 462, 'normal': 20, 'wide': 1}
+19:35:29 INFO IS/OOS: IS=335, OOS=148
+19:35:29 INFO → data/gold_orb_h4_close_confirm_enriched.csv (483 rows, 23 cols)

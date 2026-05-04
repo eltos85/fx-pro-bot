@@ -6,6 +6,306 @@
 
 ## 2026-05-04
 
+### activate(H2+H5): user-override compliance — H2 ATR-regime + H5 liquidity-sweep живой в gold_orb
+
+`коммит при deploy`
+
+**Контекст.** После research-цикла H1-H5 (см. запись ниже) все 3
+гипотезы REJECTED по Bonferroni p<0.01, но H2 и H5 показали
+устойчивый edge без sign-flip между IS и OOS:
+
+| Filter | PF kept (ALL) | Δpf vs base (1.57) | IS edge | OOS edge | p-min ALL |
+|---|---|---|---|---|---|
+| H2 (ATR expansion) | 2.02 | +0.45 | +0.05 | +0.87 | 0.135 |
+| H5 (liquidity sweep) | 2.98 | **+1.42** | +1.14 | +1.69 | 0.0501 |
+
+H1 (ORB direction) — DISQUALIFIED: sign-flip IS −0.15 / OOS +0.64 =
+classic curve-fit trap, на исторических данных делает результат
+ХУЖЕ baseline. Не активируем.
+
+**User-override compliance.** Пользователь (демо-счёт, риск убытков
+приемлем для исследовательских целей) принял явное решение об
+активации H2+H5 несмотря на не-достижение Bonferroni p<0.01.
+Обоснование пользователя: статистическая power test'а ограничена
+размером выборки (493 сделки за 365 дней), edge устойчив без
+sign-flip, ожидаемое значение положительное. Деплой как hard-rule
+(не shadow), с отслеживанием на live данных.
+
+**Реализация.**
+
+1. **`src/fx_pro_bot/strategies/scalping/gold_orb.py`:**
+   - Параметры frozen из research (`H2_ATR_PERCENTILE=70`,
+     `H2_DAILY_ATR_WINDOW=30`, `H5_LOOKBACK_BARS=50`,
+     `H5_PRIOR_END_OFFSET=10`).
+   - Поля `GoldOrbSignal.h2_regime / h2_atr_percentile / h5_swept_pre`.
+   - `__init__` принимает `regime_filter: bool, sweep_filter: bool`.
+   - `update_daily_atr_history()` обновляет cached daily ATR series
+     (вызывается раз в час из `_run_cycle` → `_maybe_update_gold_daily_atr`).
+   - `_h2_regime()` возвращает (regime_label, percentile_pct);
+     fail-safe при unknown — signal проходит (защита от ложных
+     блокировок при холодном старте).
+   - `_h5_swept()` детектит sweep на last 50 M5 bars.
+   - `_allow_signal()` — единая точка применения фильтров с
+     decision-log'ом (`GOLD-ORB BLOCK[H2]` / `GOLD-ORB BLOCK[H5]`).
+
+2. **`src/fx_pro_bot/stats/store.py`:**
+   - Миграция `_migrate_add_h2_h5_diagnostics` добавляет колонки
+     `h2_regime`, `h2_atr_percentile`, `h5_swept_pre` в
+     `position_diagnostics`.
+   - `save_open_diagnostics` принимает новые kwargs.
+
+3. **`src/fx_pro_bot/config/settings.py`:**
+   - `scalping_gold_orb_h2_regime_filter` (default=True,
+     env `SCALPING_GOLD_ORB_H2_REGIME_FILTER`).
+   - `scalping_gold_orb_h5_sweep_filter` (default=True,
+     env `SCALPING_GOLD_ORB_H5_SWEEP_FILTER`).
+
+4. **`src/fx_pro_bot/app/main.py`:**
+   - Передаёт флаги в `GoldOrbStrategy` constructor.
+   - `_maybe_update_gold_daily_atr()` — fetch GC=F daily bars
+     (period=120d, interval=1d) раз в час через общий `bar_fetcher`
+     (cTrader → yfinance fallback).
+
+5. **`tests/test_strategies.py`:**
+   - 6 unit-тестов: filters_disabled passthrough, H2 blocks
+     compression / passes expansion / unknown fail-safe, H5 blocks
+     no-sweep / passes with sweep.
+   - 433/433 passed full suite.
+
+**Сдвиг baseline.** Все per-strategy метрики `gold_orb` начинают
+считаться **с момента deploy этого коммита** (заменяет 23.04.2026
+для gold_orb; остальные стратегии — `outsiders`, `leaders`, `session_orb`,
+`squeeze_h4`, `turtle_h4`, `gbpjpy_fade` — продолжают считаться от
+23.04.2026). Это зафиксировано в `.cursor/rules/fxpro-stats-baseline.mdc`.
+
+**План мониторинга.**
+- ≥100 gold_orb-сделок (per `sample-size.mdc`, ~3-5 недель при
+  текущем темпе ~5 trades/день) — формальная проверка edge на live:
+  WR, PF, EXP сравниваются с predicted (PF~2.0 для H2-only,
+  PF~3.0 для H5-only; в combo PF может быть выше).
+- Если live PF < baseline historical 1.57 на ≥100 trades + p<0.05
+  биномиально — фильтры reverted.
+- Если live PF >= 2.0 на ≥100 trades — фиксируем эффект как
+  validated.
+
+**Артефакты.**
+- `data/gold_orb_h1_h5_test_report.txt` (statistical отчёт)
+- `data/gold_orb_h1_h5_enriched_wick.csv` (enriched 493 trades)
+- `data/fxpro_klines/GC_F_M5.csv` (365d M5 baseline)
+- `scripts/test_h1_h5_filters.py` (Fisher exact + MWU + Bonferroni)
+- `scripts/backtest_gold_orb_h1_h5.py` (backtest с meta H1-H5)
+
+**Файлы:** `src/fx_pro_bot/strategies/scalping/gold_orb.py`,
+`src/fx_pro_bot/stats/store.py`,
+`src/fx_pro_bot/config/settings.py`,
+`src/fx_pro_bot/app/main.py`,
+`tests/test_strategies.py`,
+`.cursor/rules/fxpro-stats-baseline.mdc`,
+`BUILDLOG.md`
+
+---
+
+### research(H1-H5 results): все 3 гипотезы REJECT по Bonferroni — compliance работает
+
+`без коммита (research-отчёт, артефакты в data/)`
+
+**Контекст.** Запустили 6-этапный research-цикл (см. запись ниже).
+Этапы 1-3 завершены: данные (365 дней M5 GC=F, 70 698 баров), backtest
+(493 сделки baseline, PF 1.57), независимый statistical-test каждой
+гипотезы. **Все три гипотезы (H1, H2, H5) — REJECT** по Bonferroni
+p < 0.01. H3, H4 disqualified ранее (см. ниже).
+
+**Выводы по гипотезам.**
+
+| H | Title | PF kept (ALL) | Δpf vs base | IS edge | OOS edge | p-min ALL | Verdict | Reason |
+|---|---|---|---|---|---|---|---|---|
+| H1 | ORB Internal Direction (only aligned) | 1.76 | +0.19 | **−0.15** | +0.64 | 0.20 | **REJECT** | sign-flip IS↔OOS = шум |
+| H2 | ATR Regime (only expansion, ATR>P70) | 2.02 | +0.45 | +0.05 | +0.87 | 0.135 | **REJECT** | edge устойчив, p > 0.01 |
+| H5 | Liquidity Sweep Pre-Break | 2.98 | **+1.42** | +1.14 | +1.69 | 0.0501 | **REJECT** | OOS n=13 < 30, p близко к 0.05 |
+
+**Bonferroni p-threshold = 0.01** (0.05 / 5 hypotheses, включая
+disqualified H3/H4 — консервативно).
+
+**H1 — sign-flip = классика curve-fit-trap.**
+- IS (341 сделка): aligned PF 1.28, baseline 1.42 → фильтр на IS ХУЖЕ.
+- OOS (152 сделки): aligned PF 2.36, baseline 1.72 → фильтр на OOS лучше.
+- Это значит: edge на OOS — **случайность**, не sustained. Активация
+  будет «торговать по шуму», ожидаемое значение нестабильно.
+
+**H2 — устойчивый сигнал, мало data.**
+- 188 сделок в expansion-режиме (38% выборки).
+- IS edge маленький (+0.05 PF), но OOS большой (+0.87 PF). Не флипает.
+- На ALL p_WR=0.135, p_PnL=0.42 — оба выше Bonferroni 0.01.
+- **Самый перспективный кандидат для повторного теста через 6 мес**
+  (на 24-мес выборке должна стать значимой если edge реален).
+
+**H5 — самый сильный edge, но мало sweep-сигналов.**
+- 42 swept-сделки из 493 (8.5% выборки), всего 13 в OOS.
+- WR 57%, PF 2.98 на ALL, не флипает (IS PF 2.56, OOS PF 3.41).
+- p_PnL=0.0501 на ALL — ровно на грани, и OOS sample (n=13) ниже
+  минимума 30 по `sample-size.mdc`.
+- **Кандидат на shadow-deploy** (низкий risk, edge выглядит реальным,
+  но statistical proof откладывается до накопления sweep-сделок).
+
+**Compliance — что СДЕЛАЛИ правильно.**
+1. ✓ Не подкручивали параметры (`H5_LOOKBACK_BARS=50`,
+   `H5_PRIOR_END_OFFSET=10`, `H2_P70` — все из research, не из data).
+2. ✓ Не повторяли тест с разными порогами до прохождения.
+3. ✓ Не комбинировали гипотезы до individual approve (combined-preview
+   только справочно, без активации).
+4. ✓ Walk-forward 70/30 без leakage.
+5. ✓ Bonferroni-correction учитывает все 5 hypotheses.
+
+**Чего НЕ делаем (compliance-приказ):**
+- ✗ НЕ активируем H1/H2/H5 в production.
+- ✗ НЕ подкручиваем `H5_LOOKBACK_BARS` чтобы p-value опустился.
+- ✗ НЕ отключаем `gold_orb` на основании этих данных (baseline
+  PF=1.57 положительный, sample size 493 trades > 100, но активация
+  нового фильтра ≠ отключение стратегии).
+
+**Что делаем дальше — 3 опции для пользователя.**
+
+**A) Shadow-deploy H5 (только H5).** H5 — единственный с устойчивым
+edge без sign-flip и достаточным размером эффекта. Реализация:
+- Отдельный `would-skip` мета-логгер в `gold_orb.py` (как F1/F2/M1).
+- НЕ влияет на entry/exit. Только записывает «бы заблокировал».
+- Через ≥1 100 живых сделок (~6-8 недель) — повторный whatif-test
+  с накоплением sweep-выборки.
+- Если на live достанет n_swept_oos≥30 и p<0.01 — активация с
+  baseline-reset. Иначе — disqualify.
+
+**B) Wait-and-collect H2.** Не deploy'им ничего, продолжаем работу
+текущего `gold_orb`. Перепрогон H2 на 24-мес данных через 6 мес
+(когда cTrader демо накопит). Plus: запускаем `fetch_fxpro_history
+--days 730` сейчас и перепрогоняем H2-test offline (если cTrader
+отдаёт >365 дней — multi-fetch'ить chunks). Ничего в production.
+
+**C) Полный stop research.** Принимаем что в gold_orb edge только
+от volatility (PF 1.57 — не плохо), и concentrated effort на другие
+проблемы (`amend REJECTED`, exit improvements, `gbpjpy_fade`).
+
+**Рекомендация Cursor.** **A + B параллельно**. H5 как shadow дёшев
+(50 строк кода, 0 риск), а параллельно `fetch_fxpro_history --days
+1095` даст 3-летнюю выборку. Через 1 мес — повторный H2-test на
+расширенной IS+OOS. **Решение об активации фильтров — в августе 2026**
+после накопления данных.
+
+**Артефакты.**
+- `data/fxpro_klines/GC_F_M5.csv` (70 698 баров, 365 дней)
+- `data/gold_orb_h1_h5_enriched_wick.csv` (493 сделки + meta H1/H2/H3/H5)
+- `data/gold_orb_h4_close_confirm_enriched.csv` (H4 disqualified)
+- `data/gold_orb_h1_h5_test_report.txt` (полный statistical отчёт)
+- `data/gold_orb_h1_h5_test_out.txt` (терминал-копия)
+- `data/gold_orb_h1_h5_explore_out.txt` (preliminary exploration)
+- `scripts/backtest_gold_orb_h1_h5.py` (backtest с meta-полями)
+- `scripts/test_h1_h5_filters.py` (Fisher exact + Mann-Whitney U,
+  Bonferroni-correction, IS/OOS verdict)
+
+**Файлы:** `BUILDLOG.md`, `scripts/backtest_gold_orb_h1_h5.py`,
+`scripts/test_h1_h5_filters.py`, `data/gold_orb_h1_h5_*`
+
+---
+
+### research(2026-knowledge): запускаем H1-H5 research-цикл для gold_orb, compliance-протокол
+
+`без коммита (план, исполнение по этапам)`
+
+**Контекст.** После audit'а 04.05 (12 сделок 01.05, NET −364p / −$95;
+накопление лоссов в первые недели мая) пользователь попросил
+research современных подходов 2026 г. Сделан web-обзор 8 источников
+(tradingstats.net 6,142-day ORB study, quant-signals.com 8,693-trade
+XAUUSD comparison, mql5 «Regime Mismatch» Apr 2026, ICT/SMC Medium
+Apr 2026, ForexFactory threads, и др.). Найдены 4 слепых пятна
+текущего `gold_orb`:
+
+1. **ORB Internal Direction filter** (strongest single filter:
+   77-80% first-break alignment, +6.5p continuation rate).
+   Источник: tradingstats.net/orb-strategy-research, Section
+   «Context Filter #4: ORB Internal Direction».
+2. **Regime detection через ATR percentile** (compression vs
+   trending vs expansion). Решает «3-month failure pattern» Gold
+   EAs. Источник: mql5.com/en/blogs/post/769030 + XAU SENTINEL v2.2.
+3. **Wide ORB tier** (>0.6× ATR): 77.5% continuation vs 62.9%
+   narrow. Контр-интуитивно (ритейл fade'ит широкие). Источник:
+   tradingstats.net «ORB Tier Analysis».
+4. **5-min close confirmation вместо wick break**: MFE 5.25 vs 0.50
+   pts (10x), MAE почти не меняется. Источник: tradingstats.net
+   «Confirmation Level Changes the Picture».
+5. (Дополнительно) **Liquidity sweep pre-break filter** (ICT/SMC
+   2026 paradigm) — true breakout требует sweep'а ритейлных стопов
+   до пробоя.
+
+**Решение.** Запускаем 6-этапный research-цикл с жёстким compliance
+для защиты от curve-fit (multiple-hypothesis testing trap):
+
+| Параметр | Значение | Обоснование |
+|---|---|---|
+| Гипотезы | H1, H2, H3, H4, H5 (independent) | покрытие всех 4 слепых пятен |
+| Стат-критерий | **Bonferroni p < 0.01** (0.05 / 5) | 5 одновременных тестов |
+| Walk-forward | **70% IS / 30% OOS** | стандарт по `no-data-fitting.mdc` |
+| Источник данных | cTrader Open API, 365 дней M5 GC=F | надёжный потолок (демо-аккаунт), не упрёмся в лимит |
+| Минимальный edge | ≥ 5p improvement в EXP per trade | смысл выше шума по `sample-size.mdc` (R:R 0.3) |
+| OOS-валидация | edge должен сохраниться на 30% hold-out | без этого фильтр не идёт даже в shadow |
+| Live shadow | ≥ 100 сделок (~2-3 недели) после deploy | по `sample-size.mdc` |
+| Решение об активации | shadow > real по EXP, p < 0.05 | post-shadow stat-test |
+| Reset stats | сдвиг baseline-даты в `fxpro-stats-baseline.mdc` | по образцу 23.04 rollout |
+
+**Compliance-инварианты (не нарушать в этом цикле):**
+- Каждая гипотеза тестируется **независимо** на одном IS-датасете
+  (не в комбинации). Комбинации тестируются ТОЛЬКО после того, как
+  отдельные тесты прошли OOS.
+- Параметры фильтров (например, P30/P70 percentile thresholds для
+  H2; 0.6× ATR для H3) **фиксируются перед** запуском backtest на
+  основании research-источников выше. Подбор thresholds к данным
+  (grid search, optuna) **запрещён** — это classic curve-fit
+  (`no-data-fitting.mdc` → «ЗАПРЕЩЕНО подкручивать пороги
+  интуитивно»).
+- Если гипотеза проваливает OOS — **не подкручиваем параметры**,
+  закрываем исследование по ней с записью в BUILDLOG. Возврат к
+  ней — через 3+ месяца с большей выборкой.
+- Live shadow deployment **не активирует** фильтр в торговле, ровно
+  как сейчас работают F1/F2/M1.
+
+**Этапы.**
+1. **Подготовка данных** (ETA 1-2ч): fetch 365d M5 GC=F через
+   cTrader API на VPS → CSV в `data/fxpro_klines/` → validation.
+2. **Реализация фильтров** (ETA 1-2 дня): рефактор
+   `backtest_gold_orb` под pluggable filters + 5 модулей H1-H5.
+3. **Statistical testing** (ETA 4-6ч): independent IS test +
+   OOS hold-out + Bonferroni → отбор прошедших.
+4. **Shadow deployment** (ETA 0.5 дня): код в `gold_orb.py`,
+   unit-тесты, deploy.
+5. **Live observation** (ETA 2-3 недели): накопление 100+ сделок,
+   periodic whatif-сравнение.
+6. **Активация + reset baseline** (ETA 1ч): hard rule в коде,
+   shift `fxpro-stats-baseline.mdc`, BUILDLOG-запись.
+
+**Источники для research-блока стратегии (`STRATEGIES.md` будет
+обновлён на этапе 6):**
+- Crabel T. (1990). *Day Trading with Short-Term Price Patterns and
+  Opening Range Breakout*. (canonical ORB)
+- tradingstats.net (Feb 2026). *ORB Strategy: 6,142 Days of ES & NQ*
+  + *Context Filters & Backtest Deep Dive*.
+- quant-signals.com (Apr 2026). *XAUUSD Trading Strategies:
+  3 Backtested Approaches (8,693 Trades)*.
+- mql5.com/blogs/769030 (Apr 2026). *Why Most Gold EAs Fail After
+  3 Months — The Regime Mismatch Problem*.
+- mql5.com/blogs/767965 (Mar 2026). *XAU Sentinel v2.2: Regime-
+  Adaptive*.
+- ICT / Smart Money Concepts (canonical, Medium FXM Brand Apr 2026
+  consolidation).
+
+**Файлы (будут затронуты на этапах 2-6):**
+`scripts/fetch_fxpro_history.py` (использование), `data/fxpro_klines/
+GC_F_M5.csv` (новый артефакт), `scripts/backtest_gold_orb_v2.py`
+(новый), `scripts/test_h1_h5_filters.py` (новый),
+`src/fx_pro_bot/strategies/scalping/gold_orb.py` (на этапе 4),
+`tests/test_strategies.py` (на этапе 4),
+`.cursor/rules/fxpro-stats-baseline.mdc` (на этапе 6),
+`STRATEGIES.md` (на этапе 6).
+
+---
+
 ### bug-fix(slippage_guard): сохраняем broker_position_id и синкаем gross — конец «ghost»-позициям
 
 `коммит будет добавлен ниже`

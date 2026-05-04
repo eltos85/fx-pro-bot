@@ -1,5 +1,45 @@
 """Gold ORB Isolated — пробой Opening Range на XAU/USD (London + NY opens).
 
+## H2 ATR-regime + H5 Liquidity-sweep фильтры (active 2026-05-04)
+
+Активны два дополнительных фильтра, основанные на 365-дневном backtest
+M5 GC=F (493 сделки baseline, см. BUILDLOG.md 2026-05-04
+«research(H1-H5 results)»):
+
+- **H2 ATR Regime Filter** (`regime_filter=True`):
+  signal проходит только если **daily ATR-14d > P70** на 30-day rolling
+  window (волатильный режим «expansion»). По 365d данным:
+  - 188 сделок (38% выборки) попали в expansion → **PF 2.02 vs 1.57
+    baseline** (IS edge +0.05, OOS edge +0.87, не флипает).
+  Источник: mql5.com/en/blogs/post/769030 «Regime Mismatch» Apr 2026 +
+  XAU SENTINEL v2.2; Crabel «Day Trading with Short Term Price Patterns»
+  (1990) ch.7 для ATR-regime.
+
+- **H5 Liquidity Sweep Filter** (`sweep_filter=True`):
+  signal проходит только если в last 50 M5 баров до сигнала был
+  «sweep»: prior_window bars[-50:-10] установил extremum, recent_window
+  bars[-10:-1] этот extremum пробил, signal-бар вернулся внутрь prior
+  range. По 365d: 42 сделки (8.5%) → **PF 2.98 vs 1.57 baseline**
+  (IS PF 2.56, OOS PF 3.41, edge не флипает).
+  Источник: ICT/SMC «Liquidity Grab» paradigm (2026 retail education
+  + institutional order flow theory).
+
+**Compliance — user-override Bonferroni.** Backtest показал устойчивый
+edge без sign-flip, но Bonferroni-correction p < 0.01 на ALL не
+достигнут (H2: p=0.135, H5: p=0.05). User (демо-счёт, риск убытков
+приемлем) принял решение об активации с явным записанным override в
+BUILDLOG.md 2026-05-04 «activate(H2+H5)». При деплое сдвигается
+baseline-дата (`fxpro-stats-baseline.mdc`).
+
+**Параметры — frozen (no-data-fitting.mdc).**
+- `H2_ATR_PERCENTILE = 70.0` (P70 на 30-day rolling)
+- `H2_DAILY_ATR_WINDOW = 30` (rolling window для percentile)
+- `H5_LOOKBACK_BARS = 50` (~4 часа M5)
+- `H5_PRIOR_END_OFFSET = 10` (последние 10 баров — recent window)
+Подкручивание этих чисел = curve-fitting, запрещено.
+
+
+
 Стратегия разработана на основе 90-дневного backtest
 (см. STRATEGIES.md §3b-bis и BUILDLOG.md 2026-04-24): изолированный ORB
 только для золота показал +6145 net pips за 90 дней
@@ -126,6 +166,29 @@ NY_CLOSE = time(17, 0)
 SHADOW_F1_MIN_BREAK_ATR = 0.3   # F1: пробой границы ORB-box в ATR
                                  # ниже этого = шумовой тык, кандидат на блок
 
+# ─── H2 ATR-regime / H5 Liquidity-sweep — frozen из research ───
+# (BUILDLOG 2026-05-04, scripts/test_h1_h5_filters.py).
+# НЕ подкручивать без обновления research-источника.
+H2_ATR_PERCENTILE = 70.0
+H2_DAILY_ATR_WINDOW = 30
+H2_DAILY_ATR_PERIOD = 14
+H5_LOOKBACK_BARS = 50
+H5_PRIOR_END_OFFSET = 10
+
+
+def _percentile(values: list[float], pct: float) -> float:
+    """Линейная интерполяция percentile (как np.percentile, без numpy)."""
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    k = (pct / 100.0) * (n - 1)
+    f = int(k)
+    c = min(f + 1, n - 1)
+    return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
+
 
 @dataclass(frozen=True, slots=True)
 class GoldOrbSignal:
@@ -144,6 +207,12 @@ class GoldOrbSignal:
     # Эти поля только логируются, не влияют на торговую логику.
     bars_since_box_end: int = 0
     break_distance_atr: float = 0.0
+    # H2/H5 meta-fields (для логирования и audit'а), используются
+    # `regime_filter` / `sweep_filter` для допуска или блока сигнала.
+    # См. docstring модуля «H2 ATR-regime + H5 Liquidity-sweep».
+    h2_regime: str = "unknown"           # "expansion" | "normal" | "compression" | "unknown"
+    h2_atr_percentile: float = -1.0      # текущий daily ATR vs 30d window
+    h5_swept_pre: bool = False           # был ли sweep liquidity до пробоя
 
 
 class GoldOrbStrategy:
@@ -156,11 +225,95 @@ class GoldOrbStrategy:
         max_positions: int = 2,       # max 1 на сессию × 2 сессии в день
         max_per_instrument: int = 1,  # только один trade на XAU за раз
         shadow: bool = False,         # если True — сигналы только логируются, без открытия
+        regime_filter: bool = False,  # H2: блокировать compression/normal
+        sweep_filter: bool = False,   # H5: блокировать non-swept signals
     ) -> None:
         self._store = store
         self._max_positions = max_positions
         self._max_per_instrument = max_per_instrument
         self._shadow = shadow
+        self._regime_filter = regime_filter
+        self._sweep_filter = sweep_filter
+        # Cache daily ATR series для H2-percentile (обновляется
+        # отдельным fetch'ем daily-баров, см. update_daily_atr_history).
+        self._daily_atr_history: list[float] = []
+        self._daily_atr_history_date: str | None = None
+
+    def update_daily_atr_history(self, daily_bars: list[Bar]) -> None:
+        """Обновить series daily ATR-14d из последних N daily баров.
+
+        Вызывается из main.py раз в час. Считает ATR-14d на каждом
+        баре (после первых 15) и сохраняет в self._daily_atr_history.
+
+        Если daily_bars короче 30 — фильтр H2 не активируется (см.
+        _h2_regime).
+        """
+        if not daily_bars or len(daily_bars) < H2_DAILY_ATR_PERIOD + 2:
+            return
+        # ATR на daily-барах (используем тот же _atr что и для M5).
+        # _atr принимает list[Bar] и возвращает single value по последним
+        # 14 барам — итерируем sliding window.
+        atrs: list[float] = []
+        for i in range(H2_DAILY_ATR_PERIOD + 1, len(daily_bars) + 1):
+            window = daily_bars[i - H2_DAILY_ATR_PERIOD - 1: i]
+            atr = _atr(window)
+            if atr > 0:
+                atrs.append(atr)
+        if len(atrs) >= H2_DAILY_ATR_WINDOW:
+            self._daily_atr_history = atrs
+            self._daily_atr_history_date = daily_bars[-1].ts.date().isoformat()
+            log.info(
+                "GOLD-ORB H2: daily ATR history updated (%d points, last day %s, "
+                "current_atr=%.2f, P70=%.2f)",
+                len(atrs), self._daily_atr_history_date,
+                atrs[-1], _percentile(atrs[-H2_DAILY_ATR_WINDOW:], H2_ATR_PERCENTILE),
+            )
+
+    def _h2_regime(self) -> tuple[str, float]:
+        """Возвращает (regime_label, current_percentile_pct).
+
+        Если daily ATR history не загружена / выборки <30 — ("unknown", -1).
+        """
+        if len(self._daily_atr_history) < H2_DAILY_ATR_WINDOW:
+            return "unknown", -1.0
+        window = self._daily_atr_history[-H2_DAILY_ATR_WINDOW:]
+        current = self._daily_atr_history[-1]
+        # Percentile rank current внутри window (% значений ниже current).
+        below = sum(1 for v in window if v < current)
+        pct = 100.0 * below / len(window)
+        if pct >= H2_ATR_PERCENTILE:
+            return "expansion", pct
+        if pct <= 30.0:
+            return "compression", pct
+        return "normal", pct
+
+    def _h5_swept(
+        self, bars: list[Bar], signal_idx: int, direction: TrendDirection,
+    ) -> bool:
+        """Проверка liquidity-sweep до пробоя.
+
+        Long: prior_low (bars[-50:-10]) выкошен в recent (bars[-10:-1]),
+              signal-bar close >= prior_low.
+        Short: зеркально для high.
+        """
+        if signal_idx < H5_LOOKBACK_BARS:
+            return False
+        lb_start = signal_idx - H5_LOOKBACK_BARS
+        prior_end = signal_idx - H5_PRIOR_END_OFFSET
+        if prior_end <= lb_start:
+            return False
+        prior = bars[lb_start:prior_end]
+        recent = bars[prior_end:signal_idx]
+        if not prior or not recent:
+            return False
+        sig_bar = bars[signal_idx]
+        if direction == TrendDirection.LONG:
+            prior_low = min(b.low for b in prior)
+            recent_low = min(b.low for b in recent)
+            return recent_low < prior_low and sig_bar.close >= prior_low
+        prior_high = max(b.high for b in prior)
+        recent_high = max(b.high for b in recent)
+        return recent_high > prior_high and sig_bar.close <= prior_high
 
     def _evaluate_shadow_filters(self, sig: GoldOrbSignal) -> tuple[str, str]:
         """Возвращает (f1_status, f2_status) для shadow-логирования.
@@ -293,17 +446,22 @@ class GoldOrbStrategy:
                     break_distance_atr=sig.break_distance_atr,
                     bars_since_box_end=sig.bars_since_box_end,
                     atr_at_open_pips=atr_pips,
+                    h2_regime=sig.h2_regime,
+                    h2_atr_percentile=sig.h2_atr_percentile,
+                    h5_swept_pre=sig.h5_swept_pre,
                 )
             except Exception as exc:
                 log.warning("save_open_diagnostics failed for %s: %s", pid, exc)
 
             log.info(
                 "  GOLD-ORB OPEN: %s %s @ %.5f [%s, box=[%.2f..%.2f], SL=%.2f] "
-                "[SHADOW F1=%s F2=%s break=%.2fATR age=%db]",
+                "[SHADOW F1=%s F2=%s break=%.2fATR age=%db] "
+                "[H2 regime=%s pct=%.1f%% H5 swept=%s]",
                 display_name(sig.instrument),
                 sig.direction.value.upper(),
                 price, sig.session, sig.box_high, sig.box_low, sl,
                 f1, f2, sig.break_distance_atr, sig.bars_since_box_end,
+                sig.h2_regime, sig.h2_atr_percentile, sig.h5_swept_pre,
             )
             opened += 1
             current += 1
@@ -339,11 +497,18 @@ class GoldOrbStrategy:
         cur_minutes = last_t.hour * 60 + last_t.minute
         bars_since_box_end = max(0, (cur_minutes - box_end_minutes) // 5)
 
+        # H2/H5 meta-fields (вычисляются всегда, фильтруют только если включены).
+        regime, atr_pct = self._h2_regime()
+        signal_idx = len(bars) - 1
+
         # touch-break: high/low текущего бара пересёк границу
         if last.high > box_high:
             if slope < 0:   # contra-trend защита: LONG только при slope>=0
                 return None
             break_dist_atr = (last.high - box_high) / atr if atr > 0 else 0.0
+            swept = self._h5_swept(bars, signal_idx, TrendDirection.LONG)
+            if not self._allow_signal(symbol, TrendDirection.LONG, regime, atr_pct, swept):
+                return None
             return GoldOrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.LONG,
@@ -356,12 +521,18 @@ class GoldOrbStrategy:
                 detail=f"touch-break above {box_high:.5f} (high={last.high:.5f})",
                 bars_since_box_end=bars_since_box_end,
                 break_distance_atr=round(break_dist_atr, 2),
+                h2_regime=regime,
+                h2_atr_percentile=round(atr_pct, 1),
+                h5_swept_pre=swept,
             )
 
         if last.low < box_low:
             if slope > 0:
                 return None
             break_dist_atr = (box_low - last.low) / atr if atr > 0 else 0.0
+            swept = self._h5_swept(bars, signal_idx, TrendDirection.SHORT)
+            if not self._allow_signal(symbol, TrendDirection.SHORT, regime, atr_pct, swept):
+                return None
             return GoldOrbSignal(
                 instrument=symbol,
                 direction=TrendDirection.SHORT,
@@ -374,9 +545,42 @@ class GoldOrbStrategy:
                 detail=f"touch-break below {box_low:.5f} (low={last.low:.5f})",
                 bars_since_box_end=bars_since_box_end,
                 break_distance_atr=round(break_dist_atr, 2),
+                h2_regime=regime,
+                h2_atr_percentile=round(atr_pct, 1),
+                h5_swept_pre=swept,
             )
 
         return None
+
+    def _allow_signal(
+        self,
+        symbol: str,
+        direction: TrendDirection,
+        regime: str,
+        atr_pct: float,
+        swept: bool,
+    ) -> bool:
+        """Применить H2 + H5 фильтры. Возвращает False если signal заблокирован.
+
+        - H2 (regime_filter=True): пропускаем только expansion. Если
+          history не загружена (regime="unknown") — fail-safe: signal
+          ПРОПУСКАЕТСЯ (не блокируем без data, иначе бот не торгует
+          до первого daily fetch'а).
+        - H5 (sweep_filter=True): пропускаем только swept=True.
+        """
+        if self._regime_filter and regime != "unknown" and regime != "expansion":
+            log.info(
+                "  GOLD-ORB BLOCK[H2]: %s %s regime=%s atr_pct=%.1f%% < P70 — skip",
+                display_name(symbol), direction.value.upper(), regime, atr_pct,
+            )
+            return False
+        if self._sweep_filter and not swept:
+            log.info(
+                "  GOLD-ORB BLOCK[H5]: %s %s no liquidity-sweep in last %d bars — skip",
+                display_name(symbol), direction.value.upper(), H5_LOOKBACK_BARS,
+            )
+            return False
+        return True
 
     @staticmethod
     def _get_session_bars(bars: list[Bar]) -> tuple[list[Bar], str]:
