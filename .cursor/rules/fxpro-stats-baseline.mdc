@@ -18,7 +18,7 @@ alwaysApply: false
 
 | Стратегия | Baseline | Причина |
 |---|---|---|
-| `gold_orb` | **2026-05-04 (момент deploy commit `TBD`)** | Активация H2 (ATR-regime) + H5 (liquidity-sweep) filters — изменена точка входа |
+| `gold_orb` | **2026-05-04 (момент deploy commit `193a797`)** | Активация H2 (ATR-regime) + H5 (liquidity-sweep) filters — изменена точка входа |
 | `outsiders`, `leaders`, `session_orb`, `squeeze_h4`, `turtle_h4`, `gbpjpy_fade` | **2026-04-23 09:28 UTC** (commit `86469d1`) | Комплексный апгрейд risk management |
 
 Статистика всех стратегий, кроме gold_orb, считается **с 23.04.2026 09:28 UTC** (commit `86469d1`,

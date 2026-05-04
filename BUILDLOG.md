@@ -8,7 +8,7 @@
 
 ### activate(H2+H5): user-override compliance — H2 ATR-regime + H5 liquidity-sweep живой в gold_orb
 
-`коммит при deploy`
+`193a797`
 
 **Контекст.** После research-цикла H1-H5 (см. запись ниже) все 3
 гипотезы REJECTED по Bonferroni p<0.01, но H2 и H5 показали
