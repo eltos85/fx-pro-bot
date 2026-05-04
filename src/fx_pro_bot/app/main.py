@@ -912,6 +912,11 @@ def _open_broker_for_new(
     if not new_positions:
         return
 
+    # Slippage-guard ghost-позиции собираем в этот список и в конце цикла
+    # дёргаем _update_broker_pnl батчем (один time.sleep(2) на цикл, не N).
+    # См. BUILDLOG 2026-05-04 «bug-fix(slippage_guard): ghost positions».
+    slippage_closed: list[tuple[str, int, str, str, float]] = []
+
     for pos in new_positions:
         if pos.broker_position_id:
             continue
@@ -968,19 +973,42 @@ def _open_broker_for_new(
                     log.warning("cTrader: недостаточно средств, стоп")
                     break
                 if "slippage" in result.error:
-                    # Slippage guard сам закрыл позицию — удаляем из БД, чтобы
-                    # не синхронизировалось как orphan. broker_position_id
-                    # не был сохранён (success=False), но DB-запись есть.
+                    # Slippage guard: позиция была фактически открыта у брокера
+                    # (executor вернул broker_position_id), executor её сразу
+                    # закрыл по слиппаджу > max. В БД нужна связь с pos_id
+                    # чтобы _update_broker_pnl потом подтянул реальный gross
+                    # из API deal'а — иначе ghost (см. BUILDLOG 2026-05-04
+                    # bug-fix(slippage_guard)).
+                    if result.broker_position_id:
+                        store.set_broker_position_id(
+                            pos.id, result.broker_position_id, result.volume,
+                        )
+                        slippage_closed.append((
+                            pos.id, result.broker_position_id,
+                            pos.instrument, pos.direction, pos.entry_price,
+                        ))
                     store.close_position(pos.id, "slippage_guard")
                     log.warning(
-                        "  cTrader SLIPPAGE CANCEL: %s %s — %s (strat=%.5f fill=%.5f)",
-                        pos.instrument, pos.direction, result.error,
+                        "  cTrader SLIPPAGE CANCEL: %s %s broker #%d — %s (strat=%.5f fill=%.5f)",
+                        pos.instrument, pos.direction,
+                        result.broker_position_id or 0, result.error,
                         result.strategic_price, result.fill_price,
                     )
                 else:
                     log.warning("  cTrader OPEN FAILED: %s — %s", pos.instrument, result.error)
         except Exception:
             log.exception("  cTrader OPEN error: %s", pos.instrument)
+
+    # Батч-sync gross для ghost-позиций slippage-guard'а: ждём 2с чтобы
+    # closing deal появился в cTrader API, затем тянем grossProfit + volume
+    # и пересчитываем profit_pips. Один sleep на цикл независимо от
+    # количества ghost'ов.
+    if slippage_closed and executor:
+        time.sleep(2)
+        try:
+            _update_broker_pnl(store, executor, slippage_closed)
+        except Exception as exc:
+            log.warning("_update_broker_pnl failed for slippage_closed: %s", exc)
 
 
 def _resolve_lot_size(instrument: str, sl_distance: float | None, settings: Settings) -> float:

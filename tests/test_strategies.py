@@ -608,3 +608,166 @@ def test_paper_lifecycle(tmp_path) -> None:
     summary = store.paper_summary_by_exit_strategy()
     assert len(summary) == 1
     assert summary[0]["exit_strategy"] == "scalp"
+
+
+# ── slippage_guard ghost-fix ─────────────────────────────────
+
+
+def test_open_broker_for_new_slippage_links_broker_id_and_syncs_pnl(
+    tmp_path, monkeypatch,
+) -> None:
+    """slippage_guard: когда executor.open_position возвращает success=False
+    + broker_position_id, бот обязан:
+      1. Записать `broker_position_id` в БД (`set_broker_position_id`),
+      2. Закрыть позицию с `exit_reason='slippage_guard'`,
+      3. Подтянуть реальный grossProfit из API через `_update_broker_pnl`
+         и обновить `profit_pips`.
+
+    Регрессия: до фикса BUILDLOG 2026-05-04 broker_id игнорировался,
+    позиция оставалась с pos_id=0 — реальная сделка у брокера висела
+    как ghost вне БД. См. `BUILDLOG.md` `bug-fix(slippage_guard)`.
+    """
+    from fx_pro_bot.app import main as _main
+    from fx_pro_bot.trading.executor import AccountInfo, OrderResult
+
+    monkeypatch.setattr(_main.time, "sleep", lambda *_a, **_kw: None)
+
+    store = StatsStore(tmp_path / "t.db")
+    pos_id = store.open_position(
+        strategy="gold_orb", source="orb_breakout",
+        instrument="XAUUSD=X", direction="long",
+        entry_price=2400.0, stop_loss_price=2398.0,
+    )
+
+    slip_result = OrderResult(
+        success=False,
+        broker_position_id=987654,
+        fill_price=2400.50,
+        strategic_price=2400.00,
+        slippage_pips=50.0,
+        volume=10,
+        error="slippage 50.0pip > max 10.0pip",
+    )
+
+    deal_payload = {
+        "positionId": 987654,
+        "grossProfit": -7.30,
+        "volume": 10,
+        "entryPrice": 2400.50,
+    }
+
+    class _StubExecutor:
+        def __init__(self) -> None:
+            self.open_calls = 0
+            self.deal_calls = 0
+        def get_account_info(self) -> AccountInfo:
+            return AccountInfo(balance=1500.0)
+        def get_open_positions(self) -> list:
+            return []
+        def open_position(self, **_kwargs) -> OrderResult:
+            self.open_calls += 1
+            return slip_result
+        def get_deal_list(self, _ts_from: int, _ts_to: int) -> list[dict]:
+            self.deal_calls += 1
+            return [deal_payload]
+
+    class _StubKill:
+        def check_allowed(self, _open_count: int, _balance: float) -> bool:
+            return True
+
+    class _StubSettings:
+        risk_per_trade_usd = 15.0
+        lot_size = 0.01
+
+    executor = _StubExecutor()
+    _main._open_broker_for_new(
+        store=store,
+        executor=executor,
+        killswitch=_StubKill(),
+        before_ids=set(),
+        prices={"XAUUSD=X": 2400.0},
+        settings=_StubSettings(),  # type: ignore[arg-type]
+        atrs={"XAUUSD=X": 1.5},
+    )
+
+    assert executor.open_calls == 1
+    assert executor.deal_calls == 1, "должен дёргать deal_list для синка PnL"
+
+    pos_after = store.get_position(pos_id)
+    assert pos_after is not None
+    assert pos_after.status == "closed"
+    assert pos_after.exit_reason == "slippage_guard"
+    assert pos_after.broker_position_id == 987654, (
+        "broker_position_id должен быть сохранён, иначе ghost"
+    )
+    assert pos_after.profit_pips != 0.0, (
+        "_update_broker_pnl должен пересчитать profit_pips из gross"
+    )
+    assert pos_after.profit_pips < 0, "loss-deal → отрицательный profit_pips"
+
+
+def test_open_broker_for_new_slippage_no_broker_id_falls_back(
+    tmp_path, monkeypatch,
+) -> None:
+    """Edge case: если broker_position_id=0 (executor не получил ответа от API),
+    позиция всё равно закрывается со slippage_guard, но без link/sync.
+    Поведение должно быть как до фикса для этой ветки.
+    """
+    from fx_pro_bot.app import main as _main
+    from fx_pro_bot.trading.executor import AccountInfo, OrderResult
+
+    monkeypatch.setattr(_main.time, "sleep", lambda *_a, **_kw: None)
+
+    store = StatsStore(tmp_path / "t.db")
+    pos_id = store.open_position(
+        strategy="gold_orb", source="orb_breakout",
+        instrument="XAUUSD=X", direction="long",
+        entry_price=2400.0, stop_loss_price=2398.0,
+    )
+
+    no_id_result = OrderResult(
+        success=False,
+        broker_position_id=0,
+        error="slippage 50.0pip > max 10.0pip",
+    )
+
+    class _StubExecutor:
+        def __init__(self) -> None:
+            self.deal_calls = 0
+        def get_account_info(self) -> AccountInfo:
+            return AccountInfo(balance=1500.0)
+        def get_open_positions(self) -> list:
+            return []
+        def open_position(self, **_kwargs) -> OrderResult:
+            return no_id_result
+        def get_deal_list(self, _ts_from: int, _ts_to: int) -> list[dict]:
+            self.deal_calls += 1
+            return []
+
+    class _StubKill:
+        def check_allowed(self, _open_count: int, _balance: float) -> bool:
+            return True
+
+    class _StubSettings:
+        risk_per_trade_usd = 15.0
+        lot_size = 0.01
+
+    executor = _StubExecutor()
+    _main._open_broker_for_new(
+        store=store,
+        executor=executor,
+        killswitch=_StubKill(),
+        before_ids=set(),
+        prices={"XAUUSD=X": 2400.0},
+        settings=_StubSettings(),  # type: ignore[arg-type]
+        atrs={"XAUUSD=X": 1.5},
+    )
+
+    pos_after = store.get_position(pos_id)
+    assert pos_after is not None
+    assert pos_after.status == "closed"
+    assert pos_after.exit_reason == "slippage_guard"
+    assert pos_after.broker_position_id == 0
+    assert executor.deal_calls == 0, (
+        "без broker_position_id нет смысла дёргать deal_list"
+    )

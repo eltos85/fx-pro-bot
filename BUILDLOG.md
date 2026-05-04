@@ -4,6 +4,381 @@
 
 ---
 
+## 2026-05-04
+
+### bug-fix(slippage_guard): сохраняем broker_position_id и синкаем gross — конец «ghost»-позициям
+
+`коммит будет добавлен ниже`
+
+**Симптом.** В аудите 04.05 нашли, что `slippage_guard` ветка в
+`_open_broker_for_new` **отбрасывала** `broker_position_id`,
+возвращённый executor'ом после `OrderResult(success=False, error=
+"slippage …")`. Позиция фактически открывалась у брокера и сразу
+закрывалась executor'ом по слиппаджу > max, но в БД оставалась
+запись со `broker_position_id=0` и `exit_reason='slippage_guard'`.
+В результате:
+- `_update_broker_pnl` не мог найти deal (нечем сматчить
+  `positionId` из `get_deal_list`),
+- `_sync_broker_closes` пропускал её (нет broker_id → не считалась
+  open),
+- `monitor` тоже не видел (status уже closed),
+- реальный gross/pips не подтягивался → `profit_pips=0` в БД,
+- статистика `pnl_report` / `analysis_9h` не учитывала эти сделки.
+
+За 04.05 04:00 UTC — 16:00 UTC такой ghost'ов было 4, на 01.05 — 1.
+
+**Причина.** `OrderResult.broker_position_id` приходил с executor'а
+(см. `trading/executor.py::open_position` — slippage-guard вызывает
+`close_position(broker_id)` уже после открытия), но обработчик
+ошибки в `app/main.py::_open_broker_for_new` его игнорировал и сразу
+делал `store.close_position(pos.id, "slippage_guard")` без
+предварительного `set_broker_position_id`.
+
+**Решение.** Минимальный observability-fix без изменения торговой
+логики:
+1. Если `result.broker_position_id` непустой — записать связь через
+   `store.set_broker_position_id(pos.id, broker_id, volume)` ДО
+   `close_position`. Теперь у позиции в БД есть broker_id, и она
+   ничем не отличается от обычной закрытой по `broker_tp_sl`.
+2. Накапливаем такие позиции в локальный список `slippage_closed`
+   внутри функции; в конце цикла — один `time.sleep(2)` (чтобы дать
+   API проиндексировать closing deal) и один батчевый вызов
+   `_update_broker_pnl(store, executor, slippage_closed)`. Это
+   подтягивает реальный `grossProfit` и пересчитывает `profit_pips`
+   через `pip_value_from_volume` (ту же формулу что и
+   `broker_tp_sl`-сделки после фикса 30.04).
+3. В warning-лог добавили `broker_id` чтобы в реальном времени
+   видеть какую позицию executor закрыл по слиппаджу.
+
+Edge-case: если `broker_position_id == 0` (executor не получил ID,
+ордер не отправился) — поведение остаётся как было: просто закрытие
+с `exit_reason='slippage_guard'`, без `_update_broker_pnl`.
+
+**Compliance.** Это **operational bug-fix** — ничего из
+`STRATEGIES.md` (entry/SL/TP/trail/multi-entry policy) не изменено.
+Под `strategy-guard.mdc` → «Допустимые правки БЕЗ нового анализа»
+(bug-fix в скрипте/wrapper, без влияния на сигнал). На решения
+shadow-фильтров F1/F2/M1 не влияет — они по-прежнему наблюдаются,
+не активируются (см. `whatif(shadow)` от 02.05, для активации
+нужны n≥100 + p<0.05 по `sample-size.mdc`).
+
+**Тесты.** Добавлены 2 unit-теста в `tests/test_strategies.py`:
+- `test_open_broker_for_new_slippage_links_broker_id_and_syncs_pnl`
+  — happy path: broker_id=987654 + `OrderResult(success=False)` →
+  pos закрыта с `exit_reason='slippage_guard'`,
+  `broker_position_id=987654` в БД, `profit_pips<0` после синка
+  gross=−$7.30 из stub'нутого `get_deal_list`. `time.sleep`
+  замокан.
+- `test_open_broker_for_new_slippage_no_broker_id_falls_back` —
+  edge-case: broker_id=0 → закрытие как раньше, `get_deal_list`
+  не дёргается.
+
+Полный прогон: `pytest tests/ -x -q` → 427 passed.
+
+**Файлы:** `src/fx_pro_bot/app/main.py` (+3 строк до цикла, +12
+строк в slippage-ветке, +9 строк после цикла batch-sync),
+`tests/test_strategies.py` (+~145 строк, 2 новых теста).
+
+**Что ожидаем после деплоя.** Любая slippage-cancel сделка теперь
+будет:
+- видна в `position_summary_by_strategy()` с реальным `profit_pips`,
+- учтена в `pnl_report` / `analysis_9h` / `audit_recent`,
+- доступна для `_persist_close_diagnostics` (там pos уже найдётся
+  через `store.get_position`),
+- доступна для reconcile DB↔API (broker_id есть с обеих сторон).
+  Пост-deploy через 1-2 сессии прогоним
+  `scripts/reconcile_db_vs_api.py` чтобы убедиться, что новых
+  ghost'ов нет.
+
+---
+
+## 2026-05-02
+
+### whatif(shadow): F1 / F2 / M1 на 12 сделках 01.05 — F2+M1 превратили бы день из −$95 в +$4
+
+`без коммита (наблюдение, observation only)`
+
+**Контекст.** После `audit(24h)` ниже пользователь попросил оценить
+эффект каждого shadow-наблюдения на тех же 12 сделках, чтобы видеть
+куда копать. Все три механизма уже пишут в `position_diagnostics`
+(deploy 30.04 18:29 UTC, commit `1376037`), shadow-only — на торговую
+логику не влияли.
+
+**Сценарии (предполагается, что фильтр — hard rule, был live):**
+
+| вариант | оставлено | NET pips | NET $ | Δ vs real |
+|---|---:|---:|---:|---:|
+| REAL (как было) | 12/12 | −364.1 | −95.07 | — |
+| F1 hard (break ≥ 0.3 ATR) | 11/12 | −308.4 | −78.36 | +55.7p / +$16.71 |
+| **F2 hard (sl_cooldown)** | **5/12** | **−80.8** | **−16.16** | **+283.3p / +$78.91** |
+| F1 + F2 hard | 5/12 | −80.8 | −16.16 | +283.3p / +$78.91 |
+| M1 trail (intrabar exit) | 12/12 | −241.3 | −68.33 | +122.8p / +$26.74 |
+| **F2 + M1 trail** | **5/12** | **+20.2** | **+3.84** | **+384.3p / +$98.91** |
+| F1 + F2 + M1 trail | 5/12 | +20.2 | +3.84 | +384.3p / +$98.91 |
+
+**Per-trade выкладка (из `position_diagnostics`):**
+
+```
+opened    dir   REAL   PEAK  M1_exit  F1    F2     brk
+01T08:20  short +13.1  +29.1   —      ok    ok     0.50  ← F2 ok (1-я в сессии)
+01T08:36  short  +0.0   +0.0   —      ok    ok     1.51  ← slippage_guard
+01T08:41  short +29.0  +46.5   —      ok    ok     1.46
+01T09:19  short −64.8   +0.0   —      ok    ok     2.19  ← первый SL → F2 BLOCK дальше
+01T09:45  short  +1.0   +9.4   —      ok    BLOCK  0.97  ← F2 hard зарубил бы здесь
+01T10:01  short −60.8   +0.0   —      ok    BLOCK  3.41
+01T10:17  short −57.3   +0.0   —      ok    BLOCK  2.26
+01T10:39  short  +1.6  +29.2  +23.4   ok    BLOCK  0.75  ← M1 поймал бы +23.4 вместо +1.6
+01T10:55  short −57.3  +12.9   —      ok    BLOCK  1.91
+01T11:27  short −54.8  +14.5   —      ok    BLOCK  0.56
+01T11:53  short −55.7   +0.0   —      BLOCK BLOCK  0.16  ← единственный F1 BLOCK
+01T15:52  long  −58.1  +28.6  +42.9   ok    ok     0.34  ← M1 поймал бы +42.9 вместо −58 (NY long с amend-loop)
+```
+
+**Что бросается в глаза.**
+
+- **F2 (sl_cooldown)** даёт основной эффект — режет 78% дневных потерь
+  (Δ +$79). Логика: после первого SL в Лондон-shorts перестаём лезть
+  в шорт XAU до конца сессии. На 01.05 это блокирует 7 сделок из
+  кластера 09:45–11:53, в которых 6 убыточных и 1 winner +1.6p.
+- **F1** малоэффективен в одиночку — заблокировал бы только
+  последний шорт 11:53 (brk 0.16 < 0.3 ATR).
+- **M1 trail** активировался бы только на 2 сделках, но среди них —
+  тот самый NY-LONG #150229708 с операционным amend-loop'ом.
+  Shadow intrabar показал peak +57.8p, would_exit +42.9p; live ушёл
+  на −58.1p (`dead`). Δ только на этом лонге **+101p / +$20**.
+- **F2 + M1** в комбинации превращают день из −$95 в **+$4**.
+  Δ +$99.
+
+**Compliance / sample-size.**
+
+- **n=12 << 100** (`sample-size.mdc`) — это **observation**, не
+  основание для включения F1/F2 как hard-rule или замены trail на M1.
+  Нужно ≥100 сделок, p-value < 0.05, OOS forward-test (правило
+  `no-data-fitting.mdc`: «не подгонять код под последние N сделок»).
+- F2 уже частично проверена на n=25 (BUILDLOG 30.04 «backfill»):
+  F2=ok WR 54.5% / F2=BLOCK WR 35.7% — направление верное, но
+  выборка маленькая. С учётом 01.05 сейчас n=37; нужно ещё ~63.
+- M1 backtest на 90d показывал +127% NET (intrabar UB) / +32% (M1
+  realistic) — план «А → Б», накопление shadow ≥1 неделя
+  (`fxpro-stats-baseline.mdc`, запись 30.04). 01.05 даёт первые
+  2 точки live-shadow.
+
+**Что НЕ делаем.**
+
+- НЕ включаем F2 как hard-rule по 12 сделкам.
+- НЕ переключаемся на M1 trail.
+- НЕ меняем параметры F1 (порог 0.3 ATR — research-anchor из
+  90d backtest, BUILDLOG 29.04).
+
+**Что делаем.**
+
+1. Продолжаем shadow-наблюдение F1/F2/M1 как минимум до n=100
+   gold_orb (сейчас 55 с baseline 23.04, 12 за 01.05).
+2. Через 1–2 недели — скрипт-комбайн: F2 hard / M1 trail / F2+M1 на
+   полной выборке, walk-forward T1/T2/T3, p-value по биномиальному
+   тесту.
+3. После согласования — A/B живо: F2 на половине дней, multi-entry
+   на другой половине (или 1 неделя F2 → 1 неделя без). До этого
+   код стратегии не трогаем.
+
+**Артефакты:**
+- `position_diagnostics` таблица (БД на VPS), 11/12 сделок 01.05 имеют
+  полную диагностику (1 без — `slippage_guard` с pos_id=0, в
+  `position_diagnostics` не попала по дизайну).
+- `/tmp/whatif.py` (одноразовый скрипт в контейнере, не коммитим).
+
+**Файлы:** только `BUILDLOG.md` (запись).
+
+---
+
+### verify(no-logic-change): byte-diff подтверждает что diag-v2/INTRABAR/F1F2 — observability-only
+
+`без коммита (проверка, без правок)`
+
+**Триггер.** После просадки 01.05 (`audit(24h)` ниже) возникло
+подозрение, что наблюдательные коммиты 29–30.04 могли молча задеть
+торговую логику.
+
+**Проверка.** Полный diff каждого commit'а после baseline `49861fe`
+(23.04) на файлах: `monitor.py`, `gold_orb.py`, `app/main.py`,
+`executor.py`. Анализ:
+
+| коммит | дата | дельта в торговой логике |
+|---|---|---|
+| `92e739d` gold_orb LIVE | 23.04 21:27 | initial deploy gold_orb (часть baseline) |
+| `880583f` swing strategies | 24.04 | НЕ касается gold_orb |
+| `fe4f467` validate_sl_tp fix | 27.04 | bug-fix executor (entry → current_price) |
+| `2fb0b65` F1+F2 shadow | 29.04 | новая `_evaluate_shadow_filters` → возвращает str → log; entry condition не тронута |
+| `a540eb1` late-entry diag | 28.04 | поля `bars_since_box_end`/`break_distance_atr` в Signal — для лога |
+| `d10aaa7` shadow INTRABAR | 30.04 | `_update_shadow_intrabar` пишет в in-memory `self._shadow_states`, не трогает `pos.peak_price` |
+| `22f1862` bug-fix _update_broker_pnl | 30.04 | sync metrics из API, **только метрики** |
+| `ece0d42` position_diagnostics | 30.04 | новая таблица + `save_open_/save_close_diagnostics` пишут только в неё |
+| `1376037` diag-v2 | 30.04 | `_persist_close_diagnostics` в main.py: read pos, write `position_diagnostics` |
+
+**Подтверждения (по коду, не по словам коммита):**
+
+- `_detect_signal` в `gold_orb.py` (touch-break + slope filter) —
+  байтово идентична `92e739d`.
+- SL formula `sl_dist = GOLD_ORB_SL_ATR_MULT * sig.atr` (1.5×ATR) —
+  идентична.
+- `_check_exits` в `monitor.py`: `gold_orb` добавлен в `scalping`
+  tuple ещё в `92e739d`, формулы `scalp_tp`/`scalp_trail`/`dead`
+  не менялись (вынесены в `compute_close_diagnostics` 1:1).
+- `max_positions=2`, `max_per_instrument=1`, multi-entry policy —
+  присутствуют с `92e739d`, не вводились recent коммитами.
+- 350/350 тестов проходят (`tests/test_strategies.py`,
+  `tests/test_scalping.py`, `tests/test_trading.py`).
+
+**Что наблюдательные коммиты ВСЁ ЖЕ изменили (не торговое):**
+
+- Лишний DB hit при open (`save_open_diagnostics`) и при close
+  (`_persist_close_diagnostics`) — пишут в новую таблицу
+  `position_diagnostics`, не в `positions`. Latency — несколько ms
+  per call (SQLite, локально).
+- Полный recalc shadow INTRABAR на каждом monitor-цикле для каждой
+  scalping-позиции — O(N_bars) per pos. На 12 позициях × 400 баров =
+  ~5k ops, незаметно (<10ms total).
+
+Влияния на cycle-timing на уровне, способном объяснить +17 amend
+REJECTED, **нет**.
+
+**Вывод.** Просадка 01.05 — комбинация (а) кластера multi-entry на
+одном плохом setup'е и (б) операционного bug'а в trail-amend для
+LONG #150229708 (stale M5 close vs live bid, `_validate_sl_tp_side`
+issue, известный с `fe4f467`). Стратегия gold_orb в коде не менялась.
+
+**Что предлагается сделать (отдельная задача, согласовать):**
+
+- bug-fix для trail-amend loop: тянуть spot bid/ask через `executor.client.reconcile()`
+  непосредственно перед амендом, либо явный лимит `proposed_SL ≤ bid −
+  1tick − spread` (LONG) / `≥ ask + 1tick + spread` (SHORT). По
+  `strategy-guard.mdc` — это **bug-fix exception**, не feature-change
+  (исправляет уже задокументированный симптом 16 RECETED amend'ов на
+  одном LONG).
+
+**Артефакты:** `git diff 49861fe..HEAD -- src/fx_pro_bot/...`,
+runtime tests output (350/350 passed).
+
+**Файлы:** только `BUILDLOG.md` (запись).
+
+---
+
+### audit(24h): gold_orb live — 12 сделок, WR 33%, NET −364p / −$95.07, два операционных red flag
+
+`без коммита (только аудит, observation only)`
+
+**Окно.** 2026-05-01 03:01 UTC → 2026-05-02 03:01 UTC.
+
+**Источники (3/3 сошлись).**
+
+- Логи: `docker logs fx-pro-bot-advisor-1 --since 24h` → 12 `GOLD-ORB OPEN`,
+  2 `CLOSE GOLD_ORB` (10 ушли через `broker_tp_sl` без exit-блока в `monitor.py`),
+  17 `amend REJECTED` (12 уникальных `TRADING_BAD_STOPS`).
+- БД (`/data/advisor_stats.sqlite`, `created_at >= cutoff`): 12 закрытых позиций,
+  0 открытых.
+- cTrader API (`get_deal_list`): 12 closing deals по `broker_position_id` БД +
+  1 API-only deal без записи в БД (см. red flag #1).
+
+**Реконсилиация.** Все 12 пар DB↔API сошлись по pips и gross$ с Δ=0.0p
+(подтверждение что bug-fix `_update_broker_pnl` 30.04 работает корректно;
+до фикса средний Δ был +5–30p). Открытые: API=0, DB=0 — нет zombies.
+
+**Сводка по exit_reason × API:**
+
+| exit | n | API pips | API $ |
+|---|---:|---:|---:|
+| `broker_tp_sl` | 9 | −307.6 | −$83.93 |
+| `dead` | 1 | −58.1 | −$11.62 |
+| `scalp_trail` | 1 | +1.6 | +$0.48 |
+| `slippage_guard` | 1 | 0.0 | $0.00 (но см. flag #1) |
+| **ИТОГО** | **12** | **−364.1** | **−$95.07** |
+
+**Структура.** 11 из 12 сделок — SHORT XAUUSD на london-box
+`[4582.53..4573.71]` 08:20–12:15 UTC; 1 — LONG NY-сессия 15:52 UTC. Все 12 на
+`gold_orb`, других стратегий за 24ч не было. После пробоя коробки вниз цена
+откатилась обратно в коробку, что выбило 7 шортов подряд по `broker_tp_sl`
+(средний loss −34p ≈ 1.5 ATR × $0.30/p).
+
+**Backtest baseline (для контекста, не для решений).**
+`data/gold_orb_trail_compare_out.txt` (28.04, 90 дней, 114 сигналов): LIVE WR
+65.8%, NET +3440p, PF 1.76. T3 (свежая треть) WR 71.1%, PF 2.79. Распределение
+exit-reasons backtest: scalp_trail 60% / sl 27% / tp 12%. **Live 24h** —
+broker_tp_sl 75%, scalp_trail 8% — резкий перекос в сторону SL. **Выборка
+n=12 не позволяет** утверждать деградацию edge'а (по `sample-size.mdc` нужно
+≥100 сделок и p-value < 0.05).
+
+#### Red flag #1 — `slippage_guard` race condition
+
+08:36:33 UTC бот открывал XAU SHORT, через 4 секунды отменил по
+`slippage_guard` и записал в БД `broker_position_id=0`. **Но** в API за это
+окно появился deal `posId=150215960 dealId=331551539 vol=200 gross=$-0.40` —
+ордер физически исполнился у брокера и закрылся через секунды с убытком
+2 пипса. БД эту сделку **не учитывает** → расхождение БД-агрегата и реального
+P&L брокера на $0.40 + неучтённый риск (если бы цена ушла дальше — позиция
+осталась бы открытой только на брокере, без мониторинга). Это **операционный
+bug** в `slippage_guard` логике (race между `cancel_order` и `executionEvent`).
+Реконсилиация на длинной выборке (`scripts/reconcile_db_vs_api.py --since
+2026-04-07`) поможет оценить частоту — отдельная задача.
+
+#### Red flag #2 — trail amend loop для LONG #150229708 (NY 15:52 UTC)
+
+LONG XAU @4644.31 SL 4634.41. Цена сходила до 4648.20 (peak +57.8p / shadow
+intrabar would_exit +38.9p), затем развернулась до 4640.89. Бот пытался
+амендить SL up to 4645.01 (после peak) — но к этому моменту bid уже был ниже,
+и cTrader 16 раз отверг amend как `TRADING_BAD_STOPS: New SL for BUY position
+should be <= current BID price` (4645.01 > 4640.89). Позиция в итоге закрыта
+по `dead` (time-stop / dead-zone) с −58.1p / −$11.62 — **прибыль +57.8p
+не зафиксирована** из-за неработающего trail.
+
+Симптом: `_validate_sl_tp_side` после fix 27.04 (`fe4f467`) сравнивает new SL
+с current M5 close, но **не** с актуальным bid/ask тика — между monitor
+циклами (~15s) bid успевает уйти ниже proposed SL для LONG. Это уже не
+расхождение «SL vs entry» (тот баг закрыт), а «SL vs текущая market».
+Возможные направления (не правки сейчас, без согласования):
+обновлять `current_price` тика прямо перед амендом / fallback на market-close
+если 3+ amend rejected подряд / явный лимит «trail SL ≤ bid - spread - 1tick».
+Также подтверждается paper-research 30.04 (`research(gold_orb): M1 backtest`)
+о выгоде INTRABAR-trail на M1 — на этой сделке shadow-intrabar показал
+`would_exit +38.9p` против реализованных −58.1p (Δ +96.7p в пользу M1).
+
+#### Compliance
+
+- `sample-size.mdc`: **n=12 << 100** — изменения стратегии **не предлагаются**.
+  Только observation. Никаких отключений / тюнинга порогов.
+- `no-data-fitting.mdc`: все цифры из артефактов — `/data/advisor_stats.sqlite`
+  (БД), cTrader API (`get_deal_list`), `docker logs --since 24h`,
+  `data/gold_orb_trail_compare_out.txt` (для baseline backtest).
+- `strategy-guard.mdc`: оба red flag — **операционные** баги исполнения,
+  не торговая логика. Расследование разрешено по bug-fix exception, но
+  фиксы в отдельных коммитах после согласования и с тестами.
+- `fxpro-stats-baseline.mdc`: окно 24ч после baseline 23.04, окна
+  невалидных данных (27.04 06:00–18:00) не пересекаются.
+
+#### Что НЕ делаем
+
+- Не отключаем `gold_orb` (n=12 << 100, T3 backtest WR 71%).
+- Не трогаем SL/trail параметры (research-based, требует backtest + согласия).
+- Не сужаем окно london — кластер этого дня может быть шумом отдельной сессии.
+
+#### Следующие шаги (по приоритету)
+
+1. Расследовать `slippage_guard` race condition: прогнать
+   `reconcile_db_vs_api.py --since 2026-04-07` и посчитать сколько API-only
+   deals накопилось → масштаб проблемы.
+2. Расследовать trail amend loop: посмотреть `_validate_sl_tp_side` и
+   monitor-cycle, можно ли использовать tick-level bid/ask вместо M5 close
+   при амендмента LONG/SHORT.
+3. Продолжать сбор статистики (≥1 неделя / ≥100 сделок) для оценки edge'а
+   gold_orb на текущей конфигурации.
+
+**Артефакты:** скрипт аудита (одноразовый, в контейнере)
+`/tmp/fxpro_24h_audit.py`, реконсилиация прогнана inline через
+`executor.get_deal_list` + SQL по `advisor_stats.sqlite`.
+
+**Файлы:** только `BUILDLOG.md` (запись аудита, кода не трогали).
+
+---
+
 ## 2026-04-30
 
 ### feat(diag-v2): close-diagnostics centralized в `app/main.py` (M1 для всех exit-types)
