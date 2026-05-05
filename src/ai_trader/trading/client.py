@@ -205,11 +205,19 @@ class AiBybitClient:
         sl_price: float | None = None,
         tp_price: float | None = None,
         reduce_only: bool = False,
-    ) -> dict | None:
+    ) -> dict:
         """Market-ордер с опциональными SL/TP.
 
         side: 'Buy' / 'Sell'
         order_link_id: должен начинаться с 'ai_' для нашей идентификации
+
+        Возвращает dict:
+        - При успехе: {"ok": True, "result": <bybit result>}
+        - При ошибке: {"ok": False, "error": <message>, "params": <params>}
+
+        AUDIT_2026.md P0 fix: ранее возвращался ``None``, что прятало
+        реальную причину отказа Bybit (min order size / leverage / margin)
+        и попадало в БД как generic «place_order returned None».
         """
         params: dict = {
             "category": self._category,
@@ -226,13 +234,31 @@ class AiBybitClient:
             params["takeProfit"] = str(tp_price)
         try:
             resp = self._session.place_order(**params)
-            return resp.get("result")
-        except Exception:
-            log.exception("place_order failed: %s", params)
-            return None
+        except Exception as e:
+            log.exception("place_order exception: %s", params)
+            return {"ok": False, "error": f"exception: {e}", "params": params}
+        ret_code = resp.get("retCode")
+        ret_msg = resp.get("retMsg", "")
+        if ret_code not in (0, None):
+            log.warning(
+                "place_order non-zero retCode: code=%s msg=%s params=%s",
+                ret_code,
+                ret_msg,
+                params,
+            )
+            return {
+                "ok": False,
+                "error": f"bybit retCode={ret_code} msg={ret_msg}",
+                "params": params,
+                "raw": resp,
+            }
+        return {"ok": True, "result": resp.get("result"), "raw": resp}
 
-    def close_position(self, symbol: str, side: str, qty: float, link_id: str) -> dict | None:
-        """Закрыть позицию reduce-only ордером с противоположной стороной."""
+    def close_position(self, symbol: str, side: str, qty: float, link_id: str) -> dict:
+        """Закрыть позицию reduce-only ордером с противоположной стороной.
+
+        Возвращает то же что place_order: {"ok": True/False, ...}.
+        """
         opposite = "Sell" if side == "Buy" else "Buy"
         return self.place_order(
             symbol=symbol,

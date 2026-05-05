@@ -4,6 +4,28 @@
 ловим крупные сделки "китов" по объёму на барах.
 
 Если текущий бар имеет аномально высокий объём → входим по направлению движения.
+
+─── Research basis ───────────────────────────────────────────────
+- **Volume spike как сигнал institutional flow**: TradingView/Medium 2025
+  backtest-паблики на крипто-perp. Стандартный множитель для breakout-стратегий
+  на FX/equity = 1.5–1.8× 20-bar avg, для крипты с её wick-волатильностью
+  принят 2.0× как баланс между частотой и качеством сигналов.
+- **Trend-confirmation filter (ADX ≥ 20)**: J. Welles Wilder Jr.
+  «New Concepts in Technical Trading Systems» (1978) — ADX ≥ 20 как
+  трешхолд тренда. Без этого фильтра spike-сигналы превращаются в
+  чистый шум на боковике.
+- **SL/TP 2.0/2.0 ATR**: Quant Signals 2025, бэктест n=9 433 на крипто-perp
+  (PF=1.72, max DD=4.6%). Реализация в ``app/main.py`` через константы
+  ``_VOLUME_SPIKE_SL_ATR_MULT`` / ``_VOLUME_SPIKE_TP_ATR_MULT``.
+- **Cooldown 5 баров**: предотвращение каскадных входов на одном кластере
+  (если объём держится высоким несколько баров подряд) — heuristic,
+  не из research, баг-фикс по поведению на live.
+
+⚠ Известное ограничение (AUDIT_2026.md, P3): стратегия использует только
+OHLCV-объём без orderflow / DOM. r/algotrading 2026 stress-test [Kalena 2026]
+показывает, что 34–67% разрыва бэктест↔live — это slippage / orderbook
+impact. Для high-fidelity сигнала нужно Level-2 order book — отложено
+как long-term задача.
 """
 
 from __future__ import annotations

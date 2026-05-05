@@ -39,7 +39,12 @@ class ApplyResult:
 
 
 def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | str:
-    """Возвращает ParsedAction или строку с описанием ошибки."""
+    """Возвращает ParsedAction или строку с описанием ошибки.
+
+    v0.3 (AUDIT_2026.md): промпт теперь требует commentary + JSON, поэтому
+    парсер ищет **последний** balanced JSON-блок в тексте, а не первый
+    встреченный ``{``. Это устойчиво к фигурным скобкам в commentary.
+    """
     if not text:
         return "empty response"
 
@@ -49,17 +54,45 @@ def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | 
     if fence:
         cleaned = fence.group(1).strip()
 
-    # Берём первый { … } блок если есть лишний текст
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return f"no JSON object found in response: {cleaned[:120]}"
-    candidate = cleaned[start : end + 1]
+    # Ищем последний JSON-объект в тексте: идём от конца, находим '}',
+    # затем balanced '{' слева. Если не парсится — пробуем следующий '}'.
+    obj = None
+    last_err: Exception | None = None
+    end = len(cleaned)
+    while True:
+        end_brace = cleaned.rfind("}", 0, end)
+        if end_brace == -1:
+            break
+        # Найдём balanced '{' слева через скобочный счётчик
+        depth = 0
+        start_brace = -1
+        for i in range(end_brace, -1, -1):
+            ch = cleaned[i]
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                depth -= 1
+                if depth == 0:
+                    start_brace = i
+                    break
+        if start_brace == -1:
+            break
+        candidate = cleaned[start_brace : end_brace + 1]
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict) and "action" in parsed:
+                obj = parsed
+                break
+            last_err = ValueError(f"not a decision dict: {type(parsed).__name__}")
+        except json.JSONDecodeError as e:
+            last_err = e
+        # Не подошло — попробуем JSON-блок раньше в тексте
+        end = start_brace
 
-    try:
-        obj = json.loads(candidate)
-    except json.JSONDecodeError as e:
-        return f"JSON parse error: {e}"
+    if obj is None:
+        if last_err is not None:
+            return f"JSON parse error: {last_err}"
+        return f"no JSON object found in response: {cleaned[:120]}"
 
     if not isinstance(obj, dict):
         return f"expected JSON object, got {type(obj).__name__}"
@@ -125,8 +158,9 @@ def _apply_close(
 
     link_id = f"ai_close_{uuid.uuid4().hex[:10]}"
     resp = client.close_position(pos.symbol, pos.side, pos.qty, link_id)
-    if not resp:
-        return ApplyResult(executed=False, summary="", error="close_position returned None")
+    if not resp or not resp.get("ok"):
+        err_msg = (resp or {}).get("error", "close_position returned empty")
+        return ApplyResult(executed=False, summary="", error=f"close_failed: {err_msg}")
 
     ticker = client.get_ticker(pos.symbol)
     exit_price = ticker.last_price if ticker else pos.entry_price
@@ -206,7 +240,12 @@ def _apply_open(
             ),
         )
 
-    client.set_leverage(symbol, leverage)
+    if not client.set_leverage(symbol, leverage):
+        log.warning(
+            "set_leverage %s %dx failed before place_order — продолжаем, могут быть отказы биржи",
+            symbol,
+            leverage,
+        )
     link_id = f"ai_{uuid.uuid4().hex[:12]}"
     resp = client.place_order(
         symbol=symbol,
@@ -216,8 +255,16 @@ def _apply_open(
         sl_price=sl_price,
         tp_price=tp_price,
     )
-    if not resp:
-        return ApplyResult(executed=False, summary="", error="place_order returned None")
+    if not resp or not resp.get("ok"):
+        err_msg = (resp or {}).get("error", "place_order returned empty")
+        return ApplyResult(
+            executed=False,
+            summary="",
+            error=(
+                f"open_failed: {err_msg} "
+                f"(symbol={symbol} side={side} qty={qty} lev={leverage}x)"
+            ),
+        )
 
     store.open_position(
         symbol=symbol,

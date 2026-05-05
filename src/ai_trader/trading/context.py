@@ -104,11 +104,64 @@ def collect_market_context(
     )
 
 
+def _funding_band_label(rate: float) -> str:
+    """2026 framework (Lambda Finance): bands для funding rate.
+
+    Возвращает короткую читаемую метку ([NEUTRAL]/[mild long]/[STRONG short] и т.п.)
+    для встраивания рядом с числовым значением. Помогает LLM не пропускать
+    зону «strong one-sided positioning».
+    """
+    abs_rate = abs(rate)
+    if abs_rate < 0.0005:  # 0.05%
+        return " [NEUTRAL]"
+    if abs_rate < 0.0020:  # 0.20%
+        side = "longs paying" if rate > 0 else "shorts paying"
+        return f" [mild lean: {side}]"
+    side = "longs paying" if rate > 0 else "shorts paying"
+    return f" [STRONG: {side}, contrarian risk]"
+
+
+def _btc_dominance_estimate(snapshots: list[SymbolSnapshot]) -> str | None:
+    """Грубая оценка BTC-силы относительно остальных allowed pairs за 24h.
+
+    Если у нас есть BTCUSDT + ≥ 1 alt — возвращаем строку:
+    «BTC vs alts (24h): BTC=+1.2% avg-alt=-0.8% → BTC outperforming».
+    Истинный BTC dominance % требует глобального market cap, чего в context-е нет;
+    эта эвристика fits в наш набор и достаточна как macro-trigger.
+    """
+    btc_change: float | None = None
+    alt_changes: list[float] = []
+    for s in snapshots:
+        if s.ticker is None:
+            continue
+        if s.symbol == "BTCUSDT":
+            btc_change = s.ticker.price_change_pct_24h
+        else:
+            alt_changes.append(s.ticker.price_change_pct_24h)
+    if btc_change is None or not alt_changes:
+        return None
+    avg_alt = sum(alt_changes) / len(alt_changes)
+    delta = btc_change - avg_alt
+    if abs(delta) < 0.5:
+        verdict = "BTC and alts moving together"
+    elif delta > 0:
+        verdict = "BTC outperforming alts (alt-weakness)"
+    else:
+        verdict = "alts outperforming BTC (alt-season hint)"
+    return (
+        f"BTC vs alts (24h): BTC={btc_change:+.2f}% "
+        f"avg-alt={avg_alt:+.2f}% → {verdict}"
+    )
+
+
 def format_context_for_prompt(ctx: MarketContext) -> str:
     """Превращает MarketContext в текст для LLM."""
     parts: list[str] = []
     parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
     parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
+    dom_line = _btc_dominance_estimate(ctx.snapshots)
+    if dom_line is not None:
+        parts.append(f"MACRO: {dom_line}")
     parts.append("")
 
     if ctx.news:
@@ -127,10 +180,11 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
             parts.append(f"\n[{s.symbol}] TICKER UNAVAILABLE")
             continue
         t = s.ticker
+        funding_label = _funding_band_label(t.funding_rate)
         parts.append(
             f"\n[{s.symbol}] price=${t.last_price:.6g} "
             f"24h={t.price_change_pct_24h:+.2f}% "
-            f"funding={t.funding_rate * 100:+.4f}% "
+            f"funding={t.funding_rate * 100:+.4f}%{funding_label} "
             f"vol24h={t.volume_24h:.0f}"
         )
         if s.bars_1h:

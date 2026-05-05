@@ -1,5 +1,121 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-05 — v0.3: Crypto Strategies 2026 audit + research-driven changes (n=0 reset)
+
+**Контекст.** Пользователь запросил полный аудит крипто-стратегий и
+ИИ-агента на актуальность 2026 года. Результаты собраны в
+[`AUDIT_2026.md`](AUDIT_2026.md) — без воды, понятным языком. Этот
+файл содержит обоснование всех изменений + ссылки на 2024–2026 research.
+
+Краткие findings, которые повлияли на ИИ-агент:
+
+- Industry standard 2026 риск на сделку = **1–2%**, не 5%. Источники:
+  KuCoin Risk Management 2026, Atlas Peak Research, Hyper-Quant.
+  Position sizing определяет 70–80% long-term returns; 5% соответствует
+  full Kelly с edge ~10% и опасен из-за drawdown-риска.
+- LLM-trading research 2025 (FinDebate arXiv:2509.17395, TradingAgents
+  arXiv:2412.20138, ATLAS NeurIPS 2025) показывает: **fine-grained task
+  decomposition + chain-of-thought** даёт лучше risk-adjusted returns,
+  чем coarse single-step instructions.
+- Funding rate framework 2026 (Lambda Finance): **bands** `<0.05%` /
+  `0.05–0.20%` / `>0.20%`. Раньше LLM видел голое число.
+- Post-ETF (Jan-2024) BTC и альты частично декоррелировали — не
+  считать blindly что движение BTC переносится 1:1 на альты.
+- Macro (Fed/DXY) теперь больше 4-летнего цикла (Bybit Outlook 2026,
+  Galaxy Research). Новостной фид должен это ловить.
+
+**Также найдены P0 баги** (диагноз из БД на 187 decisions, 22 ошибки):
+
+- 12× `place_order returned None` — Bybit отказывал в ордерах, executor
+  не знал почему (логи теряли `retCode/retMsg`). Чинится логированием.
+- 8× `parse_error: empty response` — DeepSeek изредка возвращает пусто.
+  Чинится retry (1 попытка, sleep 5s).
+
+**Изменения v0.3:**
+
+*Промпт (`src/ai_trader/llm/prompts.py`):*
+- CAPITAL RULES: `risk_per_trade` 5% → **2%** ($25 → **$10** на сделку),
+  `daily loss limit` $125 → **$50**.
+- Добавлен **MARKET CONTEXT 2026** блок: perp-доминирование, post-ETF
+  decoupling, funding bands, macro > 4-year cycle.
+- ANALYSIS APPROACH теперь **structured**: TREND → VOLATILITY →
+  SENTIMENT → CONFIRMATIONS → R:R CHECK → DECISION (chain-of-thought
+  через предписанный шаблон).
+- Жёсткое требование **R:R >= 1.5** для любого open: иначе hold.
+- Формат ответа изменён: **commentary + JSON** (раньше JSON only).
+  Парсер обновлён до устойчивого извлечения последнего balanced
+  JSON-блока.
+
+*Конфиг (`src/ai_trader/config/settings.py`):*
+- `max_daily_loss_usd`: 125 → 50
+- `max_total_loss_usd`: 500 → 200
+- Новое поле `risk_per_trade_pct = 0.02`
+
+*Контекст (`src/ai_trader/trading/context.py`):*
+- Funding rate теперь выводится с band-меткой
+  `[NEUTRAL]` / `[mild lean: longs paying]` / `[STRONG: shorts paying, contrarian risk]`.
+- Добавлена строка `MACRO: BTC vs alts (24h): BTC=+1.2% avg-alt=-0.8%
+  → BTC outperforming alts (alt-weakness)` — эвристическая замена
+  глобальному BTC dominance %.
+
+*Новости (`src/ai_trader/news/rss.py`):*
+- GENERIC_KEYWORDS расширены: `ibit`, `fbtc`, `etha`, `etf flow/inflows/outflows`,
+  `powell`, `yellen`, `dxy`, `btc dominance`, `liquidation`, `deleveraging`,
+  `open interest`, `funding rate`, и др. (raтcionale: 2026 ETF-флоу + macro
+  как driver).
+
+*P0 bug-fixes (применены вне рамок reset, т.к. это баги, не тюнинг):*
+- `src/ai_trader/llm/client.py`: retry на пустой LLM-ответ (`retry_on_empty=1`,
+  `retry_sleep_sec=5.0`). Теперь cycle не пропускается.
+- `src/ai_trader/trading/client.py`: `place_order` теперь возвращает
+  `{"ok": True/False, "error": <bybit retMsg>, ...}` вместо `None`.
+- `src/ai_trader/trading/executor.py`: пробрасывает Bybit `retCode/retMsg`
+  в БД (`decisions.error`). Будем видеть что именно отказывает (min order
+  size / margin / leverage).
+- `src/ai_trader/trading/executor.py`: `parse_action` устойчив к
+  commentary перед JSON (ищет последний balanced `{...}`).
+
+*Bybit-стратегии (P0 doc-fixes, не торговая логика):*
+- `vwap_crypto.py`: docstring «ADX≤20» → «ADX≤25 (приведено к коду)».
+- `crypto_overbought_fader.py`: docstring «13:00–21:00 UTC» →
+  «13:00–20:59 UTC (range(13, 21))».
+- `funding_scalp.py`, `volume_spike.py`: добавлен канонический блок
+  `─── Research basis ───`.
+- `.cursor/rules/strategy-guard.mdc`: stat_arb Z 2.5 → **2.0** (приведено
+  к коду + research GitHub abailey81 2025); добавлены записи про
+  `FundingScalpStrategy` и `VolumeSpikeStrategy`.
+
+**Сброс эксперимента n=0.** Это тюнинг + изменение контракта промпта
+(commentary + JSON), а не bug-fix → реcет по правилу `no-data-fitting.mdc`.
+
+Объём собранной до сброса статистики: 187 decisions / 33 часа / 2 трейда
+(один закрылся по SL −$5.13). Это малая выборка, статистически
+нерепрезентативна — потеря минимальная (правило `sample-size.mdc`:
+≥100 закрытых сделок и ≥2 недели для значимых выводов; у нас ни того ни
+другого).
+
+**ЗАМОРОЗКА**: v0.3 промпт и параметры заморожены на 14 дней (до 19.05.2026).
+Никаких правок до конца forward-test (исключая bug-fix-категорию).
+
+**Файлы:**
+- `AUDIT_2026.md` (новый файл)
+- `src/ai_trader/llm/prompts.py`
+- `src/ai_trader/llm/client.py`
+- `src/ai_trader/config/settings.py`
+- `src/ai_trader/trading/context.py`
+- `src/ai_trader/trading/client.py`
+- `src/ai_trader/trading/executor.py`
+- `src/ai_trader/news/rss.py`
+- `src/bybit_bot/strategies/scalping/vwap_crypto.py`
+- `src/bybit_bot/strategies/scalping/crypto_overbought_fader.py`
+- `src/bybit_bot/strategies/scalping/funding_scalp.py`
+- `src/bybit_bot/strategies/scalping/volume_spike.py`
+- `.cursor/rules/strategy-guard.mdc`
+- `docker-compose.yml`
+- `BUILDLOG_AI_TRADER.md` — эта запись
+
+---
+
 ## 2026-05-03 — v0.2.1: risk-per-trade 2% → 5% (n=0 reset)
 
 **Контекст.** v0.2 запустился в LIVE и прошёл 1 цикл (HOLD). По запросу

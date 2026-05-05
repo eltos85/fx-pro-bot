@@ -9,6 +9,7 @@ https://api-docs.deepseek.com/guides/anthropic_api
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import anthropic
@@ -39,6 +40,8 @@ class DeepSeekClient:
         model: str = "deepseek-v4-flash",
         max_tokens: int = 2000,
         thinking_enabled: bool = True,
+        retry_on_empty: int = 1,
+        retry_sleep_sec: float = 5.0,
     ) -> None:
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY is empty")
@@ -46,8 +49,40 @@ class DeepSeekClient:
         self._model = model
         self._max_tokens = max_tokens
         self._thinking_enabled = thinking_enabled
+        self._retry_on_empty = max(0, retry_on_empty)
+        self._retry_sleep_sec = max(0.0, retry_sleep_sec)
 
     def ask(self, system_prompt: str, user_prompt: str) -> LlmResponse:
+        attempts = self._retry_on_empty + 1
+        last_response: LlmResponse | None = None
+        for attempt in range(1, attempts + 1):
+            resp = self._call(system_prompt, user_prompt)
+            last_response = resp
+            if resp.error:
+                return resp
+            if resp.text:
+                return resp
+            if attempt < attempts:
+                log.warning(
+                    "LLM empty response (attempt %d/%d), retrying in %.1fs",
+                    attempt,
+                    attempts,
+                    self._retry_sleep_sec,
+                )
+                time.sleep(self._retry_sleep_sec)
+        if last_response is None:
+            return LlmResponse(text="", tokens_input=0, tokens_output=0, cost_usd=0, error="no attempts")
+        if not last_response.text and last_response.error is None:
+            return LlmResponse(
+                text="",
+                tokens_input=last_response.tokens_input,
+                tokens_output=last_response.tokens_output,
+                cost_usd=last_response.cost_usd,
+                error=f"empty response after {attempts} attempts",
+            )
+        return last_response
+
+    def _call(self, system_prompt: str, user_prompt: str) -> LlmResponse:
         try:
             kwargs: dict = {
                 "model": self._model,

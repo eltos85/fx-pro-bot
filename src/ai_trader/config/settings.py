@@ -73,19 +73,28 @@ class AiTraderSettings(BaseSettings):
     )
 
     # ─── KillSwitch ──────────────────────────────────────────────────────
-    # При risk-per-trade 5% ($25) и max-pos 3:
-    # - $125/день = 5 убыточных сделок до блока (паритет с прошлой 2%/$50)
-    # - $500 total = полный virtual capital, "доедание депо" триггер
+    # v0.3 (AUDIT_2026.md P1): risk-per-trade 5% → 2%, паритет с industry
+    # standard 2026 (KuCoin Risk Management 2026, Atlas Peak Research,
+    # Hyper-Quant: 1–2% — mainstream consensus, 5% соответствует full Kelly
+    # с edge ~10% и опасен из-за drawdown-риска).
+    # При risk-per-trade 2% ($10) и max-pos 3:
+    # - $50/день = 5 убыточных сделок до блока
+    # - $200 total = 40% virtual capital, кончается раньше «доедания депо»
     max_daily_loss_usd: float = Field(
-        default=125.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
+        default=50.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
     )
     max_total_loss_usd: float = Field(
-        default=500.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
+        default=200.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
     )
     max_open_positions: int = Field(
         default=3, validation_alias="AI_TRADER_MAX_POSITIONS"
     )
     max_leverage: int = Field(default=5, validation_alias="AI_TRADER_MAX_LEVERAGE")
+    # Risk per trade в долях (0.02 = 2%). Используется LLM в промпте + для
+    # будущих helper-функций position sizing.
+    risk_per_trade_pct: float = Field(
+        default=0.02, validation_alias="AI_TRADER_RISK_PER_TRADE"
+    )
 
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_TRADER_DATA_DIR")

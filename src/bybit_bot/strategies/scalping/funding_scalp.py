@@ -7,6 +7,25 @@ Bybit perpetual контракты имеют funding каждые 8 часов 
 
 Вход: за ENTRY_MINUTES_BEFORE минут до funding.
 Выход: сразу после funding или по SL/TP.
+
+─── Research basis ───────────────────────────────────────────────
+- **Funding rate как сигнал перегрузки**: Lambda Finance, «Crypto Funding
+  Rates and Open Interest: April 2026 Snapshot». Funding bands:
+  ``<0.05%`` нейтрально, ``0.05–0.20%`` лёгкий перекос, ``>0.20%``
+  сильный перекос. Наш ``FUNDING_RATE_THRESHOLD = 0.0003`` (= 0.03%)
+  — нижняя граница, мягче «лёгкого перекоса» по 2026 framework.
+  ``FUNDING_RATE_STRONG = 0.0008`` (0.08%) — попадает в верхнюю часть
+  «лёгкого перекоса», что разумно для contrarian-входа.
+- **Time-window перед funding**: CoinPerps, KangaAnalytics (2025 live
+  data) — вход за 30 мин до funding позволяет поймать накопление шортов/лонгов
+  перед уплатой и закрыть позицию сразу после расчёта.
+- **Bybit funding schedule**: каждые 8 часов в 00:00, 08:00, 16:00 UTC
+  для USDT-perp (стандарт биржи).
+
+⚠ Известное ограничение (AUDIT_2026.md, P3): стратегия не использует
+**Open Interest delta** в условиях входа. Согласно Lambda Finance 2026,
+сильнее работает связка «funding + OI растёт = breakout 1–2 дня».
+Текущая реализация — базовый funding-only подход (single-signal).
 """
 
 from __future__ import annotations

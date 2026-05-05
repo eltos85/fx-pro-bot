@@ -40,10 +40,20 @@ SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "DOGEUSDT": ("dogecoin", "doge"),
 }
 
-# Generic crypto keywords — статья про "crypto market" релевантна всем
+# Generic crypto keywords — статья про "crypto market" релевантна всем.
+# v0.3 (AUDIT_2026.md): расширено по 2026 macro-фокусу: BTC dominance,
+# spot Bitcoin ETF tickers (IBIT — >60% market share), DXY/Fed как
+# главные macro-driver'ы (Bybit Outlook 2026, Galaxy Research 2026).
 GENERIC_KEYWORDS = (
-    "crypto market", "crypto regulation", "sec ", "etf", "fed ", "fomc",
-    "interest rate", "macro", "stablecoin", "tether", "usdc",
+    "crypto market", "crypto regulation", "sec ", "etf", "spot etf",
+    "ibit", "fbtc", "etha", "fethereum",  # ключевые ETF-тикеры
+    "fed ", "fomc", "interest rate", "rate cut", "rate hike",
+    "powell", "yellen", "treasury",
+    "macro", "dxy", "dollar index",
+    "stablecoin", "tether", "usdt", "usdc", "circle",
+    "btc dominance", "bitcoin dominance", "altseason", "alt-season",
+    "halving", "etf flow", "etf inflows", "etf outflows",
+    "liquidation", "deleveraging", "open interest", "funding rate",
 )
 
 
