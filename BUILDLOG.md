@@ -4,6 +4,57 @@
 
 ---
 
+## 2026-05-05
+
+### disable(H2): отключаем ATR-regime фильтр — H5 остаётся
+
+`коммит при deploy`
+
+**Симптом.** После активации H2+H5 (см. запись 04.05) рынок золота
+сутки находится в режиме compression (current ATR-14d = 75.61 на
+16.7-percentile своего 30-day window, при пороге expansion P70 =
+148.11). H2 заблокировал **все** signals 05.05 — 0 сделок gold_orb
+за весь London-окно. Out-of-sample демонстрация compression-режима
+оказалась более жёсткой, чем ожидалось по 365d backtest (где
+expansion-доля 38%, compression 43%).
+
+**Решение пользователя.** Отключить H2 в production через env-var
+(`SCALPING_GOLD_ORB_H2_REGIME_FILTER=false` в `docker-compose.yml`).
+H5 остаётся активным — он редко срабатывает (8.5% на backtest), но
+это не блокирует торговлю целиком, а пропускает «правильные» пробои
+после liquidity-sweep'а.
+
+**Compliance.** Это не подгонка параметров — параметры H2 (P70,
+30-day window) НЕ менялись. Просто фильтр выключен через env-var.
+Можно будет включить обратно позже когда:
+- набирается больше OOS-наблюдений compression vs expansion в live;
+- либо при пересмотре H2 на 24-month outlooke (`fetch_fxpro_history
+  --days 730`) с большей выборкой.
+
+**НЕ делаем (compliance):**
+- ✗ НЕ снижаем порог P70 → P50 («чтобы пропускало больше»). Это
+  curve-fit под желаемый результат.
+- ✗ НЕ инвертируем H2 («блокировать только compression вместо
+  пропускать только expansion»). Это другая гипотеза, требующая
+  отдельного backtest и Bonferroni-correction (на самом деле
+  research показывает edge expansion ≠ обратный edge compression).
+
+**Реализация.**
+- `docker-compose.yml`: `SCALPING_GOLD_ORB_H2_REGIME_FILTER=false`
+  (по умолчанию). Включить обратно через `.env`.
+- Default в `settings.py` остаётся `True` (для случая запуска без
+  env-vars, но в проде — env побеждает).
+
+**Что ожидать после deploy.**
+- Бот возобновит торговлю gold_orb (signals будут проходить).
+- H5 sweep filter останется — будут сделки, но не каждая (по
+  backtest 8.5% частота, ~1 trade в 2-3 дня).
+- Если H5 тоже окажется слишком жёстким на live — обсудим отдельно.
+
+**Файлы:** `docker-compose.yml`, `BUILDLOG.md`
+
+---
+
 ## 2026-05-04
 
 ### activate(H2+H5): user-override compliance — H2 ATR-regime + H5 liquidity-sweep живой в gold_orb
