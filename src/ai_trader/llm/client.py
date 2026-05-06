@@ -38,7 +38,7 @@ class DeepSeekClient:
         api_key: str,
         base_url: str = "https://api.deepseek.com/anthropic",
         model: str = "deepseek-v4-flash",
-        max_tokens: int = 2000,
+        max_tokens: int = 4096,
         thinking_enabled: bool = True,
         retry_on_empty: int = 1,
         retry_sleep_sec: float = 5.0,
@@ -56,7 +56,7 @@ class DeepSeekClient:
         attempts = self._retry_on_empty + 1
         last_response: LlmResponse | None = None
         for attempt in range(1, attempts + 1):
-            resp = self._call(system_prompt, user_prompt)
+            resp = self._call(system_prompt, user_prompt, with_thinking=self._thinking_enabled)
             last_response = resp
             if resp.error:
                 return resp
@@ -70,6 +70,20 @@ class DeepSeekClient:
                     self._retry_sleep_sec,
                 )
                 time.sleep(self._retry_sleep_sec)
+        # Fallback: thinking-блоки забирают весь бюджет max_tokens, на
+        # text-блоки ничего не остаётся. Делаем последнюю попытку БЕЗ
+        # thinking — это reliable выход без `thinking_budget`-tax.
+        if (
+            self._thinking_enabled
+            and last_response is not None
+            and not last_response.text
+            and last_response.error is None
+        ):
+            log.warning("LLM still empty — final fallback без thinking")
+            fallback = self._call(system_prompt, user_prompt, with_thinking=False)
+            if fallback.text or fallback.error:
+                return fallback
+            last_response = fallback
         if last_response is None:
             return LlmResponse(text="", tokens_input=0, tokens_output=0, cost_usd=0, error="no attempts")
         if not last_response.text and last_response.error is None:
@@ -78,11 +92,13 @@ class DeepSeekClient:
                 tokens_input=last_response.tokens_input,
                 tokens_output=last_response.tokens_output,
                 cost_usd=last_response.cost_usd,
-                error=f"empty response after {attempts} attempts",
+                error=f"empty response after {attempts} attempts (+1 no-thinking fallback)",
             )
         return last_response
 
-    def _call(self, system_prompt: str, user_prompt: str) -> LlmResponse:
+    def _call(
+        self, system_prompt: str, user_prompt: str, *, with_thinking: bool,
+    ) -> LlmResponse:
         try:
             kwargs: dict = {
                 "model": self._model,
@@ -90,7 +106,7 @@ class DeepSeekClient:
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}],
             }
-            if self._thinking_enabled:
+            if with_thinking:
                 kwargs["thinking"] = {"type": "enabled"}
             msg = self._client.messages.create(**kwargs)
         except Exception as e:

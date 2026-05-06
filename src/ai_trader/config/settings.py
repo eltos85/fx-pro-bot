@@ -40,7 +40,7 @@ class AiTraderSettings(BaseSettings):
         validation_alias="AI_TRADER_DEEPSEEK_MODEL",
     )
     deepseek_max_tokens: int = Field(
-        default=2000, validation_alias="AI_TRADER_DEEPSEEK_MAX_TOKENS"
+        default=4096, validation_alias="AI_TRADER_DEEPSEEK_MAX_TOKENS"
     )
     deepseek_thinking_enabled: bool = Field(
         default=True, validation_alias="AI_TRADER_DEEPSEEK_THINKING"

@@ -152,6 +152,9 @@ services:
       AI_TRADER_DEEPSEEK_MODEL: ${AI_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}
       AI_TRADER_DEEPSEEK_BASE_URL: ${AI_TRADER_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
       AI_TRADER_DEEPSEEK_THINKING: ${AI_TRADER_DEEPSEEK_THINKING:-true}
+      # 4096 чтобы thinking-блоки не съедали весь бюджет до пустого
+      # text (см. BUILDLOG_AI_TRADER 2026-05-06 «fix(empty response)»).
+      AI_TRADER_DEEPSEEK_MAX_TOKENS: ${AI_TRADER_DEEPSEEK_MAX_TOKENS:-4096}
       # PAPER mode по умолчанию: ставки НЕ ставятся на биржу, только логируются.
       # Включать в LIVE только после проверки первых 1-2 циклов под наблюдением.
       AI_TRADER_TRADING_ENABLED: ${AI_TRADER_TRADING_ENABLED:-false}

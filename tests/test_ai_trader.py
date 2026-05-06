@@ -194,3 +194,115 @@ class TestStore:
             cost_usd=0.0001,
         )
         assert did > 0
+
+
+# ─── DeepSeekClient empty-response fallback ──────────────────────────────
+
+
+class TestDeepSeekClientFallback:
+    """Fallback-цепочка при пустых thinking-only ответах."""
+
+    @staticmethod
+    def _ensure_anthropic_stub():
+        """Заглушка `anthropic` для случая когда SDK не установлен локально."""
+        import sys
+        import types
+
+        if "anthropic" not in sys.modules:
+            stub = types.ModuleType("anthropic")
+            stub.Anthropic = lambda **_kw: None  # type: ignore[attr-defined]
+            sys.modules["anthropic"] = stub
+
+    @classmethod
+    def _make_client(cls, monkeypatch, anthropic_factory):
+        cls._ensure_anthropic_stub()
+        from ai_trader.llm import client as client_mod
+
+        monkeypatch.setattr(
+            client_mod.anthropic, "Anthropic",
+            lambda **_kw: anthropic_factory(),
+        )
+        return client_mod.DeepSeekClient(
+            api_key="x", retry_on_empty=1, retry_sleep_sec=0.0,
+        )
+
+    @staticmethod
+    def _make_msg(*texts: str, in_tokens: int = 10, out_tokens: int = 20):
+        from types import SimpleNamespace
+
+        blocks = [SimpleNamespace(type="text", text=t) for t in texts]
+        return SimpleNamespace(
+            content=blocks,
+            usage=SimpleNamespace(input_tokens=in_tokens, output_tokens=out_tokens),
+        )
+
+    def test_first_attempt_text_returns_immediately(self, monkeypatch):
+        from types import SimpleNamespace
+
+        calls: list[dict] = []
+        msg = self._make_msg("OK")
+
+        class FakeClient:
+            def __init__(self):
+                self.messages = SimpleNamespace(create=self._create)
+
+            def _create(self, **kwargs):
+                calls.append(kwargs)
+                return msg
+
+        client = self._make_client(monkeypatch, FakeClient)
+        resp = client.ask("sys", "user")
+        assert resp.text == "OK"
+        assert resp.error is None
+        assert len(calls) == 1
+        assert "thinking" in calls[0]   # default thinking_enabled=True
+
+    def test_empty_then_no_thinking_fallback(self, monkeypatch):
+        """1) thinking — пусто; 2) retry с thinking — пусто;
+        3) fallback БЕЗ thinking — есть текст. Должен вернуть его."""
+        from types import SimpleNamespace
+
+        calls: list[dict] = []
+        empty_msg = self._make_msg()             # 0 text-блоков
+        good_msg = self._make_msg("FALLBACK_OK")
+        responses = [empty_msg, empty_msg, good_msg]
+
+        class FakeClient:
+            def __init__(self):
+                self.messages = SimpleNamespace(create=self._create)
+
+            def _create(self, **kwargs):
+                calls.append(kwargs)
+                return responses.pop(0)
+
+        client = self._make_client(monkeypatch, FakeClient)
+        resp = client.ask("sys", "user")
+        assert resp.text == "FALLBACK_OK"
+        assert resp.error is None
+        assert len(calls) == 3
+        assert "thinking" in calls[0]
+        assert "thinking" in calls[1]
+        assert "thinking" not in calls[2]   # fallback должен быть без
+
+    def test_all_attempts_empty_returns_error(self, monkeypatch):
+        """Если даже no-thinking-fallback пуст — error с правильным текстом."""
+        from types import SimpleNamespace
+
+        calls: list[dict] = []
+        empty_msg = self._make_msg()
+
+        class FakeClient:
+            def __init__(self):
+                self.messages = SimpleNamespace(create=self._create)
+
+            def _create(self, **kwargs):
+                calls.append(kwargs)
+                return empty_msg
+
+        client = self._make_client(monkeypatch, FakeClient)
+        resp = client.ask("sys", "user")
+        assert resp.text == ""
+        assert resp.error is not None
+        assert "empty response" in resp.error
+        assert len(calls) == 3   # 2 with thinking + 1 fallback no-thinking
+

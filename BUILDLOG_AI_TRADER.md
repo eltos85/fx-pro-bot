@@ -1,5 +1,48 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-06 — fix(LLM empty response): max_tokens 2000→4096 + no-thinking fallback
+
+`коммит при deploy`
+
+**Симптом.** В логах `fx-pro-bot-ai-trader-1`:
+
+- 2026-05-06 04:34:06 cycle 69: `Parse error: no JSON object found in
+  response: \`\`\`json {...` — обрезанный JSON, output_tokens=2000
+  (упёрся в потолок).
+- 2026-05-06 05:06:06 cycle 71: `LLM error: empty response after 2
+  attempts` — два HTTP 200, но `text=""` (весь бюджет ушёл на
+  thinking-блоки, на answer-блоки не осталось).
+
+**Причина.** `max_tokens=2000` слишком мало для extended-thinking
+mode. Когда DeepSeek генерирует длинный chain-of-thought —
+thinking-блоки забирают весь бюджет, а text-блоков либо нет, либо
+они обрезаются на середине JSON. После v0.3 «fine-grained task
+decomposition» (см. запись 05.05) запросы стали тяжелее, проблема
+проявилась.
+
+**Решение.**
+1. **Увеличен `AI_TRADER_DEEPSEEK_MAX_TOKENS`** дефолт с 2000 до
+   **4096** (`src/ai_trader/config/settings.py`,
+   `src/ai_trader/llm/client.py`, `docker-compose.yml`).
+2. **Final fallback без thinking** (`src/ai_trader/llm/client.py`):
+   если после `retry_on_empty` попыток `text` всё ещё пуст и нет
+   `error` — клиент делает одну дополнительную попытку **без**
+   `thinking={"type":"enabled"}`. Это reliable выход — без
+   thinking-tax всё output_tokens идёт в text.
+3. Параметры самой модели (`thinking_enabled=true`,
+   `retry_on_empty=1`, `retry_sleep=5s`) НЕ меняются — fallback
+   срабатывает только в edge-case'е, обычная работа без изменений.
+
+**Compliance.** Это fix без изменения торговой логики
+(`strategy-guard.mdc` exception): инфра LLM-клиента, не правила
+входа/выхода. Baseline n=0 (от 05.05) НЕ сдвигается.
+
+**Файлы:** `src/ai_trader/llm/client.py`,
+`src/ai_trader/config/settings.py`, `docker-compose.yml`,
+`BUILDLOG_AI_TRADER.md`
+
+---
+
 ## 2026-05-05 — v0.3: Crypto Strategies 2026 audit + research-driven changes (n=0 reset)
 
 **Контекст.** Пользователь запросил полный аудит крипто-стратегий и
