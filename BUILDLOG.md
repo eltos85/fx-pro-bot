@@ -4,6 +4,73 @@
 
 ---
 
+## 2026-05-06
+
+### fix(broker-pnl): ретроспективный backfill grossProfit при старте контейнера
+
+`коммит при deploy`
+
+**Симптом.** Позиция gold_orb #150259981 (5.05 11:57 UTC, GC=F long,
+broker_tp_sl) в БД записана с `profit_pips = -41.5` (= −$8.30), но
+реальный `grossProfit` из cTrader API = **+$28.70 (+143.5 pip)**.
+Расхождение **+$37 на одной сделке**, инвертирован знак P&L. На счёте
+факт +$39.04 за день (3 сделки long), а статистика бота показывала
++$2.04 (одна "минусовая").
+
+**Причина.** В `_run_cycle` есть цепочка `_detect_broker_closures →
+_update_broker_pnl`, которая после серверного TP/SL запрашивает
+`get_deal_list` и обновляет `profit_pips` из реального gross. Окно её
+работы — пока контейнер жив. Если контейнер был перезапущен в окне
+между `closed_at` и следующим циклом (5 минут), **broker-side close
+никогда не был синхронизирован**, и в БД остаётся `profit_pips`,
+посчитанный по `current_price` M5-бара на момент последнего
+`monitor.run` (т.е. ДО фактического fill TP брокером). Для длинных
+скальпинг-движений (gold_orb LONG с TP в 1-2 ATR) разница достигает
+сотен пипсов.
+
+Класс багов уже фиксили 30.04.2026 для бот-инициированных close
+(`_sync_broker_closes → _update_broker_pnl`), но для
+**broker-side TP/SL** защиты от рестарта в коде не было.
+
+**Решение.**
+
+1. **Manual backfill (read-only, выполнен на VPS):** прогнал
+   `_update_broker_pnl` через `docker exec` для closed позиций за 72ч.
+   Из 10 кандидатов одна расхождением > 0.5 pip — #150259981
+   исправлена `-41.5 → +143.5 pip`.
+
+2. **Code-fix (этот коммит):** добавлена функция
+   `_backfill_broker_pnl_on_startup(store, executor, hours=48,
+   fix_threshold_pips=0.5)`. Вызывается в `run_advisor` сразу после
+   `_reconcile_broker_positions`, до `_sync_unlinked_positions`.
+   Логика:
+   - Запросить `get_deal_list` за последние 48ч.
+   - Найти closed позиции в БД с `broker_position_id > 0` и
+     `closed_at >= now - 48h`.
+   - Для каждой пересчитать `pnl_pips = grossProfit /
+     pip_value_from_volume(symbol, vol)` и обновить БД при
+     расхождении ≥ 0.5 pip (защита от round-off шума).
+   - Лог: `BACKFILL PNL: broker #%d ... → old → new pips
+     (gross=$X, vol=Y)` + сводный `Startup backfill ...
+     N candidates, M исправлено`.
+
+**Не подгонка стратегии.** Изменение технического слоя (sync БД с
+broker API), параметры стратегии (`H5_LOOKBACK_BARS`, `H5_PRIOR_END_OFFSET`,
+SL/TP мультипликаторы) **не трогаем**. См. правило
+`no-data-fitting.mdc` — это bug-fix в скрипте/коде синхронизации,
+не в торговой логике.
+
+**Compliance с `sample-size.mdc`.** Решение не основано на статистике
+(<100 сделок). Это исправление структурного бага в учёте P&L —
+допустимая правка без полной выборки (см. «Допустимые быстрые правки
+без полной выборки → Баг-фиксы»).
+
+**Файлы:** `src/fx_pro_bot/app/main.py`, `BUILDLOG.md`
+
+**Тесты:** `python3 -m pytest tests/ -q` → 441 passed.
+
+---
+
 ## 2026-05-05
 
 ### disable(H2): отключаем ATR-regime фильтр — H5 остаётся

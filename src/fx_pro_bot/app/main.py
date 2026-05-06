@@ -410,6 +410,7 @@ def run_advisor() -> None:
 
     if executor and killswitch:
         _reconcile_broker_positions(store, executor, settings)
+        _backfill_broker_pnl_on_startup(store, executor)
         _sync_unlinked_positions(store, executor, killswitch, settings)
 
     while True:
@@ -1413,6 +1414,90 @@ def _update_broker_pnl(
             "pip_value=$%.4f)",
             broker_id, pnl_pips, gross, vol, pv,
         )
+
+
+def _backfill_broker_pnl_on_startup(
+    store: StatsStore,
+    executor,
+    *,
+    hours: int = 48,
+    fix_threshold_pips: float = 0.5,
+) -> None:
+    """При старте контейнера: подтянуть реальный grossProfit с cTrader для
+    broker-closed позиций, закрытых пока контейнер был неактивен.
+
+    Закрывает окно «контейнер был мёртв в момент broker-side TP/SL»: если
+    `_detect_broker_closures` → `_update_broker_pnl` не успел отработать
+    (рестарт между closed_at и следующим циклом, или `get_deal_list` упал
+    silently), БД содержит `profit_pips` на момент monitor cycle
+    (current_price M5), а не реальный fill брокера. На длинных скальпинг-
+    сделках расхождение достигало +143 pip / +$37 на одной позиции
+    (см. BUILDLOG 2026-05-06: GC=F broker #150259981 long, БД −41.5 pip
+    vs API +143.5 pip).
+
+    Args:
+        hours: окно в часах для запроса deal_list и фильтра positions.
+            48ч хватает на любой реалистичный downtime контейнера.
+        fix_threshold_pips: минимальное расхождение для UPDATE (защита
+            от round-off шума; <0.5 pip — игнорируем).
+    """
+    import time as _time
+
+    now_ms = int(_time.time() * 1000)
+    window_ms = now_ms - hours * 3600 * 1000
+
+    try:
+        deals = executor.get_deal_list(window_ms, now_ms)
+    except Exception as exc:
+        log.warning("Startup backfill broker P&L: get_deal_list failed: %s", exc)
+        return
+
+    deal_by_pos: dict[int, dict] = {}
+    for d in deals:
+        deal_by_pos[d["positionId"]] = d
+
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT id, instrument, direction, entry_price, broker_position_id, profit_pips "
+            "FROM positions WHERE status='closed' AND broker_position_id>0 "
+            "AND closed_at >= datetime('now', ?) "
+            "ORDER BY closed_at DESC",
+            (f"-{hours} hours",),
+        ).fetchall()
+
+    candidates = len(rows)
+    fixed = 0
+    for r in rows:
+        pos_id, instrument, direction, entry_price, broker_id, old_pips = r
+        deal = deal_by_pos.get(broker_id)
+        if not deal:
+            continue
+        gross = float(deal.get("grossProfit", 0) or 0)
+        vol = int(deal.get("volume", 0) or 0)
+        if vol <= 0:
+            continue
+        pv = pip_value_from_volume(instrument, vol)
+        if pv <= 0:
+            continue
+        new_pips = round(gross / pv, 2)
+        if abs(new_pips - (old_pips or 0)) < fix_threshold_pips:
+            continue
+        ps = pip_size(instrument)
+        actual_entry = deal.get("entryPrice", entry_price) or entry_price
+        new_pct = round(new_pips * ps / actual_entry * 100, 4) if actual_entry else 0.0
+        store.update_closed_pnl(pos_id, new_pips, new_pct)
+        fixed += 1
+        log.info(
+            "  BACKFILL PNL: broker #%d %s %s → %+.1f → %+.1f pips "
+            "(gross=$%+.2f, vol=%d)",
+            broker_id, instrument, direction,
+            old_pips or 0.0, new_pips, gross, vol,
+        )
+
+    log.info(
+        "Startup backfill broker P&L (%dч): %d candidates, %d исправлено",
+        hours, candidates, fixed,
+    )
 
 
 def _persist_close_diagnostics(
