@@ -1,5 +1,68 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-06 — fix(qty rounding): instruments-info + qtyStep/tickSize округление
+
+`коммит при deploy`
+
+**Симптом** (Telegram bybit_notif_bot, cycle 2 в 05:41:37 UTC):
+
+```
+OPEN | × not executed
+error: open_failed: exception: Qty invalid (ErrCode: 10001)
+Request → POST /v5/order/create
+{"category":"linear","symbol":"XRPUSDT","side":"Buy",
+ "orderType":"Market","qty":"341.0343","stopLoss":"1.3853",
+ "takeProfit":"1.4586"}
+```
+
+**Причина.** В `executor.py:_apply_open` qty считалось как
+`round(notional_usd / price, 4)` — жёстко 4 знака. Но Bybit V5
+требует чтобы `qty` был кратен `lotSizeFilter.qtyStep`, который
+зависит от инструмента:
+
+| Symbol | qtyStep | Пример |
+|---|---|---|
+| BTCUSDT | 0.001 | OK на 4 знаках до floor |
+| ETHUSDT | 0.01 | OK |
+| XRPUSDT | **1.0** | 341.0343 → отказ Bybit |
+| DOGEUSDT | **1.0** | аналогично |
+
+То же для SL/TP — Bybit `priceFilter.tickSize` определяет шаг цены,
+LLM выдавал значения с лишними знаками (например 1.38531 при
+tickSize 0.0001).
+
+**Решение.**
+
+1. **`AiBybitClient.get_instrument_info(symbol)`**
+   (`src/ai_trader/trading/client.py`) — получает `qtyStep`,
+   `minOrderQty`, `maxOrderQty`, `tickSize` через
+   `/v5/market/instruments-info` с in-memory кэшем (контракты не
+   меняются часто).
+2. **`InstrumentInfo` dataclass** — типизированная обёртка фильтров.
+3. **`_floor_to_step` / `_round_to_step` хелперы**
+   (`src/ai_trader/trading/executor.py`) — округление qty **вниз**
+   под qtyStep (не превышать notional), цены SL/TP — к ближайшему
+   tick. Корректное число десятичных знаков выводится из step.
+4. **`_apply_open` использует instruments-info** — округляет qty,
+   проверяет `min_order_qty` (с понятной ошибкой без вызова Bybit
+   при заведомо отказе), capпит к `max_order_qty`.
+5. **5 unit-тестов** (`tests/test_ai_trader.py`):
+   - `_floor_to_step` для XRP integer и BTC milli
+   - `_round_to_step` для tick price
+   - регрессия XRPUSDT 341.0343 → 341 + place_order успешен
+   - qty < min_order_qty → отказ без вызова place_order
+   - 441/441 полный suite passed.
+
+**Compliance.** Это infra-fix без изменения торговой логики
+(`strategy-guard.mdc` exception). Параметры стратегии и LLM-промпта
+НЕ менялись. Baseline n=0 (от 05.05) НЕ сдвигается.
+
+**Файлы:** `src/ai_trader/trading/client.py`,
+`src/ai_trader/trading/executor.py`, `tests/test_ai_trader.py`,
+`BUILDLOG_AI_TRADER.md`
+
+---
+
 ## 2026-05-06 — fix(LLM empty response): max_tokens 2000→4096 + no-thinking fallback
 
 `коммит при deploy`

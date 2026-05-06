@@ -54,6 +54,21 @@ class Ticker:
     price_change_pct_24h: float
 
 
+@dataclass
+class InstrumentInfo:
+    """Фильтры лот/цены Bybit для конкретного инструмента.
+
+    Используется чтобы округлять qty под `qty_step` и SL/TP под
+    `tick_size` — иначе Bybit отклоняет ордер с ErrCode 10001
+    «Qty invalid» / «Price invalid» (см. AUDIT_2026.md).
+    """
+    symbol: str
+    qty_step: float          # шаг кол-ва (XRPUSDT=1, BTCUSDT=0.001 и т.д.)
+    min_order_qty: float
+    max_order_qty: float
+    tick_size: float         # шаг цены
+
+
 class AiBybitClient:
     def __init__(
         self,
@@ -69,6 +84,8 @@ class AiBybitClient:
             recv_window=10000,
         )
         self._category = category
+        # in-memory кэш instruments-info (контракты не меняются часто).
+        self._instr_cache: dict[str, InstrumentInfo] = {}
 
     # ─── Market data ─────────────────────────────────────────────────────
 
@@ -126,6 +143,47 @@ class AiBybitClient:
         except (ValueError, TypeError):
             log.exception("ticker parse failed %s: %s", symbol, t)
             return None
+
+    def get_instrument_info(self, symbol: str) -> InstrumentInfo | None:
+        """Получить лот/цена-фильтры для symbol с in-memory кэшированием.
+
+        В Bybit V5 `lotSizeFilter.qtyStep` определяет минимальный шаг
+        кол-ва (для XRPUSDT linear = 1.0 — целые XRP, для BTCUSDT
+        linear = 0.001). Несоблюдение → 10001 «Qty invalid».
+        """
+        if symbol in self._instr_cache:
+            return self._instr_cache[symbol]
+        try:
+            resp = self._session.get_instruments_info(
+                category=self._category, symbol=symbol,
+            )
+        except Exception:
+            log.exception("get_instruments_info %s failed", symbol)
+            return None
+        items = resp.get("result", {}).get("list", []) or []
+        if not items:
+            log.warning("instruments-info empty for %s", symbol)
+            return None
+        item = items[0]
+        lf = item.get("lotSizeFilter", {}) or {}
+        pf = item.get("priceFilter", {}) or {}
+        try:
+            info = InstrumentInfo(
+                symbol=symbol,
+                qty_step=float(lf.get("qtyStep", "0.001")),
+                min_order_qty=float(lf.get("minOrderQty", "0")),
+                max_order_qty=float(lf.get("maxOrderQty", "1e18")),
+                tick_size=float(pf.get("tickSize", "0.01")),
+            )
+        except (ValueError, TypeError) as exc:
+            log.warning("instruments-info parse failed %s: %s", symbol, exc)
+            return None
+        self._instr_cache[symbol] = info
+        log.info(
+            "Instrument %s: qty_step=%s min_qty=%s tick=%s",
+            symbol, info.qty_step, info.min_order_qty, info.tick_size,
+        )
+        return info
 
     # ─── Account / positions ─────────────────────────────────────────────
 

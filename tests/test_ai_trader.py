@@ -306,3 +306,154 @@ class TestDeepSeekClientFallback:
         assert "empty response" in resp.error
         assert len(calls) == 3   # 2 with thinking + 1 fallback no-thinking
 
+
+# ─── qty/price rounding under Bybit instrument filters ────────────────
+
+
+class TestQtyRounding:
+    """Округление qty/SL/TP под `lotSizeFilter` / `priceFilter` Bybit."""
+
+    def test_floor_to_step_xrp_integer(self):
+        from ai_trader.trading.executor import _floor_to_step
+
+        # XRPUSDT linear: qtyStep=1.0 → 341.0343 → 341
+        assert _floor_to_step(341.0343, 1.0) == 341.0
+        assert _floor_to_step(0.999, 1.0) == 0.0
+
+    def test_floor_to_step_btc_milli(self):
+        from ai_trader.trading.executor import _floor_to_step
+
+        # BTCUSDT linear: qtyStep=0.001 → 0.0049 → 0.004
+        assert _floor_to_step(0.0049, 0.001) == 0.004
+        assert _floor_to_step(0.00049, 0.001) == 0.0
+
+    def test_round_to_step_price_tick(self):
+        from ai_trader.trading.executor import _round_to_step
+
+        # XRPUSDT: tickSize=0.0001
+        assert _round_to_step(1.38531, 0.0001) == 1.3853
+        # BTCUSDT: tickSize=0.1
+        assert _round_to_step(80249.83, 0.1) == 80249.8
+
+    def test_apply_open_xrp_qty_floors_to_integer(self, monkeypatch, tmp_path):
+        """Регрессия: XRPUSDT qty=341.0343 ⇒ floor(341), а не отказ Bybit."""
+        from types import SimpleNamespace
+
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading import executor as exec_mod
+        from ai_trader.trading.client import InstrumentInfo, Ticker
+
+        captured: dict = {}
+
+        class FakeClient:
+            def get_ticker(self, symbol):
+                return Ticker(
+                    symbol=symbol, last_price=1.4154, bid=1.415, ask=1.4158,
+                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+                )
+
+            def get_instrument_info(self, symbol):
+                return InstrumentInfo(
+                    symbol=symbol, qty_step=1.0,
+                    min_order_qty=1.0, max_order_qty=1_000_000.0,
+                    tick_size=0.0001,
+                )
+
+            def set_leverage(self, symbol, leverage):
+                return True
+
+            def place_order(self, **kwargs):
+                captured["place_order"] = kwargs
+                return {"ok": True, "result": {"orderId": "x"}}
+
+        store = AiTraderStore(tmp_path / "ai.db")
+        ks_cfg = KillSwitchConfig(
+            max_daily_loss_usd=300, max_total_loss_usd=1000,
+            max_open_positions=5, max_leverage=10,
+        )
+        killswitch = KillSwitch(ks_cfg, store)
+
+        settings = SimpleNamespace(
+            trading_enabled=True, virtual_capital_usd=1000.0,
+        )
+
+        action = exec_mod.ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "XRPUSDT", "side": "Buy",
+                "leverage": 2, "position_size_usd": 482.7,
+                "stop_loss": 1.3853, "take_profit": 1.4586,
+                "reason": "test",
+            },
+        )
+        result = exec_mod._apply_open(
+            action, client=FakeClient(), store=store,
+            settings=settings, killswitch=killswitch,
+        )
+        assert result.executed, f"должно успешно: error={result.error}"
+        assert captured["place_order"]["qty"] == 341.0, (
+            f"qty должна быть округлена вниз до integer step=1.0, "
+            f"получили {captured['place_order']['qty']}"
+        )
+
+    def test_apply_open_below_min_qty_rejected(self, monkeypatch, tmp_path):
+        """Если notional слишком мал → qty < min → отказ с понятной ошибкой,
+        без попытки place_order."""
+        from types import SimpleNamespace
+
+        from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading import executor as exec_mod
+        from ai_trader.trading.client import InstrumentInfo, Ticker
+
+        place_called = []
+
+        class FakeClient:
+            def get_ticker(self, symbol):
+                return Ticker(
+                    symbol=symbol, last_price=80000.0, bid=79999, ask=80001,
+                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+                )
+
+            def get_instrument_info(self, symbol):
+                # BTCUSDT: minOrderQty=0.001
+                return InstrumentInfo(
+                    symbol=symbol, qty_step=0.001,
+                    min_order_qty=0.001, max_order_qty=100.0,
+                    tick_size=0.1,
+                )
+
+            def set_leverage(self, symbol, leverage):
+                return True
+
+            def place_order(self, **kwargs):
+                place_called.append(kwargs)
+                return {"ok": True}
+
+        store = AiTraderStore(tmp_path / "ai.db")
+        killswitch = KillSwitch(KillSwitchConfig(
+            max_daily_loss_usd=300, max_total_loss_usd=1000,
+            max_open_positions=5, max_leverage=10,
+        ), store)
+        settings = SimpleNamespace(trading_enabled=True, virtual_capital_usd=1000.0)
+
+        action = exec_mod.ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+                "leverage": 2, "position_size_usd": 50.0,
+                # 50 / 80000 = 0.000625 → floor(0.001) = 0.0 → < min 0.001
+                "stop_loss": 78000, "take_profit": 82000,
+                "reason": "test",
+            },
+        )
+        result = exec_mod._apply_open(
+            action, client=FakeClient(), store=store,
+            settings=settings, killswitch=killswitch,
+        )
+        assert not result.executed
+        assert "min_order_qty" in (result.error or "")
+        assert place_called == [], "place_order не должен быть вызван"
+

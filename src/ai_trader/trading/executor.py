@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -17,7 +18,33 @@ from typing import Any
 from ai_trader.config.settings import AiTraderSettings
 from ai_trader.safety.killswitch import KillSwitch
 from ai_trader.state.db import AiTraderStore
-from ai_trader.trading.client import AiBybitClient
+from ai_trader.trading.client import AiBybitClient, InstrumentInfo
+
+
+def _decimals_for_step(step: float) -> int:
+    """Сколько знаков после запятой нужно для строкового представления step."""
+    if step <= 0 or step >= 1:
+        return 0
+    s = f"{step:.10f}".rstrip("0").rstrip(".")
+    if "." not in s:
+        return 0
+    return len(s.split(".", 1)[1])
+
+
+def _floor_to_step(value: float, step: float) -> float:
+    """Округление вниз до ближайшего step (для qty: чтобы не превысить notional)."""
+    if step <= 0:
+        return value
+    n = math.floor(value / step)
+    return round(n * step, _decimals_for_step(step))
+
+
+def _round_to_step(value: float, step: float) -> float:
+    """Округление к ближайшему step (для цен SL/TP)."""
+    if step <= 0:
+        return value
+    n = round(value / step)
+    return round(n * step, _decimals_for_step(step))
 
 log = logging.getLogger(__name__)
 
@@ -206,6 +233,19 @@ def _apply_open(
         return ApplyResult(executed=False, summary="", error=f"ticker unavailable for {symbol}")
     price = ticker.last_price
 
+    # instruments-info — для round'инга qty/SL/TP под Bybit фильтры.
+    info = client.get_instrument_info(symbol)
+    if info is None:
+        return ApplyResult(
+            executed=False, summary="",
+            error=f"instruments-info unavailable for {symbol}",
+        )
+
+    # Округляем SL/TP под tick_size ДО sanity-check'а — чтобы не падать
+    # из-за плавающей точки LLM (1.38531 при tickSize 0.0001).
+    sl_price = _round_to_step(sl_price, info.tick_size)
+    tp_price = _round_to_step(tp_price, info.tick_size)
+
     # Sanity check на направление SL/TP
     if side == "Buy":
         if not (sl_price < price < tp_price):
@@ -226,7 +266,21 @@ def _apply_open(
     max_notional = settings.virtual_capital_usd * leverage
     if notional_usd > max_notional:
         notional_usd = max_notional
-    qty = round(notional_usd / price, 4)
+    # Округляем qty ВНИЗ под qtyStep — чтобы notional не превысил таргет
+    # и Bybit принял ордер. Без этого: XRPUSDT (qtyStep=1) получает
+    # qty=341.0343 → ErrCode 10001 «Qty invalid».
+    qty_raw = notional_usd / price
+    qty = _floor_to_step(qty_raw, info.qty_step)
+    if qty < info.min_order_qty:
+        return ApplyResult(
+            executed=False, summary="",
+            error=(
+                f"qty {qty} < min_order_qty {info.min_order_qty} for {symbol} "
+                f"(notional ${notional_usd:.2f} / price {price} / step {info.qty_step})"
+            ),
+        )
+    if qty > info.max_order_qty:
+        qty = _floor_to_step(info.max_order_qty, info.qty_step)
     if qty <= 0:
         return ApplyResult(executed=False, summary="", error="qty<=0 after rounding")
 
