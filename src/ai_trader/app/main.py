@@ -24,6 +24,7 @@ from ai_trader.config.settings import AiTraderSettings
 from ai_trader.llm.client import DeepSeekClient
 from ai_trader.llm.prompts import build_system_prompt, build_user_prompt
 from ai_trader.macro.external import MacroProvider
+from ai_trader.macro.options import OptionsIvProvider
 from ai_trader.news.rss import RssNewsProvider
 from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from ai_trader.state.db import AiTraderStore
@@ -188,6 +189,11 @@ def run() -> None:
     # полями, цикл продолжается.
     macro_provider = MacroProvider(ttl_seconds=600)
 
+    # ─── Options IV (i6/7) ───────────────────────────────────────────────
+    # Deribit DVOL для BTC и ETH — annualised implied volatility.
+    # 2 запроса на цикл (BTC, ETH); TTL 600s.
+    options_iv_provider = OptionsIvProvider(ttl_seconds=600)
+
     # ─── Telegram ────────────────────────────────────────────────────────
     tg: TelegramBot | None = None
     if settings.telegram_enabled and settings.telegram_bot_token:
@@ -218,7 +224,7 @@ def run() -> None:
         try:
             _run_cycle(
                 cycle, settings, store, bybit, llm, killswitch,
-                news_provider, macro_provider, tg,
+                news_provider, macro_provider, options_iv_provider, tg,
             )
         except Exception as e:
             log.exception("Cycle %d crashed (продолжаю)", cycle)
@@ -244,6 +250,7 @@ def _run_cycle(
     killswitch: KillSwitch,
     news_provider: RssNewsProvider | None,
     macro_provider: MacroProvider | None,
+    options_iv_provider: OptionsIvProvider | None,
     tg: TelegramBot | None,
 ) -> None:
     log.info("─── Cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
@@ -268,6 +275,7 @@ def _run_cycle(
         settings.virtual_capital_usd,
         news_provider,
         macro_provider=macro_provider,
+        options_iv_provider=options_iv_provider,
     )
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))

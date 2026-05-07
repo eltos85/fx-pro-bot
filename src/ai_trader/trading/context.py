@@ -28,6 +28,11 @@ from ai_trader.analysis.positioning import (
     format_positioning,
 )
 from ai_trader.macro.external import MacroProvider, MacroSnapshot, format_macro
+from ai_trader.macro.options import (
+    OptionsIvProvider,
+    OptionsIvSnapshot,
+    format_options_iv,
+)
 from ai_trader.news.rss import NewsItem
 from ai_trader.state.db import AiPosition, AiTraderStore
 from ai_trader.trading.client import AiBybitClient, Bar, Ticker
@@ -60,6 +65,8 @@ class MarketContext:
     # macro_provider не передан или сетевой fetch упал — формат
     # деградирует gracefully.
     macro: MacroSnapshot | None = None
+    # i6/7 (2026-05-07): Deribit DVOL/IV для BTC и ETH (options market).
+    options_iv: OptionsIvSnapshot | None = None
 
 
 def collect_market_context(
@@ -69,6 +76,7 @@ def collect_market_context(
     virtual_capital_usd: float,
     news_provider=None,
     macro_provider: MacroProvider | None = None,
+    options_iv_provider: OptionsIvProvider | None = None,
 ) -> MarketContext:
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
@@ -157,6 +165,14 @@ def collect_market_context(
             log.exception("macro_provider failed (продолжаю без macro)")
             macro = None
 
+    options_iv: OptionsIvSnapshot | None = None
+    if options_iv_provider is not None:
+        try:
+            options_iv = options_iv_provider.get_snapshot()
+        except Exception:
+            log.exception("options_iv_provider failed (продолжаю без IV)")
+            options_iv = None
+
     return MarketContext(
         snapshots=snapshots,
         open_positions=open_positions,
@@ -164,6 +180,7 @@ def collect_market_context(
         real_equity_usd=real_equity,
         news=news,
         macro=macro,
+        options_iv=options_iv,
     )
 
 
@@ -231,6 +248,16 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
         if macro_text:
             parts.append("=== GLOBAL MACRO / SENTIMENT ===")
             parts.append(macro_text)
+
+    # i6/7 — OPTIONS MARKET IV (Deribit DVOL для BTC и ETH).
+    if ctx.options_iv is not None:
+        iv_text = format_options_iv(ctx.options_iv)
+        parts.append("=== OPTIONS MARKET IV (Deribit DVOL, annualised) ===")
+        parts.append(iv_text)
+        parts.append(
+            "  Note: compare DVOL to per-symbol RV — IV>>RV signals options-"
+            "market priced for bigger move; IV<<RV signals complacency."
+        )
 
     # Эвристика BTC vs alts (на основе наших же тикеров) — мягкое
     # дополнение к точным данным CoinGecko: показывает ротацию между

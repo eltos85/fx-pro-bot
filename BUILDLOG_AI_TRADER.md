@@ -1,5 +1,77 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(market-context i6/7): Deribit DVOL/IV для BTC и ETH
+
+`<hash-pending>`
+
+**Контекст.** Шестая итерация — options-implied volatility. До этого
+агент видел **realized** volatility (через i1 RV) и Bybit-positioning,
+но **не** имел контекста ожиданий options-рынка (что профессиональные
+options-десков закладывают на ближайшие 30 дней).
+
+**Что добавлено.**
+
+1. **Новый модуль `src/ai_trader/macro/options.py`:**
+   - `OptionsIvProvider(ttl_seconds=600, get_json=...)` — TTL-кэш,
+     fetch DVOL для BTC и ETH отдельно.
+   - `OptionsIvSnapshot` dataclass: `btc_iv_now`, `btc_iv_24h_low`,
+     `btc_iv_24h_high`, `btc_iv_24h_change_pct` + те же для ETH.
+   - `format_options_iv(snapshot)` — двух-четырёхстрочный текст для
+     prompt с метками режимов IV.
+
+2. **Источник данных (free, no-auth):**
+   - Deribit `/api/v2/public/get_volatility_index_data?currency={BTC|ETH}
+     &start_timestamp=...&end_timestamp=...&resolution=3600`. Возвращает
+     `[ts_ms, open, high, low, close]` для каждого 1h-бара DVOL.
+   - 25 точек × 1h = последние 24h DVOL OHLC.
+
+3. **Метки IV-режимов:**
+   - <30% → `[LOW IV — complacency]`
+   - 30-50% → `[normal IV]`
+   - 50-80% → `[elevated IV]`
+   - ≥80% → `[EXTREME IV — panic / shock]`
+
+   Эмпирические пороги для крипто-DVOL 2024-2026 (Deribit «DVOL Index
+   Methodology» 2021+; Bouri/Lucey/Shahzad «Bitcoin's predictive power
+   on volatility» J. Financial Markets 2024).
+
+4. **Интеграция в context:**
+   - `MarketContext.options_iv: OptionsIvSnapshot | None`.
+   - `collect_market_context(..., options_iv_provider=...)` опц.
+   - `format_context_for_prompt`: блок
+     `=== OPTIONS MARKET IV (Deribit DVOL, annualised) ===` сразу
+     после `GLOBAL MACRO / SENTIMENT`. Дополнительная подсказка
+     LLM: «compare DVOL to per-symbol RV — IV>>RV signals options-
+     market priced for bigger move; IV<<RV signals complacency».
+
+5. **`app/main.py`:** `OptionsIvProvider(ttl_seconds=600)` создаётся
+   на старте, передаётся в `_run_cycle` и далее в
+   `collect_market_context`.
+
+**Тесты:** +12 регрессионных в `test_ai_trader_options_iv.py`:
+- `TestOptionsIvProviderFetch` (6): full BTC+ETH, BTC only,
+  both fail (no crash), empty data array, malformed bar, single bar
+  (no change_pct).
+- `TestOptionsIvCache` (2): TTL→1 fetch на 3 calls; TTL=0 → каждый call.
+- `TestFormatOptionsIv` (4): full data with labels (normal/elevated),
+  LOW IV complacency, EXTREME IV, all-None graceful.
+
+Suite 525/525 зелёный.
+
+**Файлы.** `src/ai_trader/macro/options.py` (новый),
+`src/ai_trader/trading/context.py` (интеграция),
+`src/ai_trader/app/main.py` (создание провайдера),
+`tests/test_ai_trader_options_iv.py` (новый).
+
+**Smoke-тест публичного API** (curl):
+- BTC DVOL: 38.74% (24h: 40.54 high → 38.36 low → 38.74). Метка
+  `[normal IV]`.
+- ETH DVOL: 54.55% (24h: 56.24 → 52.82 → 54.55). Метка `[elevated IV]`.
+  ETH IV структурно выше BTC IV (~16 pp), что соответствует
+  историческому spread'у ETH/BTC IV.
+
+---
+
 ## 2026-05-07 — feat(market-context i5/7): Liquidation cascade proxy (OI-drop × price-gap)
 
 `<hash-pending>`
