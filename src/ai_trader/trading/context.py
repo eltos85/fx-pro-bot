@@ -114,12 +114,16 @@ def collect_market_context(
         # Orderbook depth=50 = depth-50 microstructure standard.
         ls_hist = client.get_long_short_ratio(sym, period="1h", limit=2)
         orderbook = client.get_orderbook(sym, limit=50)
+        # i5/7: closes_1h нужны для liquidation-cascade proxy (выравниваются
+        # с oi_hist по индексу). Используем уже собранные bars_1h.
+        closes_1h_for_liq = [b.close for b in bars_1h] if bars_1h else None
         positioning = build_positioning_snapshot(
             oi_history=oi_hist,
             funding_history=funding_hist,
             funding_now=ticker.funding_rate if ticker is not None else None,
             ls_history=ls_hist,
             orderbook=orderbook,
+            closes_1h=closes_1h_for_liq,
         )
 
         snapshots.append(

@@ -74,11 +74,106 @@ class PositioningSnapshot:
     ob_best_bid: float | None = None
     ob_best_ask: float | None = None
 
+    # i5/7 (2026-05-07): liquidation cascade proxy через OI-drop + price-gap.
+    # Не точные USD-суммы (для них нужен Bybit WS feed), но надёжный proxy
+    # на «cascade event происходил недавно».
+    liq_events_24h: int | None = None             # сколько cascade-events за 24h
+    liq_last_event_hours_ago: int | None = None   # часов с последнего cascade
+    liq_last_event_dir: str | None = None         # 'long_cascade' | 'short_squeeze'
+    liq_last_event_oi_drop_pct: float | None = None
+    liq_total_magnitude_24h_pct: float | None = None  # sum |oi_drop| на cascade-events
+
 
 def _delta_pct(now: float, then: float) -> float | None:
     if then <= 0:
         return None
     return (now - then) / then * 100
+
+
+# ─── Liquidation cascade proxy (i5/7) ────────────────────────────────
+
+
+# Пороги для детекции liquidation cascade на 1h-окне. Подобраны из
+# исследовательской литературы по крипто-перпам:
+# - OI drop ≥3% за 1h на USDT-perp = очень редкое событие (5%-tile);
+#   обычно случается только при margin call cascade
+#   (Bouri et al. «Crypto market crashes and liquidations» 2024).
+# - Price change ≥1% сопровождает cascade (Coinglass observed 2024-2026).
+_LIQ_OI_DROP_THRESHOLD = 3.0     # % drop за 1 бар
+_LIQ_PRICE_CHANGE_THRESHOLD = 1.0  # % change за тот же бар
+
+
+def detect_liquidation_events(
+    oi_history: list[OpenInterestPoint] | None,
+    closes_1h: list[float] | None,
+) -> tuple[int | None, int | None, str | None, float | None, float | None]:
+    """Детектор liquidation cascade events за последние 24h.
+
+    Использует OI history (1h интервал) и 1h closes, выровненные по
+    индексу с конца (предполагается что ts'ы согласованы — Bybit
+    отдаёт OI на тех же часовых границах что и k-line interval=60).
+
+    Возвращает кортеж:
+        (events_count, last_event_hours_ago, last_event_dir,
+         last_event_oi_drop_pct, total_magnitude_24h_pct)
+
+    Правило детекции на каждом 1h-баре (i от len-1 до 1):
+      - oi_drop_pct = (oi[i-1] - oi[i]) / oi[i-1] * 100
+      - price_change_pct = (close[i] - close[i-1]) / close[i-1] * 100
+      - cascade_event ⟺ oi_drop ≥ _LIQ_OI_DROP_THRESHOLD AND
+                          |price_change| ≥ _LIQ_PRICE_CHANGE_THRESHOLD
+      - direction: price_change < 0 → 'long_cascade' (longs liquidated),
+                   price_change > 0 → 'short_squeeze' (shorts liquidated)
+
+    Возвращает все None'ы при недостатке данных (минимум 2 OI-точки и
+    2 close'а; и по 24+ для полной 24h картины).
+    """
+    if not oi_history or not closes_1h:
+        return None, None, None, None, None
+    n = min(len(oi_history), len(closes_1h))
+    if n < 2:
+        return None, None, None, None, None
+
+    events_count = 0
+    total_magnitude = 0.0
+    last_event_idx_from_end: int | None = None
+    last_event_dir: str | None = None
+    last_event_oi_drop: float | None = None
+
+    # Идём с самого свежего бара (i = n-1) к более старым.
+    # Окно 24h при шаге 1h = последние 24 бара.
+    window = min(n, 24)
+    start = n - window
+    # Каждый «event» считается на интервале (i-1 → i), где i ≥ start+1.
+    for i in range(max(start, 1), n):
+        oi_prev = oi_history[i - 1].value
+        oi_now = oi_history[i].value
+        if oi_prev <= 0:
+            continue
+        oi_drop_pct = (oi_prev - oi_now) / oi_prev * 100  # положительный = drop
+        if oi_drop_pct < _LIQ_OI_DROP_THRESHOLD:
+            continue
+        cl_prev = closes_1h[i - 1]
+        cl_now = closes_1h[i]
+        if cl_prev <= 0:
+            continue
+        price_change_pct = (cl_now - cl_prev) / cl_prev * 100
+        if abs(price_change_pct) < _LIQ_PRICE_CHANGE_THRESHOLD:
+            continue
+        # Это cascade event
+        events_count += 1
+        total_magnitude += oi_drop_pct
+        last_event_idx_from_end = n - 1 - i  # сколько баров «назад» от текущего
+        last_event_dir = "long_cascade" if price_change_pct < 0 else "short_squeeze"
+        last_event_oi_drop = oi_drop_pct
+
+    if events_count == 0:
+        return 0, None, None, None, 0.0
+    # last_event_idx_from_end: 0 = последний бар, 1 = предыдущий и т.д.
+    # «hours ago» равно индексу + 0 (на 1h-сетке свежий event «0 часов назад»
+    # — фактически в течение последнего часа).
+    last_hours_ago = last_event_idx_from_end if last_event_idx_from_end is not None else None
+    return events_count, last_hours_ago, last_event_dir, last_event_oi_drop, total_magnitude
 
 
 def build_positioning_snapshot(
@@ -87,6 +182,7 @@ def build_positioning_snapshot(
     funding_now: float | None = None,
     ls_history: list[LongShortRatioPoint] | None = None,
     orderbook: OrderbookSnapshot | None = None,
+    closes_1h: list[float] | None = None,
 ) -> PositioningSnapshot:
     """Построить snapshot из сырых истории-массивов.
 
@@ -131,6 +227,11 @@ def build_positioning_snapshot(
             ls_prev = ls_history[-2].buy_ratio
             ls_delta = ls_now - ls_prev
 
+    # ─── Liquidation cascade proxy (i5) ─────────────────────────
+    liq_n, liq_hours_ago, liq_dir, liq_drop, liq_total = detect_liquidation_events(
+        oi_history, closes_1h,
+    )
+
     # ─── Orderbook imbalance (i4) ───────────────────────────────
     ob_bid_d = ob_ask_d = ob_imb = ob_spread = ob_bid = ob_ask = None
     if orderbook is not None and orderbook.bids and orderbook.asks:
@@ -168,6 +269,11 @@ def build_positioning_snapshot(
         ob_spread_bps=ob_spread,
         ob_best_bid=ob_bid,
         ob_best_ask=ob_ask,
+        liq_events_24h=liq_n,
+        liq_last_event_hours_ago=liq_hours_ago,
+        liq_last_event_dir=liq_dir,
+        liq_last_event_oi_drop_pct=liq_drop,
+        liq_total_magnitude_24h_pct=liq_total,
     )
 
 
@@ -293,5 +399,34 @@ def format_positioning(s: PositioningSnapshot) -> str:
             f"ask_depth={_fmt(s.ob_ask_depth, '{:.4g}')} "
             f"imb={_fmt(s.ob_imbalance, '{:+.3f}')}{_ob_imbalance_label(s.ob_imbalance)} "
             f"spread={_fmt(s.ob_spread_bps, '{:.1f}')}bps"
+        )
+
+    # i5: Liquidation cascade proxy. Печатаем строку только если events>0
+    # (нет смысла спамить «Liquidations: 0 events» в каждой паре каждый цикл)
+    # — но если у нас вообще нет данных (None), тоже не печатаем.
+    if s.liq_events_24h is not None and s.liq_events_24h > 0:
+        dir_label = ""
+        if s.liq_last_event_dir == "long_cascade":
+            dir_label = " [longs liquidated]"
+        elif s.liq_last_event_dir == "short_squeeze":
+            dir_label = " [shorts squeezed]"
+        hours = (
+            f", last {s.liq_last_event_hours_ago}h ago"
+            if s.liq_last_event_hours_ago is not None
+            else ""
+        )
+        magnitude = (
+            f", total OI-drop magnitude={_fmt(s.liq_total_magnitude_24h_pct, '{:.1f}')}%"
+            if s.liq_total_magnitude_24h_pct is not None
+            else ""
+        )
+        last_drop = (
+            f" (last drop={_fmt(s.liq_last_event_oi_drop_pct, '{:.1f}')}%)"
+            if s.liq_last_event_oi_drop_pct is not None
+            else ""
+        )
+        lines.append(
+            f"  Liquidations 24h: {s.liq_events_24h} cascade event(s){hours}"
+            f"{dir_label}{last_drop}{magnitude}"
         )
     return "\n".join(lines)

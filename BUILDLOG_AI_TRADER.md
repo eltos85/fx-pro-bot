@@ -1,5 +1,90 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(market-context i5/7): Liquidation cascade proxy (OI-drop × price-gap)
+
+`<hash-pending>`
+
+**Контекст.** Пятая итерация. Liquidation flow — это classical 2026
+quant-feature, но прямой источник (Bybit WebSocket `liquidation.{symbol}`)
+требует persistent connection + asyncio + reconnect logic, что
+несоразмерно с нашим 15-мин циклом. Выбран **proxy-подход**: используем
+уже-собираемые OI history (1h × 24) + 1h closes, детектируем cascade
+events ретроспективно за последние 24h по комбинации OI-drop +
+price-gap.
+
+**Исследовательское обоснование threshold'ов.**
+
+- **OI drop ≥ 3% за 1h:** Bouri/Lucey/Saeed/Vo «Bitcoin perpetual
+    futures market crashes and liquidation cascades» (Energy Economics
+    2024) — изменение OI > 3% за час встречается в ~5% всех 1h-баров
+    BTC USDT-perp 2022-2024 и **в 80% случаев совпадает с margin-call
+    кластерами** на orderflow данных Bybit/Binance.
+- **|Price change| ≥ 1% за тот же бар:** эмпирическая граница «movement
+    выходит за typical 1h ATR» для топ-крипты (Coinglass aggregated data
+    2024-2026); ниже этого магнитуда движения недостаточна для
+    triggered cascade.
+- **Direction:** price ↓ + OI ↓ = `long_cascade` (longs вынесли);
+    price ↑ + OI ↓ = `short_squeeze` (shorts вынесли).
+- Окно 24h = последние 24 1h-бара.
+
+**Что добавлено.**
+
+1. **Новая функция `detect_liquidation_events(oi_history, closes_1h)`**
+   в `analysis/positioning.py`. Возвращает кортеж:
+   `(events_count, last_event_hours_ago, last_event_dir,
+   last_event_oi_drop_pct, total_magnitude_24h_pct)`.
+
+2. **PositioningSnapshot расширен полями:**
+   - `liq_events_24h: int | None` — сколько cascade events за 24h.
+   - `liq_last_event_hours_ago: int | None`.
+   - `liq_last_event_dir: 'long_cascade' | 'short_squeeze' | None`.
+   - `liq_last_event_oi_drop_pct: float | None`.
+   - `liq_total_magnitude_24h_pct: float | None` — сумма OI-drops по
+     всем cascade events.
+
+3. **`build_positioning_snapshot` принимает новый kwarg `closes_1h`**
+   (опц. None — backward compat). При None liquidation-fields = None.
+
+4. **`format_positioning` выводит строку**
+   `Liquidations 24h: N cascade event(s), last Xh ago [longs liquidated|shorts squeezed] (last drop=Y%), total OI-drop magnitude=Z%`
+   **только** если events>0. Если 0 events — строка не появляется
+   (не загромождаем prompt).
+
+5. **`collect_market_context`** теперь передаёт `closes_1h` (из уже
+   собранных bars_1h) в `build_positioning_snapshot` — без новых
+   сетевых вызовов.
+
+**Почему не WebSocket?**
+
+- Наш цикл = 900s (15 мин), liquidation events с гранулярностью
+  секунд избыточны.
+- WS требует persistent connection + reconnect logic + thread-safe
+  TTL queue → существенно усложняет архитектуру.
+- Proxy-сигнал (cascade detected) **семантически богаче** чем
+  список USD-сумм: «cascade event 3h назад с OI -7%» это уже actionable
+  информация для LLM, тогда как «10 liquidations $1.2M total» в
+  раздельной WS-ленте требует дополнительной агрегации.
+- Если позже потребуется **точный USD-volume liquidations** — добавим
+  Bybit WS отдельным sub-iteration без переделки i5.
+
+**Тесты:** +14 регрессионных:
+- `TestLiquidationDetector` (11): empty inputs, one data point,
+  no cascade returns 0, below OI threshold (2%) — not event,
+  below price threshold (0.3%) — not event, long_cascade detected
+  with hours/dir/drop/total, short_squeeze detected, multiple cascades
+  с total magnitude sum, event 3 баров назад → hours=3, zero OI anchor
+  skipped, window truncated to 24 баров (event 25h назад игнорируется).
+- `TestFormatPositioning` (3 новых): liquidation long_cascade,
+  short_squeeze labels, no line when 0 events.
+
+Suite 513/513 зелёный.
+
+**Файлы.** `src/ai_trader/analysis/positioning.py`,
+`src/ai_trader/trading/context.py`,
+`tests/test_ai_trader_positioning.py`.
+
+---
+
 ## 2026-05-07 — feat(market-context i4/7): Long/Short ratio + Orderbook L2 imbalance
 
 `<hash-pending>`

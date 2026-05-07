@@ -6,6 +6,7 @@ import pytest
 from ai_trader.analysis.positioning import (
     PositioningSnapshot,
     build_positioning_snapshot,
+    detect_liquidation_events,
     format_positioning,
 )
 from ai_trader.trading.client import (
@@ -279,6 +280,40 @@ class TestFormatPositioning:
         # OI/Funding строки всё равно есть (пусть и со значениями n/a).
         assert "OI:" in out and "Funding:" in out
 
+    def test_format_liquidation_long_cascade(self):
+        """Если есть liquidation event — строка появляется с правильной меткой."""
+        # 5 OI-точек: первые 4 стабильны на 1000, последняя падает до 950 (-5%)
+        oi = _oi([1000.0, 1000.0, 1000.0, 1000.0, 950.0])
+        # Closes выровненные: цена тоже падает -2%
+        closes = [100.0, 100.0, 100.0, 100.0, 98.0]
+        s = build_positioning_snapshot(
+            oi_history=oi, funding_history=None, closes_1h=closes,
+        )
+        out = format_positioning(s)
+        assert "Liquidations 24h: 1 cascade event(s)" in out
+        assert "[longs liquidated]" in out
+        assert "last 0h ago" in out  # last bar = 0h ago
+
+    def test_format_liquidation_short_squeeze(self):
+        # OI-drop -5% + price gap +2% = short squeeze
+        oi = _oi([1000.0, 1000.0, 1000.0, 1000.0, 950.0])
+        closes = [100.0, 100.0, 100.0, 100.0, 102.0]
+        s = build_positioning_snapshot(
+            oi_history=oi, funding_history=None, closes_1h=closes,
+        )
+        out = format_positioning(s)
+        assert "[shorts squeezed]" in out
+
+    def test_format_no_liquidation_line_when_zero(self):
+        # OI медленно растёт, цена ровная — no cascade
+        oi = _oi([1000.0, 1010.0, 1020.0, 1030.0, 1040.0])
+        closes = [100.0, 100.0, 100.0, 100.0, 100.0]
+        s = build_positioning_snapshot(
+            oi_history=oi, funding_history=None, closes_1h=closes,
+        )
+        out = format_positioning(s)
+        assert "Liquidations" not in out
+
     def test_format_oi_unwind_label(self):
         s = PositioningSnapshot(
             oi_now=900_000.0, oi_4h_ago=1_000_000.0, oi_24h_ago=1_200_000.0,
@@ -293,3 +328,104 @@ class TestFormatPositioning:
         # -10% попадает в strong (≥10%), -25% в EXTREME
         assert "strong unwind" in out
         assert "EXTREME unwind" in out
+
+
+# ─── Liquidation cascade proxy (i5) ──────────────────────────────────
+
+
+class TestLiquidationDetector:
+    """detect_liquidation_events — формула on 1h-окне."""
+
+    def test_no_inputs_all_none(self):
+        out = detect_liquidation_events(None, None)
+        assert out == (None, None, None, None, None)
+
+    def test_one_data_point_returns_none(self):
+        out = detect_liquidation_events(_oi([100.0]), [50.0])
+        assert out == (None, None, None, None, None)
+
+    def test_no_cascade_returns_zero_events(self):
+        # OI и price стабильны
+        oi = _oi([1000.0, 1010.0, 1020.0, 1030.0])
+        closes = [100.0, 100.5, 101.0, 101.5]
+        ev, hours, dir_, drop, total = detect_liquidation_events(oi, closes)
+        assert ev == 0
+        assert hours is None
+        assert dir_ is None
+        assert total == 0.0
+
+    def test_below_oi_threshold_not_event(self):
+        # OI drops 2% (<3% threshold), price drops 5% — не event
+        oi = _oi([1000.0, 980.0])
+        closes = [100.0, 95.0]
+        ev, *_ = detect_liquidation_events(oi, closes)
+        assert ev == 0
+
+    def test_below_price_threshold_not_event(self):
+        # OI drops 5%, price drops 0.3% — не event
+        oi = _oi([1000.0, 950.0])
+        closes = [100.0, 99.7]
+        ev, *_ = detect_liquidation_events(oi, closes)
+        assert ev == 0
+
+    def test_long_cascade_detected(self):
+        # OI -5%, price -2% → long_cascade
+        oi = _oi([1000.0, 950.0])
+        closes = [100.0, 98.0]
+        ev, hours, dir_, drop, total = detect_liquidation_events(oi, closes)
+        assert ev == 1
+        assert hours == 0  # последний бар = 0h ago
+        assert dir_ == "long_cascade"
+        assert drop == pytest.approx(5.0)
+        assert total == pytest.approx(5.0)
+
+    def test_short_squeeze_detected(self):
+        # OI -5%, price +2% → short_squeeze
+        oi = _oi([1000.0, 950.0])
+        closes = [100.0, 102.0]
+        ev, hours, dir_, drop, total = detect_liquidation_events(oi, closes)
+        assert ev == 1
+        assert dir_ == "short_squeeze"
+
+    def test_multiple_cascades_total_magnitude_summed(self):
+        # 3 события за 4 баров: bar 1, 2, 3 — все cascade
+        oi = _oi([1000.0, 950.0, 900.0, 850.0])
+        closes = [100.0, 98.0, 96.0, 94.0]
+        ev, hours, dir_, drop, total = detect_liquidation_events(oi, closes)
+        assert ev == 3
+        # Last event = последний бар (i=3): drop = (900-850)/900 ≈ 5.56%
+        assert drop == pytest.approx(50 / 900 * 100, rel=1e-6)
+        # Сумма всех drops:
+        # bar1: (1000-950)/1000 = 5%
+        # bar2: (950-900)/950 ≈ 5.263%
+        # bar3: (900-850)/900 ≈ 5.556%
+        # total ≈ 15.819%
+        assert total == pytest.approx(5.0 + 50 / 950 * 100 + 50 / 900 * 100, rel=1e-6)
+        assert hours == 0
+
+    def test_event_3_bars_ago_returns_correct_hours(self):
+        # 5 баров: на bar 1 (= n-4 from end) был cascade, остальные стабильны
+        oi = _oi([1000.0, 950.0, 950.0, 950.0, 950.0])
+        closes = [100.0, 98.0, 98.0, 98.0, 98.0]
+        ev, hours, _, _, _ = detect_liquidation_events(oi, closes)
+        assert ev == 1
+        # Последний event на i=1, n=5, hours_ago = 5-1-1 = 3
+        assert hours == 3
+
+    def test_zero_oi_anchor_skipped(self):
+        # Bar с oi_prev=0 — не учитываем (деление на 0)
+        oi = _oi([0.0, 1000.0])
+        closes = [100.0, 98.0]
+        ev, *_ = detect_liquidation_events(oi, closes)
+        assert ev == 0
+
+    def test_window_truncated_to_24_bars(self):
+        # 30 баров; событие на bar 0 (≥6 баров за пределами 24h-окна) — игнор
+        oi_values = [1000.0, 950.0] + [950.0] * 28  # cascade на index 1
+        oi = _oi(oi_values)
+        closes = [100.0, 98.0] + [98.0] * 28
+        ev, hours, *_ = detect_liquidation_events(oi, closes)
+        # Event на i=1, n=30 → не входит в окно последних 24 баров
+        # (start = n-24 = 6, нужны i ≥ start+1=7)
+        assert ev == 0
+        assert hours is None
