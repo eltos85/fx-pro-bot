@@ -2,7 +2,7 @@
 
 ## 2026-05-07 — feat(symbols): расширили пул с 5 до 10 пар + max_pos 3→5 + parametrized prompt
 
-`коммит при deploy`
+`6d51360`
 
 **Что изменилось.**
 
