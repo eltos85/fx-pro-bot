@@ -8,7 +8,16 @@ from ai_trader.analysis.positioning import (
     build_positioning_snapshot,
     format_positioning,
 )
-from ai_trader.trading.client import FundingPoint, OpenInterestPoint
+from ai_trader.trading.client import (
+    FundingPoint,
+    LongShortRatioPoint,
+    OpenInterestPoint,
+    OrderbookSnapshot,
+)
+
+
+def _ob(bids: list[tuple[float, float]], asks: list[tuple[float, float]]) -> OrderbookSnapshot:
+    return OrderbookSnapshot(ts=1_700_000_000_000, bids=bids, asks=asks)
 
 
 def _oi(values: list[float], step_ms: int = 60 * 60 * 1000) -> list[OpenInterestPoint]:
@@ -168,6 +177,106 @@ class TestFormatPositioning:
         )
         out = format_positioning(s)
         assert "n/a" in out
+        assert "OI:" in out and "Funding:" in out
+
+    def test_ls_ratio_built_with_delta(self):
+        ls = [
+            LongShortRatioPoint(ts=1_700_000_000_000, buy_ratio=0.50, sell_ratio=0.50),
+            LongShortRatioPoint(ts=1_700_003_600_000, buy_ratio=0.58, sell_ratio=0.42),
+        ]
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None, ls_history=ls,
+        )
+        assert s.ls_buy_ratio_now == pytest.approx(0.58)
+        assert s.ls_buy_ratio_prev == pytest.approx(0.50)
+        assert s.ls_buy_ratio_delta == pytest.approx(0.08)
+
+    def test_ls_ratio_single_point_no_delta(self):
+        ls = [LongShortRatioPoint(ts=1_700_000_000_000, buy_ratio=0.55, sell_ratio=0.45)]
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None, ls_history=ls,
+        )
+        assert s.ls_buy_ratio_now == pytest.approx(0.55)
+        assert s.ls_buy_ratio_prev is None
+        assert s.ls_buy_ratio_delta is None
+
+    def test_orderbook_imbalance_balanced(self):
+        # Симметричный stack — imbalance ≈ 0.
+        ob = _ob(
+            bids=[(99.0, 10.0), (98.0, 5.0)],
+            asks=[(100.0, 10.0), (101.0, 5.0)],
+        )
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None, orderbook=ob,
+        )
+        assert s.ob_bid_depth == pytest.approx(15.0)
+        assert s.ob_ask_depth == pytest.approx(15.0)
+        assert s.ob_imbalance == pytest.approx(0.0)
+        assert s.ob_best_bid == pytest.approx(99.0)
+        assert s.ob_best_ask == pytest.approx(100.0)
+        # Spread: (100-99)/99.5 * 10000 ≈ 100.50 bps
+        assert s.ob_spread_bps == pytest.approx(100.5025, abs=0.5)
+
+    def test_orderbook_strong_bid_pressure(self):
+        # Bid_depth >> ask_depth → imbalance > 0.3
+        ob = _ob(
+            bids=[(99.0, 100.0)],
+            asks=[(100.0, 10.0)],
+        )
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None, orderbook=ob,
+        )
+        # imbalance = (100-10)/110 ≈ 0.818 → EXTREME bid wall
+        assert s.ob_imbalance == pytest.approx(90 / 110, rel=1e-6)
+
+    def test_orderbook_empty_returns_none_for_microstructure(self):
+        ob = _ob(bids=[], asks=[])
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None, orderbook=ob,
+        )
+        assert s.ob_imbalance is None
+        assert s.ob_bid_depth is None
+        assert s.ob_spread_bps is None
+
+    def test_orderbook_zero_total_volume_no_imbalance(self):
+        ob = _ob(bids=[(99.0, 0.0)], asks=[(100.0, 0.0)])
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None, orderbook=ob,
+        )
+        # Депт всё равно считается как 0+0 = 0, imbalance не делится на ноль
+        assert s.ob_bid_depth == 0.0
+        assert s.ob_ask_depth == 0.0
+        assert s.ob_imbalance is None  # total=0 → не делим
+
+    def test_format_includes_ls_and_orderbook_lines_when_present(self):
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None,
+            ls_history=[
+                LongShortRatioPoint(ts=1_700_000_000_000, buy_ratio=0.45, sell_ratio=0.55),
+                LongShortRatioPoint(ts=1_700_003_600_000, buy_ratio=0.68, sell_ratio=0.32),
+            ],
+            orderbook=_ob(
+                bids=[(99.0, 100.0), (98.0, 50.0)],
+                asks=[(100.0, 10.0), (101.0, 5.0)],
+            ),
+        )
+        out = format_positioning(s)
+        assert "L/S retail:" in out
+        assert "L2 OB(50):" in out
+        # buy=68% → contrarian short label
+        assert "retail HEAVY long" in out
+        # imbalance ~ +0.82 → EXTREME bid wall
+        assert "EXTREME bid wall" in out
+
+    def test_format_omits_ls_and_ob_when_absent(self):
+        s = build_positioning_snapshot(
+            oi_history=None, funding_history=None,
+        )
+        out = format_positioning(s)
+        # Без LSR / orderbook эти строки не появляются.
+        assert "L/S retail" not in out
+        assert "L2 OB" not in out
+        # OI/Funding строки всё равно есть (пусть и со значениями n/a).
         assert "OI:" in out and "Funding:" in out
 
     def test_format_oi_unwind_label(self):

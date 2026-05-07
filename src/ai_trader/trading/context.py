@@ -109,10 +109,17 @@ def collect_market_context(
         # с None-полями — формат потом просто пропустит этот блок.
         oi_hist = client.get_open_interest_history(sym, interval="1h", limit=25)
         funding_hist = client.get_funding_rate_history(sym, limit=21)
+        # i4/7 (2026-05-07): retail Long/Short ratio + L2 orderbook imbalance.
+        # LSR limit=2 = текущая + предыдущая 1h-точка (для Δ).
+        # Orderbook depth=50 = depth-50 microstructure standard.
+        ls_hist = client.get_long_short_ratio(sym, period="1h", limit=2)
+        orderbook = client.get_orderbook(sym, limit=50)
         positioning = build_positioning_snapshot(
             oi_history=oi_hist,
             funding_history=funding_hist,
             funding_now=ticker.funding_rate if ticker is not None else None,
+            ls_history=ls_hist,
+            orderbook=orderbook,
         )
 
         snapshots.append(

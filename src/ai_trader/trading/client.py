@@ -78,6 +78,35 @@ class FundingPoint:
 
 
 @dataclass
+class LongShortRatioPoint:
+    """Точка long/short account ratio от Bybit
+    `/v5/market/account-ratio` (он же `get_long_short_ratio` в pybit).
+
+    `buy_ratio` + `sell_ratio` ≈ 1.0. Это доля **аккаунтов** (не объёма)
+    с long/short позицией среди всех retail-trader'ов на Bybit.
+    Используется как **contrarian** retail-positioning indicator
+    (Coinalyze docs: «крайнее retail positioning часто предсказывает
+    reversal»).
+    """
+    ts: int
+    buy_ratio: float
+    sell_ratio: float
+
+
+@dataclass
+class OrderbookSnapshot:
+    """L2 orderbook snapshot от Bybit `/v5/market/orderbook`.
+
+    Bids отсортированы по price desc (лучший биr первый), asks — по
+    price asc (лучший аск первый). Каждый уровень = (price, qty).
+    На USDT-perp qty — в base coin (для BTCUSDT: BTC).
+    """
+    ts: int
+    bids: list[tuple[float, float]]
+    asks: list[tuple[float, float]]
+
+
+@dataclass
 class InstrumentInfo:
     """Фильтры лот/цены Bybit для конкретного инструмента.
 
@@ -260,6 +289,95 @@ class AiBybitClient:
                 continue
         out.sort(key=lambda p: p.ts)
         return out
+
+    def get_long_short_ratio(
+        self,
+        symbol: str,
+        period: str = "1h",
+        limit: int = 3,
+    ) -> list[LongShortRatioPoint] | None:
+        """Long/short account ratio history (Bybit V5).
+
+        - `period`: '5min','15min','30min','1h','4h','1d'.
+        - `limit` ≤ 500; default 3 = последние 3 точки (для tracking
+          перехода retail из long в short).
+
+        Возвращает list, отсортированный по ts возр., или None при
+        ошибке (та же семантика что у `get_open_interest_history`).
+        """
+        try:
+            resp = self._session.get_long_short_ratio(
+                category=self._category,
+                symbol=symbol,
+                period=period,
+                limit=limit,
+            )
+        except Exception:
+            log.exception("get_long_short_ratio %s %s failed", symbol, period)
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_long_short_ratio non-zero retCode for %s: code=%s msg=%s",
+                symbol, ret_code, resp.get("retMsg", ""),
+            )
+            return None
+        items = resp.get("result", {}).get("list", []) or []
+        out: list[LongShortRatioPoint] = []
+        for row in items:
+            try:
+                out.append(
+                    LongShortRatioPoint(
+                        ts=int(row.get("timestamp", 0) or 0),
+                        buy_ratio=float(row.get("buyRatio", 0) or 0),
+                        sell_ratio=float(row.get("sellRatio", 0) or 0),
+                    )
+                )
+            except (ValueError, TypeError):
+                continue
+        out.sort(key=lambda p: p.ts)
+        return out
+
+    def get_orderbook(
+        self,
+        symbol: str,
+        limit: int = 50,
+    ) -> OrderbookSnapshot | None:
+        """L2 orderbook snapshot (Bybit V5 `/v5/market/orderbook`).
+
+        - `limit` для linear: 1, 50, 200, 500. Default 50 (depth-50 —
+          стандарт для market microstructure анализа).
+
+        Возвращает `OrderbookSnapshot` или `None` при ошибке.
+        Bids/asks парсятся как `(price, qty)` floats.
+        """
+        try:
+            resp = self._session.get_orderbook(
+                category=self._category,
+                symbol=symbol,
+                limit=limit,
+            )
+        except Exception:
+            log.exception("get_orderbook %s failed", symbol)
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_orderbook non-zero retCode for %s: code=%s msg=%s",
+                symbol, ret_code, resp.get("retMsg", ""),
+            )
+            return None
+        result = resp.get("result", {}) or {}
+        bids_raw = result.get("b", []) or []
+        asks_raw = result.get("a", []) or []
+        try:
+            bids = [(float(p), float(q)) for p, q in bids_raw]
+            asks = [(float(p), float(q)) for p, q in asks_raw]
+        except (ValueError, TypeError):
+            log.warning("orderbook parse failed for %s", symbol)
+            return None
+        ts = int(result.get("ts", 0) or 0)
+        return OrderbookSnapshot(ts=ts, bids=bids, asks=asks)
 
     def get_instrument_info(self, symbol: str) -> InstrumentInfo | None:
         """Получить лот/цена-фильтры для symbol с in-memory кэшированием.

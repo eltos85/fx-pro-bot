@@ -1,5 +1,100 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(market-context i4/7): Long/Short ratio + Orderbook L2 imbalance
+
+`<hash-pending>`
+
+**Контекст.** Четвёртая итерация — Bybit-флов. Добавляем два классических
+microstructure-сигнала: retail Long/Short account ratio (contrarian) и
+текущий orderbook L2 imbalance (institutional flow proxy).
+
+**Что добавлено.**
+
+1. **Bybit-клиент (`src/ai_trader/trading/client.py`):**
+   - `get_long_short_ratio(symbol, period='1h', limit=2)` →
+     `list[LongShortRatioPoint] | None`. Endpoint
+     `/v5/market/account-ratio` (pybit `get_long_short_ratio`).
+     Поля: `buyRatio`, `sellRatio` (0..1, sum≈1.0). Это доля
+     **аккаунтов** (не объёма) с long/short позицией среди ритейла на
+     Bybit. limit=2 = текущая + предыдущая часовая точка для
+     вычисления Δ buy_ratio.
+   - `get_orderbook(symbol, limit=50)` → `OrderbookSnapshot | None`.
+     Endpoint `/v5/market/orderbook?limit=50`. Возвращает 50 уровней
+     bid/ask `(price, qty)`.
+   - Новые dataclass'ы `LongShortRatioPoint(ts, buy_ratio, sell_ratio)`
+     и `OrderbookSnapshot(ts, bids, asks)`.
+
+2. **PositioningSnapshot расширен:**
+   - L/S ratio: `ls_buy_ratio_now`, `ls_buy_ratio_prev`,
+     `ls_buy_ratio_delta`.
+   - Orderbook: `ob_bid_depth` (sum qty 50 bids, base coin),
+     `ob_ask_depth`, `ob_imbalance` ((bid-ask)/(bid+ask), -1..1),
+     `ob_spread_bps` ((ask-bid)/mid × 10000), `ob_best_bid`,
+     `ob_best_ask`.
+
+3. **Метки (research-обоснованные):**
+   - **L/S retail (contrarian):** ≥0.65 →
+     `[retail HEAVY long — contrarian short]`,
+     ≥0.55 → `[retail long-leaning]`,
+     ≤0.35 → `[retail HEAVY short — contrarian long]`,
+     ≤0.45 → `[retail short-leaning]`,
+     иначе → `[retail balanced]`.
+     Источник: Coinalyze docs «Long/Short Ratio» (retail-positioning
+     contrarian); Bybit V5 spec для account-ratio.
+   - **Orderbook imbalance:** ≥±0.5 → `EXTREME bid wall` /
+     `EXTREME ask wall`, ≥±0.3 → `strong bid/ask pressure`,
+     ≥±0.1 → `bid/ask-leaning`. Source: Cont/Kukanov «Order book
+     imbalance and price dynamics» (J. Empirical Finance 2014);
+     Stoikov «The micro-price» (2018) для крипто-микроструктуры.
+
+4. **`build_positioning_snapshot` расширен:**
+   - Новые kwargs `ls_history`, `orderbook` (опц. None для backward
+     compat).
+   - `_build` всё так же tolerant: при пустом orderbook bids/asks или
+     суммарном qty=0 — `ob_imbalance=None` (без crash и без деления
+     на 0).
+
+5. **`format_positioning` теперь многострочный:**
+   - Базовый вывод (OI + Funding) без изменений.
+   - Если `ls_buy_ratio_now is not None` — добавляется строка
+     `L/S retail: buy=X% (Δ=±Ypp) [метка]`.
+   - Если `ob_imbalance is not None` — добавляется строка
+     `L2 OB(50): bid_depth=X ask_depth=Y imb=±Z [метка] spread=Wbps`.
+   - Если эти данные отсутствуют — строки **просто не появляются**,
+     promptу не показывается «n/a» по бесполезным полям.
+
+6. **`collect_market_context` теперь дополнительно запрашивает**
+   `get_long_short_ratio(limit=2)` и `get_orderbook(limit=50)` для
+   каждого символа. Дополнительная нагрузка ≈ +20 запросов к Bybit
+   public per cycle (10 пар × 2 endpoint), что в пределах rate-limit'а
+   (600 req/5s).
+
+**Тесты:** +8 регрессионных в `test_ai_trader_positioning.py`:
+- L/S history с delta (2 events).
+- L/S single point → no delta.
+- Orderbook balanced → imbalance = 0, spread считается.
+- Orderbook strong bid pressure (90/110 ratio).
+- Empty orderbook → `ob_imbalance=None`, без crash.
+- Zero-volume bids/asks → нет деления на 0.
+- format_positioning включает L/S + L2 строки при наличии.
+- format_positioning **не** показывает их при отсутствии.
+
+Suite 499/499 зелёный (20 на positioning, 13 на macro, 13 на indicators-v0.5).
+
+**Файлы.** `src/ai_trader/trading/client.py`,
+`src/ai_trader/analysis/positioning.py`,
+`src/ai_trader/trading/context.py`,
+`tests/test_ai_trader_positioning.py`.
+
+**Smoke-тест публичного API** (pybit demo BTCUSDT):
+- LSR: buyRatio=0.4691, sellRatio=0.5309 — текущий ритейл слегка
+  short-bias.
+- Orderbook depth=50: 50 bid + 50 ask уровней, top-of-book
+  bid=80976.6/0.217 BTC, ask=80976.7/0.003 BTC, spread = 0.1 USD ≈
+  0.012 bps.
+
+---
+
 ## 2026-05-07 — feat(market-context i3/7): Fear & Greed + BTC Dominance (global macro)
 
 `<hash-pending>`

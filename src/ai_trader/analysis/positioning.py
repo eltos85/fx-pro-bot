@@ -35,7 +35,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ai_trader.trading.client import FundingPoint, OpenInterestPoint
+from ai_trader.trading.client import (
+    FundingPoint,
+    LongShortRatioPoint,
+    OpenInterestPoint,
+    OrderbookSnapshot,
+)
 
 
 @dataclass
@@ -56,6 +61,19 @@ class PositioningSnapshot:
     funding_7d_mean: float | None
     funding_prev_period: float | None       # rate prev settlement (для tracking turning point)
 
+    # i4/7 (2026-05-07): retail Long/Short account ratio (contrarian)
+    ls_buy_ratio_now: float | None = None
+    ls_buy_ratio_prev: float | None = None
+    ls_buy_ratio_delta: float | None = None  # now - prev (за тот же period в Bybit endpoint)
+
+    # i4/7: Order book L2 imbalance (микроструктура, текущий снимок)
+    ob_bid_depth: float | None = None        # sum qty первых 50 bids (base coin)
+    ob_ask_depth: float | None = None        # sum qty первых 50 asks
+    ob_imbalance: float | None = None        # (bid - ask) / (bid + ask), -1..1
+    ob_spread_bps: float | None = None       # (best_ask - best_bid) / mid_price * 10000
+    ob_best_bid: float | None = None
+    ob_best_ask: float | None = None
+
 
 def _delta_pct(now: float, then: float) -> float | None:
     if then <= 0:
@@ -67,14 +85,16 @@ def build_positioning_snapshot(
     oi_history: list[OpenInterestPoint] | None,
     funding_history: list[FundingPoint] | None,
     funding_now: float | None = None,
+    ls_history: list[LongShortRatioPoint] | None = None,
+    orderbook: OrderbookSnapshot | None = None,
 ) -> PositioningSnapshot:
     """Построить snapshot из сырых истории-массивов.
 
     Tolerant к None / коротким массивам — для каждой производной
     проверяет наличие минимально нужных точек.
 
-    Конвенция: oi_history и funding_history отсортированы по ts возр.
-    (как возвращает client.get_*).
+    Конвенция: oi_history, funding_history, ls_history отсортированы
+    по ts возр. (как возвращает client.get_*).
     """
     oi_now = oi_4h = oi_24h = oi_d4 = oi_d24 = None
     if oi_history:
@@ -103,6 +123,31 @@ def build_positioning_snapshot(
         if len(funding_history) >= 2:
             f_prev = funding_history[-2].rate
 
+    # ─── Long/Short ratio (i4) ──────────────────────────────────
+    ls_now = ls_prev = ls_delta = None
+    if ls_history:
+        ls_now = ls_history[-1].buy_ratio
+        if len(ls_history) >= 2:
+            ls_prev = ls_history[-2].buy_ratio
+            ls_delta = ls_now - ls_prev
+
+    # ─── Orderbook imbalance (i4) ───────────────────────────────
+    ob_bid_d = ob_ask_d = ob_imb = ob_spread = ob_bid = ob_ask = None
+    if orderbook is not None and orderbook.bids and orderbook.asks:
+        ob_bid_d = sum(q for _, q in orderbook.bids)
+        ob_ask_d = sum(q for _, q in orderbook.asks)
+        total = ob_bid_d + ob_ask_d
+        if total > 0:
+            ob_imb = (ob_bid_d - ob_ask_d) / total
+        # Лучшие bid/ask = первый элемент в каждом массиве
+        # (по контракту OrderbookSnapshot bids — desc, asks — asc).
+        ob_bid = orderbook.bids[0][0]
+        ob_ask = orderbook.asks[0][0]
+        if ob_bid > 0 and ob_ask > 0:
+            mid = (ob_bid + ob_ask) / 2
+            if mid > 0:
+                ob_spread = (ob_ask - ob_bid) / mid * 10000  # bps
+
     return PositioningSnapshot(
         oi_now=oi_now,
         oi_4h_ago=oi_4h,
@@ -114,6 +159,15 @@ def build_positioning_snapshot(
         funding_24h_mean=f_mean_24h,
         funding_7d_mean=f_mean_7d,
         funding_prev_period=f_prev,
+        ls_buy_ratio_now=ls_now,
+        ls_buy_ratio_prev=ls_prev,
+        ls_buy_ratio_delta=ls_delta,
+        ob_bid_depth=ob_bid_d,
+        ob_ask_depth=ob_ask_d,
+        ob_imbalance=ob_imb,
+        ob_spread_bps=ob_spread,
+        ob_best_bid=ob_bid,
+        ob_best_ask=ob_ask,
     )
 
 
@@ -162,31 +216,82 @@ def _fmt(v: float | None, spec: str) -> str:
         return "n/a"
 
 
+def _ls_ratio_label(buy_ratio: float | None) -> str:
+    """Retail long/short — contrarian. >0.55 = много лонгов (риск squeeze
+    вниз); <0.45 = много шортов (риск squeeze вверх). Источник
+    интерпретации: Coinalyze docs «Long/Short ratio» и Bybit account-ratio
+    spec — это **доля аккаунтов**, не объёма."""
+    if buy_ratio is None:
+        return ""
+    if buy_ratio >= 0.65:
+        return " [retail HEAVY long — contrarian short]"
+    if buy_ratio >= 0.55:
+        return " [retail long-leaning]"
+    if buy_ratio <= 0.35:
+        return " [retail HEAVY short — contrarian long]"
+    if buy_ratio <= 0.45:
+        return " [retail short-leaning]"
+    return " [retail balanced]"
+
+
+def _ob_imbalance_label(imb: float | None) -> str:
+    """Orderbook imbalance: > 0 → больше bid-объёма (поддержка),
+    < 0 → больше ask (давление). Пороги ±0.3 / ±0.5 эмпирически
+    отражают «существенный перекос» / «extreme wall» (Cont/Kukanov
+    «Order book imbalance and price dynamics» J. Empir. Fin. 2014;
+    Stoikov 2018 для крипто-микроструктуры)."""
+    if imb is None:
+        return ""
+    a = abs(imb)
+    if a >= 0.5:
+        sign = "EXTREME bid wall" if imb > 0 else "EXTREME ask wall"
+        return f" [{sign}]"
+    if a >= 0.3:
+        sign = "strong bid pressure" if imb > 0 else "strong ask pressure"
+        return f" [{sign}]"
+    if a >= 0.1:
+        sign = "bid-leaning" if imb > 0 else "ask-leaning"
+        return f" [{sign}]"
+    return ""
+
+
 def format_positioning(s: PositioningSnapshot) -> str:
-    """Двустрочный текстовый формат для system-promptа.
+    """Многострочный текстовый формат для system-promptа.
 
-    Пример вывода:
-
-        OI: now=1.235M, Δ4h=+3.1% [moderate], Δ24h=+11.8% [strong buildup]
-        Funding: now=+0.012%, 24h cum=+0.036% [mild long bias],
-        24h mean=+0.012%, 7d mean=+0.008%
+    Включает: OI, Funding, retail Long/Short (если есть), L2 imbalance
+    (если есть). Каждый блок в 1 строке, метки рядом со значениями.
     """
-    line1 = (
+    lines: list[str] = []
+
+    lines.append(
         f"  OI: now={_fmt(s.oi_now, '{:.4g}')}, "
         f"Δ4h={_fmt(s.oi_delta_4h_pct, '{:+.2f}')}%{_oi_delta_label(s.oi_delta_4h_pct)}, "
         f"Δ24h={_fmt(s.oi_delta_24h_pct, '{:+.2f}')}%{_oi_delta_label(s.oi_delta_24h_pct)}"
     )
-    # funding_now / funding_24h_mean / funding_7d_mean — все в долях,
-    # выводим как % с 4 знаками.
     fnow_pct = s.funding_now * 100 if s.funding_now is not None else None
     fcum_pct = s.funding_24h_cumulative * 100 if s.funding_24h_cumulative is not None else None
     fmean_pct = s.funding_24h_mean * 100 if s.funding_24h_mean is not None else None
     f7d_pct = s.funding_7d_mean * 100 if s.funding_7d_mean is not None else None
 
-    line2 = (
+    lines.append(
         f"  Funding: now={_fmt(fnow_pct, '{:+.4f}')}%{_funding_label(s.funding_now)}, "
         f"24h cum={_fmt(fcum_pct, '{:+.4f}')}%{_funding_label(s.funding_24h_mean)}, "
         f"24h mean={_fmt(fmean_pct, '{:+.4f}')}%, "
         f"7d mean={_fmt(f7d_pct, '{:+.4f}')}%"
     )
-    return f"{line1}\n{line2}"
+
+    # i4: L/S ratio + orderbook — только если эти фичи реально есть
+    if s.ls_buy_ratio_now is not None:
+        lines.append(
+            f"  L/S retail: buy={_fmt(s.ls_buy_ratio_now * 100, '{:.1f}')}% "
+            f"(Δ={_fmt((s.ls_buy_ratio_delta or 0) * 100, '{:+.1f}')}pp)"
+            f"{_ls_ratio_label(s.ls_buy_ratio_now)}"
+        )
+    if s.ob_imbalance is not None and s.ob_best_bid is not None:
+        lines.append(
+            f"  L2 OB(50): bid_depth={_fmt(s.ob_bid_depth, '{:.4g}')} "
+            f"ask_depth={_fmt(s.ob_ask_depth, '{:.4g}')} "
+            f"imb={_fmt(s.ob_imbalance, '{:+.3f}')}{_ob_imbalance_label(s.ob_imbalance)} "
+            f"spread={_fmt(s.ob_spread_bps, '{:.1f}')}bps"
+        )
+    return "\n".join(lines)
