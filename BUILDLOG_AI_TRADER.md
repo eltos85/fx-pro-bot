@@ -2,7 +2,7 @@
 
 ## 2026-05-07 — fix(reconcile): не помечать позицию closed при API failure биржи
 
-`75d85a7`
+`f3ce979`
 
 **Симптом** (Telegram, 04:29 МСК = 01:29 UTC, cycle 74):
 
