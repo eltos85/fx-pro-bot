@@ -1,5 +1,81 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(symbols): расширили пул с 5 до 10 пар + max_pos 3→5 + parametrized prompt
+
+`коммит при deploy`
+
+**Что изменилось.**
+
+1. **Пул торгуемых пар: 5 → 10** (`src/ai_trader/config/settings.py`).
+   Добавлены 5 пар, не пересекающиеся с `bybit_bot.scan_symbols`
+   (SOL/ADA/LINK/SUI/TON/WIF/TIA/DOT) и не дублирующие текущие
+   ai_trader (BTC/ETH/BNB/XRP/DOGE):
+
+   | Symbol   | Класс / нарратив                          |
+   |----------|-------------------------------------------|
+   | AVAXUSDT | L1 / Avalanche subnets                    |
+   | LTCUSDT  | digital silver / mining-кор               |
+   | ATOMUSDT | Cosmos hub / IBC                          |
+   | WLDUSDT  | identity / OpenAI tie-in (нарратив 2025+) |
+   | TAOUSDT  | decentralized AI / Bittensor              |
+
+   Все 5 — публично листятся на Bybit demo linear (проверено
+   `/v5/market/tickers` 2026-05-07): AVAX $9.69, LTC $57.08, ATOM $1.93,
+   WLD $0.26, TAO $310.96. Funding rates в нейтральной зоне (|rate|<0.05%).
+
+2. **`AI_TRADER_MAX_POSITIONS`: default 3 → 5.**
+   Логика sizing: пул увеличен в 2 раза (5→10), одновременная ёмкость
+   увеличена пропорционально (3→5 = ~50%% пар). Risk-per-trade остаётся
+   2%% капитала ($10 на сделку), значит max realised drawdown за один
+   цикл = 5×$10 = $50, ровно равен `max_daily_loss_usd`. Дальше —
+   killswitch блокирует торговлю до следующего дня. Killswitch
+   `max_total_loss_usd=$200` (40%% capital) тоже не сдвигаем.
+
+3. **Параметризованный system-промпт** (`src/ai_trader/llm/prompts.py`).
+   Старый `SYSTEM_PROMPT` имел зашитые `BTCUSDT, ETHUSDT, BNBUSDT,
+   XRPUSDT, DOGEUSDT`, `Maximum 3 simultaneous`, `position_size_usd:
+   50-500`, `Risk ... <= $10 (2%% of $500)`. При расширении пар пришлось
+   бы каждый раз править саму строку → конфликтует с правилом «промпт
+   ЗАМОРОЖЕН на 14 дней эксперимента» (`prompts.py`).
+
+   v0.4: `SYSTEM_PROMPT_TEMPLATE` + `build_system_prompt(settings)`
+   подставляет лимиты и список пар через %-форматирование (literal
+   `%`-знаки в тексте → `%%` для escape, JSON-схемы остаются интактны
+   — это причина выбрать % над str.format с массой `{{`/`}}`).
+   `app/main.py` теперь зовёт `build_system_prompt(settings)` каждый
+   цикл, decisions audit-trail сохраняет ровно тот промпт что видел LLM.
+
+   Поведенческой подгонки нет: при дефолтных настройках текст 1:1
+   эквивалентен старому, плюс расширение списка пар. Это «параметризация
+   константы», не правка торговой логики.
+
+**Без runtime guard на overlap с bybit_bot.** Согласовано с пользователем:
+проверка остаётся в виде комментария в `DEFAULT_AI_SYMBOLS` (`settings.py`).
+ai_trader и bybit_bot — изолированные кодовые базы (правило
+`strategy-guard.mdc`), импорт `bybit_bot.*` из `ai_trader.*` запрещён.
+Контроль non-overlap — на уровне ревью / `.env` диффа.
+
+**Тесты.** +3 unit-теста `TestBuildSystemPrompt`:
+- `test_default_prompt_contains_default_pairs_and_limits` — все 10 пар
+  и дефолтные лимиты ($500, 5 pos, 5x lev, 2%%, $50 daily) попадают в
+  итоговый промпт; JSON-схема не сломана.
+- `test_custom_settings_propagate` — кастомные `AI_TRADER_*` env vars
+  пробрасываются в LLM-промпт (capital=$1000, max_pos=7, leverage=3,
+  risk=1%%); SOLUSDT появляется, DOGEUSDT исчезает; `position_size_usd`
+  диапазон становится `50-1000`.
+- `test_no_unresolved_placeholders` — fail-fast если в финальном
+  промпте остался хоть один `%(name)s` (защита от опечатки в шаблоне).
+
+Все 453 теста зелёные (было 450 → +3).
+
+**Файлы:**
+- `src/ai_trader/config/settings.py` — DEFAULT_AI_SYMBOLS 5→10, max_pos 3→5
+- `src/ai_trader/llm/prompts.py` — SYSTEM_PROMPT_TEMPLATE + build_system_prompt
+- `src/ai_trader/app/main.py` — вызов `build_system_prompt(settings)` на цикл
+- `tests/test_ai_trader.py` — TestBuildSystemPrompt (3 теста)
+
+---
+
 ## 2026-05-07 — fix(reconcile): не помечать позицию closed при API failure биржи
 
 `f3ce979`

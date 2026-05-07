@@ -458,6 +458,94 @@ class TestQtyRounding:
         assert place_called == [], "place_order не должен быть вызван"
 
 
+# ─── build_system_prompt: подстановка plairs/limits в шаблон ─────────
+
+
+class TestBuildSystemPrompt:
+    """v0.4 (2026-05-07): SYSTEM_PROMPT превращён в шаблон с плейсхолдерами,
+    значения подставляются из `AiTraderSettings`. Эти тесты гарантируют:
+    - все %(name)s корректно подменяются (нет KeyError),
+    - JSON-схема в шаблоне не ломается (фигурные скобки литеральны),
+    - изменения настроек реально попадают в промпт LLM.
+    """
+
+    @staticmethod
+    def _make_settings(monkeypatch, **env):
+        # Чистим от лишних переменных, чтобы не наследовалось из локального .env
+        for key in list(__import__("os").environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        from ai_trader.config.settings import AiTraderSettings
+        return AiTraderSettings()
+
+    def test_default_prompt_contains_default_pairs_and_limits(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt
+
+        settings = self._make_settings(monkeypatch)
+        prompt = build_system_prompt(settings)
+
+        # Базовые лимиты дефолтного конфига (settings.py).
+        assert "Maximum 5 simultaneous open positions" in prompt
+        assert "Maximum leverage: 5x" in prompt
+        assert "Virtual capital: $500 USD" in prompt
+        assert "Maximum risk per trade: 2% of capital ($10 max" in prompt
+        assert "Daily loss limit: $50" in prompt
+
+        # Все 10 дефолтных пар в списке ALLOWED.
+        for sym in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+                    "AVAXUSDT", "LTCUSDT", "ATOMUSDT", "WLDUSDT", "TAOUSDT"):
+            assert sym in prompt, f"{sym} должен быть в ALLOWED PAIRS"
+
+        # JSON-схема не сломана плейсхолдерами.
+        assert '"action": "open"' in prompt
+        assert '"action": "close"' in prompt
+        assert '"action": "hold"' in prompt
+        # %(min_size)d-%(max_size).0f → 50-500 для default capital
+        assert "position_size_usd\": 50-500" in prompt
+        assert "leverage\": 1-5" in prompt
+
+    def test_custom_settings_propagate(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt
+
+        settings = self._make_settings(
+            monkeypatch,
+            AI_TRADER_SYMBOLS="BTCUSDT,ETHUSDT,SOLUSDT",
+            AI_TRADER_VIRTUAL_CAPITAL="1000",
+            AI_TRADER_MAX_POSITIONS="7",
+            AI_TRADER_MAX_LEVERAGE="3",
+            AI_TRADER_RISK_PER_TRADE="0.01",
+            AI_TRADER_MAX_DAILY_LOSS="100",
+        )
+        prompt = build_system_prompt(settings)
+
+        assert "Maximum 7 simultaneous open positions" in prompt
+        assert "Maximum leverage: 3x" in prompt
+        assert "Virtual capital: $1000 USD" in prompt
+        # 1% of $1000 = $10
+        assert "1% of capital ($10 max" in prompt
+        assert "Daily loss limit: $100" in prompt
+        # SOLUSDT появляется (а DOGE не должен)
+        assert "SOLUSDT" in prompt
+        assert "DOGEUSDT" not in prompt
+        # JSON-schema лимиты обновляются
+        assert "leverage\": 1-3" in prompt
+        assert "position_size_usd\": 50-1000" in prompt
+
+    def test_no_unresolved_placeholders(self, monkeypatch):
+        """В финальном промпте не должно остаться ни одного %(...)s — иначе
+        LLM получит сырой плейсхолдер вместо значения."""
+        import re
+
+        from ai_trader.llm.prompts import build_system_prompt
+
+        settings = self._make_settings(monkeypatch)
+        prompt = build_system_prompt(settings)
+        leftovers = re.findall(r"%\([a-zA-Z_]+\)[a-zA-Z.0-9]+", prompt)
+        assert leftovers == [], f"unresolved placeholders in prompt: {leftovers}"
+
+
 # ─── get_positions: None при API failure (regression 2026-05-07) ─────
 
 

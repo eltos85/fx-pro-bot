@@ -14,13 +14,27 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Пары для AI-трейдера. ВАЖНО: не пересекаются с bybit_bot scan_symbols
 # (SOL, ADA, LINK, SUI, TON, WIF, TIA, DOT). Если поменяешь — проверь
-# нет ли коллизии с активными парами основного бота.
+# нет ли коллизии с активными парами основного бота, иначе одну пару
+# будут параллельно вести оба бота, и непонятно чьи открытые позиции
+# принадлежат кому (нет общего ledger).
+#
+# v0.4 (2026-05-07): расширили с 5 до 10. Добавлены:
+#   - AVAXUSDT, LTCUSDT, ATOMUSDT — крупные L1 с разными нарративами
+#     (Avalanche subnets, digital silver / mining, Cosmos hub / IBC).
+#   - WLDUSDT, TAOUSDT — narrative-плеи 2025-2026 (Worldcoin / identity,
+#     Bittensor / decentralized AI). Дают LLM-агенту возможность
+#     отыгрывать AI-флоу без перекрытия с bybit_bot.
 DEFAULT_AI_SYMBOLS: tuple[str, ...] = (
     "BTCUSDT",
     "ETHUSDT",
     "BNBUSDT",
     "XRPUSDT",
     "DOGEUSDT",
+    "AVAXUSDT",
+    "LTCUSDT",
+    "ATOMUSDT",
+    "WLDUSDT",
+    "TAOUSDT",
 )
 
 
@@ -87,8 +101,13 @@ class AiTraderSettings(BaseSettings):
         default=200.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
     )
     max_open_positions: int = Field(
-        default=3, validation_alias="AI_TRADER_MAX_POSITIONS"
+        default=5, validation_alias="AI_TRADER_MAX_POSITIONS"
     )
+    # 3 → 5 (2026-05-07): пул пар расширен с 5 до 10, увеличиваем
+    # одновременную ёмкость пропорционально (50% пар = типичный режим
+    # «несколько setup'ов одновременно»). Risk-per-trade остаётся 2%
+    # ($10), значит max realised drawdown за один цикл = 5×$10 = $50,
+    # ровно равен `max_daily_loss_usd`. Дальше — killswitch.
     max_leverage: int = Field(default=5, validation_alias="AI_TRADER_MAX_LEVERAGE")
     # Risk per trade в долях (0.02 = 2%). Используется LLM в промпте + для
     # будущих helper-функций position sizing.

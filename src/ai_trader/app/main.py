@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 
 from ai_trader.config.settings import AiTraderSettings
 from ai_trader.llm.client import DeepSeekClient
-from ai_trader.llm.prompts import SYSTEM_PROMPT, build_user_prompt
+from ai_trader.llm.prompts import build_system_prompt, build_user_prompt
 from ai_trader.news.rss import RssNewsProvider
 from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from ai_trader.state.db import AiTraderStore
@@ -251,19 +251,20 @@ def _run_cycle(
     ctx = collect_market_context(
         bybit, store, settings.symbols, settings.virtual_capital_usd, news_provider
     )
+    system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
 
     log.info(
         "LLM call: positions=%d real_equity=$%.2f news=%d",
         len(ctx.open_positions), ctx.real_equity_usd, len(ctx.news),
     )
-    resp = llm.ask(SYSTEM_PROMPT, user_prompt)
+    resp = llm.ask(system_prompt, user_prompt)
     store.add_api_cost(resp.cost_usd)
 
     if resp.error:
         store.log_decision(
             cycle=cycle,
-            prompt_system=SYSTEM_PROMPT,
+            prompt_system=system_prompt,
             prompt_user=user_prompt,
             response_raw=None,
             parsed_action=None,
@@ -288,7 +289,7 @@ def _run_cycle(
     if isinstance(parsed, str):
         store.log_decision(
             cycle=cycle,
-            prompt_system=SYSTEM_PROMPT,
+            prompt_system=system_prompt,
             prompt_user=user_prompt,
             response_raw=resp.text,
             parsed_action=None,
@@ -306,7 +307,7 @@ def _run_cycle(
     )
     store.log_decision(
         cycle=cycle,
-        prompt_system=SYSTEM_PROMPT,
+        prompt_system=system_prompt,
         prompt_user=user_prompt,
         response_raw=resp.text,
         parsed_action=parsed.raw,
