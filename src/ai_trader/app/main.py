@@ -45,17 +45,41 @@ def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
 def _reconcile_closed_positions(
     client: AiBybitClient, store: AiTraderStore, tg: TelegramBot | None = None
 ) -> None:
-    """Если SL/TP закрыли позицию на бирже — обновим её в БД + push в TG."""
+    """Если SL/TP закрыли позицию на бирже — обновим её в БД + push в TG.
+
+    Защита от false-close при transient outage биржи (DNS / network /
+    non-zero retCode). Инцидент 2026-05-07: на VPS 30 минут отказывал DNS,
+    `get_positions` возвращал [] (молча), reconcile помечал реально
+    открытую позицию как closed, в БД появлялась exit_price=entry_price
+    и PnL=$0.00 (визитная карточка фейк-клоза). Теперь:
+    - `get_positions` возвращает None при API failure → этот символ
+      пропускается полностью, ни одна его позиция не помечается closed.
+    - `get_ticker` неудача → exit_price нет → позиция тоже НЕ помечается
+      closed (вернёмся в следующем цикле, когда биржа отвечает).
+    """
     open_db = store.get_open_positions()
     if not open_db:
         return
 
+    # Собираем positions per-symbol. None-маркер означает «API не ответил»,
+    # для этого символа reconcile пропускаем целиком.
     api_positions_by_symbol: dict[str, list] = {}
+    failed_symbols: set[str] = set()
     for sym in {p.symbol for p in open_db}:
-        for p in client.get_positions(symbol=sym):
-            api_positions_by_symbol.setdefault(p.symbol, []).append(p)
+        positions = client.get_positions(symbol=sym)
+        if positions is None:
+            failed_symbols.add(sym)
+            log.warning(
+                "RECONCILE skipped for %s: get_positions returned None "
+                "(API unavailable, deferring to next cycle)",
+                sym,
+            )
+            continue
+        api_positions_by_symbol[sym] = list(positions)
 
     for db_pos in open_db:
+        if db_pos.symbol in failed_symbols:
+            continue
         api_list = api_positions_by_symbol.get(db_pos.symbol, [])
         still_open = any(
             p.side == db_pos.side and abs(p.size - db_pos.qty) < 1e-6 for p in api_list
@@ -63,7 +87,14 @@ def _reconcile_closed_positions(
         if still_open:
             continue
         ticker = client.get_ticker(db_pos.symbol)
-        exit_price = ticker.last_price if ticker else db_pos.entry_price
+        if ticker is None or ticker.last_price <= 0:
+            log.warning(
+                "RECONCILE deferred for id=%d %s %s: ticker unavailable, "
+                "не помечаю closed без цены выхода",
+                db_pos.id, db_pos.side, db_pos.symbol,
+            )
+            continue
+        exit_price = ticker.last_price
         if db_pos.side == "Buy":
             pnl = (exit_price - db_pos.entry_price) * db_pos.qty
         else:

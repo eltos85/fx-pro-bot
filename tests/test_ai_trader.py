@@ -457,3 +457,228 @@ class TestQtyRounding:
         assert "min_order_qty" in (result.error or "")
         assert place_called == [], "place_order не должен быть вызван"
 
+
+# ─── get_positions: None при API failure (regression 2026-05-07) ─────
+
+
+class TestGetPositionsApiFailureMarker:
+    """Регрессия: при network/DNS-ошибке Bybit `get_positions` должен
+    возвращать ``None`` (а не ``[]``), чтобы вызывающий код мог отличить
+    «биржа сказала позиций нет» от «биржа не ответила».
+
+    Инцидент 2026-05-07: на VPS отказал DNS, `get_positions` молча
+    возвращал `[]`, reconcile решал что позиция закрылась через SL/TP
+    и помечал её closed в БД, хотя на бирже она оставалась открытой.
+    """
+
+    @staticmethod
+    def _make_client_with_session(session):
+        from ai_trader.trading.client import AiBybitClient
+
+        client = AiBybitClient.__new__(AiBybitClient)
+        client._session = session
+        client._category = "linear"
+        client._instr_cache = {}
+        return client
+
+    def test_network_exception_returns_none(self):
+        class FakeSession:
+            def get_positions(self, **_kw):
+                raise ConnectionError("DNS resolution failed")
+
+        client = self._make_client_with_session(FakeSession())
+        assert client.get_positions(symbol="BTCUSDT") is None
+
+    def test_non_zero_retcode_returns_none(self):
+        class FakeSession:
+            def get_positions(self, **_kw):
+                return {"retCode": 10001, "retMsg": "params error", "result": {"list": []}}
+
+        client = self._make_client_with_session(FakeSession())
+        assert client.get_positions(symbol="BTCUSDT") is None
+
+    def test_success_empty_list_returns_empty(self):
+        class FakeSession:
+            def get_positions(self, **_kw):
+                return {"retCode": 0, "result": {"list": []}}
+
+        client = self._make_client_with_session(FakeSession())
+        assert client.get_positions(symbol="BTCUSDT") == []
+
+    def test_success_with_positions(self):
+        class FakeSession:
+            def get_positions(self, **_kw):
+                return {
+                    "retCode": 0,
+                    "result": {"list": [
+                        {
+                            "symbol": "BTCUSDT", "side": "Buy", "size": "0.006",
+                            "avgPrice": "82184.9", "leverage": "1",
+                            "unrealisedPnl": "-5.46", "positionValue": "493.0",
+                        }
+                    ]},
+                }
+
+        client = self._make_client_with_session(FakeSession())
+        out = client.get_positions(symbol="BTCUSDT")
+        assert out is not None
+        assert len(out) == 1
+        assert out[0].symbol == "BTCUSDT"
+        assert out[0].size == 0.006
+
+
+# ─── _reconcile_closed_positions: regression 2026-05-07 ────────────
+
+
+class _FakeClientReconcile:
+    """In-memory fake клиент для reconcile-тестов."""
+
+    def __init__(self, *, positions_by_symbol=None, ticker_by_symbol=None,
+                 positions_returns_none=False, ticker_returns_none=False):
+        self._positions = positions_by_symbol or {}
+        self._tickers = ticker_by_symbol or {}
+        self._positions_none = positions_returns_none
+        self._ticker_none = ticker_returns_none
+
+    def get_positions(self, symbol=None):
+        if self._positions_none:
+            return None
+        return list(self._positions.get(symbol, []))
+
+    def get_ticker(self, symbol):
+        if self._ticker_none:
+            return None
+        return self._tickers.get(symbol)
+
+
+def _open_btc_position(store):
+    return store.open_position(
+        symbol="BTCUSDT", side="Buy", qty=0.006, entry_price=82184.9,
+        sl_price=80541.0, tp_price=84651.0, leverage=1,
+        order_link_id="ai_test_btc",
+        llm_reason="test fixture",
+    )
+
+
+class TestReconcileClosedPositions:
+    def test_api_failure_does_not_close_position(self, store):
+        """Регрессия 2026-05-07: get_positions=None → позиция остаётся
+        open в БД, мы откладываем reconcile до восстановления API."""
+        from ai_trader.app.main import _reconcile_closed_positions
+
+        pos_id = _open_btc_position(store)
+        client = _FakeClientReconcile(positions_returns_none=True)
+
+        _reconcile_closed_positions(client, store, tg=None)
+
+        opens = store.get_open_positions()
+        assert len(opens) == 1, "позиция должна остаться открытой"
+        assert opens[0].id == pos_id
+        assert opens[0].closed_at is None
+        assert opens[0].exit_price is None
+
+    def test_ticker_failure_does_not_close_position(self, store):
+        """Если позиции на бирже нет, но ticker не получен — не закрываем
+        (без exit_price нельзя посчитать корректный PnL)."""
+        from ai_trader.app.main import _reconcile_closed_positions
+
+        pos_id = _open_btc_position(store)
+        client = _FakeClientReconcile(
+            positions_by_symbol={"BTCUSDT": []},  # биржа: нет позиций
+            ticker_returns_none=True,
+        )
+
+        _reconcile_closed_positions(client, store, tg=None)
+
+        opens = store.get_open_positions()
+        assert len(opens) == 1, "без ticker'а закрывать нельзя"
+        assert opens[0].id == pos_id
+
+    def test_position_still_open_no_change(self, store):
+        from ai_trader.app.main import _reconcile_closed_positions
+        from ai_trader.trading.client import Position
+
+        _open_btc_position(store)
+        client = _FakeClientReconcile(
+            positions_by_symbol={"BTCUSDT": [Position(
+                symbol="BTCUSDT", side="Buy", size=0.006, entry_price=82180,
+                leverage=1, unrealised_pnl=-5.46, position_value=493.0,
+            )]},
+        )
+
+        _reconcile_closed_positions(client, store, tg=None)
+
+        opens = store.get_open_positions()
+        assert len(opens) == 1
+        assert opens[0].closed_at is None
+
+    def test_position_actually_closed_marks_closed(self, store):
+        """Happy path: позиция исчезла, ticker есть → close с правильным PnL."""
+        from ai_trader.app.main import _reconcile_closed_positions
+        from ai_trader.trading.client import Ticker
+
+        pos_id = _open_btc_position(store)
+        client = _FakeClientReconcile(
+            positions_by_symbol={"BTCUSDT": []},
+            ticker_by_symbol={"BTCUSDT": Ticker(
+                symbol="BTCUSDT", last_price=84651.0, bid=84650, ask=84652,
+                funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+            )},
+        )
+
+        _reconcile_closed_positions(client, store, tg=None)
+
+        opens = store.get_open_positions()
+        assert opens == []
+        # PnL = (84651 - 82184.9) * 0.006 ≈ 14.7966
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT exit_price, realized_pnl_usd, close_reason "
+                "FROM positions WHERE id=?", (pos_id,),
+            ).fetchone()
+        assert row["exit_price"] == pytest.approx(84651.0)
+        assert row["realized_pnl_usd"] == pytest.approx(14.7966)
+        assert "exchange_closed" in row["close_reason"]
+
+    def test_partial_api_failure_isolates_failed_symbol(self, store):
+        """Если для одного символа API упал, а для другого ОК — закрытая
+        на бирже ETH-позиция должна закрыться, а BTC — остаться открытой."""
+        from ai_trader.app.main import _reconcile_closed_positions
+        from ai_trader.trading.client import Ticker
+
+        btc_id = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.006, entry_price=82184.9,
+            sl_price=80541.0, tp_price=84651.0, leverage=1,
+            order_link_id="ai_btc_partial", llm_reason="t",
+        )
+        eth_id = store.open_position(
+            symbol="ETHUSDT", side="Sell", qty=0.5, entry_price=3000,
+            sl_price=3100, tp_price=2800, leverage=3,
+            order_link_id="ai_eth_partial", llm_reason="t",
+        )
+
+        class PartialFailClient:
+            def get_positions(self, symbol=None):
+                if symbol == "BTCUSDT":
+                    return None  # DNS не разрешил конкретно btc-запрос
+                if symbol == "ETHUSDT":
+                    return []  # на бирже ETH закрылся
+                return []
+
+            def get_ticker(self, symbol):
+                if symbol == "ETHUSDT":
+                    return Ticker(
+                        symbol=symbol, last_price=2800.0, bid=2799, ask=2801,
+                        funding_rate=0, volume_24h=0, price_change_pct_24h=0,
+                    )
+                return None
+
+        _reconcile_closed_positions(PartialFailClient(), store, tg=None)
+
+        opens = store.get_open_positions()
+        assert {p.id for p in opens} == {btc_id}, (
+            "BTC должен остаться open (API failure), "
+            "ETH должен быть closed (биржа закрыла + ticker есть)"
+        )
+        assert eth_id not in {p.id for p in opens}
+

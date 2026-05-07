@@ -1,5 +1,101 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — fix(reconcile): не помечать позицию closed при API failure биржи
+
+`75d85a7`
+
+**Симптом** (Telegram, 04:29 МСК = 01:29 UTC, cycle 74):
+
+```
+❌ ERROR in LLM
+Connection error.
+```
+
+Позиция **id=5 BTCUSDT Buy 0.006 @ $82184.9** на бирже Bybit demo
+осталась открытой (size=0.006, SL=80541, TP=84651, unrealised PnL ≈ −$5.46),
+а в локальной БД `ai_trader.sqlite` была помечена closed с маркерами:
+
+```
+exit_price = 82184.9          ← равен entry_price
+realized_pnl_usd = $0.00      ← подозрительно ровный ноль
+close_reason = "exchange_closed (SL/TP/manual)"
+closed_at = 2026-05-07T00:21:44 UTC
+```
+
+Pattern PnL=$0.00 + exit=entry — визитная карточка фейк-клоза.
+
+**Причина.** В Cycle 71 (00:21:16 UTC) на VPS отказал DNS на ~30 минут:
+
+```
+2026-05-07 00:21:44 [ERROR] ai_trader.trading.client: get_positions failed
+NameResolutionError: Failed to resolve 'api-demo.bybit.com'
+2026-05-07 00:21:44 [INFO] ai_trader: RECONCILE closed:
+  id=5 Buy BTCUSDT qty=0.006 | entry=$82184.9 exit=$82184.9 | PnL: $+0.00
+```
+
+`AiBybitClient.get_positions(symbol="BTCUSDT")` поймал
+`requests.ConnectionError` и **молча возвращал `[]`**. Реконсилятор
+в `app/main.py:_reconcile_closed_positions` интерпретировал пустой
+список как «позиция исчезла с биржи → её закрыли SL/TP» и обновил БД.
+`get_ticker` тоже упал, поэтому `exit_price` упал на fallback
+`db_pos.entry_price` → PnL=$0.00.
+
+После этого LLM API тоже упал с тем же DNS-symptom — отсюда
+«❌ ERROR in LLM / Connection error» в Telegram (это сообщение
+дошло позже, когда DNS Telegram-API восстановился раньше биржевого).
+
+**Решение.**
+
+1. **`get_positions` теперь возвращает `list[Position] | None`**
+   (`src/ai_trader/trading/client.py`):
+   - `None` ⇐ network exception **или** `retCode != 0`.
+   - `[]` ⇐ API ответил успешно, открытых позиций нет.
+   - Вызывающий код ОБЯЗАН отличать `None` от `[]`:
+     «нет ответа» ≠ «нет позиций».
+
+2. **`_reconcile_closed_positions`** (`src/ai_trader/app/main.py`):
+   - Собирает positions per-symbol; если `get_positions` вернул
+     `None` для символа — этот символ помечается `failed_symbols`
+     и **полностью пропускается**, ни одна его позиция не помечается
+     closed.
+   - Дополнительно: даже при успешном `get_positions=[]`, если
+     `get_ticker` тоже упал — позиция **не помечается closed**
+     (без exit-цены нельзя посчитать корректный PnL; ждём следующего
+     цикла, когда биржа отвечает).
+   - Логируем `WARNING` с причиной отложенного reconcile, чтобы
+     видеть в журнале реальные blackouts.
+
+3. **Hot-fix БД на VPS.** Восстановил позицию id=5:
+   - `UPDATE positions SET closed_at=NULL, exit_price=NULL,
+     realized_pnl_usd=NULL, close_reason=NULL WHERE id=5;`
+   - `UPDATE daily_pnl SET n_trades=n_trades-1 WHERE day='2026-05-07';`
+     (`realized_pnl_usd` и `n_wins` не трогал — фейк-клоз был с
+     PnL=$0, won=0, эти счётчики не сместились).
+   - После восстановления состояние БД 1:1 совпадает с биржей
+     (Buy 0.006 BTCUSDT @ 82184.9, SL=80541, TP=84651).
+
+4. **9 regression-тестов** (`tests/test_ai_trader.py`):
+   - `TestGetPositionsApiFailureMarker` (4 теста):
+     network-exception → None, non-zero retCode → None,
+     empty list → [], success c позициями.
+   - `TestReconcileClosedPositions` (5 тестов):
+     `test_api_failure_does_not_close_position` (главный регресс),
+     `test_ticker_failure_does_not_close_position`,
+     `test_position_still_open_no_change`,
+     `test_position_actually_closed_marks_closed` (happy path с
+     корректным PnL=$14.7966 на TP),
+     `test_partial_api_failure_isolates_failed_symbol` (BTC failed,
+     ETH ОК — изолированно обрабатываются).
+
+5. Все 450 тестов в репозитории зелёные.
+
+**Файлы:**
+- `src/ai_trader/trading/client.py` — `get_positions` → `| None`
+- `src/ai_trader/app/main.py` — guard в `_reconcile_closed_positions`
+- `tests/test_ai_trader.py` — +9 regression-тестов
+
+---
+
 ## 2026-05-06 — fix(qty rounding): instruments-info + qtyStep/tickSize округление
 
 `коммит при deploy`

@@ -204,7 +204,15 @@ class AiBybitClient:
                         return 0.0
         return 0.0
 
-    def get_positions(self, symbol: str | None = None) -> list[Position]:
+    def get_positions(self, symbol: str | None = None) -> list[Position] | None:
+        """Возвращает список открытых позиций.
+
+        - ``[]`` — API ответил успешно, открытых позиций нет.
+        - ``None`` — запрос не получился (network/DNS/timeout/non-zero retCode).
+          Вызывающий код ОБЯЗАН отличать ``None`` от ``[]``: «нет ответа»
+          ≠ «нет позиций». Иначе reconcile-логика помечает позиции closed
+          при transient outage биржи (см. инцидент 2026-05-07).
+        """
         try:
             params: dict = {"category": self._category, "settleCoin": "USDT"}
             if symbol:
@@ -212,7 +220,15 @@ class AiBybitClient:
             resp = self._session.get_positions(**params)
         except Exception:
             log.exception("get_positions failed")
-            return []
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_positions non-zero retCode: code=%s msg=%s",
+                ret_code,
+                resp.get("retMsg", ""),
+            )
+            return None
         items = resp.get("result", {}).get("list", []) or []
         out: list[Position] = []
         for p in items:
