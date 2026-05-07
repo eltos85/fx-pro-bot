@@ -1,5 +1,101 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(prompt v0.6): EXIT MANAGEMENT block (research-based 2026)
+
+`<hash-pending>`
+
+**Контекст.** После аудита P0 пользователь спросил «почему модель не
+закрывает AVAX-short в плюсе пока есть прибыль» (цикл 5: unrealised
+PnL ≈ +$7.85 ≈ 58% от TP-target). Анализ показал: промпт **entry-only**
+— описывает как **открывать**, но не описывает когда **закрывать
+раньше TP**. Единственный exit-механизм был exchange SL/TP. Это
+оставляет деньги на столе при «50% pullback после 90% прохода к TP»
+и не позволяет реагировать на setup invalidation.
+
+**Research-источники 2026 (web, использованы для составления правил):**
+
+1. BBX Research 2026 «Stop Riding the Profit Rollercoaster: Institutional
+    Guide to Dynamic Trade Management» — Classic 1-2-3 Scaling Model:
+    move SL to BE on +1R, T1 close 50%% at 1.5R-2R. URL:
+    `research.bbx.com/stop-riding-the-profit-rollercoaster-an-institutional-guide-to-dynamic-trade-management-and-trailing-stops/`
+2. StratBase 2026 «Trailing Stop Strategies Compared» — BTC daily
+    2019-2025 backtest: ATR 2.0× +285%% return / best Sharpe; ATR 2.5×
+    +320%% return / -25%% MDD. 1.5×ATR activation distance улучшает
+    return на 14%% и снижает breakeven stop-outs на 35%%. URL:
+    `stratbase.ai/en/blog/trailing-stop-strategies-compared`
+3. TradeOS «Mean Reversion VWAP+Z-Score Playbook»; Extreme to Mean
+    «Reversion-to-Mean VWAP Trading Strategy» — для mean-reversion
+    primary target = возврат к VWAP, partial close 50%% на VWAP/Z=±1.
+    Не fixed R:R distance beyond VWAP. URLs:
+    `tradeos.xyz/vwap-zscore-mean-reversion-strategy`,
+    `extremetomean.com/the-reversion-to-mean-vwap-trading-strategy-how-to-snap-back-into-profits`
+4. Headge 2026 «Define Your Trading Edge» — invalidation = structural
+    condition (defendable, swing clarity, defended reactions), НЕ feeling.
+5. AOTrading 2026 «Crypto Position Management 3-5-7 Rule»;
+    LedgerMind 2026 «Advanced Signal Confirmation Techniques» —
+    multi-layer confirmation framework (3+ источника = WR > 67%%).
+
+**Что добавлено в `src/ai_trader/llm/prompts.py` (v0.6).**
+
+1. **ANALYSIS APPROACH расширен с 7 до 8 пунктов:** добавлен пункт
+    «OPEN POSITIONS REVIEW» (skip если нет открытых) — модель обязана
+    для КАЖДОЙ открытой позиции оценить:
+    a. валиден ли original setup;
+    b. unrealised PnL в R-units (>=1R / >=1.5R / >=2R);
+    c. появилось ли contrary new evidence;
+    d. для mean-reversion entries — вернулась ли цена к VWAP.
+    Это драйвер close/hold-решения через EXIT MANAGEMENT.
+
+2. **Новый блок EXIT MANAGEMENT (research-based):** 4 триггера
+    early-close (`action="close"`) + 4 явных DO-NOT-CLOSE guards.
+
+    Триггеры (любого достаточно):
+    - **(1) SETUP INVALIDATION:** для mean-reversion — close когда
+      |VWAP dev| < 0.5%% ИЛИ retail L/S вернулся в 0.45-0.55 / F&G
+      вышел из contrarian zone. Для trend — 4H EMA20/50 flip.
+      Для news — 24h+ без follow-through.
+    - **(2) LOCKED-PROFIT GUARD:** unrealised >= 1.5R AND setup
+      ослаб (одна из confirmation invalidated). Аналог partial-close
+      в нашем коде, который full-close-only.
+    - **(3) ADVERSE NEW EVIDENCE THIS CYCLE:** counter-news,
+      liquidation cascade против позиции (1-2h), funding flip,
+      OI extreme buildup (>=15%% Δ24h).
+    - **(4) MACRO REGIME SHIFT:** F&G вышел из contrarian-зоны для
+      contrarian entry.
+
+    DO NOT CLOSE EARLY (HOLD):
+    - Profit < 1R и setup intact — let it run.
+    - В плюсе + setup intact + нет contrary evidence — exchange SL/TP.
+    - Просто «хочу зафиксировать профит» без объективного триггера —
+      это эмоция, не data-driven decision.
+    - Belief о возможном развороте без объективных данных — belief != invalidation.
+
+    Закрытие через `action="close"` (full close). Бот пока НЕ поддерживает
+    partial close, trailing-stop updates, breakeven SL — это TODO для
+    code-side изменений (отложено по решению user'а).
+
+3. **build_user_prompt:** обновлён под новую 8-пунктовую структуру
+    (`MACRO → TREND → VOLATILITY → SENTIMENT/POSITIONING →
+    OPEN POSITIONS REVIEW → CONFIRMATIONS → R:R CHECK → DECISION`).
+
+**Тесты:** `python3 -m pytest tests/ -q` → **525 passed in 5.81s**.
+Регрессий нет; `test_no_unresolved_placeholders` корректно валидирует
+новый промпт (нет неэскейпленных `%`).
+
+**По правилу `no-data-fitting.mdc`:** правки промпта основаны на
+**пяти research-артефактах 2026 года** (см. список выше), не на
+интуиции. Каждый из 4 триггеров и 4 guard'ов имеет ссылку на источник
+в самом промпте. Sample-size: одна сделка пока (AVAX-short) — этот
+фикс не делает выводов из неё, а добавляет общие правила exit
+management из независимой research-литературы.
+
+**Файлы:**
+- `src/ai_trader/llm/prompts.py` (v0.6): ANALYSIS APPROACH (8 пунктов),
+  новый EXIT MANAGEMENT блок, обновлённый docstring и build_user_prompt
+- `BUILDLOG_AI_TRADER.md`: эта запись
+
+---
+
 ## 2026-05-07 — fix(prompt-collisions P0): унифицировать funding-метку, описать i1-i6 в промпте
 
 `<hash-pending>`
