@@ -22,6 +22,11 @@ import logging
 from dataclasses import dataclass, field
 
 from ai_trader.analysis.indicators import IndicatorSnapshot, compute_snapshot, format_snapshot
+from ai_trader.analysis.positioning import (
+    PositioningSnapshot,
+    build_positioning_snapshot,
+    format_positioning,
+)
 from ai_trader.news.rss import NewsItem
 from ai_trader.state.db import AiPosition, AiTraderStore
 from ai_trader.trading.client import AiBybitClient, Bar, Ticker
@@ -37,6 +42,10 @@ class SymbolSnapshot:
     bars_4h: list[Bar]
     ind_1h: IndicatorSnapshot | None = None
     ind_4h: IndicatorSnapshot | None = None
+    # i2/7 (2026-05-07): positioning-фичи (OI delta + funding history).
+    # None если эндпоинты недоступны или мало истории — формат не падает,
+    # просто пропускает блок POSITIONING для символа.
+    positioning: PositioningSnapshot | None = None
 
 
 @dataclass
@@ -87,6 +96,19 @@ def collect_market_context(
                 rv_window=30,
                 bars_per_year=6 * 365,
             )
+
+        # i2/7 (2026-05-07): positioning-фичи (institutional 2026 primary).
+        # 25 OI точек × 1h = текущая + 24 hours back; funding 10 событий = ~3.3 дня.
+        # При None / коротких массивах build_positioning_snapshot выдаёт snapshot
+        # с None-полями — формат потом просто пропустит этот блок.
+        oi_hist = client.get_open_interest_history(sym, interval="1h", limit=25)
+        funding_hist = client.get_funding_rate_history(sym, limit=21)
+        positioning = build_positioning_snapshot(
+            oi_history=oi_hist,
+            funding_history=funding_hist,
+            funding_now=ticker.funding_rate if ticker is not None else None,
+        )
+
         snapshots.append(
             SymbolSnapshot(
                 symbol=sym,
@@ -95,6 +117,7 @@ def collect_market_context(
                 bars_4h=bars_4h,
                 ind_1h=ind_1h,
                 ind_4h=ind_4h,
+                positioning=positioning,
             )
         )
 
@@ -209,6 +232,15 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
             high24 = max(b.high for b in s.bars_1h[-24:])
             low24 = min(b.low for b in s.bars_1h[-24:])
             parts.append(f"  24h range: low=${low24:.6g} high=${high24:.6g}")
+        # i2/7 — POSITIONING (institutional 2026 primary): OI delta + funding
+        # history. Печатаем перед классическими индикаторами, чтобы LLM видел
+        # их первыми и приоритезировал в reasoning.
+        if s.positioning is not None and (
+            s.positioning.oi_now is not None
+            or s.positioning.funding_24h_cumulative is not None
+        ):
+            parts.append("  POSITIONING (institutional 2026):")
+            parts.append(format_positioning(s.positioning))
         if s.ind_1h is not None:
             parts.append("  1H INDICATORS:")
             parts.append(format_snapshot(s.ind_1h))

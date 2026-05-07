@@ -1,5 +1,88 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(market-context i2/7): Open Interest delta + Funding rate cumulative
+
+`<hash-pending>`
+
+**Контекст.** Вторая итерация перехода к 2026 quant-стандарту. Research
+(Decentralised.news 2026, Borri/Cagnazzo J. Empirical Finance 2024,
+Lambda Finance 2026 framework) показывает: positioning-фичи (OI delta,
+cumulative funding) — **primary signals** для крипто-перпов, тогда как
+RSI/MACD — secondary context. Эта итерация добавляет positioning-блок
+**перед** классическими индикаторами в каждом per-symbol блоке
+market-контекста.
+
+**Что добавлено.**
+
+1. **Bybit-клиент (`src/ai_trader/trading/client.py`):**
+   - `get_open_interest_history(symbol, interval='1h', limit=24)` →
+     `list[OpenInterestPoint] | None`. Эндпоинт Bybit V5
+     `/v5/market/open-interest`. Семантика None vs [] такая же как у
+     `get_positions` (отличаем «не доехало» от «пусто») —
+     иначе reconcile/positioning интерпретирует transient outage как
+     валидное «OI=0».
+   - `get_funding_rate_history(symbol, limit=10)` →
+     `list[FundingPoint] | None`. Эндпоинт `/v5/market/funding/history`.
+   - Новые dataclass'ы `OpenInterestPoint(ts, value)` и
+     `FundingPoint(ts, rate)`.
+
+2. **Аналитика (`src/ai_trader/analysis/positioning.py`, новый):**
+   - `PositioningSnapshot` dataclass: oi_now, oi_4h_ago, oi_24h_ago,
+     oi_delta_4h_pct, oi_delta_24h_pct, funding_now, funding_24h_cumulative,
+     funding_24h_mean, funding_7d_mean, funding_prev_period.
+   - `build_positioning_snapshot(oi_history, funding_history, funding_now)`
+     — собирает фичи из сырых истории-массивов. Tolerant к None /
+     коротким массивам (соответствующие производные = None, без crash).
+   - `format_positioning(snapshot)` — текстовый двухстрочный вывод
+     для system-prompt с режим-метками.
+
+3. **Метки (research-обоснованные):**
+   - **OI delta:** `[moderate]` ≥±2%, `[buildup]/[unwind]` ≥±5%,
+     `[strong buildup]/[strong unwind]` ≥±10%,
+     `[EXTREME buildup]/[EXTREME unwind]` ≥±15%.
+   - **Funding bands** (Lambda Finance 2026):
+     `<0.05%` per 8h → `[neutral leverage]`,
+     `0.05–0.20%` → `[mild long bias]/[mild short bias]`,
+     `>0.20%` → `[STRONG long bias]/[STRONG short bias]`.
+
+4. **Контекст-сборка (`src/ai_trader/trading/context.py`):**
+   - `SymbolSnapshot` получил поле `positioning: PositioningSnapshot | None`.
+   - `collect_market_context()` запрашивает OI history (limit=25) и
+     funding history (limit=21) per-symbol, строит positioning и
+     складывает в snapshot.
+   - `format_context_for_prompt()` выводит блок
+     `POSITIONING (institutional 2026):` **перед** `1H INDICATORS`
+     для каждого символа (visual cue для LLM что приоритезировать
+     positioning над classical indicators).
+
+**Почему OI history limit=25, а не 24:** для расчёта Δ24h нужно `[-25]`
+(индекс «25 точек назад» при шаге 1h). Δ4h использует `[-5]`. Пограничный
+запас на случай если Bybit вернёт <25 точек для редко торгуемых пар
+(WLD, TAO) — функция спокойно вернёт `Δ24h=None`, формат это покажет.
+
+**Тесты:** добавлены 12 регрессионных в `test_ai_trader_positioning.py`:
+- `TestBuildPositioning` (8): empty inputs, short OI, OI delta-4h
+  known value (+10%), OI delta-24h known value (+48% / +5.71%),
+  zero anchor → None, funding 5 events с known cumulative,
+  1 event (без crash), funding_now passthrough.
+- `TestFormatPositioning` (4): full data shows OI/funding labels,
+  STRONG short bias, all-None graceful fallback (`n/a` markers),
+  OI unwind (`[strong unwind]` / `[EXTREME unwind]`).
+
+Suite 478/478 зелёный.
+
+**Файлы.** `src/ai_trader/trading/client.py`,
+`src/ai_trader/analysis/positioning.py` (новый),
+`src/ai_trader/trading/context.py`,
+`tests/test_ai_trader_positioning.py` (новый).
+
+**Smoke-тест публичного API** (`pybit.HTTP(demo=True)` на BTCUSDT):
+- OI keys = `['openInterest', 'timestamp']` ✓
+- Funding keys = `['symbol', 'fundingRate', 'fundingRateTimestamp']` ✓
+- BTC OI = ~52,572 BTC; funding rate = +0.00917% — реалистичные значения.
+
+---
+
 ## 2026-05-07 — feat(market-context i1/7): VWAP + Realized Volatility (1H/4H)
 
 `<hash-pending>`

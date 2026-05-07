@@ -55,6 +55,29 @@ class Ticker:
 
 
 @dataclass
+class OpenInterestPoint:
+    """Точка истории Open Interest от Bybit `/v5/market/open-interest`.
+
+    `value` — суммарный OI в base-coin (для USDT-perp Bybit отдаёт
+    `openInterest` в ЕДИНИЦАХ контракта = base coin; для BTCUSDT это BTC).
+    `ts` — unix ms.
+    """
+    ts: int
+    value: float
+
+
+@dataclass
+class FundingPoint:
+    """Точка funding history от Bybit `/v5/market/funding/history`.
+
+    `rate` — funding-rate в долях (0.0001 = 0.01%). На USDT-perp Bybit
+    funding settle каждые 8 часов: 00:00 / 08:00 / 16:00 UTC.
+    """
+    ts: int
+    rate: float
+
+
+@dataclass
 class InstrumentInfo:
     """Фильтры лот/цены Bybit для конкретного инструмента.
 
@@ -143,6 +166,100 @@ class AiBybitClient:
         except (ValueError, TypeError):
             log.exception("ticker parse failed %s: %s", symbol, t)
             return None
+
+    def get_open_interest_history(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        limit: int = 24,
+    ) -> list[OpenInterestPoint] | None:
+        """Историю Open Interest по символу (Bybit `/v5/market/open-interest`).
+
+        - `interval` Bybit format: '5min','15min','30min','1h','4h','1d'.
+        - `limit` ≤ 200; default 24 = последние сутки часовых точек.
+
+        Возвращает:
+        - список `OpenInterestPoint`, отсортированный по ts возр.
+        - `None` если запрос не получился (network/non-zero retCode).
+          Семантика как у `get_positions` — отличаем «пусто» от
+          «не доехало».
+        """
+        try:
+            resp = self._session.get_open_interest(
+                category=self._category,
+                symbol=symbol,
+                intervalTime=interval,
+                limit=limit,
+            )
+        except Exception:
+            log.exception("get_open_interest_history %s %s failed", symbol, interval)
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_open_interest non-zero retCode for %s: code=%s msg=%s",
+                symbol, ret_code, resp.get("retMsg", ""),
+            )
+            return None
+        items = resp.get("result", {}).get("list", []) or []
+        out: list[OpenInterestPoint] = []
+        for row in items:
+            try:
+                out.append(
+                    OpenInterestPoint(
+                        ts=int(row.get("timestamp", 0) or 0),
+                        value=float(row.get("openInterest", 0) or 0),
+                    )
+                )
+            except (ValueError, TypeError):
+                continue
+        out.sort(key=lambda p: p.ts)
+        return out
+
+    def get_funding_rate_history(
+        self,
+        symbol: str,
+        limit: int = 10,
+    ) -> list[FundingPoint] | None:
+        """История funding rate по символу.
+
+        - `limit` ≤ 200; default 10 = последние ≈3.3 дня (8h × 10).
+
+        Возвращает:
+        - список `FundingPoint`, отсортированный по ts возр.
+        - `None` при сетевой / API-ошибке (та же семантика что у
+          `get_open_interest_history`).
+        """
+        try:
+            resp = self._session.get_funding_rate_history(
+                category=self._category,
+                symbol=symbol,
+                limit=limit,
+            )
+        except Exception:
+            log.exception("get_funding_rate_history %s failed", symbol)
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_funding_rate_history non-zero retCode for %s: code=%s msg=%s",
+                symbol, ret_code, resp.get("retMsg", ""),
+            )
+            return None
+        items = resp.get("result", {}).get("list", []) or []
+        out: list[FundingPoint] = []
+        for row in items:
+            try:
+                out.append(
+                    FundingPoint(
+                        ts=int(row.get("fundingRateTimestamp", 0) or 0),
+                        rate=float(row.get("fundingRate", 0) or 0),
+                    )
+                )
+            except (ValueError, TypeError):
+                continue
+        out.sort(key=lambda p: p.ts)
+        return out
 
     def get_instrument_info(self, symbol: str) -> InstrumentInfo | None:
         """Получить лот/цена-фильтры для symbol с in-memory кэшированием.
