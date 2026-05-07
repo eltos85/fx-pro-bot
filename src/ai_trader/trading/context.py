@@ -27,6 +27,7 @@ from ai_trader.analysis.positioning import (
     build_positioning_snapshot,
     format_positioning,
 )
+from ai_trader.macro.external import MacroProvider, MacroSnapshot, format_macro
 from ai_trader.news.rss import NewsItem
 from ai_trader.state.db import AiPosition, AiTraderStore
 from ai_trader.trading.client import AiBybitClient, Bar, Ticker
@@ -55,6 +56,10 @@ class MarketContext:
     virtual_capital_usd: float
     real_equity_usd: float
     news: list[NewsItem] = field(default_factory=list)
+    # i3/7 (2026-05-07): глобальный macro/sentiment snapshot. None если
+    # macro_provider не передан или сетевой fetch упал — формат
+    # деградирует gracefully.
+    macro: MacroSnapshot | None = None
 
 
 def collect_market_context(
@@ -63,6 +68,7 @@ def collect_market_context(
     symbols: tuple[str, ...],
     virtual_capital_usd: float,
     news_provider=None,
+    macro_provider: MacroProvider | None = None,
 ) -> MarketContext:
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
@@ -132,12 +138,21 @@ def collect_market_context(
             log.exception("news_provider failed (продолжаю без новостей)")
             news = []
 
+    macro: MacroSnapshot | None = None
+    if macro_provider is not None:
+        try:
+            macro = macro_provider.get_snapshot()
+        except Exception:
+            log.exception("macro_provider failed (продолжаю без macro)")
+            macro = None
+
     return MarketContext(
         snapshots=snapshots,
         open_positions=open_positions,
         virtual_capital_usd=virtual_capital_usd,
         real_equity_usd=real_equity,
         news=news,
+        macro=macro,
     )
 
 
@@ -196,9 +211,22 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
     parts: list[str] = []
     parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
     parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
+
+    # i3/7 — GLOBAL MACRO / SENTIMENT (CoinGecko + alternative.me).
+    # Точные глобальные значения BTC dominance + Fear&Greed. Эта секция
+    # появляется в начале контекста, до per-symbol blocks.
+    if ctx.macro is not None:
+        macro_text = format_macro(ctx.macro)
+        if macro_text:
+            parts.append("=== GLOBAL MACRO / SENTIMENT ===")
+            parts.append(macro_text)
+
+    # Эвристика BTC vs alts (на основе наших же тикеров) — мягкое
+    # дополнение к точным данным CoinGecko: показывает ротацию между
+    # BTC и теми пары, что мы реально торгуем.
     dom_line = _btc_dominance_estimate(ctx.snapshots)
     if dom_line is not None:
-        parts.append(f"MACRO: {dom_line}")
+        parts.append(f"BTC vs traded alts: {dom_line}")
     parts.append("")
 
     if ctx.news:

@@ -1,5 +1,90 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(market-context i3/7): Fear & Greed + BTC Dominance (global macro)
+
+`<hash-pending>`
+
+**Контекст.** Третья итерация — глобальные macro/sentiment-индикаторы.
+Прежде агент видел только локальные данные с Bybit (price/OI/funding на
+конкретных символах). Теперь добавляется глобальный контекст:
+расположение рынка в цикле жадности/страха и распределение капитала
+между BTC/ETH/stables.
+
+**Что добавлено.**
+
+1. **Новый модуль `src/ai_trader/macro/external.py`:**
+   - `MacroProvider(ttl_seconds=600, get_json=...)` — TTL-кэшируемый
+     провайдер с инжектируемой `get_json` (для тестов / переопределения
+     транспорта). Default — stdlib `urllib.request` + 8s timeout.
+   - `MacroSnapshot` dataclass: fng_value (0-100), fng_classification,
+     fng_delta_24h, btc_dominance_pct, eth_dominance_pct,
+     stables_dominance_pct, market_cap_change_24h_pct.
+   - `format_macro(snapshot)` — двух-трёхстрочный текст для prompt.
+
+2. **Источники данных (free, no-auth):**
+   - Fear & Greed: `https://api.alternative.me/fng/?limit=2`.
+     Возвращает текущее + предыдущее значение, что позволяет считать
+     `fng_delta_24h`.
+   - CoinGecko global: `https://api.coingecko.com/api/v3/global`.
+     `market_cap_percentage` для BTC, ETH и сборки `stables_dominance`
+     по тикерам `usdt, usdc, dai, fdusd, tusd, busd, usde, pyusd`.
+     `market_cap_change_percentage_24h_usd` — общее изменение mcap.
+
+3. **Метки (research-обоснованные):**
+   - **F&G:** ≤25 → `[Extreme Fear, historically contrarian-buy zone]`,
+     26-44 → `[Fear]`, 45-55 → `[Neutral]`, 56-74 → `[Greed]`,
+     ≥75 → `[Extreme Greed, historically contrarian-sell zone]`.
+     Эксплицитно «contrarian», чтобы LLM не интерпретировал «Extreme
+     Fear» как «sell». Источник интерпретации: alternative.me FAQ;
+     академически — Garcia/Tessone «Social signals and algorithmic
+     trading of Bitcoin» (Royal Society Open Sci 2014).
+   - **Stables dominance:** ≥12% → `[HIGH stables — risk-off / cash-heavy]`,
+     ≥9% → `[elevated stables — caution]`. Эмпирический threshold для
+     цикла 2024-2026 (на пиках страха stables ≥10-12%).
+
+4. **Кэш и rate-limit:**
+   - TTL 600 с (10 мин) — совпадает с CoinGecko cache-frequency на
+     стороне сервера.
+   - Наш цикл = 900 с (15 мин), значит fetch ≈ 1 раз/цикл, далеко от
+     rate-limit'ов CoinGecko (~50 req/min) и alternative.me (~бесконечно).
+   - При фейле сети `get_snapshot()` возвращает `MacroSnapshot` с
+     `None` полями, цикл **продолжается**, формат показывает
+     `(macro: data unavailable)`.
+
+5. **Интеграция в контекст:**
+   - `MarketContext.macro: MacroSnapshot | None`.
+   - `collect_market_context(..., macro_provider=...)` опц.
+   - `format_context_for_prompt`: блок `=== GLOBAL MACRO / SENTIMENT ===`
+     **в начале** контекста (до per-symbol blocks). Прежний эвристический
+     блок «BTC vs alts» сохранён, но переименован «BTC vs traded alts»,
+     чтобы не путать с глобальной CoinGecko-доминацией.
+   - В `app/main.py` `MacroProvider` создаётся один раз на старте,
+     передаётся в `_run_cycle` и далее в `collect_market_context`.
+
+**Тесты:** +13 регрессионных в `test_ai_trader_macro.py`:
+- `TestMacroProviderFetch` (6): full data, fng-failure partial, coingecko-
+  failure partial, both fail (no crash), malformed value, single-event no
+  delta.
+- `TestMacroProviderCache` (2): TTL hits → 1 fetch на 3 calls;
+  TTL=0 → каждый call fetch.
+- `TestFormatMacro` (5): full data with labels, extreme fear, extreme
+  greed, high stables, all-None graceful.
+
+Все 491 тест зелёные.
+
+**Файлы.** `src/ai_trader/macro/__init__.py` (пустой пакет),
+`src/ai_trader/macro/external.py` (новый),
+`src/ai_trader/trading/context.py` (интеграция),
+`src/ai_trader/app/main.py` (создание провайдера),
+`tests/test_ai_trader_macro.py` (новый).
+
+**Smoke-тест публичных API** (curl на момент i3 commit'а):
+- F&G value=47 (Neutral), prev=46 (Fear), delta=+1.
+- CoinGecko: BTC dom 58.48%, ETH 10.15%, USDT 6.85%, USDC 2.83%.
+  → stables ≈ 9.67% → метка `[elevated stables — caution]`.
+
+---
+
 ## 2026-05-07 — feat(market-context i2/7): Open Interest delta + Funding rate cumulative
 
 `<hash-pending>`

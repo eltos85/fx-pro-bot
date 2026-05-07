@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from ai_trader.config.settings import AiTraderSettings
 from ai_trader.llm.client import DeepSeekClient
 from ai_trader.llm.prompts import build_system_prompt, build_user_prompt
+from ai_trader.macro.external import MacroProvider
 from ai_trader.news.rss import RssNewsProvider
 from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from ai_trader.state.db import AiTraderStore
@@ -179,6 +180,14 @@ def run() -> None:
             max_age_hours=settings.news_max_age_hours,
         )
 
+    # ─── Macro / sentiment (i3/7) ────────────────────────────────────────
+    # Глобальные macro-индикаторы из бесплатных публичных API
+    # (alternative.me F&G, CoinGecko /global). TTL 600s = 10мин,
+    # совпадает с обновлением CoinGecko (cache 10 минут на их стороне).
+    # При отказе сети — get_snapshot() возвращает MacroSnapshot с None
+    # полями, цикл продолжается.
+    macro_provider = MacroProvider(ttl_seconds=600)
+
     # ─── Telegram ────────────────────────────────────────────────────────
     tg: TelegramBot | None = None
     if settings.telegram_enabled and settings.telegram_bot_token:
@@ -207,7 +216,10 @@ def run() -> None:
     while not _shutdown:
         cycle += 1
         try:
-            _run_cycle(cycle, settings, store, bybit, llm, killswitch, news_provider, tg)
+            _run_cycle(
+                cycle, settings, store, bybit, llm, killswitch,
+                news_provider, macro_provider, tg,
+            )
         except Exception as e:
             log.exception("Cycle %d crashed (продолжаю)", cycle)
             if tg:
@@ -231,6 +243,7 @@ def _run_cycle(
     llm: DeepSeekClient,
     killswitch: KillSwitch,
     news_provider: RssNewsProvider | None,
+    macro_provider: MacroProvider | None,
     tg: TelegramBot | None,
 ) -> None:
     log.info("─── Cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
@@ -249,7 +262,12 @@ def _run_cycle(
         return
 
     ctx = collect_market_context(
-        bybit, store, settings.symbols, settings.virtual_capital_usd, news_provider
+        bybit,
+        store,
+        settings.symbols,
+        settings.virtual_capital_usd,
+        news_provider,
+        macro_provider=macro_provider,
     )
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
