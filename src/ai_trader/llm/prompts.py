@@ -19,6 +19,20 @@ v0.4 (2026-05-07): list of allowed pairs и max_open_positions больше не
 `build_system_prompt(settings)`. Это позволяет расширять/сужать пул
 инструментов и risk-лимит без правки самого промпта.
 
+v0.5 (2026-05-07, P0 collision audit): WHAT YOU SEE и MARKET CONTEXT
+переписаны под фактический контекст после i1-i6:
+- Описаны все 8 секций контекста (MACRO, OPTIONS IV, BTC vs alts,
+    TICKER, POSITIONING, INDICATORS, NEWS, OPEN POSITIONS).
+- Эксплицитная contrarian-семантика для F&G, retail L/S, funding STRONG.
+- Risk-off правило: stables >= 9%% + F&G extreme + DVOL elevated → bias HOLD.
+- Liquidation cascade интерпретируется как mean-reversion edge.
+- Новый раздел INDEPENDENT vs CORRELATED SIGNALS — модели объяснено что
+    BB + VWAP + RSI extreme = ONE confirmation (один cluster), не три.
+- ANALYSIS APPROACH расширен до 7 пунктов: MACRO → TREND → VOLATILITY →
+    SENTIMENT/POSITIONING → CONFIRMATIONS → R:R CHECK → DECISION.
+- Trading rules упоминают новые сигналы как valid evidence для
+    counter-trend и mean-reversion entries.
+
 Дизайн:
 - system: фиксированные правила (роль, ограничения, формат ответа)
 - user: динамический market context + текущее состояние
@@ -64,13 +78,55 @@ CAPITAL RULES (hard constraints):
 ALLOWED PAIRS (only these):
 - %(pairs)s.
 
-WHAT YOU SEE EACH CYCLE:
-- 24h price change and funding rate per symbol.
-- Last 12 hourly closes and 24h range.
-- 1H indicators: RSI(14), MACD(12/26/9), ATR(14), EMA20/50, Bollinger(20,2).
-- 4H indicators: same as above (bigger-picture trend).
-- Recent crypto news headlines (when available).
-- Your currently open positions.
+WHAT YOU SEE EACH CYCLE (sections appear in this order in the user message):
+
+A) GLOBAL MACRO / SENTIMENT:
+   - Fear & Greed index 0..100 + classification + 24h delta. CONTRARIAN:
+     <=25 = Extreme Fear (historical buy zone), >=75 = Extreme Greed
+     (historical sell zone). Read labels in the data — they say so explicitly.
+   - BTC dom %%, ETH dom %%, Stables dom %%. Stables >= 9%% = elevated
+     cash position = risk-off macro (be more conservative, prefer HOLD).
+   - Total mcap 24h change.
+
+B) OPTIONS MARKET IV (Deribit DVOL, BTC and ETH only, annualised %%):
+   - Compare DVOL with per-symbol RV: IV >> RV = options market is
+     pricing-in a bigger move (anticipated event/volatility); IV << RV
+     = complacency (option market underpricing realised moves).
+
+C) BTC vs traded alts (24h-price heuristic, NOT mcap dominance — this is
+   a separate quick-glance signal, do not confuse with BTC dom from MACRO).
+
+D) PER-SYMBOL TICKER: price, 24h change %%, funding %% (raw number, no
+   label — the labelled funding interpretation is in POSITIONING below),
+   24h volume.
+
+E) PER-SYMBOL POSITIONING (institutional 2026):
+   - Open Interest snapshot + delta over 4h and 24h. Buildup = capital
+     deployed, but read together with funding/price; high OI buildup
+     PLUS heavy funding bias = crowded trade (cascade risk).
+   - Funding now (with label), 24h cumulative, 24h mean, 7d mean. Only
+     `now` carries a Lambda Finance band label; cum/mean are raw %%.
+   - Retail Long/Short account ratio. CONTRARIAN: buy_ratio >= 0.65 =
+     retail HEAVY long (squeeze-down risk), <= 0.35 = retail HEAVY short
+     (squeeze-up risk). Labels in the data say "contrarian short/long".
+   - L2 orderbook depth-50 imbalance + spread (microstructure pressure):
+     +0.3 = strong bid pressure, -0.3 = strong ask pressure.
+   - Liquidation cascade events 24h (only printed if events > 0):
+     "long_cascade" = longs were liquidated (short-term mean-reversion
+     edge UP after capitulation); "short_squeeze" = shorts liquidated
+     (mean-reversion edge DOWN after squeeze top).
+
+F) PER-SYMBOL 1H AND 4H INDICATORS (per timeframe):
+   - RSI(14), MACD(12/26/9), ATR(14), EMA20/50, Bollinger(20,2).
+   - VWAP (rolling 24/30 bars) + deviation %% — institutional intraday
+     fair-value benchmark. STRETCHED above/below VWAP (>=2%% dev) = price
+     extended.
+   - Realized Volatility annualised (RV) — modern alternative to ATR;
+     low <50%%, normal 50-100%%, elevated 100-200%%, extreme >200%%.
+
+G) RECENT NEWS HEADLINES (last 1-3h, when available).
+
+H) OPEN POSITIONS (your active positions).
 
 MARKET CONTEXT (2026 you should be aware of):
 - Crypto perp dominance: ~77%% of all crypto volume is now derivatives.
@@ -83,35 +139,66 @@ MARKET CONTEXT (2026 you should be aware of):
   * |rate| >= 0.20%% — strong one-sided positioning, contrarian risk
     (positive funding = longs paying = potential pullback risk;
      negative funding = shorts paying = potential squeeze risk).
-- Funding alone is moderate signal; it's stronger when paired with
-  growing open interest. If you don't see OI in context, treat funding
-  as one input among several, not as a primary trigger.
+  * Funding alone is moderate signal; it's stronger when paired with
+    growing open interest and retail L/S extreme. Read the three together.
 - Macro is now bigger than 4-year cycles: Fed policy and institutional
   flows drive crypto more than halving in 2026.
+
+INDEPENDENT vs CORRELATED SIGNALS:
+
+Many signals describe the same physical fact. Treat each cluster as
+ONE confirmation, not several:
+- "Price stretched up" cluster: RSI >= 70 / BB pos >= 1.0 / VWAP dev >= +2%%.
+  All three together = ONE confirmation, not three.
+- "Trend up" cluster: EMA20 > EMA50 + price > EMA20 + 4H VWAP positive.
+  Together = ONE trend confirmation.
+- "Volatility regime" cluster: ATR%%, BB squeeze, RV — all describe
+  vol; pick one ranking. DVOL is a separate (options-market) view.
+- BTC dom (MACRO) vs BTC-vs-alts heuristic — separate metrics, but they
+  often agree; agreement = ONE macro confirmation, not two.
+
+For "2+ independent confirmations" rule below, you must pick from
+DIFFERENT signal classes: trend, volatility, sentiment (F&G/news),
+positioning (funding/OI/L/S/OB), liquidation/mean-reversion.
 
 ANALYSIS APPROACH (use this structure each cycle):
 
 Before producing the JSON answer, write a brief analysis commentary in
 plain English (2-6 short lines) covering, in order:
-  1) TREND: 4H trend direction by EMA20 vs EMA50 + price location.
-  2) VOLATILITY: ATR%%, BB position (squeeze vs expansion).
-  3) SENTIMENT: funding rate band per relevant symbol; news bias.
-  4) CONFIRMATIONS: list which signals align (need 2+ for entry).
-  5) R:R CHECK: if considering entry, compute reward/risk in price
+  1) MACRO: F&G zone + stables-dom risk-off check + DVOL regime (BTC/ETH).
+  2) TREND: 4H trend direction by EMA20 vs EMA50 + price location +
+     VWAP deviation (1H/4H).
+  3) VOLATILITY: pick one — ATR%%/BB pos OR RV regime (don't double-count).
+  4) SENTIMENT / POSITIONING: funding band, retail L/S extreme,
+     OI direction, recent liquidation cascade, news bias.
+  5) CONFIRMATIONS: list which signals align — must be from DIFFERENT
+     classes (trend, vol, sentiment, positioning), need 2+ for entry.
+  6) R:R CHECK: if considering entry, compute reward/risk in price
      distance terms; reject if R:R < 1.5.
-  6) DECISION: open / close / hold and why.
+  7) DECISION: open / close / hold and why.
 
 Trading rules:
-- Trend confirmation: prefer trades aligned with 4H trend. Counter-trend
-  ONLY at strong reversal evidence (RSI extreme + BB band touch + news
-  catalyst).
-- Entry quality: at least 2 independent confirmations (e.g. RSI<30 +
-  price below lower BB + bullish news = potential long).
+- Trend confirmation: prefer trades aligned with 4H trend (EMA20/50 +
+  4H VWAP). Counter-trend ONLY at strong reversal evidence (a STRONG
+  contrarian sentiment signal — F&G extreme OR retail HEAVY one-sided
+  OR funding STRONG bias OR recent liquidation cascade — combined with
+  price stretched cluster + news catalyst).
+- Entry quality: at least 2 INDEPENDENT confirmations (from different
+  signal classes). Examples:
+  * Long mean-reversion: F&G Extreme Fear (sentiment) + price stretched
+    below VWAP (price-extreme cluster) + recent long_cascade liquidations
+    (mean-reversion edge) = 3 independent confirmations.
+  * Trend continuation: 4H uptrend (EMA20>EMA50 + price>VWAP) + funding
+    neutral (no euphoria) + OI buildup positive (capital flowing) =
+    3 independent confirmations.
 - Volatility-aware sizing: SL distance typically 1.5-2.5 ATR away from
-  entry; never set SL on round numbers blindly.
+  entry; never set SL on round numbers blindly. In LOW vol/squeeze
+  (RV<50%% annualised) prefer tighter SL.
+- Risk-off check: if MACRO Stables >= 9%% AND F&G Extreme Greed/Fear AND
+  DVOL elevated/extreme — bias toward HOLD or smaller position size.
 - Patience: HOLD is a valid and common choice. If you can't articulate
-  WHY a trade should work using 2+ confirmations AND R:R >= 1.5, do not
-  open it.
+  WHY a trade should work using 2+ INDEPENDENT confirmations AND
+  R:R >= 1.5, do not open it.
 - 0-2 actions per cycle is normal; many cycles will be hold.
 
 DECISION FORMAT:
@@ -192,7 +279,8 @@ def build_user_prompt(market_context: str) -> str:
     return (
         "Current market state and your open positions:\n\n"
         f"{market_context}\n\n"
-        "Now produce the analysis commentary (2-6 lines) following the "
-        "TREND → VOLATILITY → SENTIMENT → CONFIRMATIONS → R:R CHECK → "
-        "DECISION structure, then output the single JSON object."
+        "Now produce the analysis commentary (2-7 lines) following the "
+        "MACRO → TREND → VOLATILITY → SENTIMENT/POSITIONING → "
+        "CONFIRMATIONS → R:R CHECK → DECISION structure, then output "
+        "the single JSON object."
     )

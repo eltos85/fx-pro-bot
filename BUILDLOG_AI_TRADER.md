@@ -1,5 +1,89 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — fix(prompt-collisions P0): унифицировать funding-метку, описать i1-i6 в промпте
+
+`<hash-pending>`
+
+**Контекст.** После накопления i1–i6 (VWAP/RV, OI/funding history,
+F&G/dominance, retail L/S + L2 OB, liquidation cascade, Deribit DVOL)
+обнаружено: промпт `prompts.py` всё ещё описывает **только** classical
+indicators (RSI/MACD/ATR/EMA/BB) и игнорирует ~7 новых сигналов. Также
+`funding rate` дублировался в тикере и в POSITIONING с разными метками,
+причём в POSITIONING-метке отсутствовало явное contrarian-указание
+(«STRONG long bias» вместо «STRONG: longs paying, contrarian risk»).
+Это могло путать LLM (не различает «лонги переплачивают, риск pullback»
+и «давление вверх»).
+
+**Аудит коллизий (8 найдено).** Симптомы:
+- P0.1: WHAT YOU SEE / MARKET CONTEXT не описывают macro/options/positioning.
+- P0.2: funding rate с двумя разными метками (тикер vs POSITIONING).
+- P1.3: 4-5 сигналов о волатильности (ATR, BB, VWAP, RV, DVOL) без иерархии.
+- P1.4: `_funding_label` ошибочно применён к `cum`-числу через `mean`.
+- P2: counter-trend rule требует только classical evidence.
+- P2: BTC dominance дублируется (CoinGecko vs наша эвристика alts).
+- P2: контекст ~6700 токенов, label-noise.
+- P3: BB+VWAP+RSI extreme может считаться как 3 confirmations (двойной счёт).
+
+Согласовали с пользователем: фиксим **только P0 (1+2)**, остальные
+ждут реальных LLM-логов.
+
+**Что изменено (3 файла, 1 commit).**
+
+1. **`src/ai_trader/analysis/positioning.py` — `_funding_label`:**
+   - Метки переписаны с явным contrarian-намёком:
+     - `[STRONG long bias — longs paying, contrarian risk]`
+     - `[mild long bias — longs paying]`
+     - `[neutral funding]`
+   - Применяется только к `funding_now` (single-period rate). К `cum`
+     метку не применяем — Lambda Finance bands некорректны для суммы.
+
+2. **`src/ai_trader/trading/context.py`:**
+   - Удалён `_funding_band_label` (was dead-code source № 2 для
+     funding-метки в тикере).
+   - В per-symbol тикере убран `funding_label` — теперь печатается
+     только число `funding=+0.0036%` без метки. Single source of truth
+     для funding interpretation = POSITIONING block.
+
+3. **`src/ai_trader/llm/prompts.py` — `WHAT YOU SEE` + `MARKET CONTEXT`
+   + `ANALYSIS APPROACH` + `Trading rules` (v0.5):**
+   - 8-секционная структура контекста (A..H) описана явно: MACRO,
+     OPTIONS IV, BTC vs alts, TICKER, POSITIONING, INDICATORS, NEWS,
+     OPEN POSITIONS.
+   - Эксплицитные contrarian-/risk-off-/mean-reversion-подсказки:
+     * F&G ≤25/≥75 → contrarian buy/sell zone.
+     * Stables ≥9% → risk-off macro, bias HOLD.
+     * Retail L/S buy ≥0.65/≤0.35 → contrarian short/long.
+     * Liquidation cascade → mean-reversion edge (bouri 2024).
+     * Funding STRONG one-sided → contrarian risk.
+   - Новый раздел **INDEPENDENT vs CORRELATED SIGNALS**: явно
+     перечислены кластеры (price-stretched-up = RSI70+BB1.0+VWAP+2%
+     = ONE confirmation, не три).
+   - ANALYSIS APPROACH расширен с 6 до 7 пунктов: добавлен MACRO в
+     начало.
+   - `build_user_prompt` обновлён под новую структуру.
+
+**Не задеплоено i7.** Ранее планировался агрессивный rollback prompt
+к PRIMARY/SECONDARY иерархии (отдельный «institutional 2026»-стиль),
+но по запросу пользователя откачен в пользу более мягкого изменения
+(см. этот фикс).
+
+**Тесты:** `python3 -m pytest tests/ -q` → **525 passed in 6.01s**.
+Регрессий нет: тесты `test_format_with_full_data_shows_all_labels`
+и `test_format_funding_strong_short_bias` продолжают проходить —
+ключевые слова `mild long bias` / `STRONG short bias` сохранены в
+новых строках через "—" суффикс.
+
+**Файлы:**
+- `src/ai_trader/analysis/positioning.py` — `_funding_label`,
+  `format_positioning` (убрана метка для cum)
+- `src/ai_trader/trading/context.py` — убран `_funding_band_label`,
+  тикер без funding-метки
+- `src/ai_trader/llm/prompts.py` — v0.5: WHAT YOU SEE / MARKET
+  CONTEXT / ANALYSIS APPROACH / Trading rules / build_user_prompt
+- `BUILDLOG_AI_TRADER.md` — эта запись
+
+---
+
 ## 2026-05-07 — feat(market-context i6/7): Deribit DVOL/IV для BTC и ETH
 
 `<hash-pending>`

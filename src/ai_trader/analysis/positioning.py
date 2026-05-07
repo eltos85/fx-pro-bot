@@ -300,17 +300,34 @@ def _oi_delta_label(delta_pct: float | None) -> str:
 
 def _funding_label(rate_per_period: float | None) -> str:
     """Lambda Finance 2026 funding bands. rate_per_period — единичный
-    8h funding (доля, 0.0005 = 0.05%)."""
+    8h funding (доля, 0.0005 = 0.05%).
+
+    ВАЖНО: метка построена так, чтобы LLM не путал «STRONG long bias»
+    со «значит надо лонг». В крипто-перпах **funding rate отражает
+    давление от уже открытых позиций**: longs paying = большинство в
+    лонге → contrarian risk (риск pullback). Поэтому к каждой не-нейтральной
+    метке добавлен contrarian-намёк (longs/shorts paying, contrarian risk).
+    Применимо ТОЛЬКО к single-period rate; cumulative и mean публикуются
+    без меток (для них пороги Lambda Finance некорректны).
+    """
     if rate_per_period is None:
         return ""
     a = abs(rate_per_period)
     if a >= 0.0020:  # 0.20%
-        sign = "STRONG long bias" if rate_per_period > 0 else "STRONG short bias"
+        sign = (
+            "STRONG long bias — longs paying, contrarian risk"
+            if rate_per_period > 0
+            else "STRONG short bias — shorts paying, contrarian risk"
+        )
         return f" [{sign}]"
     if a >= 0.0005:  # 0.05%
-        sign = "mild long bias" if rate_per_period > 0 else "mild short bias"
+        sign = (
+            "mild long bias — longs paying"
+            if rate_per_period > 0
+            else "mild short bias — shorts paying"
+        )
         return f" [{sign}]"
-    return " [neutral leverage]"
+    return " [neutral funding]"
 
 
 def _fmt(v: float | None, spec: str) -> str:
@@ -381,7 +398,7 @@ def format_positioning(s: PositioningSnapshot) -> str:
 
     lines.append(
         f"  Funding: now={_fmt(fnow_pct, '{:+.4f}')}%{_funding_label(s.funding_now)}, "
-        f"24h cum={_fmt(fcum_pct, '{:+.4f}')}%{_funding_label(s.funding_24h_mean)}, "
+        f"24h cum={_fmt(fcum_pct, '{:+.4f}')}%, "
         f"24h mean={_fmt(fmean_pct, '{:+.4f}')}%, "
         f"7d mean={_fmt(f7d_pct, '{:+.4f}')}%"
     )

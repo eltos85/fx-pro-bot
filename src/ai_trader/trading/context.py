@@ -184,23 +184,6 @@ def collect_market_context(
     )
 
 
-def _funding_band_label(rate: float) -> str:
-    """2026 framework (Lambda Finance): bands для funding rate.
-
-    Возвращает короткую читаемую метку ([NEUTRAL]/[mild long]/[STRONG short] и т.п.)
-    для встраивания рядом с числовым значением. Помогает LLM не пропускать
-    зону «strong one-sided positioning».
-    """
-    abs_rate = abs(rate)
-    if abs_rate < 0.0005:  # 0.05%
-        return " [NEUTRAL]"
-    if abs_rate < 0.0020:  # 0.20%
-        side = "longs paying" if rate > 0 else "shorts paying"
-        return f" [mild lean: {side}]"
-    side = "longs paying" if rate > 0 else "shorts paying"
-    return f" [STRONG: {side}, contrarian risk]"
-
-
 def _btc_dominance_estimate(snapshots: list[SymbolSnapshot]) -> str | None:
     """Грубая оценка BTC-силы относительно остальных allowed pairs за 24h.
 
@@ -283,11 +266,14 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
             parts.append(f"\n[{s.symbol}] TICKER UNAVAILABLE")
             continue
         t = s.ticker
-        funding_label = _funding_band_label(t.funding_rate)
+        # Метка funding убрана из тикера (раньше была через
+        # `_funding_band_label`) — она дублировала и противоречила метке
+        # в POSITIONING.Funding. Теперь funding interpretation в одном
+        # месте — POSITIONING block (см. _funding_label в positioning.py).
         parts.append(
             f"\n[{s.symbol}] price=${t.last_price:.6g} "
             f"24h={t.price_change_pct_24h:+.2f}% "
-            f"funding={t.funding_rate * 100:+.4f}%{funding_label} "
+            f"funding={t.funding_rate * 100:+.4f}% "
             f"vol24h={t.volume_24h:.0f}"
         )
         if s.bars_1h:
