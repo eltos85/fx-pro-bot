@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-05-07
+
+### fix(ctrader-client): расширенный reconnect backoff + smart attempt-reset
+
+`коммит при deploy`
+
+**Симптом.** Бот молчал ~2 дня (последняя сделка 5.05 11:57 UTC,
+ничего по 7.05 13:00 UTC). В логах — `cTrader: отключено` 678+ раз
+после `Connection was closed cleanly` от сервера, реконнект упорно
+крутил TCP-handshake'и, сервер их подсасывал и тут же закрывал
+через ~30 сек.
+
+**Причина (по [официальной документации cTrader Open API](https://help.ctrader.com/open-api/)).**
+
+1. **Серверный лимит:** "Create at most two connections per app
+   (one demo + one live)". Фактически cTrader детектит client_id и
+   при превышении новых TCP-сессий за период активно отвергает
+   подключения (server-side throttle, не объявленный лимит).
+2. **Наш баг в `_schedule_reconnect`:** после `RECONNECT_DELAYS_SEC =
+   [5, 10, 30, 60, 120]` цикл фиксировал delay на 120 сек и крутился
+   бесконечно (`while self._running:`). За 11 часов с момента
+   первого `ConnectionLost` (7.05 00:34 UTC) накопилось 244+ попыток
+   создания нового `Client(host, port, TcpProtocol)` — каждая = новый
+   TCP socket. cTrader расценил как нарушение и начал отвергать.
+3. **Reset attempt counter** делался при любом успешном
+   `_connect_and_auth`. Если сервер сразу после auth закрывал
+   соединение (server-rejected drop через 30s), counter всё равно
+   сбрасывался на 0 → следующий reconnect шёл с delay=5s, что
+   усугубляло throttle.
+
+**Известный баг cTrader.** В [официальном forum-thread](https://communityuat.ctrader.com/forum/connect-api-support/45671)
+описан кейс: после `ProtoOAAccountDisconnectEvent` TCP-сокет может
+стать "unresponsive" — единственный способ восстановления — полный
+disconnect + re-auth. Это пересекается с нашим симптомом.
+
+**Решение.**
+
+1. **Тактически (выполнено на VPS):** полностью остановили advisor
+   на 16 минут (`docker compose stop advisor`). Этого хватило чтобы
+   cTrader снял throttle на client_id и очистил stale-сессии. После
+   `docker compose start advisor` подключение чистое, 0 дисконнектов
+   за 10+ минут стабильной работы.
+
+2. **Code-fix (этот коммит):** `src/fx_pro_bot/trading/client.py`:
+   - `RECONNECT_DELAYS_SEC = (5, 10, 30, 60, 120, 300, 900)` —
+     после 6 попыток delay = 15 минут. За 24ч ≤96 попыток вместо 700+.
+   - Новое поле `_last_successful_connect_ts` ставится в конце
+     `_connect_and_auth()` (после успешной auth-цепочки).
+   - `_on_disconnected` сбрасывает `_reconnect_attempt = 0` ТОЛЬКО
+     если uptime ≥`STABLE_UPTIME_SEC = 300` (5 минут стабильной
+     связи). Иначе counter накапливается → backoff растёт →
+     не давим на сервер.
+   - `_schedule_reconnect` больше НЕ сбрасывает attempt при успехе
+     (чтобы не сбросить при transient accept-then-drop).
+   - В `_on_disconnected` добавлен лог uptime (`отключено
+     (uptime %.0fs)`) — теперь видно server-rejected vs real network
+     drop.
+
+**Не подгонка стратегии.** Изменение технического слоя
+(connection management). Параметры стратегии (фильтры H5, SL/TP
+мультипликаторы) не трогаем. Compliance с `no-data-fitting.mdc` —
+bug-fix в коде клиента, не в торговой логике.
+
+**Что ожидать.** После реального серверного дисконнекта (например,
+ночное обслуживание cTrader) бот:
+- сразу сделает попытку #1 через 5с;
+- если не пройдёт — #2 через 10с, #3 через 30с, #4 через 60с,
+  #5 через 120с, #6 через 300с (5 мин), затем все следующие через
+  15 мин;
+- как только соединение прожило ≥5 мин — счётчик сбросится, и
+  при следующем drop опять начнём с 5с.
+
+**Файлы:** `src/fx_pro_bot/trading/client.py`, `BUILDLOG.md`
+
+**Тесты:** `python3 -m pytest tests/ -q` → 453 passed.
+
+---
+
 ## 2026-05-06
 
 ### fix(broker-pnl): ретроспективный backfill grossProfit при старте контейнера
