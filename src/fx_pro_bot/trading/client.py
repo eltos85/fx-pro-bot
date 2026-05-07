@@ -17,6 +17,27 @@ _reactor_lock = threading.Lock()
 
 HEARTBEAT_INTERVAL_SEC = 10
 
+# Reconnect policy.
+#
+# cTrader Open API docs (https://help.ctrader.com/open-api/) рекомендуют:
+# - Не более 2 соединений на app (одно demo + одно live).
+# - Heartbeat каждые ≤10s — иначе сервер дисконнектит за inactivity.
+#
+# Если контейнер агрессивно реконнектит (наш bug 06–07.05.2026: 244 попыток
+# за 11ч с фиксированным delay=120s после server-side disconnect), сервер
+# распознаёт паттерн "много новых TCP-сессий с одного app_id" и активно
+# отвергает каждое новое соединение (`Connection was closed cleanly`
+# сразу после TCP handshake) — фактически throttle/ban на client_id.
+#
+# Решение:
+# 1. Расширенный exponential backoff до 15 минут max.
+# 2. STABLE_UPTIME_SEC: attempt-counter сбрасывается ТОЛЬКО если
+#    предыдущее соединение прожило ≥5 минут. Если соединение упало
+#    раньше — это server-side reject, продолжаем экспоненциальный
+#    backoff (не возвращаемся к малым delays).
+RECONNECT_DELAYS_SEC: tuple[int, ...] = (5, 10, 30, 60, 120, 300, 900)
+STABLE_UPTIME_SEC = 300
+
 
 def _ensure_reactor() -> None:
     """Запустить Twisted reactor в фоновом потоке (один раз на процесс)."""
@@ -88,6 +109,11 @@ class CTraderClient:
         self._reconnecting = False
         self._reconnect_attempt = 0
         self._heartbeat_loop: Any = None
+        # Timestamp of last successful auth (set in _connect_and_auth).
+        # Используется в _on_disconnected: если соединение прожило
+        # ≥STABLE_UPTIME_SEC — реальный network drop, сброс attempt
+        # counter; иначе — server reject, накапливаем backoff.
+        self._last_successful_connect_ts: float = 0.0
 
     @property
     def is_ready(self) -> bool:
@@ -162,6 +188,7 @@ class CTraderClient:
         _time.sleep(3)
 
         self._do_auth(timeout)
+        self._last_successful_connect_ts = _time.time()
 
     def _cleanup_client(self) -> None:
         """Остановить текущего клиента (best effort)."""
@@ -532,7 +559,15 @@ class CTraderClient:
         if client is not self._client:
             log.debug("cTrader: ignoring disconnect from stale client")
             return
-        log.warning("cTrader: отключено — %s", reason)
+        import time as _time
+
+        uptime = (
+            _time.time() - self._last_successful_connect_ts
+            if self._last_successful_connect_ts else 0.0
+        )
+        log.warning(
+            "cTrader: отключено (uptime %.0fs) — %s", uptime, reason,
+        )
         self._stop_heartbeat()
         self._connected.clear()
         self._account_auth_done.clear()
@@ -542,6 +577,19 @@ class CTraderClient:
                     res[1] = ConnectionError(f"Disconnected: {reason}")
                     ev.set()
             self._waiters.clear()
+
+        # Reset reconnect attempt counter ТОЛЬКО если соединение
+        # прожило ≥STABLE_UPTIME_SEC. Если упало раньше — это
+        # server-side reject (cTrader throttle), продолжаем
+        # накапливать backoff до 15-минутной паузы (RECONNECT_DELAYS_SEC).
+        if uptime >= STABLE_UPTIME_SEC:
+            if self._reconnect_attempt > 0:
+                log.info(
+                    "cTrader: соединение было стабильно %.0fs — "
+                    "сброс reconnect attempt counter",
+                    uptime,
+                )
+            self._reconnect_attempt = 0
 
         if self._running and not self._reconnecting:
             self._schedule_reconnect()
@@ -581,7 +629,19 @@ class CTraderClient:
             log.debug("cTrader: heartbeat send error: %s", exc)
 
     def _schedule_reconnect(self) -> None:
-        """Переподключение с экспоненциальным backoff (5s → 10s → 30s → 60s, max 120s)."""
+        """Переподключение с экспоненциальным backoff.
+
+        Delays: RECONNECT_DELAYS_SEC = (5, 10, 30, 60, 120, 300, 900).
+        После 6 неудачных попыток delay = 15 минут — это даёт серверной
+        стороне cTrader время очистить stale-сессии и снять throttle.
+
+        Reset attempt counter:
+        - НЕ сбрасывается при успешном reconnect (мог быть transient
+          server-rejected accept → drop через секунды).
+        - Сбрасывается в `_on_disconnected` ТОЛЬКО если предыдущее
+          соединение прожило ≥STABLE_UPTIME_SEC. Так bot не возвращается
+          к малым delays при server-side throttle.
+        """
         if self._reconnecting:
             return
         self._reconnecting = True
@@ -589,10 +649,11 @@ class CTraderClient:
         import time as _time
 
         def _do_reconnect():
-            delays = [5, 10, 30, 60, 120]
             while self._running:
                 attempt = self._reconnect_attempt
-                delay = delays[min(attempt, len(delays) - 1)]
+                delay = RECONNECT_DELAYS_SEC[
+                    min(attempt, len(RECONNECT_DELAYS_SEC) - 1)
+                ]
                 log.info("cTrader: reconnect #%d через %ds...", attempt + 1, delay)
                 _time.sleep(delay)
 
@@ -604,9 +665,11 @@ class CTraderClient:
 
                 try:
                     self._connect_and_auth(timeout=30)
-                    self._reconnect_attempt = 0
                     self._reconnecting = False
-                    log.info("cTrader: переподключение успешно")
+                    log.info(
+                        "cTrader: переподключение успешно (attempt #%d)",
+                        attempt + 1,
+                    )
                     return
                 except Exception as exc:
                     log.error("cTrader: reconnect failed: %s", exc)
