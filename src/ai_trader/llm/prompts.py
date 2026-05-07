@@ -14,6 +14,30 @@
   <0.05% нейтрально, 0.05–0.20% лёгкий перекос, >0.20% сильный.
 - Macro-контекст: BTC dominance, post-ETF decoupling BTC↔альты упомянуты.
 
+v0.6-backport (2026-05-12, EXIT MANAGEMENT block): добавлен research-based
+блок EXIT MANAGEMENT с 4 триггерами early-close и явными DO-NOT-CLOSE
+guards. Бекпорт коммита 9ef3a1f на v0.3-базу (без v0.4/v0.5 — i1-i6
+индикаторы откачены, см. BUILDLOG 2026-05-11 rollback HEAD → f3ce9795).
+ANALYSIS APPROACH добавлен пункт OPEN POSITIONS REVIEW (без VWAP-return,
+т.к. VWAP в v0.3-контексте отсутствует). Источники research (2026):
+- BBX Research «Institutional Guide to Dynamic Trade Management» —
+    Classic 1-2-3 Scaling Model, T1 at 1.5R-2R.
+- StratBase «Trailing Stop Strategies Compared» — ATR 2.0× оптимально
+    по Sharpe на BTC daily 2019-2025.
+- TradeOS «VWAP+Z-Score Playbook 2026» и Extreme to Mean — для
+    mean-reversion entries primary target = VWAP (на v0.3 не используется,
+    т.к. VWAP-индикатора нет в контексте — заменено на EMA-flip триггер).
+- Headge «Define Your Trading Edge» — invalidation = structural
+    condition, не feeling.
+- AOTrading «3-5-7 Rule 2026» — multi-layer confirmation framework.
+Триггеры EXIT MANAGEMENT, работающие на v0.3-контексте:
+- LOCKED-PROFIT GUARD на >= 1.5R (R-units из entry/SL/TP).
+- ADVERSE NEW EVIDENCE: counter-news, funding flip.
+- SETUP INVALIDATION (trend): EMA20/50 flip против позиции.
+- SETUP INVALIDATION (news): 24h+ без follow-through.
+Триггеры с упоминанием VWAP/L-S/F&G/OI/liquidations модель проигнорирует,
+т.к. соответствующих полей нет в market context.
+
 Дизайн:
 - system: фиксированные правила (роль, ограничения, формат ответа)
 - user: динамический market context + текущее состояние
@@ -70,14 +94,19 @@ MARKET CONTEXT (2026 you should be aware of):
 ANALYSIS APPROACH (use this structure each cycle):
 
 Before producing the JSON answer, write a brief analysis commentary in
-plain English (2-6 short lines) covering, in order:
+plain English (3-7 short lines) covering, in order:
   1) TREND: 4H trend direction by EMA20 vs EMA50 + price location.
-  2) VOLATILITY: ATR%, BB position (squeeze vs expansion).
+  2) VOLATILITY: ATR%%, BB position (squeeze vs expansion).
   3) SENTIMENT: funding rate band per relevant symbol; news bias.
-  4) CONFIRMATIONS: list which signals align (need 2+ for entry).
-  5) R:R CHECK: if considering entry, compute reward/risk in price
+  4) OPEN POSITIONS REVIEW (skip if no open positions): for EACH open
+     position evaluate — a) is the original setup still valid?
+     b) unrealised PnL in R units (>=1R / >=1.5R / >=2R)?
+     c) any contrary new evidence (news, funding flip, EMA shift)?
+     This drives close/hold decision per EXIT MANAGEMENT below.
+  5) CONFIRMATIONS: list which signals align (need 2+ for entry).
+  6) R:R CHECK: if considering entry, compute reward/risk in price
      distance terms; reject if R:R < 1.5.
-  6) DECISION: open / close / hold and why.
+  7) DECISION: open / close / hold and why.
 
 Trading rules:
 - Trend confirmation: prefer trades aligned with 4H trend. Counter-trend
@@ -91,6 +120,75 @@ Trading rules:
   WHY a trade should work using 2+ confirmations AND R:R >= 1.5, do not
   open it.
 - 0-2 actions per cycle is normal; many cycles will be hold.
+
+EXIT MANAGEMENT (when to close existing positions early — research-based):
+
+Each cycle, evaluate every open position with the same rigor as new
+entries. The exchange already holds your hard SL and TP; this section
+governs early discretionary close (action="close") via the bot's API.
+Note: this bot does NOT support partial close, trailing-stop updates,
+or moving SL to breakeven on the exchange. Your only tool is FULL close
+at market — use it judiciously.
+
+Compute R-units for each position from its TP/SL geometry:
+- 1R distance = |entry - SL|. Current PnL in R = (current_price - entry)
+  / (TP - entry) * R_target, where R_target = (TP - entry)/(entry - SL).
+  (For Sell: invert sign of price diffs.) You can read approximate
+  unrealised PnL from price moves vs entry.
+
+CLOSE EARLY (action="close") if ANY of:
+
+1) SETUP INVALIDATION — the original confirmation cluster has weakened.
+   For each entry type:
+   * Mean-reversion entry (price-stretched + contrarian sentiment):
+     close when price returned to VWAP region (|VWAP dev| < 0.5%%) OR
+     contrarian signal normalised (retail L/S buy_ratio drifted back
+     to 0.45-0.55 or F&G left contrarian zone).
+     Research basis: TradeOS VWAP+Z-Score Playbook 2026, Extreme to Mean
+     2026 — primary mean-reversion target IS the VWAP itself, NOT a
+     fixed R:R distance beyond VWAP.
+   * Trend-following entry: close when 4H trend EMA20/50 flips against
+     position OR price loses 4H VWAP support (long) / resistance (short).
+   * News-driven entry: close after news catalyst aged 24h+ without
+     follow-through.
+
+2) LOCKED-PROFIT GUARD — unrealised profit reached/exceeded **1.5R** AND
+   the original setup is no longer fully valid (one of the entry
+   confirmations weakened). Locking 1.5R is mathematically better than
+   risking it back to 0R hoping for the full TP.
+   Research basis: BBX Research 2026 «Institutional Guide to Dynamic
+   Trade Management» — Classic 1-2-3 Scaling Model: T1 at 1.5R-2R is
+   the institutional partial-close trigger. Without partial-close in
+   our bot, full-close at 1.5R after invalidation is the closest analog.
+
+3) ADVERSE NEW EVIDENCE — a NEW signal directly opposite to the
+   position's thesis appeared THIS cycle:
+   * Counter-direction high-impact news (bullish news for short, etc.).
+   * Liquidation cascade in opposite direction in last 1-2 hours
+     (long_cascade for our short → exhaustion of selling, mean-revert
+     UP risk).
+   * Funding flipped strongly against position (e.g. positive funding
+     changed to negative for our short — shorts now paying = squeeze
+     risk up).
+   * OI extreme buildup against position (>=15%% Δ24h in opposite dir).
+
+4) MACRO REGIME SHIFT — global F&G moved out of contrarian zone for a
+   contrarian entry. Example: entered long because F&G was Extreme Fear
+   (<=25); now F&G recovered to >50 (Neutral/Greed) — the macro
+   contrarian premise no longer holds.
+
+DO NOT CLOSE EARLY (HOLD the position) if:
+- Position is in profit AND original setup remains intact AND no new
+  contrary evidence — let the exchange SL/TP do their job.
+- The only motivation is "I want to lock-in some profit" without any
+  invalidation or contrary signal — that's emotional, not data-driven.
+- Profit is below 1R AND setup is intact — let it run; closing here
+  wastes the entire R:R thesis.
+- You believe the trade "could" reverse but have no objective evidence —
+  belief is not invalidation. Wait for one of the 4 triggers above.
+
+The ANALYSIS COMMENTARY for any close-action MUST cite which trigger
+(1/2/3/4) fired and which specific signal changed.
 
 DECISION FORMAT:
 
@@ -147,7 +245,9 @@ def build_user_prompt(market_context: str) -> str:
     return (
         "Current market state and your open positions:\n\n"
         f"{market_context}\n\n"
-        "Now produce the analysis commentary (2-6 lines) following the "
-        "TREND → VOLATILITY → SENTIMENT → CONFIRMATIONS → R:R CHECK → "
-        "DECISION structure, then output the single JSON object."
+        "Now produce the analysis commentary (3-7 lines) following the "
+        "TREND → VOLATILITY → SENTIMENT → OPEN POSITIONS REVIEW → "
+        "CONFIRMATIONS → R:R CHECK → DECISION structure "
+        "(skip OPEN POSITIONS REVIEW if no open positions), then "
+        "output the single JSON object."
     )

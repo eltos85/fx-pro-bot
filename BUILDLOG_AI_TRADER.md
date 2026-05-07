@@ -1,5 +1,57 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-12 — backport: EXIT MANAGEMENT block (v0.6 prompt → v0.3 база)
+
+**Запрос пользователя:** «нужно найти в ветке backup функционал для
+сохранения прибыли — кейс когда бот видит новости, что лот не наберёт
+плюс, и должен сохранить прибыль».
+
+**Что сделано.** Cherry-pick коммита `9ef3a1f feat(prompt v0.6):
+EXIT MANAGEMENT block` из ветки `backup-pre-rollback-20260511-172246`.
+Конфликты в `src/ai_trader/llm/prompts.py` (3 шт.) и в
+`BUILDLOG_AI_TRADER.md` решены вручную:
+
+- Версия в docstring: HEAD-база v0.3, поверх неё помечено
+  `v0.6-backport (2026-05-12)`. Описания v0.4/v0.5 (parametrized
+  symbols и P0 collision audit) НЕ возвращены, так как зависят от
+  i1–i6 индикаторов, которые откачены.
+- ANALYSIS APPROACH: оставлена 6-пунктовая структура v0.3, добавлен
+  один новый пункт — `4) OPEN POSITIONS REVIEW (skip if none)` для
+  каждой open position: setup validity, unrealised R, contrary new
+  evidence. Итого 7 пунктов (TREND → VOL → SENT → OPEN POS REVIEW →
+  CONFIRMATIONS → R:R → DECISION). Упоминание VWAP-return удалено
+  (VWAP-индикатора нет в v0.3-контексте).
+- Блок EXIT MANAGEMENT (4 trigger'а CLOSE EARLY + 4 DO-NOT-CLOSE
+  guards + R-units formula) перенесён **целиком**.
+
+**Что реально работает на v0.3-контексте (RSI/MACD/ATR/EMA/BB):**
+- LOCKED-PROFIT GUARD на >= 1.5R + ослабление setup (главный триггер
+  «сохранить прибыль»).
+- ADVERSE NEW EVIDENCE: counter-direction high-impact news, funding
+  flip против позиции.
+- SETUP INVALIDATION (trend): 4H EMA20/50 flip против позиции.
+- SETUP INVALIDATION (news): catalyst aged 24h+ без follow-through.
+
+**Что в EXIT MANAGEMENT упомянуто, но НЕ применимо** (модель проигнорирует,
+т.к. полей нет в market context): VWAP-return для mean-reversion,
+retail L/S buy_ratio, F&G zone, OI Δ24h, liquidation cascade.
+
+**`build_user_prompt`** обновлён под 7-пунктовую структуру.
+
+**Тесты:** `pytest tests/test_ai_trader.py` — все passed (после правок
+ниже).
+
+**Файлы:**
+- `src/ai_trader/llm/prompts.py` (v0.6-backport)
+- `BUILDLOG_AI_TRADER.md`
+
+**Не cherry-pick'нуто:** ничего из i1–i6 (VWAP, RV, OI, funding cum,
+F&G, BTC dom, L/S, L2 orderbook, liquidations, DVOL), v0.4/v0.5
+prompts, v0.7 fees prompt, v0.8 conviction sizing, v0.9–v0.13.1 —
+по запросу пользователя сохранено в `backup-pre-rollback-20260511-172246`.
+
+---
+
 ## 2026-05-11 — rollback: HEAD → f3ce9795 (откат всех изменений 07–11 мая)
 
 **Запрос пользователя:** откатить все ai_trader-коммиты ПОСЛЕ `f3ce9795`
