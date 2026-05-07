@@ -66,12 +66,26 @@ def collect_market_context(
                 [b.high for b in bars_1h],
                 [b.low for b in bars_1h],
                 [b.close for b in bars_1h],
+                volumes=[b.volume for b in bars_1h],
+                # 1H VWAP: rolling по последним 24 барам = «daily VWAP-aware»
+                # (institutional intraday). RV: 24 returns ≈ 1 сутки,
+                # аннуализация 24×365 = 8760.
+                vwap_window=24,
+                rv_window=24,
+                bars_per_year=24 * 365,
             )
         if len(bars_4h) >= 30:
             ind_4h = compute_snapshot(
                 [b.high for b in bars_4h],
                 [b.low for b in bars_4h],
                 [b.close for b in bars_4h],
+                volumes=[b.volume for b in bars_4h],
+                # 4H VWAP: rolling 30 баров ≈ 5 суток (weekly fair-value
+                # benchmark). RV: 30 returns ≈ 5 суток, аннуализация
+                # 6×365=2190 (6 четырёхчасовых баров в сутки).
+                vwap_window=30,
+                rv_window=30,
+                bars_per_year=6 * 365,
             )
         snapshots.append(
             SymbolSnapshot(

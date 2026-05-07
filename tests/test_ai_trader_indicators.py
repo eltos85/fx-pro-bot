@@ -15,9 +15,11 @@ from ai_trader.analysis.indicators import (
     ema,
     format_snapshot,
     macd,
+    realized_volatility,
     rsi,
     sma,
     true_ranges,
+    vwap,
 )
 
 
@@ -182,3 +184,146 @@ class TestSnapshot:
         s = format_snapshot(snap)
         assert "[uptrend]" in s
         assert "[OVERBOUGHT]" in s  # RSI=100 на чистом росте
+
+
+# ─── v0.5: VWAP & Realized Volatility ────────────────────────────────
+
+
+class TestVwap:
+    """Volume-Weighted Average Price.
+
+    typical = (H+L+C)/3, VWAP = Σ(typical × volume) / Σ(volume).
+    """
+
+    def test_vwap_constant_price_constant_volume(self):
+        # Все бары с одинаковой ценой → VWAP = эта цена.
+        h = [101.0] * 10
+        l_ = [99.0] * 10
+        c = [100.0] * 10
+        v = [1000.0] * 10
+        # typical = (101+99+100)/3 = 100
+        result = vwap(h, l_, c, v)
+        assert result == pytest.approx(100.0)
+
+    def test_vwap_weighted_by_volume(self):
+        # Цена 100 на 9 барах с volume=1, цена 200 на 1 баре с volume=900.
+        # Среднее по volume = (9×100 + 900×200) / (9+900) = 189100/909 ≈ 208.04
+        h = [100.0] * 9 + [200.0]
+        l_ = [100.0] * 9 + [200.0]
+        c = [100.0] * 9 + [200.0]
+        v = [1.0] * 9 + [900.0]
+        result = vwap(h, l_, c, v)
+        # typical совпадает с close, поэтому формула проще:
+        expected = (9 * 100 + 900 * 200) / (9 + 900)
+        assert result == pytest.approx(expected, rel=1e-6)
+
+    def test_vwap_zero_total_volume_returns_none(self):
+        assert vwap([100.0] * 5, [100.0] * 5, [100.0] * 5, [0.0] * 5) is None
+
+    def test_vwap_period_window_subset(self):
+        # 10 баров, period=3 → берём только последние 3
+        h = [100.0] * 7 + [200.0] * 3
+        l_ = h[:]
+        c = h[:]
+        v = [1.0] * 10
+        result = vwap(h, l_, c, v, period=3)
+        assert result == pytest.approx(200.0)
+
+    def test_vwap_short_data_returns_none(self):
+        assert vwap([], [], [], []) is None
+
+    def test_vwap_mismatched_lengths_returns_none(self):
+        assert vwap([1.0, 2.0], [1.0], [1.0, 2.0], [1.0, 1.0]) is None
+
+
+class TestRealizedVolatility:
+    """Аннуализированная RV = √(Σ(log_return²)/N × bars_per_year)."""
+
+    def test_rv_constant_price_zero(self):
+        # Постоянная цена → 0 returns → RV = 0
+        result = realized_volatility([100.0] * 25)
+        assert result == pytest.approx(0.0)
+
+    def test_rv_short_series_returns_none(self):
+        assert realized_volatility([100.0]) is None
+        assert realized_volatility([]) is None
+
+    def test_rv_known_value_1pct_per_bar(self):
+        # 25 баров, каждый бар +1% (log return ≈ 0.00995)
+        closes = [100.0]
+        for _ in range(24):
+            closes.append(closes[-1] * 1.01)
+        # 24 returns каждый log(1.01)≈0.00995, sum_sq ≈ 24 × 9.9e-5 = 2.376e-3
+        # RV = sqrt(2.376e-3 / 24 × 8760) = sqrt(0.8672) ≈ 0.931 (93%)
+        from math import log, sqrt
+        r = log(1.01)
+        expected = sqrt((r * r * 24) / 24 * 8760)
+        result = realized_volatility(closes, period=24, bars_per_year=8760)
+        assert result == pytest.approx(expected, rel=1e-9)
+        # И «процентный» лейбл попадает в зону normal/elevated.
+        assert result is not None and 0.5 < result < 1.5
+
+    def test_rv_window_subset(self):
+        # Первые 10 баров постоянны, последние 5 растут на 1%.
+        closes = [100.0] * 10
+        for _ in range(5):
+            closes.append(closes[-1] * 1.01)
+        # period=5 берёт только последние 5 returns (все ≈ 0.00995)
+        r = realized_volatility(closes, period=5, bars_per_year=8760)
+        assert r is not None and r > 0.5  # > 50% annualised
+
+
+class TestSnapshotV05Fields:
+    """compute_snapshot теперь принимает volumes и возвращает VWAP+RV."""
+
+    def test_snapshot_with_volumes_populates_vwap_and_rv(self):
+        # 60 баров: цена растёт +1%/бар, volume = 1000
+        closes: list[float] = [100.0]
+        for _ in range(59):
+            closes.append(closes[-1] * 1.01)
+        highs = [c * 1.001 for c in closes]
+        lows = [c * 0.999 for c in closes]
+        volumes = [1000.0] * 60
+
+        snap = compute_snapshot(
+            highs, lows, closes, volumes=volumes,
+            vwap_window=24, rv_window=24, bars_per_year=8760,
+        )
+        assert snap.vwap is not None
+        # VWAP последних 24 баров должен лежать между минимумом и максимумом окна
+        win_min = min(closes[-24:])
+        win_max = max(closes[-24:])
+        assert win_min < snap.vwap < win_max
+        # close выше VWAP в restless uptrend → положительный dev
+        assert snap.vwap_dev_pct is not None and snap.vwap_dev_pct > 0
+        # RV для 1% per bar ≈ 93% annualised
+        assert snap.rv_pct is not None and 50.0 < snap.rv_pct < 200.0
+        assert snap.rv_window_bars == 24
+
+    def test_snapshot_without_volumes_keeps_vwap_none(self):
+        closes = [100.0 + i for i in range(60)]
+        highs = [c + 0.5 for c in closes]
+        lows = [c - 0.5 for c in closes]
+        snap = compute_snapshot(highs, lows, closes)  # volumes=None
+        assert snap.vwap is None
+        assert snap.vwap_dev_pct is None
+        # RV всё равно считается (volumes не нужны)
+        assert snap.rv_pct is not None
+
+    def test_format_snapshot_includes_vwap_and_rv_lines(self):
+        closes: list[float] = [100.0]
+        for _ in range(59):
+            closes.append(closes[-1] * 1.005)
+        highs = [c * 1.001 for c in closes]
+        lows = [c * 0.999 for c in closes]
+        volumes = [1000.0] * 60
+        snap = compute_snapshot(
+            highs, lows, closes, volumes=volumes,
+            vwap_window=24, rv_window=24, bars_per_year=8760,
+        )
+        s = format_snapshot(snap)
+        assert "VWAP=" in s
+        assert "dev=" in s
+        assert "RV(annualised" in s
+        # Метки режимов
+        assert "[" in s and "vol" in s

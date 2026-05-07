@@ -1,5 +1,92 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-07 — feat(market-context i1/7): VWAP + Realized Volatility (1H/4H)
+
+`<hash-pending>`
+
+**Контекст.** Пользователь обратил внимание, что классические индикаторы
+(RSI 1978, MACD 2005, Bollinger 2001) — «древние знания», и попросил
+использовать актуальные подходы 2026 года. Research показывает: в 2024-
+2026 институциональные quant-десков фокусируются на positioning/flow
+(funding, OI, RV, IV-skew), а не на retail-индикаторах. План — 7 итераций
+по добавлению современных фич + demote классических в конец промпта.
+Первая итерация (эта запись) — локальные вычисления без новых сетевых
+вызовов.
+
+**Что добавлено.**
+
+1. **VWAP (Volume-Weighted Average Price)** для 1H и 4H в
+   `src/ai_trader/analysis/indicators.py` (новая функция `vwap()`).
+   Формула: `Σ((H+L+C)/3 × Volume) / Σ(Volume)` по rolling-окну.
+   Окно: 24 бара на 1H (≈ daily VWAP-aware), 30 баров на 4H
+   (≈ weekly fair-value benchmark).
+
+   *Research basis:* Berkowitz/Logue/Noser «The Total Cost of
+   Transactions on the NYSE» (Journal of Finance 1988); institutional
+   execution standard. Decentralised.news «Quant Signals for Crypto
+   Derivatives 2026»: «institutional quant models focus on positioning,
+   funding stress, volatility structure — not RSI/MACD».
+
+2. **Realized Volatility (RV, аннуализированная)** —
+   `realized_volatility()`. Формула: `√(Σ(log_return²)/N × bars_per_year)`.
+   Окно: 24 returns на 1H (≈ 1 сутки), 30 на 4H (≈ 5 суток).
+   Аннуализация: 8760 для 1H, 2190 для 4H.
+
+   *Research basis:* Andersen/Bollerslev/Diebold/Labys «Modeling and
+   Forecasting Realized Volatility» (Econometrica 2003). RV предпочитают
+   ATR в современных GARCH/HAR-RV моделях — она lognormal-friendly,
+   аддитивна (RV_T = ΣRV_τ) и используется как input для волатильность-
+   forecasting. В 2026 RV vs IV спред — proxy на ожидания
+   институциональных option-desks.
+
+3. **Метки в `format_snapshot`:**
+   - VWAP: `[STRETCHED above/below VWAP]` (≥±2%), `[above/below VWAP]`
+     (±0.5–2%), `[near VWAP]` (<±0.5%).
+   - RV: `[EXTREME vol regime]` (≥200%), `[elevated vol]` (100–200%),
+     `[normal vol]` (50–100%), `[low vol / squeeze candidate]` (<50%).
+
+   Эти метки — текстовые, чтобы LLM сразу видел регим без расчётов.
+
+4. **`compute_snapshot()` расширен:** новые kwargs `volumes`,
+   `vwap_window`, `rv_window`, `bars_per_year`. Default behavior
+   сохранён (если volumes=None — VWAP=None, RV всё равно считается).
+   `IndicatorSnapshot` получил 4 новых поля: `vwap`, `vwap_dev_pct`,
+   `rv_pct`, `rv_window_bars`.
+
+5. **`build_market_context` (`trading/context.py`)** теперь передаёт
+   volumes из свечей и правильный `bars_per_year` для каждого TF.
+
+**Тесты:** добавлены 13 регрессионных тестов
+(`tests/test_ai_trader_indicators.py`):
+- `TestVwap` (6) — постоянная цена, weighted by volume, edge cases
+  (zero volume, mismatched lengths, period subset, empty input).
+- `TestRealizedVolatility` (4) — постоянная цена → 0, short series → None,
+  known-value (1% per bar → ~93% annualised), period subset.
+- `TestSnapshotV05Fields` (3) — volumes populates VWAP+RV, без volumes
+  VWAP=None, format_snapshot включает VWAP/RV строки и метки.
+
+Все 466 тестов suite зелёные.
+
+**Файлы.** `src/ai_trader/analysis/indicators.py`,
+`src/ai_trader/trading/context.py`,
+`tests/test_ai_trader_indicators.py`.
+
+**Что НЕ менялось.** Классические индикаторы (RSI/MACD/BB/EMA/ATR)
+остаются на своём месте — в этой итерации они НЕ degrademовали в
+промпте. Demote запланирован в **итерации 7**, после того как
+positioning/flow-фичи будут добавлены и validatedы (итерации 2-6).
+
+**План оставшихся итераций** (отдельные коммиты):
+- i2: Open Interest delta + Funding rate cumulative (Bybit public API).
+- i3: Fear & Greed Index + BTC Dominance % (alternative.me, CoinGecko).
+- i4: Long/Short ratio + Orderbook L2 imbalance (Bybit).
+- i5: Liquidation feed (Bybit WebSocket или OI-drop proxy).
+- i6: Deribit DVOL/IV для BTC и ETH (options sentiment).
+- i7: Promote/demote — positioning/flow в начало промпта, classical
+  indicators в конец как «secondary context».
+
+---
+
 ## 2026-05-07 — feat(symbols): расширили пул с 5 до 10 пар + max_pos 3→5 + parametrized prompt
 
 `6d51360`

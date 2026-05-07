@@ -12,16 +12,36 @@
 - EMA: канонический экспоненциально-взвешенный mean. α = 2/(N+1).
 - Bollinger Bands: John Bollinger «Bollinger on Bollinger Bands» (2001).
   Middle = SMA(20), Upper/Lower = middle ± 2·std(20).
+- VWAP (Volume-Weighted Average Price): Berkowitz, Logue, Noser «The Total
+  Cost of Transactions on the NYSE» (Journal of Finance 1988); institutional
+  standard для оценки fair-value execution. Typical price (H+L+C)/3 × volume,
+  cumulative по окну. Используется как 2026-крипто proxy на institutional bid.
+- Realized Volatility (RV): Andersen/Bollerslev/Diebold/Labys «Modeling and
+  Forecasting Realized Volatility» (Econometrica 2003); Andersen et al.
+  «The Distribution of Realized Stock Return Volatility» (J. Financial
+  Econ. 2001). Sum of squared log-returns по окну, аннуализируется.
+  В 2024-2026 квант-десках RV предпочитают ATR — он modeling-friendly
+  (lognormal returns) и используется как input для GARCH/HAR-RV
+  forecasting. См. Decentralised.news «Quant Signals for Crypto
+  Derivatives 2026»: «Realized Volatility vs Implied Volatility spread —
+  signal что market makers price директионального риска».
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import sqrt
+from math import log, sqrt
 
 
 @dataclass
 class IndicatorSnapshot:
-    """Полный набор индикаторов для одного символа."""
+    """Полный набор индикаторов для одного символа.
+
+    v0.5 (2026-05-07): добавлены VWAP и Realized Volatility — современные
+    quant-фичи 2026 года (positioning/flow-aware). VWAP — institutional
+    fair-value benchmark; RV — modeling-friendly альтернатива ATR.
+    Классические индикаторы (RSI/MACD/BB/EMA/ATR) остаются как
+    secondary context для LLM.
+    """
 
     last_close: float
     rsi14: float | None
@@ -36,6 +56,11 @@ class IndicatorSnapshot:
     bb_middle: float | None
     bb_lower: float | None
     bb_position: float | None  # (close-lower)/(upper-lower) [0..1]; <0 / >1 = за пределами
+    # v0.5: новые quant-фичи 2026.
+    vwap: float | None = None              # rolling VWAP по окну (default = весь массив свечей)
+    vwap_dev_pct: float | None = None      # (close-vwap)/vwap*100 — отклонение от institutional fair-value
+    rv_pct: float | None = None            # rolling annualised realized volatility, в %
+    rv_window_bars: int | None = None      # сколько баров пошло в RV (для интерпретации)
 
 
 # ─── Базовые helpers ─────────────────────────────────────────────────────
@@ -169,6 +194,82 @@ def bollinger(closes: list[float], period: int = 20, sigma: float = 2.0) -> tupl
     return (mid + sigma * sd, mid, mid - sigma * sd)
 
 
+def vwap(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    volumes: list[float],
+    period: int | None = None,
+) -> float | None:
+    """Volume-Weighted Average Price по окну.
+
+    Typical price = (H+L+C)/3, взвешенный по volume каждого бара,
+    суммируется по последним `period` барам (или по всему массиву если
+    period=None). Используется институционалами как proxy на
+    fair-value execution price (Berkowitz/Logue/Noser 1988).
+
+    Возвращает None если данных недостаточно или volume суммарный = 0.
+    """
+    n = len(closes)
+    if n == 0 or n != len(highs) or n != len(lows) or n != len(volumes):
+        return None
+    if period is not None and period <= 0:
+        return None
+    window = n if period is None else min(period, n)
+    if window <= 0:
+        return None
+    h = highs[-window:]
+    l = lows[-window:]
+    c = closes[-window:]
+    v = volumes[-window:]
+    pv_sum = 0.0
+    v_sum = 0.0
+    for i in range(window):
+        if v[i] <= 0:
+            continue
+        typical = (h[i] + l[i] + c[i]) / 3
+        pv_sum += typical * v[i]
+        v_sum += v[i]
+    if v_sum <= 0:
+        return None
+    return pv_sum / v_sum
+
+
+def realized_volatility(
+    closes: list[float],
+    period: int | None = None,
+    bars_per_year: float = 24 * 365,
+) -> float | None:
+    """Аннуализированная Realized Volatility, в долях (0.5 = 50%).
+
+    RV = √(Σ(log_return²) / N × bars_per_year) —
+    стандарт Andersen/Bollerslev (Econometrica 2003).
+
+    `period` — окно последних N return'ов (None = все доступные).
+    `bars_per_year` — для аннуализации; default 24×365 предполагает
+    часовые свечи. Для 4h свечей: 6×365=2190.
+
+    Возвращает None если данных < 2.
+    """
+    n = len(closes)
+    if n < 2:
+        return None
+    if period is not None and period <= 0:
+        return None
+    returns: list[float] = []
+    start = 1 if period is None else max(1, n - period)
+    for i in range(start, n):
+        prev = closes[i - 1]
+        cur = closes[i]
+        if prev <= 0 or cur <= 0:
+            continue
+        returns.append(log(cur / prev))
+    if not returns:
+        return None
+    sq_sum = sum(r * r for r in returns)
+    return sqrt(sq_sum / len(returns) * bars_per_year)
+
+
 # ─── Сводка по всем индикаторам ──────────────────────────────────────────
 
 
@@ -176,9 +277,20 @@ def compute_snapshot(
     highs: list[float],
     lows: list[float],
     closes: list[float],
+    volumes: list[float] | None = None,
+    *,
+    vwap_window: int | None = None,
+    rv_window: int | None = 24,
+    bars_per_year: float = 24 * 365,
 ) -> IndicatorSnapshot:
     """Полный snapshot. Тихо возвращает None для тех индикаторов, для которых
     данных не хватило (например, при первом запуске когда только 5 свечей).
+
+    v0.5: добавлены VWAP и RV. `volumes` опционален (если None — VWAP=None).
+    `vwap_window` default = len(closes) (rolling VWAP по всему окну
+    переданных свечей; для 1H × 100 это VWAP за последние ~4 дня).
+    `rv_window` default = 24 (последние 24 часовых return'а ≈ 1 сутки).
+    `bars_per_year` для аннуализации RV: 8760 для 1H, 2190 для 4H.
     """
     last_close = closes[-1] if closes else 0.0
     rsi_v = rsi(closes, 14)
@@ -191,6 +303,17 @@ def compute_snapshot(
     bb_pos: float | None = None
     if bb_u is not None and bb_l is not None and bb_u != bb_l:
         bb_pos = (last_close - bb_l) / (bb_u - bb_l)
+
+    vwap_v: float | None = None
+    vwap_dev: float | None = None
+    if volumes is not None:
+        vwap_v = vwap(highs, lows, closes, volumes, period=vwap_window)
+        if vwap_v is not None and vwap_v > 0:
+            vwap_dev = (last_close - vwap_v) / vwap_v * 100
+
+    rv = realized_volatility(closes, period=rv_window, bars_per_year=bars_per_year)
+    rv_pct = rv * 100 if rv is not None else None
+    rv_n = min(rv_window or len(closes), max(0, len(closes) - 1))
 
     return IndicatorSnapshot(
         last_close=last_close,
@@ -206,6 +329,10 @@ def compute_snapshot(
         bb_middle=bb_m,
         bb_lower=bb_l,
         bb_position=bb_pos,
+        vwap=vwap_v,
+        vwap_dev_pct=vwap_dev,
+        rv_pct=rv_pct,
+        rv_window_bars=rv_n if rv is not None else None,
     )
 
 
@@ -246,6 +373,35 @@ def format_snapshot(s: IndicatorSnapshot) -> str:
         elif s.bb_position <= 0.2:
             bb_label = " [near lower BB]"
 
+    # VWAP-метка: насколько price отклонился от institutional fair-value.
+    # Пороги ±0.5% / ±2% — разумные эвристики для крипто (на 1h-окне).
+    vwap_label = ""
+    if s.vwap_dev_pct is not None:
+        if s.vwap_dev_pct >= 2.0:
+            vwap_label = " [STRETCHED above VWAP]"
+        elif s.vwap_dev_pct >= 0.5:
+            vwap_label = " [above VWAP]"
+        elif s.vwap_dev_pct <= -2.0:
+            vwap_label = " [STRETCHED below VWAP]"
+        elif s.vwap_dev_pct <= -0.5:
+            vwap_label = " [below VWAP]"
+        else:
+            vwap_label = " [near VWAP]"
+
+    # Realized Volatility-метка: режим волатильности.
+    # Эмпирические пороги для крипто-перпов (annualised RV): low <50%,
+    # normal 50-100%, elevated 100-200%, extreme >200%.
+    rv_label = ""
+    if s.rv_pct is not None:
+        if s.rv_pct >= 200:
+            rv_label = " [EXTREME vol regime]"
+        elif s.rv_pct >= 100:
+            rv_label = " [elevated vol]"
+        elif s.rv_pct >= 50:
+            rv_label = " [normal vol]"
+        else:
+            rv_label = " [low vol / squeeze candidate]"
+
     return (
         f"  RSI14={fmt(s.rsi14, '{:.1f}')}{rsi_label} "
         f"MACD={fmt(s.macd_line, '{:.4g}')}/sig={fmt(s.macd_signal, '{:.4g}')}/"
@@ -253,5 +409,7 @@ def format_snapshot(s: IndicatorSnapshot) -> str:
         f"  ATR14={fmt(s.atr14, '{:.4g}')} ({fmt(s.atr14_pct, '{:.2f}')}% of price)  "
         f"EMA20={fmt(s.ema20, '{:.4g}')} EMA50={fmt(s.ema50, '{:.4g}')}{trend_label}\n"
         f"  BB(20,2): upper={fmt(s.bb_upper, '{:.4g}')} mid={fmt(s.bb_middle, '{:.4g}')} "
-        f"lower={fmt(s.bb_lower, '{:.4g}')} pos={fmt(s.bb_position, '{:.2f}')}{bb_label}"
+        f"lower={fmt(s.bb_lower, '{:.4g}')} pos={fmt(s.bb_position, '{:.2f}')}{bb_label}\n"
+        f"  VWAP={fmt(s.vwap, '{:.6g}')} dev={fmt(s.vwap_dev_pct, '{:+.2f}')}%{vwap_label}  "
+        f"RV(annualised, n={s.rv_window_bars or 0})={fmt(s.rv_pct, '{:.1f}')}%{rv_label}"
     )
