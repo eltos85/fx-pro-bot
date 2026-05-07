@@ -9,8 +9,10 @@
 Стратегия:
 - Кэш в памяти на 10 минут (cycle 15 минут — 1-2 fetch на цикл максимум).
 - Парсинг через `feedparser` (стандарт для RSS/Atom).
-- Фильтр по символам: ищем кошчевые слова в title/summary
-  (BTC/Bitcoin, ETH/Ethereum, BNB, XRP/Ripple, DOGE/Dogecoin).
+- Фильтр по символам: ищем ключевые слова в title/summary
+  (BTC/Bitcoin, ETH/Ethereum, BNB, XRP/Ripple, DOGE/Dogecoin,
+  AVAX/Avalanche, LTC/Litecoin, ATOM/Cosmos, WLD/Worldcoin,
+  TAO/Bittensor — см. SYMBOL_KEYWORDS ниже).
 - Дедупликация по URL.
 - Top-N (default 8) свежих за последние N часов (default 6h).
 """
@@ -38,6 +40,16 @@ SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "BNBUSDT": ("binance coin", "bnb", "binance "),
     "XRPUSDT": ("xrp", "ripple"),
     "DOGEUSDT": ("dogecoin", "doge"),
+    # 2026-05-07: расширили пул на 5 пар (AVAX, LTC, ATOM, WLD, TAO).
+    # Ключи подобраны так, чтобы НЕ матчить ложные слова: 'atom ' с
+    # пробелом отсекает 'atomic'; 'tao ' — 'taoism'/'tax on'; 'avax' —
+    # уникальный тикер; 'wld' аналогично; 'litecoin' идёт первым,
+    # 'ltc ' с пробелом для контекста типа "LTC price".
+    "AVAXUSDT": ("avalanche", "avax"),
+    "LTCUSDT":  ("litecoin", "ltc "),
+    "ATOMUSDT": ("cosmos hub", "cosmos ", "atom "),
+    "WLDUSDT":  ("worldcoin", "wld", "world id", "worldid"),
+    "TAOUSDT":  ("bittensor", "tao "),
 }
 
 # Generic crypto keywords — статья про "crypto market" релевантна всем.

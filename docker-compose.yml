@@ -132,14 +132,22 @@ services:
       # Эксперимент 14 дней. ВСЕ параметры заморожены — менять = curve-fitting.
       AI_TRADER_POLL_INTERVAL_SEC: ${AI_TRADER_POLL_INTERVAL_SEC:-900}
       AI_TRADER_VIRTUAL_CAPITAL: ${AI_TRADER_VIRTUAL_CAPITAL:-500}
-      AI_TRADER_SYMBOLS: ${AI_TRADER_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
+      # AI_TRADER_SYMBOLS специально НЕ объявлен здесь как
+      # `${...:-default}` — единственный источник правды для списка пар
+      # это `.env` (см. `.env.example` секцию AI_TRADER). Если переменная
+      # отсутствует и в .env — pydantic_settings берёт `DEFAULT_AI_SYMBOLS`
+      # из `src/ai_trader/config/settings.py` (10 пар, не пересекаются
+      # с `BYBIT_BOT_SCAN_SYMBOLS`). Это предотвращает дублирование
+      # списка в compose-defaults и в коде.
       # Killswitch (v0.3, 2%-риск): согласно AUDIT_2026.md P1, переход на
       # mainstream 2026 risk per trade 1–2% (KuCoin Risk Mgmt 2026, Atlas Peak
       # Research, Hyper-Quant). При 2% риска = $10 макс на сделку × 5 = $50/день.
       # Total $200 = 40% virtual capital, ранняя остановка эксперимента.
       AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-50}
       AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-200}
-      AI_TRADER_MAX_POSITIONS: ${AI_TRADER_MAX_POSITIONS:-3}
+      # 3 → 5 (2026-05-07): пул удвоился (5→10), одновременная ёмкость растёт
+      # пропорционально. 5×$10 риска = $50 = max_daily_loss, дальше killswitch.
+      AI_TRADER_MAX_POSITIONS: ${AI_TRADER_MAX_POSITIONS:-5}
       AI_TRADER_MAX_LEVERAGE: ${AI_TRADER_MAX_LEVERAGE:-5}
       AI_TRADER_RISK_PER_TRADE: ${AI_TRADER_RISK_PER_TRADE:-0.02}
       # Bybit — ОТДЕЛЬНЫЕ ключи от bybit-bot (см. .env: AI_TRADER_BYBIT_API_KEY).
@@ -159,8 +167,9 @@ services:
       # Включать в LIVE только после проверки первых 1-2 циклов под наблюдением.
       AI_TRADER_TRADING_ENABLED: ${AI_TRADER_TRADING_ENABLED:-false}
       # News (Wave 3): RSS-агрегатор CoinDesk/CoinTelegraph/Decrypt, без auth.
-      # Кэш в памяти 10 мин, фильтр по символам (BTC/ETH/BNB/XRP/DOGE) +
-      # generic-keywords (ETF, Fed, regulation). Top-N свежих за last_age_hours.
+      # Кэш в памяти 10 мин, фильтр по символам (BTC/ETH/BNB/XRP/DOGE +
+      # AVAX/LTC/ATOM/WLD/TAO с 2026-05-07) + generic-keywords (ETF, Fed,
+      # regulation). Top-N свежих за last_age_hours.
       AI_TRADER_NEWS_ENABLED: ${AI_TRADER_NEWS_ENABLED:-true}
       AI_TRADER_NEWS_MAX_AGE_HOURS: ${AI_TRADER_NEWS_MAX_AGE_HOURS:-6}
       AI_TRADER_NEWS_MAX_ITEMS: ${AI_TRADER_NEWS_MAX_ITEMS:-8}

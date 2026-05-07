@@ -12,13 +12,18 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# Пары для AI-трейдера. ВАЖНО: не пересекаются с bybit_bot scan_symbols
-# (SOL, ADA, LINK, SUI, TON, WIF, TIA, DOT). Если поменяешь — проверь
-# нет ли коллизии с активными парами основного бота, иначе одну пару
-# будут параллельно вести оба бота, и непонятно чьи открытые позиции
-# принадлежат кому (нет общего ledger).
+# Список пар для AI-трейдера. Source of truth — `.env` через переменную
+# `AI_TRADER_SYMBOLS` (см. `.env.example`). Эта константа — safety-net
+# fallback для локальной разработки / pytest / случая когда .env пуст.
+# В докер-проде список ВСЕГДА приходит из .env; compose специально не
+# хранит default, чтобы не было двух мест правды (см. docker-compose.yml).
 #
-# v0.4 (2026-05-07): расширили с 5 до 10. Добавлены:
+# ВАЖНО: ни один тикер не должен пересекаться с
+# `BYBIT_BOT_SCAN_SYMBOLS` (SOL/ADA/LINK/SUI/TON/WIF/TIA/DOT) — иначе
+# одну пару параллельно ведут оба бота, и непонятно чьи открытые
+# позиции (нет общего ledger). Проверка на этапе ревью .env-диффа.
+#
+# v0.4 (2026-05-07): расширено с 5 до 10. Добавлены:
 #   - AVAXUSDT, LTCUSDT, ATOMUSDT — крупные L1 с разными нарративами
 #     (Avalanche subnets, digital silver / mining, Cosmos hub / IBC).
 #   - WLDUSDT, TAOUSDT — narrative-плеи 2025-2026 (Worldcoin / identity,
