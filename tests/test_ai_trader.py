@@ -371,6 +371,39 @@ class TestDeepSeekClientFallback:
         assert "empty response" in resp.error
         assert len(calls) == 3   # 2 with thinking + 1 fallback no-thinking
 
+    def test_msg_content_none_treated_as_empty_no_crash(self, monkeypatch):
+        """Регрессия 2026-05-08 cycle 5 на VPS: DeepSeek вернул response с
+        `content=None` после 504-retry от anthropic SDK. Раньше падало
+        TypeError 'NoneType' object is not iterable, и весь цикл крашился.
+        Теперь None-content трактуется как empty-response → сработает
+        retry + no-thinking fallback."""
+        from types import SimpleNamespace
+
+        calls: list[dict] = []
+        none_msg = SimpleNamespace(
+            content=None,
+            usage=SimpleNamespace(input_tokens=10, output_tokens=0),
+        )
+        good_msg = self._make_msg("RECOVERED")
+        responses = [none_msg, none_msg, good_msg]
+
+        class FakeClient:
+            def __init__(self):
+                self.messages = SimpleNamespace(create=self._create)
+
+            def _create(self, **kwargs):
+                calls.append(kwargs)
+                return responses.pop(0)
+
+        client = self._make_client(monkeypatch, FakeClient)
+        resp = client.ask("sys", "user")
+        # Не упало — это и есть главный assertion (regression)
+        assert resp.text == "RECOVERED"
+        assert resp.error is None
+        # Прошли 2 попытки с thinking + 1 fallback без thinking
+        assert len(calls) == 3
+        assert "thinking" not in calls[2]
+
 
 # ─── qty/price rounding under Bybit instrument filters ────────────────
 

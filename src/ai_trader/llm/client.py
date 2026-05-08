@@ -113,16 +113,28 @@ class DeepSeekClient:
             log.exception("DeepSeek API call failed")
             return LlmResponse(text="", tokens_input=0, tokens_output=0, cost_usd=0, error=str(e))
 
+        # DeepSeek-V4 (Anthropic-compatible API) иногда возвращает response с
+        # `content = None` — наблюдалось на VPS 2026-05-08 cycle 5 после 504
+        # Gateway Timeout и автоматического retry со стороны anthropic SDK,
+        # а также при пограничных thinking-сбоях. Если итерировать None
+        # напрямую — падение `TypeError: 'NoneType' object is not iterable`
+        # пробрасывается из _call наружу, ловится в app.main как «cycle
+        # crashed», и retry / no-thinking-fallback из ask() не отрабатывают.
+        # Лечится тем что относимся к None-content как к empty response —
+        # ask() сделает retry, потом fallback без thinking.
+        content = getattr(msg, "content", None)
         text_parts: list[str] = []
-        for block in msg.content:
-            block_type = getattr(block, "type", None)
-            if block_type == "text":
-                text_parts.append(getattr(block, "text", ""))
-            elif block_type == "thinking":
-                # thinking-блок не является ответом для парсера, но логируем
-                tk = getattr(block, "thinking", "")
-                if tk:
-                    log.debug("LLM thinking: %s", tk[:300])
+        if content is None:
+            log.warning("LLM returned msg.content=None — treating as empty")
+        else:
+            for block in content:
+                block_type = getattr(block, "type", None)
+                if block_type == "text":
+                    text_parts.append(getattr(block, "text", ""))
+                elif block_type == "thinking":
+                    tk = getattr(block, "thinking", "")
+                    if tk:
+                        log.debug("LLM thinking: %s", tk[:300])
         text = "\n".join(text_parts).strip()
 
         usage = getattr(msg, "usage", None)

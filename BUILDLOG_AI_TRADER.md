@@ -1,5 +1,61 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-08 — fix(llm/client): защита от msg.content=None (cycle 5 crash)
+
+`<hash-pending>`
+
+### Симптом
+
+В Telegram прилетело `❌ ERROR in cycle 5` → `'NoneType' object is not iterable`.
+В docker-логах:
+
+```
+File "ai_trader/llm/client.py", line 117, in _call
+    for block in msg.content:
+TypeError: 'NoneType' object is not iterable
+```
+
+В предыдущем cycle 6 был зафиксирован `504 Gateway Timeout` от DeepSeek
++ автоматический retry от `anthropic` SDK. По всей видимости, после
+такого retry SDK иногда отдаёт response-объект где `content = None`
+(вместо обычного списка блоков).
+
+### Причина
+
+`_call` итерировал `msg.content` без проверки на `None`. Исключение
+пробрасывалось из `_call` наружу, ловилось в `app/main.py` как
+«Cycle X crashed (продолжаю)» и пользователю в Telegram. Существующие
+retry / no-thinking-fallback в `ask()` не отрабатывали — они полагаются
+на возврат `LlmResponse` с пустым text, а не на исключение.
+
+### Фикс
+
+В `_call`: `getattr(msg, "content", None)` + явная проверка на None.
+Если None — лог WARNING, возвращаем `LlmResponse` с пустым text (не
+исключение). Это тригеррит существующую цепочку:
+
+1. retry с thinking (по-умолчанию 1 retry);
+2. final fallback БЕЗ thinking (single shot).
+
+То есть один сбой DeepSeek больше не валит весь цикл — бот переходит
+в режим деградации: ask() сделает до 3 попыток, последняя — без
+thinking-блоков (надёжнее).
+
+### Тесты
+
+Добавлен `test_msg_content_none_treated_as_empty_no_crash` — fake
+`anthropic` возвращает 2 раза `content=None`, потом валидный
+`SimpleNamespace(content=[text-block])`. Ожидается: цикл НЕ падает,
+финальный текст приходит из 3-го вызова без thinking. Все 534 теста
+прошли.
+
+### Файлы
+
+- `src/ai_trader/llm/client.py` (защита от None)
+- `tests/test_ai_trader.py` (regression test)
+
+---
+
 ## 2026-05-08 — feat(v0.8): conviction-based position sizing $25-$100 (USER OVERRIDE)
 
 `<hash-pending>`
