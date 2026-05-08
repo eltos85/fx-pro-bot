@@ -32,6 +32,7 @@ class PositionRow:
     close_reason: str | None = None
     pair_tag: str = ""
     opened_bar_idx: int = 0
+    bybit_close_order_id: str | None = None
 
 
 class StatsStore:
@@ -94,6 +95,8 @@ class StatsStore:
         self.conn.executescript("""
             CREATE INDEX IF NOT EXISTS idx_positions_pair_tag ON positions(pair_tag);
             CREATE INDEX IF NOT EXISTS idx_positions_strategy ON positions(strategy);
+            CREATE INDEX IF NOT EXISTS idx_positions_bybit_close_order_id
+                ON positions(bybit_close_order_id);
         """)
 
     def _migrate_schema(self) -> None:
@@ -103,6 +106,10 @@ class StatsStore:
         migrations = [
             ("pair_tag", "TEXT NOT NULL DEFAULT ''"),
             ("opened_bar_idx", "INTEGER NOT NULL DEFAULT 0"),
+            # Bybit closedPnl orderId — predотвращает применение одной API-записи
+            # к нескольким DB-строкам (recon-дубли при race close + быстрых re-open
+            # на one-way mode). Видеть BUILDLOG_BYBIT.md 2026-05-08.
+            ("bybit_close_order_id", "TEXT"),
         ]
         for col, col_type in migrations:
             if col not in existing:
@@ -161,12 +168,15 @@ class StatsStore:
         exit_price: float,
         pnl_usd: float,
         close_reason: str = "signal",
+        bybit_close_order_id: str | None = None,
     ) -> None:
         now = datetime.now(tz=UTC).isoformat()
         self.conn.execute(
-            "UPDATE positions SET closed_at=?, exit_price=?, pnl_usd=?, close_reason=? "
+            "UPDATE positions "
+            "SET closed_at=?, exit_price=?, pnl_usd=?, close_reason=?, "
+            "    bybit_close_order_id=COALESCE(?, bybit_close_order_id) "
             "WHERE id=?",
-            (now, exit_price, pnl_usd, close_reason, position_id),
+            (now, exit_price, pnl_usd, close_reason, bybit_close_order_id, position_id),
         )
         self.conn.commit()
 
@@ -196,14 +206,36 @@ class StatsStore:
         exit_price: float,
         pnl_usd: float,
         close_reason: str,
+        bybit_close_order_id: str | None = None,
     ) -> None:
         """Обновить pnl_usd / exit_price / close_reason у уже закрытой позиции
         (нужно для дозаполнения sync_pending после получения closedPnl из API)."""
         self.conn.execute(
-            "UPDATE positions SET exit_price=?, pnl_usd=?, close_reason=? WHERE id=?",
-            (exit_price, pnl_usd, close_reason, position_id),
+            "UPDATE positions "
+            "SET exit_price=?, pnl_usd=?, close_reason=?, "
+            "    bybit_close_order_id=COALESCE(?, bybit_close_order_id) "
+            "WHERE id=?",
+            (exit_price, pnl_usd, close_reason, bybit_close_order_id, position_id),
         )
         self.conn.commit()
+
+    def is_close_order_id_used(self, order_id: str) -> bool:
+        """Проверить, не был ли этот closedPnl orderId уже применён к другой позиции.
+
+        Защищает от recon-дублей: если бот в one-way mode успел открыть
+        несколько DB-строк под одну биржевую позицию, то после закрытия
+        биржа отдаст один closedPnl record. Без этой проверки этот record
+        был бы применён к КАЖДОЙ DB-строке (одинаковый PnL у нескольких
+        записей). С проверкой — применяется только к первой, остальные
+        остаются sync_pending → sync_orphan.
+        """
+        if not order_id:
+            return False
+        row = self.conn.execute(
+            "SELECT 1 FROM positions WHERE bybit_close_order_id=? LIMIT 1",
+            (order_id,),
+        ).fetchone()
+        return row is not None
 
     def get_open_by_pair_tag(self, pair_tag: str) -> list[PositionRow]:
         """Все открытые позиции с данным pair_tag (для парного закрытия Stat-Arb)."""
@@ -249,4 +281,8 @@ class StatsStore:
             close_reason=row["close_reason"],
             pair_tag=row["pair_tag"] if "pair_tag" in row.keys() else "",
             opened_bar_idx=row["opened_bar_idx"] if "opened_bar_idx" in row.keys() else 0,
+            bybit_close_order_id=(
+                row["bybit_close_order_id"]
+                if "bybit_close_order_id" in row.keys() else None
+            ),
         )

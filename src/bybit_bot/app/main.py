@@ -411,29 +411,66 @@ def _reconcile_close(
     db_pos: PositionRow,
     api_pnl: float,
     reason: str,
-) -> None:
+    skip_order_ids: set[str] | None = None,
+) -> str | None:
     """Подтянуть real-PnL из API и записать в БД + KillSwitch.
 
     Должна вызываться ПОСЛЕ паузы (~2с) чтобы Bybit closed-pnl API успел
     отдать запись. Без паузы fetch_realized_pnl часто возвращает пусто и
     мы фоллбэчимся на uPnL, теряя точность.
+
+    skip_order_ids — closedPnl orderId, уже применённые к другим DB-строкам
+    в этом цикле. Защита от recon-дублей (см. BUILDLOG_BYBIT.md 2026-05-08).
+    Возвращает orderId использованной API-записи (None если запись не нашлась
+    или уже была применена к другой строке).
     """
     since_ms = int((datetime.now(tz=UTC) - timedelta(minutes=5)).timestamp() * 1000)
-    real_pnl = api_pnl
-    exit_price = 0.0
-    cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms)
+    used_order_id: str | None = None
+
+    persistent_skip = set(skip_order_ids or set())
+    cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms,
+                                     skip_order_ids=persistent_skip)
+
+    duplicate_record = bool(
+        cpnl and cpnl.get("orderId") and stats.is_close_order_id_used(cpnl["orderId"])
+    )
+    if duplicate_record:
+        # Найденная API-запись уже применена к другой DB-строке (one-way merge
+        # или race close). Помечаем эту строку sync_pending — в следующем цикле
+        # либо появится уникальная свежая запись (нормальное закрытие сиблинга),
+        # либо через 30 мин закроется как sync_orphan с pnl=0.
+        log.warning(
+            "RECON SKIP %s id=%s: closedPnl orderId %s уже применён к другой "
+            "DB-строке (one-way merge / race) — оставляем sync_pending",
+            db_pos.symbol, db_pos.id, cpnl["orderId"],
+        )
+        stats.close_position(db_pos.id, exit_price=0.0, pnl_usd=0.0,
+                             close_reason="sync_pending")
+        return None
+
     if cpnl:
         real_pnl = float(cpnl["closedPnl"])
         exit_price = float(cpnl.get("avgExitPrice", 0))
-        log.info("REAL PnL %s: closedPnl=%.4f (uPnL was %.4f), exit=%.4f",
-                 db_pos.symbol, real_pnl, api_pnl, exit_price)
+        used_order_id = cpnl.get("orderId")
+        log.info("REAL PnL %s: closedPnl=%.4f (uPnL was %.4f), exit=%.4f orderId=%s",
+                 db_pos.symbol, real_pnl, api_pnl, exit_price, used_order_id or "-")
     else:
+        # API ещё не отдал запись (закрытие <1-2с назад). Падаем на uPnL как
+        # fallback — оригинальное поведение для случая, когда ни одна запись
+        # ещё не доступна. Корректность важнее: uPnL близок к real PnL для
+        # market-close сразу после события.
+        real_pnl = api_pnl
+        exit_price = 0.0
         log.warning("Не удалось получить closed-pnl для %s, используем uPnL=%.4f",
-                     db_pos.symbol, api_pnl)
+                    db_pos.symbol, api_pnl)
 
-    stats.close_position(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl, close_reason=reason)
+    stats.close_position(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl,
+                         close_reason=reason,
+                         bybit_close_order_id=used_order_id)
     killswitch.record_trade_close(real_pnl)
     log.info("ЗАКРЫТА: %s %s pnl=%.4f [%s]", db_pos.side, db_pos.symbol, real_pnl, reason)
+
+    return used_order_id
 
 
 def _close_and_record(
@@ -497,8 +534,12 @@ def _close_batch_with_reconcile(
     time.sleep(_PNL_RECONCILE_SLEEP_SEC)
 
     closed: set[str] = set()
+    used_order_ids: set[str] = set()
     for db_pos, api_pnl, reason in submitted:
-        _reconcile_close(client, stats, killswitch, db_pos, api_pnl, reason)
+        used = _reconcile_close(client, stats, killswitch, db_pos, api_pnl, reason,
+                                skip_order_ids=used_order_ids)
+        if used:
+            used_order_ids.add(used)
         closed.add(db_pos.symbol)
     return closed
 
@@ -544,6 +585,7 @@ def _reconcile_pending_sync(
     if not pending:
         return
 
+    used_order_ids: set[str] = set()
     for db_pos in pending:
         try:
             opened_dt = datetime.fromisoformat(db_pos.opened_at)
@@ -553,7 +595,18 @@ def _reconcile_pending_sync(
         except (ValueError, TypeError):
             since_ms = int((datetime.now(tz=UTC) - timedelta(hours=24)).timestamp() * 1000)
 
-        cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms, retries=1, retry_delay_sec=0)
+        cpnl = client.fetch_realized_pnl(
+            db_pos.symbol, since_ms, retries=1, retry_delay_sec=0,
+            skip_order_ids=used_order_ids,
+        )
+
+        if cpnl and cpnl.get("orderId") and stats.is_close_order_id_used(cpnl["orderId"]):
+            log.warning(
+                "RECONCILE SKIP %s id=%s: closedPnl orderId %s уже применён",
+                db_pos.symbol, db_pos.id, cpnl["orderId"],
+            )
+            cpnl = None
+
         if not cpnl:
             closed_age_min = 0.0
             try:
@@ -574,11 +627,15 @@ def _reconcile_pending_sync(
 
         real_pnl = float(cpnl["closedPnl"])
         exit_price = float(cpnl.get("avgExitPrice", 0))
+        order_id = cpnl.get("orderId")
         stats.update_closed_pnl(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl,
-                                close_reason="sync_closed")
+                                close_reason="sync_closed",
+                                bybit_close_order_id=order_id)
+        if order_id:
+            used_order_ids.add(order_id)
         killswitch.record_trade_close(real_pnl)
-        log.info("RECONCILE %s: real PnL=%.4f exit=%.4f (from API, was sync_pending)",
-                 db_pos.symbol, real_pnl, exit_price)
+        log.info("RECONCILE %s: real PnL=%.4f exit=%.4f orderId=%s (from API, was sync_pending)",
+                 db_pos.symbol, real_pnl, exit_price, order_id or "-")
 
 
 def _process_exits(
@@ -628,10 +685,13 @@ def _process_exits(
     # Подтягиваем реальный PnL из Bybit closed-pnl API.
     # Если API не вернул запись (закрытие <1-2с назад) — помечаем позицию
     # close_reason="sync_pending" и возвращаемся к ней в следующем цикле.
+    #
+    # Защита от recon-дублей: одна биржевая позиция = одна closedPnl запись.
+    # Если в DB несколько строк под один символ (one-way merge / race close),
+    # каждая строка получает уникальный orderId или остаётся sync_pending.
+    used_order_ids: set[str] = set()
     for db_pos in db_open:
         if db_pos.symbol not in api_map:
-            real_pnl = 0.0
-            exit_price = 0.0
             try:
                 opened_dt = datetime.fromisoformat(db_pos.opened_at)
                 if opened_dt.tzinfo is None:
@@ -640,14 +700,27 @@ def _process_exits(
             except (ValueError, TypeError):
                 since_ms = int((datetime.now(tz=UTC) - timedelta(hours=12)).timestamp() * 1000)
 
-            cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms)
+            cpnl = client.fetch_realized_pnl(db_pos.symbol, since_ms,
+                                             skip_order_ids=used_order_ids)
+            if cpnl and cpnl.get("orderId") and stats.is_close_order_id_used(cpnl["orderId"]):
+                log.warning(
+                    "SYNC SKIP %s id=%s: closedPnl orderId %s уже применён к другой "
+                    "DB-строке — sync_pending",
+                    db_pos.symbol, db_pos.id, cpnl["orderId"],
+                )
+                cpnl = None
+
             if cpnl:
                 real_pnl = float(cpnl["closedPnl"])
                 exit_price = float(cpnl.get("avgExitPrice", 0))
-                log.info("SYNC %s: real PnL=%.4f exit=%.4f (from API)",
-                         db_pos.symbol, real_pnl, exit_price)
+                order_id = cpnl.get("orderId")
+                log.info("SYNC %s: real PnL=%.4f exit=%.4f orderId=%s (from API)",
+                         db_pos.symbol, real_pnl, exit_price, order_id or "-")
                 stats.close_position(db_pos.id, exit_price=exit_price, pnl_usd=real_pnl,
-                                     close_reason="sync_closed")
+                                     close_reason="sync_closed",
+                                     bybit_close_order_id=order_id)
+                if order_id:
+                    used_order_ids.add(order_id)
             else:
                 log.warning("SYNC %s: closed-pnl API пусто — помечаем sync_pending, повтор в след. цикле",
                             db_pos.symbol)

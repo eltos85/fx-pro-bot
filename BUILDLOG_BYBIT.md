@@ -1,5 +1,104 @@
 # Bybit Crypto Bot — Build Log
 
+## 2026-05-08
+
+### fix(recon): дедуп closedPnl orderId — одна биржевая позиция = одна DB-строка
+`377ef1a`
+
+**Симптом.** В `bybit_stats.sqlite` одна реальная биржевая сделка иногда
+писалась несколькими DB-строками с одинаковым `pnl_usd` / `exit_price`.
+Конкретные кейсы за 03.05 → 08.05:
+
+- WIF 04.05 19:14-19:15: id=717 и id=718 — обе с pnl=−$0.85.
+- TON 07.05 15:21-15:29: id=728-732, четыре строки с одинаковым pnl=+$3.85.
+- WIF 07.05 16:55-16:57: id=735 и id=736 — обе с pnl=−$2.13.
+
+На API биржи каждый раз была **одна** сделка, в БД дублировалась 2-5 раз.
+PnL счёта (на бирже) не пострадал, но статистика по БД врала: завышенный
+n, искажённое среднее, расхождение `audit_bybit.py` API vs DB.
+
+**Причина.** Race + one-way merge. Bybit в one-way mode при повторном
+`Buy` на ту же сторону **добавляет qty к существующей позиции**, не
+создаёт вторую. Если бот в течение секунд после SL открывает позицию
+снова, биржа уже снесла предыдущую, `get_positions()` пуст → `open_symbols`
+пуст → бот думает «можно открывать» → создаёт новую DB-строку. Но в БД
+**предыдущая строка ещё открыта** (recon ещё не отработал). Когда recon
+запускается, в БД две `open` строки на один символ; обе уходят в
+`fetch_realized_pnl(symbol)` → API возвращает один и тот же свежайший
+`closedPnl` record → обе DB-строки получают идентичный PnL.
+
+В `_close_batch_with_reconcile` точно так же: при `_reconcile_close`
+для каждой ноги подряд `fetch_realized_pnl` отдаёт один и тот же record.
+
+**Фикс.** Используем `closedPnl.orderId` как уникальный ключ:
+
+1. **`StatsStore`** — миграция: новая колонка `bybit_close_order_id TEXT`
+   и индекс `idx_positions_bybit_close_order_id`. `close_position` /
+   `update_closed_pnl` принимают опциональный `bybit_close_order_id` и
+   пишут его через `COALESCE(?, bybit_close_order_id)` (идемпотентно).
+   Helper `is_close_order_id_used(order_id)` — `True`, если этот orderId
+   уже стоит у какой-либо позиции.
+2. **`BybitClient.fetch_realized_pnl`** — новый kwarg `skip_order_ids:
+   set[str]`. API вернёт **первую запись, чей orderId не входит в skip**
+   (раньше возвращался безусловно `records[0]`).
+3. **`_reconcile_close`** — принимает `skip_order_ids` (для уникальности
+   внутри одного батча `_close_batch_with_reconcile`) и проверяет
+   `stats.is_close_order_id_used()` (кросс-цикловая защита). Если orderId
+   уже занят сиблингом — DB-строка помечается `sync_pending` (нулевой PnL,
+   без `record_trade_close`). Через 30 минут `_reconcile_pending_sync`
+   закроет её как `sync_orphan` с pnl=0, если уникальной API-записи так
+   и не появилось.
+4. **`_process_exits`** (миграция через sync) и `_reconcile_pending_sync`
+   — те же два слоя защиты (внутрицикловой `used_order_ids` + кросс-
+   цикловая проверка `is_close_order_id_used`).
+
+**Поведение для нормальной торговли.** Без изменений: одна позиция → одна
+closedPnl запись → одна DB-строка получает уникальный orderId, всё как
+раньше. Fallback на uPnL при пустом API-ответе сохранён.
+
+**Поведение для дублей.** Первая DB-строка получает реальный PnL;
+последующие сиблинги в БД отмечаются `sync_pending` → через 30 мин
+автоматически становятся `sync_orphan` с pnl=0 (нулевой вклад в
+статистику). Это безопасно, потому что денежно их PnL уже учтён в первой
+строке (на бирже одна закрытая позиция).
+
+**Проверка соответствия правилам.**
+
+- `api-docs.mdc`: `closedPnl.orderId` — официальное поле Bybit V5,
+ уникально внутри пользователя
+ (https://bybit-exchange.github.io/docs/v5/position/close-pnl).
+- `strategy-guard.mdc`: торговая логика (пороги, фильтры, SL/TP, лимиты,
+ entry/exit условия) **не тронута**. Только учёт.
+- `no-data-fitting.mdc`: bug-fix, не подгонка. Корень — баг recon,
+ подтверждён конкретными dup-записями в БД.
+- `sample-size.mdc`: bug-fix не требует sample-size порогов (он не меняет
+ решений по сделкам).
+
+**Тесты.** Полный pytest — **533 passed, 0 failed** (было 350 до правок
+ai-trader; за этот сезон добавились ai-trader-тесты + два новых
+регрессионных):
+
+- `test_process_exits_dedups_closed_order_id_for_oneway_merge` — две DB
+ строки на WIF, один API-record с orderId; проверяет что только одна
+ строка получает PnL и `bybit_close_order_id`, а вторая остаётся
+ `sync_pending`.
+- `test_is_close_order_id_used_returns_true_after_assignment` —
+ helper-тест на корректность колонки и индекса.
+
+**Что НЕ трогаем (отдельные задачи).**
+
+- Корневую причину race на стороне открытия (бот не должен открывать
+ новую позицию пока в БД ещё `open` строка по тому же символу) —
+ это отдельный фикс на `open_symbols`/блокировку. Текущий фикс
+ защищает учёт от уже накопленных и будущих race-кейсов.
+- Backfill старых дублей в БД (id=717,718,728-732,735,736 и др.) —
+ миграция-скрипт, отдельным коммитом, по запросу.
+
+**Файлы:** `src/bybit_bot/stats/store.py`, `src/bybit_bot/trading/client.py`,
+`src/bybit_bot/app/main.py`, `tests/test_bybit_bot.py`.
+
+---
+
 ## 2026-05-03
 
 ### feat(sync): _sync_positions_on_startup теперь фильтрует по scan_symbols
