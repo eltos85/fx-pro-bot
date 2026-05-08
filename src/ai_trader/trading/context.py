@@ -305,11 +305,116 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
     if not ctx.open_positions:
         parts.append("(none)")
     else:
+        # Build symbol → last_price map для расчёта unrealised PnL.
+        # Формат расширен в 2026-05-08 (cognitive-load reduction): чтобы
+        # LLM не вычислял сам PnL/R-units по 3+ позициям параллельно
+        # — даём готовые цифры. Это не меняет торговую логику (no
+        # data-fitting), а только улучшает качество close-решений
+        # по правилам EXIT MANAGEMENT v0.6.
+        sym_price: dict[str, float] = {}
+        for s in ctx.snapshots:
+            if s.ticker is not None and s.ticker.last_price > 0:
+                sym_price[s.symbol] = s.ticker.last_price
         for p in ctx.open_positions:
-            parts.append(
-                f"  id={p.id} {p.side} {p.symbol} qty={p.qty} entry=${p.entry_price:.6g} "
-                f"sl=${p.sl_price or 0:.6g} tp=${p.tp_price or 0:.6g} "
-                f"lev={p.leverage}x linkid={p.order_link_id}"
-            )
+            parts.append(_format_open_position(p, sym_price.get(p.symbol)))
 
     return "\n".join(parts)
+
+
+def _format_open_position(p: AiPosition, current_price: float | None) -> str:
+    """Расширенный формат открытой позиции для LLM-контекста.
+
+    Содержит готовые runtime-метрики (current price, unrealised PnL,
+    R-units, % к TP, age, conviction, оригинальный reason). Цель —
+    снизить cognitive load: модель не должна сама высчитывать PnL
+    по N позициям. См. EXIT MANAGEMENT в `prompts.py` v0.6 — все
+    триггеры формулируются в R-units.
+
+    Если current_price=None (тикер недоступен) — runtime-секция
+    пропускается, остаются базовые поля (id/side/symbol/qty/entry/SL/TP).
+    """
+    sl = p.sl_price or 0.0
+    tp = p.tp_price or 0.0
+    sign = 1.0 if p.side == "Buy" else -1.0
+    one_r_per_unit = abs(p.entry_price - sl) if sl > 0 else 0.0
+    full_r_per_unit = abs(tp - p.entry_price) if tp > 0 else 0.0
+    target_r = (full_r_per_unit / one_r_per_unit) if one_r_per_unit > 0 else 0.0
+
+    base = (
+        f"  id={p.id} {p.side} {p.symbol} qty={p.qty} entry=${p.entry_price:.6g} "
+        f"SL=${sl:.6g} TP=${tp:.6g} lev={p.leverage}x"
+    )
+
+    runtime_lines: list[str] = []
+    if current_price is not None and current_price > 0:
+        unrealised = (current_price - p.entry_price) * p.qty * sign
+        if one_r_per_unit > 0:
+            r_units = (current_price - p.entry_price) * sign / one_r_per_unit
+            r_str = f"{r_units:+.2f}R"
+        else:
+            r_str = "?R"
+        if full_r_per_unit > 0:
+            pct_to_tp = (current_price - p.entry_price) * sign / full_r_per_unit * 100.0
+            pct_str = f"{pct_to_tp:+.0f}%→TP"
+        else:
+            pct_str = ""
+        runtime_lines.append(
+            f"    now=${current_price:.6g} unrealised=${unrealised:+.2f} "
+            f"({r_str} of {target_r:.1f}R target, {pct_str})"
+        )
+
+    # Conviction достаётся из llm_reason префиксом "[conv:X]"
+    # (см. _apply_open в executor.py). Если префикса нет — старая
+    # позиция, не показываем conviction.
+    conv = ""
+    raw_reason = p.llm_reason or ""
+    if raw_reason.startswith("[conv:"):
+        end = raw_reason.find("]")
+        if end > 0:
+            conv = raw_reason[6:end]
+            raw_reason = raw_reason[end + 1 :].lstrip()
+
+    age_str = _age_string(p.opened_at)
+    meta_parts: list[str] = []
+    if conv:
+        meta_parts.append(f"conv={conv}")
+    if age_str:
+        meta_parts.append(f"opened={age_str} ago")
+    if meta_parts:
+        runtime_lines.append("    " + " ".join(meta_parts))
+
+    if raw_reason:
+        # Обрезаем на 140 chars чтобы не разрастало контекст
+        short_reason = raw_reason[:140] + ("…" if len(raw_reason) > 140 else "")
+        runtime_lines.append(f'    reason: "{short_reason}"')
+
+    if runtime_lines:
+        return base + "\n" + "\n".join(runtime_lines)
+    return base
+
+
+def _age_string(opened_at_iso: str) -> str:
+    """Преобразует ISO timestamp открытия в читаемую длительность типа
+    '2h 15m'. Возвращает пустую строку при ошибке парсинга."""
+    if not opened_at_iso:
+        return ""
+    from datetime import datetime, timezone
+
+    try:
+        opened = datetime.fromisoformat(opened_at_iso.replace("Z", "+00:00"))
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return ""
+    now = datetime.now(tz=timezone.utc)
+    delta = now - opened
+    total_min = int(delta.total_seconds() // 60)
+    if total_min < 0:
+        return ""
+    if total_min < 60:
+        return f"{total_min}m"
+    h, m = divmod(total_min, 60)
+    if h < 24:
+        return f"{h}h {m}m" if m else f"{h}h"
+    d, h2 = divmod(h, 24)
+    return f"{d}d {h2}h" if h2 else f"{d}d"

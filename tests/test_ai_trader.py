@@ -1051,3 +1051,110 @@ class TestReconcileClosedPositions:
         )
         assert eth_id not in {p.id for p in opens}
 
+
+# ─── _format_open_position: расширенный формат для LLM (cog-load reduction) ──
+
+
+class TestFormatOpenPosition:
+    """v0.8 follow-up (2026-05-08): добавили в LLM-контекст для каждой
+    открытой позиции готовые runtime-метрики (current price, unrealised
+    PnL/R-units, age, conviction, original reason). Эти тесты гарантируют
+    корректность вычислений и graceful degradation при отсутствующих
+    данных."""
+
+    @staticmethod
+    def _make_position(**overrides) -> "AiPosition":  # type: ignore[name-defined]
+        from ai_trader.state.db import AiPosition
+
+        defaults = dict(
+            id=42,
+            symbol="WLDUSDT",
+            side="Sell",
+            qty=100.0,
+            entry_price=1.50,
+            sl_price=1.60,
+            tp_price=1.30,
+            leverage=2,
+            order_link_id="ai_test123",
+            opened_at="2026-05-08T10:00:00+00:00",
+            closed_at=None,
+            exit_price=None,
+            realized_pnl_usd=None,
+            close_reason=None,
+            llm_reason="[conv:medium] WLD stretched, retail long, contrarian short",
+        )
+        defaults.update(overrides)
+        return AiPosition(**defaults)
+
+    def test_short_in_profit_shows_correct_r_units(self):
+        from ai_trader.trading.context import _format_open_position
+
+        # Sell @ 1.50, SL=1.60, TP=1.30 → 1R = 0.10, target = 2.0R
+        # current=1.40 → unrealised = (1.50-1.40)*100 = +$10 = +1.0R
+        pos = self._make_position()
+        out = _format_open_position(pos, current_price=1.40)
+        assert "id=42 Sell WLDUSDT" in out
+        assert "now=$1.4" in out
+        assert "unrealised=$+10.00" in out
+        assert "+1.00R of 2.0R" in out
+        assert "+50%→TP" in out  # 0.10 / 0.20 = 50%
+        assert "conv=medium" in out
+
+    def test_long_at_loss_shows_negative_r(self):
+        from ai_trader.trading.context import _format_open_position
+
+        # Buy @ 100, SL=90, TP=120 → 1R = 10, target = 2.0R
+        # current=95 → unrealised = -$50 = -0.5R
+        pos = self._make_position(
+            symbol="BTCUSDT", side="Buy", qty=10.0,
+            entry_price=100.0, sl_price=90.0, tp_price=120.0,
+            llm_reason="[conv:high] btc breakout",
+        )
+        out = _format_open_position(pos, current_price=95.0)
+        assert "Buy BTCUSDT" in out
+        assert "unrealised=$-50.00" in out
+        assert "-0.50R" in out
+        assert "-25%→TP" in out  # -5/20 = -25%
+        assert "conv=high" in out
+
+    def test_no_current_price_skips_runtime_section(self):
+        """Тикер недоступен → строка содержит только базовые поля."""
+        from ai_trader.trading.context import _format_open_position
+
+        pos = self._make_position()
+        out = _format_open_position(pos, current_price=None)
+        assert "id=42" in out
+        assert "now=$" not in out
+        assert "unrealised=" not in out
+        assert "R of" not in out
+
+    def test_no_conviction_prefix_back_compat(self):
+        """Старая позиция без префикса [conv:X] — conviction просто
+        не показывается, остальное работает."""
+        from ai_trader.trading.context import _format_open_position
+
+        pos = self._make_position(llm_reason="just a plain reason without prefix")
+        out = _format_open_position(pos, current_price=1.40)
+        assert "conv=" not in out
+        assert "just a plain reason" in out
+
+    def test_long_reason_truncated(self):
+        from ai_trader.trading.context import _format_open_position
+
+        long = "[conv:low] " + ("X" * 300)
+        pos = self._make_position(llm_reason=long)
+        out = _format_open_position(pos, current_price=1.40)
+        assert "…" in out  # truncation marker
+        # Не должно быть всех 300 X — обрезается на 140
+        assert "X" * 200 not in out
+
+    def test_zero_sl_tp_does_not_crash(self):
+        """Граничный случай — SL=None/0 → R-units не считаются, но не падает."""
+        from ai_trader.trading.context import _format_open_position
+
+        pos = self._make_position(sl_price=None, tp_price=None)
+        out = _format_open_position(pos, current_price=1.40)
+        assert "id=42" in out
+        # При SL=0 R-units не определены, должна быть метка "?R"
+        assert "?R" in out
+
