@@ -1,5 +1,177 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-08 — feat(v0.8): conviction-based position sizing $25-$100 (USER OVERRIDE)
+
+`<hash-pending>`
+
+### TL;DR
+
+По прямой просьбе пользователя переходим с фиксированного 2%-риска на
+**conviction-based sizing** $25-$100 на сделку (5%-20% капитала).
+Daily-loss limit $50 → $300, total-loss limit $200 → $400.
+
+**Это явный user override против industry standard 2026.** Все
+research-источники (KuCoin Risk Mgmt 2026, Van K. Tharp «Trade Your
+Way to Financial Freedom» 2007 ch.11, Ralph Vince Optimal-f, AOTrading
+3-5-7 Rule 2026) сходятся на 1-2% per trade как mainstream consensus.
+5% и выше допускается только опытным трейдерам с проверенной
+WR ≥ 60% и Profit Factor ≥ 1.5 на n ≥ 200 сделок.
+
+У нас сейчас n=10 сделок (WR 70%, итог +$10.76) — выборка
+**категорически недостаточна** для калибровки size-страт по правилу
+`sample-size.mdc` (минимум 100 сделок и 2 недели в разных режимах).
+Решение принято несмотря на это, на основании subjective conviction
+пользователя в качестве LLM-сигналов. Trade-off зафиксирован явно.
+
+### Контекст и обсуждение
+
+User написал: *«еще я бы хотел чтобы ИИ ставил большие суммы, я вижу
+что он редко ошибается и я хотел бы чтобы он мог ставить примерно по
+такому принципу: допустим на депозите 500 долларов, максимальная ставка
+от 25 до 100 долларов, в зависимости от убежденности ИИ в результате»*.
+
+После уточнения "ставка" = **risk per trade** (сколько максимально
+теряем при срабатывании SL), и предъявления 4 risk'ов в чате:
+
+1. Catastrophe geometry — после 30%-просадки нужно +43% чтобы вернуться;
+2. Industry standard 1-2% per trade (KuCoin/Tharp/Vince) превышается в 5-10×;
+3. Sample size n=10 — недостаточно для conviction-калибровки;
+4. Daily loss = $300 = 60% депозита — один плохой день ≈ невозвратный.
+
+Пользователь выбрал вариант D «как просил, без дополнительных guard'ов:
+$25-$100 conviction-based, daily limit $300; зафиксировать в BUILDLOG
+что это user override против industry standard». Принято.
+
+### Что изменено
+
+#### 1. `src/ai_trader/config/settings.py`
+
+Добавлены 4 новых поля для conviction-based caps + property
+`conviction_risk_map`:
+
+```python
+risk_low_usd: float = 25.0          # AI_TRADER_RISK_LOW_USD
+risk_medium_usd: float = 50.0       # AI_TRADER_RISK_MEDIUM_USD
+risk_high_usd: float = 75.0         # AI_TRADER_RISK_HIGH_USD
+risk_very_high_usd: float = 100.0   # AI_TRADER_RISK_VERY_HIGH_USD
+
+@property
+def conviction_risk_map(self) -> dict[str, float]:
+    return {"low": self.risk_low_usd, "medium": self.risk_medium_usd,
+            "high": self.risk_high_usd, "very_high": self.risk_very_high_usd}
+```
+
+`risk_per_trade_pct` оставлен для back-compat, но в коде больше не
+используется (просто dead config).
+
+`max_daily_loss_usd` 50 → 300, `max_total_loss_usd` 200 → 400.
+
+#### 2. `src/ai_trader/llm/prompts.py` (v0.8)
+
+В JSON-схеме `open` добавлено обязательное поле `"conviction"`:
+
+```json
+"conviction": "low" | "medium" | "high" | "very_high"
+```
+
+CAPITAL RULES переписаны: вместо одиночного 2%-правила — 4 уровня
+с research-обоснованными критериями отбора:
+
+- **low** ($25): минимальный bar — 2 independent confirmations,
+  R:R ≥ 1.5 net of fees, no contradictory macro.
+- **medium** ($50): 3 independent confirmations, R:R ≥ 1.8 gross,
+  macro neutral or weakly aligned.
+- **high** ($75): 4+ confirmations, R:R ≥ 2.0 gross, macro clearly
+  aligned + clear contrarian/flow edge (funding STRONG against,
+  retail HEAVY one-sided, fresh liquidation cascade).
+- **very_high** ($100): exceptional confluence — 3+ macro signals
+  same direction + 4+ confirmations + R:R ≥ 2.5 + clear catalyst.
+  Промпт явно требует «expect <10% of opens, otherwise downgrade».
+
+Anti-inflation guard в промпте: «if you find yourself reaching for
+very_high routinely, you're inflating; downgrade to high».
+
+CRITICAL CONSTRAINTS теперь enforce'ит per-conviction risk cap (а не
+fixed $10) — модели объяснено что bot валидирует это в коде.
+
+#### 3. `src/ai_trader/trading/executor.py`
+
+- `parse_action`: opt-in валидация поля `conviction` (back-compat:
+  отсутствие поля = OK, default "low" применится в `_apply_open`).
+  Невалидное значение (например `"extreme"`) → reject.
+- `_apply_open`: **HARD-GUARD** — после округления qty считаем
+  `actual_risk_usd = |entry - SL| * qty` и сравниваем с
+  `settings.conviction_risk_map[conviction]`. Если LLM нарушил — отказ
+  с пояснением, без вызова Bybit.
+- Conviction сохраняется в БД через префикс в `llm_reason`:
+  `"[conv:high] <original reason>"`. Без миграции схемы. Будущая
+  калибровка (WR per conviction) сможет grep'нуть префикс.
+- В `summary` ApplyResult добавлены `conv=<level>` и
+  `risk=$X.XX/$Y.YY` для логирования и Telegram-уведомлений.
+
+#### 4. `docker-compose.yml`
+
+```yaml
+AI_TRADER_MAX_DAILY_LOSS:        ${...:-300}   # было 50
+AI_TRADER_MAX_TOTAL_LOSS:        ${...:-400}   # было 200
+AI_TRADER_RISK_LOW_USD:          ${...:-25}    # новое
+AI_TRADER_RISK_MEDIUM_USD:       ${...:-50}    # новое
+AI_TRADER_RISK_HIGH_USD:         ${...:-75}    # новое
+AI_TRADER_RISK_VERY_HIGH_USD:    ${...:-100}   # новое
+```
+
+В `.env.example` добавлены те же переменные с disclaimer'ом.
+
+#### 5. Тесты (`tests/test_ai_trader.py`)
+
+Добавлены 6 новых:
+
+- `test_open_with_valid_conviction` — все 4 уровня парсятся.
+- `test_open_with_invalid_conviction_rejected` — невалидное значение → reject.
+- `test_open_without_conviction_accepted_back_compat` — отсутствие поля OK.
+- `test_apply_open_risk_exceeds_low_conviction_cap_rejected` —
+  hard-guard: risk $50 > cap $25 для low → отказ + place_order не вызван.
+- `test_apply_open_high_conviction_allows_larger_risk` — та же сделка
+  с conviction=high (cap $75) проходит. Conviction в summary логе.
+- `test_apply_open_default_conviction_low_when_missing` — back-compat:
+  без поля conviction default = low, с большим риском → reject.
+
+Существующие тесты `TestBuildSystemPrompt` обновлены под новую схему
+промпта (проверяют наличие "CONVICTION-BASED RISK" текста и
+schema-поля `"conviction": ...` в JSON examples). Helper
+`_make_test_settings()` создаёт SimpleNamespace с
+`conviction_risk_map` для всех executor-тестов.
+
+**Все 533 теста пройдены** (включая 43 в `test_ai_trader.py`).
+
+### Source-of-truth disclaimer
+
+По правилам `sample-size.mdc` и `no-data-fitting.mdc` это решение
+**не основано на статистическом анализе данных**. Это user override
+по ощущению («ИИ редко ошибается», n=10 → 7 winners).
+
+Если по результатам **первых 50 сделок** на новых лимитах:
+
+- WR упадёт ниже 50% → откат к $10/$10/$10/$10 (industry standard 2%);
+- WR останется ≥ 60% И Profit Factor ≥ 1.5 → можно валидно
+  обосновать сохранение текущей размерности на будущее.
+
+Из настроек `.env` оба сценария реализуются без правки кода —
+переменные `AI_TRADER_RISK_*_USD` overridable.
+
+### Файлы
+
+- `src/ai_trader/config/settings.py` (новые fields + property)
+- `src/ai_trader/llm/prompts.py` (v0.8: CAPITAL RULES, JSON schema, CONSTRAINTS)
+- `src/ai_trader/trading/executor.py` (parse_action validation +
+  _apply_open hard-guard + summary + reason prefix)
+- `docker-compose.yml` (новые env defaults)
+- `.env.example` (документация для пользователя)
+- `tests/test_ai_trader.py` (+6 новых тестов, обновлены TestBuildSystemPrompt)
+- `BUILDLOG_AI_TRADER.md` (эта запись)
+
+---
+
 ## 2026-05-07 — feat(prompt v0.6): EXIT MANAGEMENT block (research-based 2026)
 
 `<hash-pending>`

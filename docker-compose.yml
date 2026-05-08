@@ -139,16 +139,26 @@ services:
       # из `src/ai_trader/config/settings.py` (10 пар, не пересекаются
       # с `BYBIT_BOT_SCAN_SYMBOLS`). Это предотвращает дублирование
       # списка в compose-defaults и в коде.
-      # Killswitch (v0.3, 2%-риск): согласно AUDIT_2026.md P1, переход на
-      # mainstream 2026 risk per trade 1–2% (KuCoin Risk Mgmt 2026, Atlas Peak
-      # Research, Hyper-Quant). При 2% риска = $10 макс на сделку × 5 = $50/день.
-      # Total $200 = 40% virtual capital, ранняя остановка эксперимента.
-      AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-50}
-      AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-200}
+      # Killswitch (v0.8, 2026-05-08): conviction-based sizing $25-$100 по
+      # явному запросу пользователя — это user override против industry
+      # standard 2026 (1-2% per trade). См. BUILDLOG_AI_TRADER.md запись
+      # v0.8 для disclaimer'а. Daily $50→$300 (3 high-conviction убытка),
+      # total $200→$400 (80% капитала, после чего полный stop).
+      AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-300}
+      AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-400}
       # 3 → 5 (2026-05-07): пул удвоился (5→10), одновременная ёмкость растёт
-      # пропорционально. 5×$10 риска = $50 = max_daily_loss, дальше killswitch.
+      # пропорционально.
       AI_TRADER_MAX_POSITIONS: ${AI_TRADER_MAX_POSITIONS:-5}
       AI_TRADER_MAX_LEVERAGE: ${AI_TRADER_MAX_LEVERAGE:-5}
+      # Conviction-based risk caps (v0.8): LLM возвращает поле conviction
+      # (low/medium/high/very_high) в JSON-ответе, бот применяет cap.
+      # Маппинг: low=$25 (5%), medium=$50 (10%), high=$75 (15%),
+      # very_high=$100 (20%). risk_per_trade_pct остался для back-compat,
+      # но в коде больше не используется.
+      AI_TRADER_RISK_LOW_USD: ${AI_TRADER_RISK_LOW_USD:-25}
+      AI_TRADER_RISK_MEDIUM_USD: ${AI_TRADER_RISK_MEDIUM_USD:-50}
+      AI_TRADER_RISK_HIGH_USD: ${AI_TRADER_RISK_HIGH_USD:-75}
+      AI_TRADER_RISK_VERY_HIGH_USD: ${AI_TRADER_RISK_VERY_HIGH_USD:-100}
       AI_TRADER_RISK_PER_TRADE: ${AI_TRADER_RISK_PER_TRADE:-0.02}
       # Bybit — ОТДЕЛЬНЫЕ ключи от bybit-bot (см. .env: AI_TRADER_BYBIT_API_KEY).
       # Можно использовать те же что у bybit-bot, но рекомендуется завести

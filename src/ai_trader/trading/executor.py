@@ -50,6 +50,8 @@ log = logging.getLogger(__name__)
 
 
 ALLOWED_SIDES = {"Buy", "Sell"}
+ALLOWED_CONVICTIONS = {"low", "medium", "high", "very_high"}
+DEFAULT_CONVICTION = "low"  # fallback при отсутствующем/невалидном значении
 
 
 @dataclass
@@ -138,6 +140,15 @@ def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | 
             v = obj.get(key)
             if not isinstance(v, (int, float)) or v <= 0:
                 return f"invalid {key}: {v!r}"
+        # conviction (v0.8): опциональное поле — пропускаем, если его нет
+        # (LLM может вернуть старый формат; default = "low" применяется
+        # в _apply_open). Если поле есть — должно быть валидной строкой.
+        conv = obj.get("conviction")
+        if conv is not None and conv not in ALLOWED_CONVICTIONS:
+            return (
+                f"invalid conviction {conv!r}, "
+                f"must be one of {sorted(ALLOWED_CONVICTIONS)}"
+            )
 
     if action == "close":
         if not isinstance(obj.get("position_id"), int):
@@ -223,6 +234,21 @@ def _apply_open(
     sl_price = float(raw["stop_loss"])
     tp_price = float(raw["take_profit"])
     reason = str(raw.get("reason", ""))[:200]
+    # v0.8: conviction-based risk cap. Default "low" если LLM не вернул
+    # поле (back-compat) или вернул невалидное значение (parse_action
+    # уже отверг бы откровенно левые значения, но lowercase-нормализация
+    # на всякий случай).
+    conviction_raw = raw.get("conviction", DEFAULT_CONVICTION)
+    conviction = (
+        conviction_raw.lower().strip()
+        if isinstance(conviction_raw, str)
+        else DEFAULT_CONVICTION
+    )
+    if conviction not in ALLOWED_CONVICTIONS:
+        conviction = DEFAULT_CONVICTION
+    risk_cap_usd = settings.conviction_risk_map.get(
+        conviction, settings.risk_low_usd
+    )
 
     check = killswitch.check_can_open_position(leverage)
     if not check.allowed:
@@ -284,13 +310,33 @@ def _apply_open(
     if qty <= 0:
         return ApplyResult(executed=False, summary="", error="qty<=0 after rounding")
 
+    # v0.8 HARD-GUARD: actual risk = |entry - SL| * qty. LLM мог нечаянно
+    # запросить notional слишком большой для своего conviction-уровня —
+    # отбрасываем ордер вместо того чтобы молча открыть слишком большую
+    # позицию. Без этого guard'а правило risk-cap из промпта остаётся
+    # инструкцией без принудительного исполнения на стороне кода.
+    actual_risk_usd = abs(price - sl_price) * qty
+    if actual_risk_usd > risk_cap_usd:
+        return ApplyResult(
+            executed=False,
+            summary="",
+            error=(
+                f"risk_exceeds_cap: actual=${actual_risk_usd:.2f} > "
+                f"cap=${risk_cap_usd:.2f} for conviction={conviction!r} "
+                f"(price={price} SL={sl_price} qty={qty}). "
+                f"Either reduce position_size_usd or tighten SL."
+            ),
+        )
+
     if not settings.trading_enabled:
         # PAPER MODE: не вызываем биржу, только пишем decision-only
         return ApplyResult(
             executed=False,
             summary=(
                 f"[PAPER] OPEN {side} {symbol} qty={qty} @ ${price:.6g} "
-                f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x — {reason}"
+                f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
+                f"conv={conviction} risk=${actual_risk_usd:.2f}/${risk_cap_usd:.0f} "
+                f"— {reason}"
             ),
         )
 
@@ -320,6 +366,10 @@ def _apply_open(
             ),
         )
 
+    # Conviction добавляем в llm_reason как префикс — чтобы сохранилось в
+    # БД без миграции схемы. Будущая калибровка (WR per conviction level)
+    # сможет grep'нуть префикс. Формат: "[conv:high] <original reason>".
+    reason_with_conv = f"[conv:{conviction}] {reason}"[:200]
     store.open_position(
         symbol=symbol,
         side=side,
@@ -329,12 +379,14 @@ def _apply_open(
         tp_price=tp_price,
         leverage=leverage,
         order_link_id=link_id,
-        llm_reason=reason,
+        llm_reason=reason_with_conv,
     )
     return ApplyResult(
         executed=True,
         summary=(
             f"OPEN {side} {symbol} qty={qty} @ ${price:.6g} "
-            f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x — {reason}"
+            f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
+            f"conv={conviction} risk=${actual_risk_usd:.2f}/${risk_cap_usd:.0f} "
+            f"— {reason}"
         ),
     )

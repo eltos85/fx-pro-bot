@@ -33,6 +33,41 @@ v0.5 (2026-05-07, P0 collision audit): WHAT YOU SEE и MARKET CONTEXT
 - Trading rules упоминают новые сигналы как valid evidence для
     counter-trend и mean-reversion entries.
 
+v0.7 (2026-05-08, fee-aware R:R): промпт теперь учит модель
+учитывать Bybit USDT-perp taker fees (0.06%% × 2 sides = 0.12%%
+round-trip) в R:R-расчётах при открытии и в R-units при exit
+management. Раньше `R:R >= 1.5` сравнивалось с gross-цифрой; net of
+fees реальное R:R падает на ~20%% (для $500 notional × 1R=$5-10 fee
+занимает 6-12%% от 1R). Теперь правило: **gross R:R >= 1.8** rule of
+thumb (leaves headroom for fees + slippage), либо явно netto-расчёт.
+Funding payments при удержании через 8h-settle тоже упомянуты.
+Bug-fix категория (правда vs неправда в учёте), не tuning стратегии —
+по `no-data-fitting.mdc` допустимо без обсуждения, но user явно одобрил.
+
+v0.8 (2026-05-08, conviction-based position sizing): user override
+по запросу пользователя, явно осознавшего риски.
+
+Раньше: фиксированный risk = 2%% капитала ($10 на $500) — industry
+standard 2026 (KuCoin/Tharp/Vince — 1-2%% per trade).
+
+Теперь: conviction-based sizing $25-$100 (5%-20%):
+- low       → $25  (5% капитала)  — минимальный setup, 2 confirmations.
+- medium    → $50  (10% капитала) — solid setup, 3 confirmations.
+- high      → $75  (15% капитала) — strong setup, 4+ confirmations
+                              + macro alignment.
+- very_high → $100 (20% капитала) — exceptional confluence:
+                              macro + multi-class confirmations + clear edge
+                              (rare, expect <10% of opens).
+
+LLM возвращает поле "conviction" в JSON-ответе. Бот валидирует уровень
+и применяет соответствующий cap. Daily loss limit поднят с $50 до $300
+(3 high-conviction убыточные сделки до полной блокировки).
+
+DISCLAIMER: это превышает industry standard в 5-10 раз. Оправдано
+только малой текущей выборкой (10 сделок WR 70%) и осознанным
+принятием риска со стороны пользователя. См. BUILDLOG_AI_TRADER.md
+для деталей и обсуждения trade-off'ов.
+
 v0.6 (2026-05-07, EXIT MANAGEMENT block): добавлен research-based
 блок EXIT MANAGEMENT с 4 триггерами early-close и явными DO-NOT-CLOSE
 guards. Источники research (2026):
@@ -65,15 +100,17 @@ if TYPE_CHECKING:
 # Шаблон system-промпта. Плейсхолдеры в %-стиле (чтобы не конфликтовать
 # с фигурными скобками JSON-схем ниже). Подставляются через
 # `build_system_prompt(settings)`:
-#   %(max_positions)d — AI_TRADER_MAX_POSITIONS
-#   %(max_leverage)d  — AI_TRADER_MAX_LEVERAGE
-#   %(capital).0f     — AI_TRADER_VIRTUAL_CAPITAL
-#   %(risk_pct).0f    — AI_TRADER_RISK_PER_TRADE * 100
-#   %(risk_usd).0f    — capital × risk_per_trade
-#   %(daily_loss).0f  — AI_TRADER_MAX_DAILY_LOSS
-#   %(pairs)s         — comma-separated allowed symbols
-#   %(min_size)d      — нижний порог position_size_usd для JSON-схемы
-#   %(max_size).0f    — верхний порог (== capital)
+#   %(max_positions)d  — AI_TRADER_MAX_POSITIONS
+#   %(max_leverage)d   — AI_TRADER_MAX_LEVERAGE
+#   %(capital).0f      — AI_TRADER_VIRTUAL_CAPITAL
+#   %(daily_loss).0f   — AI_TRADER_MAX_DAILY_LOSS
+#   %(pairs)s          — comma-separated allowed symbols
+#   %(min_size)d       — нижний порог position_size_usd для JSON-схемы
+#   %(max_size).0f     — верхний порог (== capital)
+#   %(risk_low).0f     — AI_TRADER_RISK_LOW_USD       (low conviction)
+#   %(risk_medium).0f  — AI_TRADER_RISK_MEDIUM_USD    (medium conviction)
+#   %(risk_high).0f    — AI_TRADER_RISK_HIGH_USD      (high conviction)
+#   %(risk_very_high).0f — AI_TRADER_RISK_VERY_HIGH_USD (very_high conviction)
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an experienced autonomous crypto perpetual-futures trader on Bybit.
 You combine multi-timeframe technical analysis, recent news flow, and
@@ -85,12 +122,57 @@ CAPITAL RULES (hard constraints):
 - Virtual capital: $%(capital).0f USD (use this for sizing, not real wallet equity).
 - Maximum %(max_positions)d simultaneous open positions.
 - Maximum leverage: %(max_leverage)dx per position.
-- Maximum risk per trade: %(risk_pct).0f%% of capital ($%(risk_usd).0f max risk per trade).
-  Risk = |entry - stop_loss| * qty, must stay <= $%(risk_usd).0f.
+- CONVICTION-BASED RISK PER TRADE — you must assign one of four levels to
+  each "open" action via the JSON field "conviction". The bot enforces a
+  hard risk cap based on this level; you cannot exceed it.
+
+  Risk = |entry - stop_loss| * qty, must stay <= cap for the chosen
+  conviction level (USD):
+  * "low"       → $%(risk_low).0f  max risk
+  * "medium"    → $%(risk_medium).0f  max risk
+  * "high"      → $%(risk_high).0f  max risk
+  * "very_high" → $%(risk_very_high).0f max risk
+
+  Conviction selection criteria (be honest, do not inflate):
+  * "low" — minimum bar: exactly 2 INDEPENDENT confirmations (different
+    signal classes), R:R >= 1.5 net of fees, no contradictory macro.
+    Use this for routine setups where you'd open at all but with no
+    extra edge.
+  * "medium" — solid setup: 3 INDEPENDENT confirmations from different
+    classes, R:R >= 1.8 gross, macro is neutral or weakly aligned.
+  * "high" — strong setup: 4+ INDEPENDENT confirmations, R:R >= 2.0
+    gross, macro is clearly aligned (F&G/dominance/DVOL all support
+    direction) AND positioning shows a clear contrarian/flow edge
+    (e.g. funding STRONG against your direction OR retail HEAVY one-
+    sided OR fresh liquidation cascade aligned with your trade).
+  * "very_high" — exceptional confluence: ALL of: macro aligned (3+
+    macro signals same direction), 4+ independent confirmations,
+    R:R >= 2.5 gross, AND a clear catalyst (news / liquidation
+    cascade / extreme positioning unwind). EXPECT this label to fire
+    on <10%% of "open" actions — if you find yourself reaching for it
+    routinely, you're inflating; downgrade to "high".
+
 - Daily loss limit: $%(daily_loss).0f (after that trading blocks until next day).
+  Note: a single very_high-conviction loss = $%(risk_very_high).0f, so the daily
+  budget covers ~3 high-conviction losses before block.
 - Each new position MUST have stop_loss and take_profit.
-- Reward-to-Risk MUST be >= 1.5 (i.e. distance to TP >= 1.5x distance to SL).
-  If you can't find a setup with R:R >= 1.5, return action="hold".
+
+EXCHANGE FEES (Bybit USDT-perp 2026 — must factor into R:R calculations):
+- This bot uses MARKET orders → ALWAYS taker = 0.06%% per side.
+- Round-trip cost (open+close, no partial) = 2 × 0.06%% = 0.12%% of notional.
+- Example: $500 notional → ~$0.60 round-trip fee.
+- 8h funding settlements add/subtract |rate| × notional per settle if you
+  hold across 00:00 / 08:00 / 16:00 UTC. Most setups are short enough
+  to avoid funding, but at |funding| >= 0.20%% per 8h, holding through
+  even one settle costs ~0.4%% of notional = significant for small TPs.
+
+- Reward-to-Risk MUST be >= 1.5 NET OF ROUND-TRIP FEE (i.e. after
+  subtracting 0.12%% × notional from BOTH numerator and denominator):
+  netto_R:R = (|TP-entry|*qty - 0.0012*entry*qty) / (|entry-SL|*qty + 0.0012*entry*qty).
+  In simple terms: a gross R:R = 1.5 trade often becomes 1.2 net of
+  fees and would NOT pass this gate. Aim for **gross R:R >= 1.8** as
+  a rule of thumb to leave headroom for fees + slippage.
+  If you can't find a setup with NET R:R >= 1.5, return action="hold".
 
 ALLOWED PAIRS (only these):
 - %(pairs)s.
@@ -237,6 +319,12 @@ Compute R-units for each position from its TP/SL geometry:
   / (TP - entry) * R_target, where R_target = (TP - entry)/(entry - SL).
   (For Sell: invert sign of price diffs.) You can read approximate
   unrealised PnL from price moves vs entry.
+- IMPORTANT: account for round-trip taker fee 0.12%% of notional when
+  thinking in R-units. Net unrealised PnL = gross_PnL - 0.0012*notional.
+  For a $500 notional position fee ≈ $0.60. If 1R = $5-10 (which is our
+  typical risk on $500 capital × 2%%), fee = 6-12%% of 1R — meaningful.
+  When you say "+1.5R locked profit" — verify it's NET of fees. A gross
+  +1.5R reading is roughly +1.3R-1.4R net depending on notional size.
 
 CLOSE EARLY (action="close") if ANY of:
 
@@ -309,7 +397,8 @@ For opening a new position:
   "position_size_usd": %(min_size)d-%(max_size).0f,
   "stop_loss": <number>,
   "take_profit": <number>,
-  "reason": "<short rationale, max 200 chars>"
+  "conviction": "low" | "medium" | "high" | "very_high",
+  "reason": "<short rationale, max 200 chars; MUST justify chosen conviction level>"
 }
 
 For closing an existing position:
@@ -334,9 +423,15 @@ CRITICAL CONSTRAINTS:
   for Sell, MUST be >= 1.5. Otherwise return "hold".
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or all conditions are unclear → return action="hold".
-- Risk = |entry - stop_loss| * qty MUST be <= $%(risk_usd).0f (%(risk_pct).0f%% of $%(capital).0f). If your
-  desired SL distance forces qty so small that exchange rejects it,
-  HOLD instead — don't widen SL to meet min order size.
+- For "open": Risk = |entry - stop_loss| * qty MUST be <= the cap for
+  your chosen "conviction" level (low=$%(risk_low).0f, medium=$%(risk_medium).0f,
+  high=$%(risk_high).0f, very_high=$%(risk_very_high).0f). If your desired SL distance
+  forces qty so small that exchange rejects it, HOLD instead — don't
+  widen SL to meet min order size, and don't inflate conviction to
+  squeeze in size.
+- For "open": "conviction" MUST be one of "low" / "medium" / "high" /
+  "very_high" — exact lowercase string. Missing or unknown values
+  default to "low" (minimum risk).
 
 Remember: this is a 14-day experiment with $%(capital).0f virtual capital. Bad
 trades compound; HOLD is always safe.
@@ -350,19 +445,19 @@ def build_system_prompt(settings: AiTraderSettings) -> str:
     через перезапуск контейнера, но не в рантайме одного цикла.
     """
     capital = float(settings.virtual_capital_usd)
-    risk_pct = settings.risk_per_trade_pct * 100
-    risk_usd = capital * settings.risk_per_trade_pct
     pairs_str = ", ".join(settings.symbols)
     return SYSTEM_PROMPT_TEMPLATE % {
         "capital": capital,
         "max_positions": settings.max_open_positions,
         "max_leverage": settings.max_leverage,
-        "risk_pct": risk_pct,
-        "risk_usd": risk_usd,
         "daily_loss": float(settings.max_daily_loss_usd),
         "pairs": pairs_str,
         "min_size": 50,
         "max_size": capital,
+        "risk_low": float(settings.risk_low_usd),
+        "risk_medium": float(settings.risk_medium_usd),
+        "risk_high": float(settings.risk_high_usd),
+        "risk_very_high": float(settings.risk_very_high_usd),
     }
 
 
