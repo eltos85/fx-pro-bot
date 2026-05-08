@@ -126,69 +126,22 @@ services:
         max-file: "3"
     env_file:
       - .env
+    # ВАЖНО: все AI_TRADER_* параметры подтягиваются ИСКЛЮЧИТЕЛЬНО из `.env`
+    # через `env_file` (выше) + кодовых defaults в
+    # `src/ai_trader/config/settings.py`. Здесь, в `environment:`, мы
+    # хранили `${...:-default}` пары — это создавало ТРЁХ-уровневую
+    # параметризацию (settings.py / compose / .env), что путает и
+    # приводит к рассинхрону. Single source of truth:
+    #   1. `.env` (на VPS)        — production override / секреты
+    #   2. `settings.py` Field()  — кодовые defaults (fallback для
+    #                                pytest, локальной разработки и
+    #                                любого случая когда .env пуст)
+    #   3. `.env.example`         — документация ожидаемых значений
+    # Compose НЕ хранит defaults для AI_TRADER_* (поведенческих)
+    # параметров. Хардкод-инфра (DATA_DIR=/data, привязан к bind-mount
+    # ниже) — единственное исключение.
     environment:
       AI_TRADER_DATA_DIR: /data
-      AI_TRADER_LOG_LEVEL: ${AI_TRADER_LOG_LEVEL:-INFO}
-      # Эксперимент 14 дней. ВСЕ параметры заморожены — менять = curve-fitting.
-      AI_TRADER_POLL_INTERVAL_SEC: ${AI_TRADER_POLL_INTERVAL_SEC:-900}
-      AI_TRADER_VIRTUAL_CAPITAL: ${AI_TRADER_VIRTUAL_CAPITAL:-500}
-      # AI_TRADER_SYMBOLS специально НЕ объявлен здесь как
-      # `${...:-default}` — единственный источник правды для списка пар
-      # это `.env` (см. `.env.example` секцию AI_TRADER). Если переменная
-      # отсутствует и в .env — pydantic_settings берёт `DEFAULT_AI_SYMBOLS`
-      # из `src/ai_trader/config/settings.py` (10 пар, не пересекаются
-      # с `BYBIT_BOT_SCAN_SYMBOLS`). Это предотвращает дублирование
-      # списка в compose-defaults и в коде.
-      # Killswitch (v0.8, 2026-05-08): conviction-based sizing $25-$100 по
-      # явному запросу пользователя — это user override против industry
-      # standard 2026 (1-2% per trade). См. BUILDLOG_AI_TRADER.md запись
-      # v0.8 для disclaimer'а. Daily $50→$300 (3 high-conviction убытка),
-      # total $200→$400 (80% капитала, после чего полный stop).
-      AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-300}
-      AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-400}
-      # 3 → 5 (2026-05-07): пул удвоился (5→10), одновременная ёмкость растёт
-      # пропорционально.
-      AI_TRADER_MAX_POSITIONS: ${AI_TRADER_MAX_POSITIONS:-5}
-      AI_TRADER_MAX_LEVERAGE: ${AI_TRADER_MAX_LEVERAGE:-5}
-      # Conviction-based risk caps (v0.8): LLM возвращает поле conviction
-      # (low/medium/high/very_high) в JSON-ответе, бот применяет cap.
-      # Маппинг: low=$25 (5%), medium=$50 (10%), high=$75 (15%),
-      # very_high=$100 (20%). risk_per_trade_pct остался для back-compat,
-      # но в коде больше не используется.
-      AI_TRADER_RISK_LOW_USD: ${AI_TRADER_RISK_LOW_USD:-25}
-      AI_TRADER_RISK_MEDIUM_USD: ${AI_TRADER_RISK_MEDIUM_USD:-50}
-      AI_TRADER_RISK_HIGH_USD: ${AI_TRADER_RISK_HIGH_USD:-75}
-      AI_TRADER_RISK_VERY_HIGH_USD: ${AI_TRADER_RISK_VERY_HIGH_USD:-100}
-      AI_TRADER_RISK_PER_TRADE: ${AI_TRADER_RISK_PER_TRADE:-0.02}
-      # Bybit — ОТДЕЛЬНЫЕ ключи от bybit-bot (см. .env: AI_TRADER_BYBIT_API_KEY).
-      # Можно использовать те же что у bybit-bot, но рекомендуется завести
-      # отдельные subaccount или хотя бы переменные с другим именем для аудита.
-      AI_TRADER_BYBIT_DEMO: ${AI_TRADER_BYBIT_DEMO:-true}
-      AI_TRADER_BYBIT_CATEGORY: ${AI_TRADER_BYBIT_CATEGORY:-linear}
-      # DeepSeek-V4 через Anthropic-compatible endpoint.
-      # Free tier даёт 5M входных + 5M выходных tokens.
-      AI_TRADER_DEEPSEEK_MODEL: ${AI_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}
-      AI_TRADER_DEEPSEEK_BASE_URL: ${AI_TRADER_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
-      AI_TRADER_DEEPSEEK_THINKING: ${AI_TRADER_DEEPSEEK_THINKING:-true}
-      # 4096 чтобы thinking-блоки не съедали весь бюджет до пустого
-      # text (см. BUILDLOG_AI_TRADER 2026-05-06 «fix(empty response)»).
-      AI_TRADER_DEEPSEEK_MAX_TOKENS: ${AI_TRADER_DEEPSEEK_MAX_TOKENS:-4096}
-      # PAPER mode по умолчанию: ставки НЕ ставятся на биржу, только логируются.
-      # Включать в LIVE только после проверки первых 1-2 циклов под наблюдением.
-      AI_TRADER_TRADING_ENABLED: ${AI_TRADER_TRADING_ENABLED:-false}
-      # News (Wave 3): RSS-агрегатор CoinDesk/CoinTelegraph/Decrypt, без auth.
-      # Кэш в памяти 10 мин, фильтр по символам (BTC/ETH/BNB/XRP/DOGE +
-      # AVAX/LTC/ATOM/WLD/TAO с 2026-05-07) + generic-keywords (ETF, Fed,
-      # regulation). Top-N свежих за last_age_hours.
-      AI_TRADER_NEWS_ENABLED: ${AI_TRADER_NEWS_ENABLED:-true}
-      AI_TRADER_NEWS_MAX_AGE_HOURS: ${AI_TRADER_NEWS_MAX_AGE_HOURS:-6}
-      AI_TRADER_NEWS_MAX_ITEMS: ${AI_TRADER_NEWS_MAX_ITEMS:-8}
-      # Telegram (Wave 4): если TELEGRAM_BOT_TOKEN пустой — TG-модуль молчит.
-      # TELEGRAM_CHAT_ID опционален (auto-detect при первой команде /start),
-      # но если задан — отключает auto-bind для безопасности.
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-      AI_TRADER_TELEGRAM_ENABLED: ${AI_TRADER_TELEGRAM_ENABLED:-true}
     volumes:
       - ai_trader_data:/data
 

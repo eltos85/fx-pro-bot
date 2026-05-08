@@ -1,5 +1,73 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-08 — refactor(compose): single source of truth для AI_TRADER_* параметров
+
+`<hash-pending>`
+
+### Проблема
+
+После v0.8 (conviction-based sizing) дефолты лимитов **дублировались
+в трёх местах**:
+
+1. `src/ai_trader/config/settings.py` — pydantic `Field(default=...)`.
+2. `docker-compose.yml` — `${VAR:-default}` для каждого AI_TRADER_*.
+3. `.env.example` — рекомендуемые значения как документация.
+
+Это нарушало правило single-source-of-truth: при изменении одного
+default'а (например `risk_low_usd 25 → 30`) нужно было править
+**два** файла синхронно. Рассинхрон приводил бы к разному поведению
+на VPS (где `compose ${VAR:-default}` зашивает 25) и в pytest (где
+`Field(default=30)` дал бы 30) — самый коварный класс багов.
+
+Тот же подход уже был выработан для `AI_TRADER_SYMBOLS` (см. коммент
+в `settings.py` строки 18-20): «compose специально не хранит default,
+чтобы не было двух мест правды».
+
+### Решение
+
+В `docker-compose.yml` секция `ai-trader.environment:` сжата до
+**одной строки** — `AI_TRADER_DATA_DIR: /data` (хардкод-инфра,
+привязан к bind-mount volume).
+
+Все остальные AI_TRADER_* параметры удалены из compose-окружения и
+теперь подтягиваются по цепочке:
+
+```
+docker compose env_file: .env
+        ↓ (переменные → окружение контейнера)
+pydantic_settings.BaseSettings()
+        ↓ (читает os.environ)
+если нет → Field(default=...) из settings.py
+```
+
+То есть:
+- **`.env`** на VPS = production-overrides + секреты.
+- **`settings.py`** Field() = кодовые defaults (single place).
+- **`.env.example`** = документация (примеры значений + объяснения).
+- **`docker-compose.yml`** = только инфра (`DATA_DIR`, volume).
+
+### Затронуты только AI_TRADER_*
+
+Сервисы `advisor` (FX) и `bybit-bot` всё ещё содержат
+`${VAR:-default}` блоки. Они работают, и их рефакторинг — отдельная
+задача (рисково трогать одновременно). Это записано как TODO для
+будущего pass'а по cleanup'у.
+
+### Проверка
+
+- Все 534 теста прошли.
+- На VPS после rebuild стартап-лог должен показать те же значения:
+  `Killswitch: daily=$300 total=$400 maxpos=5 maxlev=5x`,
+  `Virtual capital: $500.00`. Защита от регрессии.
+
+### Файлы
+
+- `docker-compose.yml` (compress ai-trader.environment to 1 line)
+- `.env.example` (документация single-source-of-truth)
+- `BUILDLOG_AI_TRADER.md` (эта запись)
+
+---
+
 ## 2026-05-08 — fix(llm/client): защита от msg.content=None (cycle 5 crash)
 
 `<hash-pending>`
