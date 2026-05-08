@@ -529,6 +529,87 @@ def test_process_exits_pending_when_api_empty(tmp_path):
     assert pending[0].pnl_usd == 0.0
 
 
+def test_process_exits_dedups_closed_order_id_for_oneway_merge(tmp_path):
+    """Регрессия (BUILDLOG_BYBIT.md 2026-05-08): если в БД 2 строки под один
+    символ (one-way merge / race close), а Bybit вернул только одну
+    closedPnl запись — PnL должен достаться только ОДНОЙ строке.
+    Вторая остаётся sync_pending (а не получает дубль PnL).
+
+    До фикса: обе строки получали один и тот же PnL → завышение n и искажение
+    среднего PnL. Конкретные кейсы из проды: WIF 04.05 19:14-19:15 (id=717,718),
+    TON 07.05 15:21-15:29 (id=728-732 с одинаковым +$3.85)."""
+    from unittest.mock import MagicMock
+    from bybit_bot.app.main import _process_exits
+    from bybit_bot.config.settings import Settings
+    from bybit_bot.stats.store import StatsStore
+    from bybit_bot.trading.killswitch import KillSwitch, KillSwitchConfig
+
+    store = StatsStore(tmp_path / "exit_test_dedup.sqlite")
+    store.open_position(
+        symbol="WIFUSDT", side="Buy", qty="3255",
+        entry_price=0.19198, order_id="open_order_A",
+        strategy="scalp_vwap",
+    )
+    store.open_position(
+        symbol="WIFUSDT", side="Buy", qty="3255",
+        entry_price=0.19196, order_id="open_order_B",
+        strategy="scalp_vwap",
+    )
+
+    client = MagicMock()
+    client.get_positions.side_effect = [[], []]
+    client.fetch_realized_pnl.return_value = {
+        "closedPnl": "-0.85",
+        "avgExitPrice": "0.19184",
+        "orderId": "close_order_X",
+    }
+    killswitch = KillSwitch(KillSwitchConfig(
+        max_daily_loss_usd=100.0, max_drawdown_pct=50.0, max_positions=5,
+    ))
+    settings = Settings(api_key="k", api_secret="s", _env_file=None)
+
+    _process_exits(
+        client=client, stats=store, killswitch=killswitch,
+        settings=settings, bars_map={}, scalp_statarb=None,
+    )
+
+    closed = store.conn.execute(
+        "SELECT id, pnl_usd, close_reason, bybit_close_order_id FROM positions "
+        "WHERE closed_at IS NOT NULL ORDER BY id"
+    ).fetchall()
+    assert len(closed) == 2
+
+    real_pnl_rows = [r for r in closed if r["close_reason"] == "sync_closed"]
+    pending_rows = [r for r in closed if r["close_reason"] == "sync_pending"]
+    assert len(real_pnl_rows) == 1, "ровно одна DB-строка должна получить real PnL"
+    assert len(pending_rows) == 1, "вторая DB-строка должна остаться sync_pending"
+    assert abs(real_pnl_rows[0]["pnl_usd"] - (-0.85)) < 1e-9
+    assert real_pnl_rows[0]["bybit_close_order_id"] == "close_order_X"
+    assert pending_rows[0]["pnl_usd"] == 0.0
+    assert pending_rows[0]["bybit_close_order_id"] is None
+
+
+def test_is_close_order_id_used_returns_true_after_assignment(tmp_path):
+    """Helper is_close_order_id_used корректно опознаёт уже занятый orderId."""
+    from bybit_bot.stats.store import StatsStore
+
+    store = StatsStore(tmp_path / "store_dedup.sqlite")
+    pid = store.open_position(
+        symbol="TONUSDT", side="Buy", qty="100",
+        entry_price=2.50, order_id="open_X",
+        strategy="scalp_vwap",
+    )
+    assert store.is_close_order_id_used("close_Z") is False
+    assert store.is_close_order_id_used("") is False
+
+    store.close_position(pid, exit_price=2.55, pnl_usd=1.0,
+                         close_reason="sync_closed",
+                         bybit_close_order_id="close_Z")
+
+    assert store.is_close_order_id_used("close_Z") is True
+    assert store.is_close_order_id_used("close_other") is False
+
+
 def _make_client_with_mock_session(place_order_responses):
     """Создать BybitClient с моком pybit-сессии.
 

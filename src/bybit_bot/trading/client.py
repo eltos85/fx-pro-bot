@@ -325,21 +325,27 @@ class BybitClient:
         *,
         retries: int = 3,
         retry_delay_sec: float = 2.0,
+        skip_order_ids: set[str] | None = None,
     ) -> dict | None:
         """Найти последнюю запись closed-pnl для символа после since_ms.
 
         Bybit обновляет closed-pnl с задержкой 1-5 секунд после закрытия,
         поэтому делаем retry: API может ещё не успеть зафиксировать запись.
 
+        skip_order_ids — orderId, которые уже применены к другим позициям в БД
+        (защита от recon-дублей: одна биржевая позиция = одна closedPnl запись,
+        нельзя применять её к нескольким DB-строкам).
+
         Возвращает dict с ключами closedPnl, avgEntryPrice, avgExitPrice,
-        updatedTime, qty или None если не найдено после всех попыток.
+        updatedTime, qty, orderId или None если не найдено после всех попыток.
         """
         import time
+        skip = skip_order_ids or set()
         for attempt in range(retries):
             records = self.get_closed_pnl(symbol=symbol, limit=10, start_time=since_ms)
-            if records:
-                # API возвращает в порядке от новых к старым -> берём самую свежую
-                return records[0]
+            for r in records:
+                if r.get("orderId") and r["orderId"] not in skip:
+                    return r
             if attempt < retries - 1:
                 time.sleep(retry_delay_sec)
         return None
