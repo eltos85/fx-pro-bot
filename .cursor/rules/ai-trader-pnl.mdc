@@ -1,0 +1,127 @@
+---
+description: Правила интерпретации P&L и работы с данными для ai_trader (Bybit demo). API — единственный источник истины, локальная SQLite может рассинхрониться.
+globs: ["src/ai_trader/**/*", "BUILDLOG_AI_TRADER.md", "tests/test_ai_trader*"]
+alwaysApply: false
+---
+
+# AI-Trader: P&L и статистика
+
+> **Scope:** только `ai_trader` (Bybit demo, отдельный SQLite
+> `ai_trader.sqlite`). Для `bybit_bot` см. `bybit-pnl.mdc`,
+> для `fx_pro_bot/advisor` — `ctrader-pnl.mdc`.
+
+## Источник правды — Bybit API, НЕ SQLite
+
+`ai_trader.sqlite` — это **журнал решений LLM** (decisions, positions
+с reason'ами и conviction). Это НЕ ledger биржи. Возможные расхождения
+с реальностью:
+
+- Позиция помечена `closed_at NOT NULL` в БД, но на бирже ещё открыта
+ (баг 2026-05-07: API failure при close → reconcile неправильно решил
+ что позиции нет → пометил closed; см. `BUILDLOG_AI_TRADER.md`).
+- Позиция закрыта на бирже по SL/TP, но `closed_at` не проставлен
+ (reconcile-цикл ещё не дошёл, либо API outage).
+- `realized_pnl_usd` в БД — оценка по `(exit-entry)*qty*sign` без учёта
+ точных fee, funding, slippage. На бирже `closedPnl` уже NET —
+ единственная корректная цифра.
+- Часть сделок может быть закрыта руками с интерфейса Bybit или сторонним
+ скриптом — в БД они вообще не появятся.
+
+**При любом анализе фактических торговых результатов идём в API:**
+
+```python
+import os
+from pybit.unified_trading import HTTP
+
+s = HTTP(
+    api_key=os.environ["AI_TRADER_BYBIT_API_KEY"],
+    api_secret=os.environ["AI_TRADER_BYBIT_API_SECRET"],
+    demo=True,  # ai_trader всегда demo (см. settings.bybit_demo)
+)
+
+# Закрытые сделки — closedPnl уже NET (комиссия + funding учтены)
+records = []
+cursor = None
+for _ in range(20):
+    kwargs = {"category": "linear", "limit": 100}
+    if cursor:
+        kwargs["cursor"] = cursor
+    r = s.get_closed_pnl(**kwargs)
+    records.extend(r.get("result", {}).get("list", []) or [])
+    cursor = r.get("result", {}).get("nextPageCursor")
+    if not cursor:
+        break
+```
+
+Запуск с VPS (контейнер уже знает env-переменные):
+
+```bash
+ssh root@204.168.149.140 'docker exec fx-pro-bot-ai-trader-1 python3 /tmp/script.py'
+```
+
+## P&L в Bybit API — всегда NET
+
+`closedPnl` в `get_closed_pnl()` — итог за вычетом taker-комиссий
+(0.06% × 2 = 0.12% round-trip) и funding-payments. Не вычитать
+комиссию повторно.
+
+## Фильтрация ai_trader vs bybit_bot
+
+ai_trader на demo использует **тот же Bybit-аккаунт**, что и bybit_bot
+(один `BYBIT_API_KEY`/`SECRET` уровня аккаунта; ключи отличаются
+лишь именем env-переменной). Поэтому `get_closed_pnl()` отдаёт сделки
+**обоих ботов**.
+
+Различать по `orderLinkId` НЕЛЬЗЯ:
+- На Bybit demo `orderLinkId` в `get_closed_pnl` приходит **пустым**
+ (даже если при `place_order` мы передавали `ai_<uuid>`). Это
+ особенность demo-кластера, не баг нашего кода.
+
+Различать НУЖНО по символу. Пулы пар разделены by design:
+
+```python
+AI_SYMBOLS = {
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+    "AVAXUSDT", "LTCUSDT", "ATOMUSDT", "WLDUSDT", "TAOUSDT",
+}
+ai_records = [r for r in records if r.get("symbol") in AI_SYMBOLS]
+```
+
+Канонический список — `DEFAULT_AI_SYMBOLS` в
+`src/ai_trader/config/settings.py`. На VPS актуальный список:
+
+```bash
+ssh root@204.168.149.140 'docker exec fx-pro-bot-ai-trader-1 \
+    python3 -c "from ai_trader.config.settings import AiTraderSettings; \
+    print(AiTraderSettings().symbols)"'
+```
+
+Если список расширяется — обновить и тут, и в `.env`.
+
+## Метрики — что считать
+
+При статистике:
+- Группировка по периодам с явными UTC-границами (например, до/после
+ деплоя v0.X). Не использовать локальные TZ — будут расхождения с
+ `updatedTime` (ms UTC) из API.
+- WR, net P&L, avg P&L, worst, best, stdev (для Sharpe-like).
+- Если сравниваем периоды — обязательно sample size; см.
+ `sample-size.mdc` (≥100 сделок, ≥2 недели, p<0.05 для disable-решений).
+- При дополнительных разрезах (по conviction, по символу, по
+ направлению) — привязка к `decisions.parsed_action` или
+ `positions.llm_reason` из БД допустима (там единственный источник
+ conviction-метки `[conv:X]`), но **сумма pnl** должна совпасть с API.
+
+## Что записывать в BUILDLOG_AI_TRADER.md
+
+Любая запись со статистикой должна содержать:
+- Источник: «Bybit API `get_closed_pnl` за период X..Y».
+- N сделок и временной диапазон.
+- WR, net, avg, worst (для контекста).
+- Если из этого делается изменение в стратегии/промпте/параметрах —
+ явно сослаться на `sample-size.mdc` (порог соблюдён? если нет —
+ это «наблюдение», не «вывод»).
+
+Без ссылки на API запись считается домыслом. Не использовать `.sqlite`
+напрямую как доказательство — только как complement (доли по
+conviction, паттерны в reason'ах LLM).
