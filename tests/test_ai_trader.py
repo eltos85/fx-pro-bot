@@ -33,10 +33,8 @@ def _make_test_settings(
         risk_high_usd=risk_high_usd,
         risk_very_high_usd=risk_very_high_usd,
     )
-    # v0.9: "low" исключён из conviction_risk_map (запрещён). Поле
-    # `risk_low_usd` сохраняется в SimpleNamespace для тестов back-compat
-    # (отображение env-переменной), но в карту не попадает.
     s.conviction_risk_map = {
+        "low": risk_low_usd,
         "medium": risk_medium_usd,
         "high": risk_high_usd,
         "very_high": risk_very_high_usd,
@@ -138,9 +136,8 @@ class TestParseAction:
         assert isinstance(result, str)
 
     # v0.8 conviction-based sizing parsing
-    # v0.9: "low" удалена из ALLOWED_CONVICTIONS — должна реджектиться.
     def test_open_with_valid_conviction(self):
-        for conv in ("medium", "high", "very_high"):
+        for conv in ("low", "medium", "high", "very_high"):
             text = (
                 '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
                 '"leverage": 3, "position_size_usd": 200, '
@@ -162,22 +159,9 @@ class TestParseAction:
         assert isinstance(result, str)
         assert "invalid conviction" in result
 
-    def test_open_with_low_conviction_rejected_v09(self):
-        """v0.9: 'low' удалена — должна реджектиться на уровне parse_action."""
-        text = (
-            '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
-            '"leverage": 3, "position_size_usd": 200, '
-            '"stop_loss": 60000, "take_profit": 65000, '
-            '"conviction": "low", "reason": "test"}'
-        )
-        result = parse_action(text, ALLOWED)
-        assert isinstance(result, str)
-        assert "invalid conviction" in result
-        assert "low" in result
-
     def test_open_without_conviction_accepted_back_compat(self):
-        # Back-compat: старый формат (без conviction) парсится; в
-        # _apply_open применяется DEFAULT_CONVICTION = "medium" (v0.9).
+        # Back-compat: старый формат (без conviction) парсится — default=low
+        # применится в _apply_open.
         text = (
             '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
             '"leverage": 3, "position_size_usd": 200, '
@@ -573,10 +557,10 @@ class TestQtyRounding:
         assert "min_order_qty" in (result.error or "")
         assert place_called == [], "place_order не должен быть вызван"
 
-    def test_apply_open_low_conviction_rejected_v09(self, tmp_path):
-        """v0.9: conviction='low' удалена. Если каким-то образом запрос
-        с conviction='low' дойдёт до executor (минуя parse_action),
-        executor сам должен отказать."""
+    def test_apply_open_risk_exceeds_low_conviction_cap_rejected(self, tmp_path):
+        """v0.8 HARD-GUARD: low conviction = $25 cap. Если LLM запросил
+        большой notional с широким SL, фактический риск > $25 → отказ
+        даже если notional/SL валидные сами по себе."""
         from ai_trader.trading import executor as exec_mod
         from ai_trader.trading.client import InstrumentInfo, Ticker
 
@@ -615,6 +599,7 @@ class TestQtyRounding:
             raw={
                 "action": "open", "symbol": "BTCUSDT", "side": "Buy",
                 "leverage": 2, "position_size_usd": 500.0,
+                # qty = 500 / 100 = 5.0; risk = |100-90|*5 = $50 > $25 (low cap)
                 "stop_loss": 90.0, "take_profit": 130.0,
                 "conviction": "low",
                 "reason": "test",
@@ -625,64 +610,8 @@ class TestQtyRounding:
             settings=settings, killswitch=killswitch,
         )
         assert not result.executed
-        assert "conviction_disabled" in (result.error or "")
-        assert "low" in (result.error or "")
-        assert place_called == [], "place_order не должен быть вызван"
-
-    def test_apply_open_risk_exceeds_medium_conviction_cap_rejected(self, tmp_path):
-        """v0.8/v0.9 HARD-GUARD: medium conviction = $50 cap. Если LLM
-        запросил notional с широким SL и actual risk > $50 — отказ."""
-        from ai_trader.trading import executor as exec_mod
-        from ai_trader.trading.client import InstrumentInfo, Ticker
-
-        place_called: list = []
-
-        class FakeClient:
-            def get_ticker(self, symbol):
-                return Ticker(
-                    symbol=symbol, last_price=100.0, bid=99.9, ask=100.1,
-                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
-                )
-
-            def get_instrument_info(self, symbol):
-                return InstrumentInfo(
-                    symbol=symbol, qty_step=0.01,
-                    min_order_qty=0.01, max_order_qty=10_000.0,
-                    tick_size=0.01,
-                )
-
-            def set_leverage(self, symbol, leverage):
-                return True
-
-            def place_order(self, **kwargs):
-                place_called.append(kwargs)
-                return {"ok": True}
-
-        store = AiTraderStore(tmp_path / "ai.db")
-        killswitch = KillSwitch(KillSwitchConfig(
-            max_daily_loss_usd=300, max_total_loss_usd=1000,
-            max_open_positions=5, max_leverage=10,
-        ), store)
-        settings = _make_test_settings(virtual_capital_usd=1000.0)
-
-        # qty = 1000 / 100 = 10.0; risk = |100-90|*10 = $100 > $50 (medium cap)
-        action = exec_mod.ParsedAction(
-            action="open",
-            raw={
-                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
-                "leverage": 2, "position_size_usd": 1000.0,
-                "stop_loss": 90.0, "take_profit": 130.0,
-                "conviction": "medium",
-                "reason": "test",
-            },
-        )
-        result = exec_mod._apply_open(
-            action, client=FakeClient(), store=store,
-            settings=settings, killswitch=killswitch,
-        )
-        assert not result.executed
         assert "risk_exceeds_cap" in (result.error or "")
-        assert "medium" in (result.error or "")
+        assert "low" in (result.error or "")
         assert place_called == [], "place_order не должен быть вызван"
 
     def test_apply_open_high_conviction_allows_larger_risk(self, tmp_path):
@@ -743,14 +672,11 @@ class TestQtyRounding:
         # place_order был вызван
         assert "place_order" in captured
 
-    def test_apply_open_default_conviction_medium_when_missing_v09(self, tmp_path):
-        """v0.9 back-compat: если LLM не вернул conviction, применяется
-        DEFAULT_CONVICTION = 'medium' (раньше был 'low'). Проверяем
-        что cap = risk_medium_usd ($50)."""
+    def test_apply_open_default_conviction_low_when_missing(self, tmp_path):
+        """Back-compat: если LLM не вернул conviction, применяется default=low.
+        Проверяем что cap = risk_low_usd."""
         from ai_trader.trading import executor as exec_mod
         from ai_trader.trading.client import InstrumentInfo, Ticker
-
-        captured: dict = {}
 
         class FakeClient:
             def get_ticker(self, symbol):
@@ -770,7 +696,6 @@ class TestQtyRounding:
                 return True
 
             def place_order(self, **kwargs):
-                captured["place_order"] = kwargs
                 return {"ok": True, "result": {"orderId": "x"}}
 
         store = AiTraderStore(tmp_path / "ai.db")
@@ -780,15 +705,13 @@ class TestQtyRounding:
         ), store)
         settings = _make_test_settings(virtual_capital_usd=500.0)
 
-        # qty = 500/100 = 5.0; risk = |100-95|*5 = $25 — укладывается в
-        # medium cap ($50). Без conviction должен применяться default=medium
-        # и сделка пройти.
+        # risk = |100-90|*5 = $50 > $25 default low cap → reject
         action = exec_mod.ParsedAction(
             action="open",
             raw={
                 "action": "open", "symbol": "BTCUSDT", "side": "Buy",
                 "leverage": 2, "position_size_usd": 500.0,
-                "stop_loss": 95.0, "take_profit": 110.0,
+                "stop_loss": 90.0, "take_profit": 130.0,
                 "reason": "test (no conviction field)",
             },
         )
@@ -796,13 +719,9 @@ class TestQtyRounding:
             action, client=FakeClient(), store=store,
             settings=settings, killswitch=killswitch,
         )
-        assert result.executed, f"должно открыться: error={result.error}"
-        # default conviction = medium попал в summary
-        assert "conv=medium" in result.summary
-        # cap = $50 (medium), risk = $25
-        assert "risk=$25" in result.summary
-        assert "/$50" in result.summary
-        assert "place_order" in captured
+        assert not result.executed
+        assert "risk_exceeds_cap" in (result.error or "")
+        assert "low" in (result.error or "")
 
 
 # ─── build_system_prompt: подстановка plairs/limits в шаблон ─────────
@@ -838,14 +757,11 @@ class TestBuildSystemPrompt:
         assert "Maximum leverage: 5x" in prompt
         assert "Virtual capital: $500 USD" in prompt
         # v0.8: conviction-based risk caps вместо одиночного 2% правила
-        # v0.9: уровень "low" удалён, минимум "medium".
         assert "CONVICTION-BASED RISK PER TRADE" in prompt
-        assert "THERE IS\n  NO \"low\" LEVEL" in prompt
-        assert '"medium"    → $50  max risk  (MINIMUM bar to open)' in prompt
+        assert '"low"       → $25  max risk' in prompt
+        assert '"medium"    → $50  max risk' in prompt
         assert '"high"      → $75  max risk' in prompt
         assert '"very_high" → $100 max risk' in prompt
-        # "low" не должен фигурировать как валидный уровень в risk-cap таблице
-        assert '"low"       → $25  max risk' not in prompt
         # daily loss limit поднят до $300 в v0.8
         assert "Daily loss limit: $300" in prompt
 
@@ -862,8 +778,7 @@ class TestBuildSystemPrompt:
         assert "position_size_usd\": 50-500" in prompt
         assert "leverage\": 1-5" in prompt
         # v0.8: schema требует conviction в open
-        # v0.9: enum без "low"
-        assert '"conviction": "medium" | "high" | "very_high"' in prompt
+        assert '"conviction": "low" | "medium" | "high" | "very_high"' in prompt
 
     def test_custom_settings_propagate(self, monkeypatch):
         from ai_trader.llm.prompts import build_system_prompt
@@ -894,8 +809,8 @@ class TestBuildSystemPrompt:
         assert "leverage\": 1-3" in prompt
         assert "position_size_usd\": 50-1000" in prompt
         # v0.8: env-overrides попадают в conviction-cap текст
-        # v0.9: "low" удалён из CAPITAL RULES
-        assert '"medium"    → $15  max risk  (MINIMUM bar to open)' in prompt
+        assert '"low"       → $5  max risk' in prompt
+        assert '"medium"    → $15  max risk' in prompt
         assert '"high"      → $30  max risk' in prompt
         assert '"very_high" → $50 max risk' in prompt
 
