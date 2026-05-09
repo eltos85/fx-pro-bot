@@ -1,5 +1,56 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-09 — revert: полный откат v0.8 (conviction-based sizing)
+
+`<hash-pending>`
+
+По решению user'а — **полный откат** обоих коммитов v0.8 (conviction
+sizing $25-$100) и v0.9 (запрет conv:low). Аргумент: «лишает ИИ
+размышлений». Возврат к v0.7 baseline: фиксированный 2%-risk per
+trade ($10 на $500 капитал), без conviction-поля в схеме.
+
+Способ: `git revert 748e8b5` (v0.9, чисто) + `git revert 9100305`
+(v0.8, конфликты в `docker-compose.yml` и `BUILDLOG_AI_TRADER.md` —
+разрешены вручную: оставлен HEAD-вариант docker-compose, т.е.
+single-source-of-truth refactor `e661ce0` сохранён, AI_TRADER_*
+переменные в compose НЕ возвращены — теперь они только в `.env`
+и `settings.py`).
+
+Что вернулось:
+- `risk_per_trade_pct = 0.02` как единственный risk-параметр
+- `max_daily_loss = $50`, `max_total_loss = $200`
+- Промпт без CONVICTION-BASED RISK PER TRADE блока, без
+  `"conviction"` в JSON-схеме
+- `executor.py` без `ALLOWED_CONVICTIONS`, hard-guard, conv-префикса
+  в `llm_reason`
+- Тесты v0.8/v0.9 (parse_action conviction + apply_open conv-cap)
+  удалены вместе с revert'ом
+
+Что сохранено:
+- Правило `.cursor/rules/ai-trader-pnl.mdc` (commit `d19c6db`) —
+  останется, оно полезно независимо от v0.8 эксперимента.
+- Запись наблюдения 2026-05-09 (post-v0.8 деградация по API) —
+  останется в BUILDLOG как исторический факт.
+- Refactor compose `e661ce0` — сохранён.
+
+Disclaimer: по правилу `sample-size.mdc` n=14 закрытых сделок после
+v0.8 — формально недостаточно для статистически значимого вывода.
+Это явный user override (как и сам v0.8 был user override). Оба
+эксперимента (введение conviction и его удаление) фиксируем как
+явные UX-эксперименты, не data-driven решения.
+
+### Файлы
+
+- `src/ai_trader/llm/prompts.py` (revert)
+- `src/ai_trader/trading/executor.py` (revert)
+- `src/ai_trader/config/settings.py` (revert)
+- `tests/test_ai_trader.py` (revert)
+- `docker-compose.yml` (resolved: HEAD сохранён)
+- `.env.example` (revert; AI_TRADER_RISK_*_USD удалены)
+- `BUILDLOG_AI_TRADER.md` (resolved: HEAD сохранён, v0.8 запись удалена)
+
+---
+
 ## 2026-05-09 — наблюдение: post-v0.8 P&L резко хуже (NB: малая выборка)
 
 `<hash-pending>`
@@ -177,9 +228,12 @@ thinking-блоков (надёжнее).
 
 ---
 
-## 2026-05-08 — feat(v0.8): conviction-based position sizing $25-$100 (USER OVERRIDE)
+<!-- v0.8 запись удалена при revert (2026-05-09). Историческая запись
+с user-override обоснованием conviction-based sizing — была здесь, но
+после полного отката v0.8 + v0.9 оставлять её нет смысла. См. запись
+от 2026-05-09 «revert: полный откат v0.8» наверху файла. -->
 
-`<hash-pending>`
+## 2026-05-08 — feat(v0.8): [reverted 2026-05-09]
 
 ### TL;DR
 

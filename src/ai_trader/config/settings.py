@@ -96,18 +96,14 @@ class AiTraderSettings(BaseSettings):
     # standard 2026 (KuCoin Risk Management 2026, Atlas Peak Research,
     # Hyper-Quant: 1–2% — mainstream consensus, 5% соответствует full Kelly
     # с edge ~10% и опасен из-за drawdown-риска).
-    # v0.8 (2026-05-08): user override — переходим на conviction-based
-    # sizing $25-$100 (5%-20% per trade). Лимиты подняты пропорционально:
-    # daily $50 → $300 (3 убыточных сделки на high-conviction), total
-    # $200 → $400 (80% капитала, после чего полный stop). Записано в
-    # BUILDLOG_AI_TRADER.md как явный user override — это превышает
-    # industry standard в 5-10 раз, оправдывается только малой выборкой
-    # (10 сделок WR 70%) и осознанным принятием риска со стороны user'а.
+    # При risk-per-trade 2% ($10) и max-pos 3:
+    # - $50/день = 5 убыточных сделок до блока
+    # - $200 total = 40% virtual capital, кончается раньше «доедания депо»
     max_daily_loss_usd: float = Field(
-        default=300.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
+        default=50.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
     )
     max_total_loss_usd: float = Field(
-        default=400.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
+        default=200.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
     )
     max_open_positions: int = Field(
         default=5, validation_alias="AI_TRADER_MAX_POSITIONS"
@@ -120,39 +116,9 @@ class AiTraderSettings(BaseSettings):
     max_leverage: int = Field(default=5, validation_alias="AI_TRADER_MAX_LEVERAGE")
     # Risk per trade в долях (0.02 = 2%). Используется LLM в промпте + для
     # будущих helper-функций position sizing.
-    # ВАЖНО: с v0.8 (conviction-based sizing) этот параметр стал FALLBACK
-    # на случай если LLM не вернул conviction-поле. Реальный риск
-    # определяется conviction-маппингом ниже.
     risk_per_trade_pct: float = Field(
         default=0.02, validation_alias="AI_TRADER_RISK_PER_TRADE"
     )
-
-    # ─── Conviction-based risk sizing (v0.8, 2026-05-08) ─────────────────
-    # User override против industry-standard 2026 (1-2%% per trade).
-    # См. BUILDLOG_AI_TRADER.md, запись от 2026-05-08, для disclaimer
-    # и обсуждения рисков. LLM возвращает поле "conviction" в JSON-ответе,
-    # которое мапится в реальный risk-cap для одной сделки.
-    risk_low_usd: float = Field(
-        default=25.0, validation_alias="AI_TRADER_RISK_LOW_USD"
-    )
-    risk_medium_usd: float = Field(
-        default=50.0, validation_alias="AI_TRADER_RISK_MEDIUM_USD"
-    )
-    risk_high_usd: float = Field(
-        default=75.0, validation_alias="AI_TRADER_RISK_HIGH_USD"
-    )
-    risk_very_high_usd: float = Field(
-        default=100.0, validation_alias="AI_TRADER_RISK_VERY_HIGH_USD"
-    )
-
-    @property
-    def conviction_risk_map(self) -> dict[str, float]:
-        return {
-            "low": self.risk_low_usd,
-            "medium": self.risk_medium_usd,
-            "high": self.risk_high_usd,
-            "very_high": self.risk_very_high_usd,
-        }
 
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_TRADER_DATA_DIR")
