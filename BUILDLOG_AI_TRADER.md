@@ -1,5 +1,80 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-09 — feat(prompt+executor v0.9): запрет conviction="low" (USER OVERRIDE)
+
+`<hash-pending>`
+
+### Что изменилось
+
+После v0.8 наблюдение `0/4 wins` на закрытых `conv:low` сделках (Bybit
+API closedPnl, см. запись ниже от 2026-05-09 и правило
+`ai-trader-pnl.mdc`). По решению user'а — отключаем уровень `low`
+из conviction-системы.
+
+- `prompts.py`: enum `conviction` в JSON-схеме теперь
+ `"medium" | "high" | "very_high"`. CAPITAL RULES переписаны:
+ `medium` — минимум для входа (3+ незав. confirmations + R:R≥1.8
+ gross), `low` явно запрещён («there is no low level»). Schema
+ docstring обновлён до v0.9 + объяснение причины.
+- `executor.py`:
+ - `ALLOWED_CONVICTIONS = {"medium", "high", "very_high"}`.
+ - `DEFAULT_CONVICTION = "medium"` (back-compat: если LLM не вернул
+ поле, считаем минимально допустимый setup).
+ - `parse_action`: при `conviction="low"` → возвращает строку-ошибку
+ «invalid conviction 'low' ... 'low' removed in v0.9 — return
+ action='hold' for weak setups».
+ - `_apply_open`: hard-guard — если каким-то образом conviction не
+ в `ALLOWED_CONVICTIONS` или `risk_cap_usd <= 0` → отказ с явной
+ ошибкой (`conviction_disabled` / `conviction_no_cap`).
+- `settings.py`: `risk_low_usd` остаётся (env `AI_TRADER_RISK_LOW_USD`)
+ для возможного быстрого rollback'а, но `conviction_risk_map`
+ теперь без ключа `"low"`.
+
+### Тесты
+
+- `parse_action`: новый `test_open_with_low_conviction_rejected_v09`.
+- `_apply_open`:
+ - переименован старый `test_apply_open_risk_exceeds_low_conviction_cap_rejected`
+ → `test_apply_open_low_conviction_rejected_v09` (теперь проверяет, что
+ `conviction='low'` сразу отвергается с `conviction_disabled`).
+ - добавлен `test_apply_open_risk_exceeds_medium_conviction_cap_rejected`
+ (cap-проверка теперь на `medium=$50`).
+ - `test_apply_open_default_conviction_low_when_missing` →
+ `test_apply_open_default_conviction_medium_when_missing_v09`
+ (default теперь `medium`).
+- `build_system_prompt`: проверки на `"low"       → $25` заменены на
+ `"medium"    → $50  max risk  (MINIMUM bar to open)` и негативный
+ ассерт `'"low"...' not in prompt`.
+
+Итого: было 534 теста → стало 536, все green.
+
+### Disclaimer (sample-size)
+
+По правилу `sample-size.mdc` n=4 закрытых сделок с conv:low —
+**недостаточно** для disable-решения (порог ≥100 сделок и ≥2 недели
+для рекомендованной статистической значимости). Это явный user
+override, аналогично v0.8.
+
+Гипотеза, которую проверяем: поднятие risk-cap'а до $25 для слабых
+сетапов (v0.8) дало модели опцию «торговать всё подряд по чуть-чуть»;
+до v0.8 при $10 такие setup'ы шли как HOLD. Без `low` модель должна
+либо подтянуть качество до `medium` (3+ confirmations + R:R≥1.8),
+либо чаще выбирать `hold`.
+
+Если эксперимент не подтвердит улучшение через 1-2 недели — откатим
+изменение (v0.9 → v0.8), `risk_low_usd` поэтому намеренно сохранён
+в settings.
+
+### Файлы
+
+- `src/ai_trader/llm/prompts.py`
+- `src/ai_trader/trading/executor.py`
+- `src/ai_trader/config/settings.py`
+- `tests/test_ai_trader.py`
+- `BUILDLOG_AI_TRADER.md`
+
+---
+
 ## 2026-05-09 — наблюдение: post-v0.8 P&L резко хуже (NB: малая выборка)
 
 `<hash-pending>`

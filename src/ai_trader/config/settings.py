@@ -132,6 +132,12 @@ class AiTraderSettings(BaseSettings):
     # См. BUILDLOG_AI_TRADER.md, запись от 2026-05-08, для disclaimer
     # и обсуждения рисков. LLM возвращает поле "conviction" в JSON-ответе,
     # которое мапится в реальный risk-cap для одной сделки.
+    #
+    # v0.9 (2026-05-09): уровень "low" удалён из conviction_risk_map.
+    # `risk_low_usd` остаётся как env-переменная для обратной
+    # совместимости и быстрого rollback'а (если эксперимент покажет, что
+    # запрет low был ошибкой), но в карте для executor'а — нет low.
+    # Попытка LLM открыть с conviction="low" → reject в executor.py.
     risk_low_usd: float = Field(
         default=25.0, validation_alias="AI_TRADER_RISK_LOW_USD"
     )
@@ -147,8 +153,9 @@ class AiTraderSettings(BaseSettings):
 
     @property
     def conviction_risk_map(self) -> dict[str, float]:
+        # v0.9: "low" не в карте — попытка открыть с этим уровнем
+        # отклоняется в executor._apply_open. См. комментарий выше.
         return {
-            "low": self.risk_low_usd,
             "medium": self.risk_medium_usd,
             "high": self.risk_high_usd,
             "very_high": self.risk_very_high_usd,

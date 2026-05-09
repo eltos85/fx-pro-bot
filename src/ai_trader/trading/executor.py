@@ -50,8 +50,15 @@ log = logging.getLogger(__name__)
 
 
 ALLOWED_SIDES = {"Buy", "Sell"}
-ALLOWED_CONVICTIONS = {"low", "medium", "high", "very_high"}
-DEFAULT_CONVICTION = "low"  # fallback при отсутствующем/невалидном значении
+# v0.9 (2026-05-09): "low" уровень удалён по итогам наблюдения 0/4 WR
+# на 4 закрытых conv:low сделках после v0.8 (Bybit API closedPnl).
+# См. BUILDLOG_AI_TRADER.md для контекста и `ai-trader-pnl.mdc`.
+# Если LLM присылает conviction="low" — parse_action отклоняет ответ.
+ALLOWED_CONVICTIONS = {"medium", "high", "very_high"}
+# Back-compat: если LLM не вернул `conviction` поле вообще, считаем что
+# это минимально допустимый setup (medium = 3+ confirmations). До v0.9
+# дефолт был "low" — но low больше не существует.
+DEFAULT_CONVICTION = "medium"
 
 
 @dataclass
@@ -141,13 +148,17 @@ def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | 
             if not isinstance(v, (int, float)) or v <= 0:
                 return f"invalid {key}: {v!r}"
         # conviction (v0.8): опциональное поле — пропускаем, если его нет
-        # (LLM может вернуть старый формат; default = "low" применяется
-        # в _apply_open). Если поле есть — должно быть валидной строкой.
+        # (back-compat: default = DEFAULT_CONVICTION применяется в
+        # _apply_open). Если поле есть — должно быть валидной строкой
+        # из ALLOWED_CONVICTIONS.
+        # v0.9: "low" удалена из ALLOWED_CONVICTIONS — попытка вернёт
+        # строку-ошибку парсинга, executor её не увидит.
         conv = obj.get("conviction")
         if conv is not None and conv not in ALLOWED_CONVICTIONS:
             return (
                 f"invalid conviction {conv!r}, "
-                f"must be one of {sorted(ALLOWED_CONVICTIONS)}"
+                f"must be one of {sorted(ALLOWED_CONVICTIONS)} "
+                f"('low' removed in v0.9 — return action='hold' for weak setups)"
             )
 
     if action == "close":
@@ -234,10 +245,10 @@ def _apply_open(
     sl_price = float(raw["stop_loss"])
     tp_price = float(raw["take_profit"])
     reason = str(raw.get("reason", ""))[:200]
-    # v0.8: conviction-based risk cap. Default "low" если LLM не вернул
-    # поле (back-compat) или вернул невалидное значение (parse_action
-    # уже отверг бы откровенно левые значения, но lowercase-нормализация
-    # на всякий случай).
+    # v0.8 + v0.9: conviction-based risk cap, "low" больше не разрешена.
+    # Default "medium" если LLM не вернул поле (back-compat). Если пришёл
+    # явный "low" — parse_action уже отверг этот ответ; здесь страхуемся
+    # ещё раз, но в норме сюда low не доходит.
     conviction_raw = raw.get("conviction", DEFAULT_CONVICTION)
     conviction = (
         conviction_raw.lower().strip()
@@ -245,10 +256,25 @@ def _apply_open(
         else DEFAULT_CONVICTION
     )
     if conviction not in ALLOWED_CONVICTIONS:
-        conviction = DEFAULT_CONVICTION
-    risk_cap_usd = settings.conviction_risk_map.get(
-        conviction, settings.risk_low_usd
-    )
+        return ApplyResult(
+            executed=False,
+            summary="",
+            error=(
+                f"conviction_disabled: {conviction!r} not allowed; "
+                f"allowed={sorted(ALLOWED_CONVICTIONS)}. "
+                f"Weak setups must be returned as action='hold'."
+            ),
+        )
+    risk_cap_usd = settings.conviction_risk_map.get(conviction, 0.0)
+    if risk_cap_usd <= 0:
+        return ApplyResult(
+            executed=False,
+            summary="",
+            error=(
+                f"conviction_no_cap: no risk cap configured for "
+                f"conviction={conviction!r}"
+            ),
+        )
 
     check = killswitch.check_can_open_position(leverage)
     if not check.allowed:

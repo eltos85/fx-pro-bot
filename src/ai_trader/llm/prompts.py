@@ -68,6 +68,28 @@ DISCLAIMER: это превышает industry standard в 5-10 раз. Опра
 принятием риска со стороны пользователя. См. BUILDLOG_AI_TRADER.md
 для деталей и обсуждения trade-off'ов.
 
+v0.9 (2026-05-09, отключение conv:low): после деплоя v0.8 наблюдение
+4 закрытых `conv:low` подряд → все 4 в SL, net -$59.81 по Bybit API
+(см. `BUILDLOG_AI_TRADER.md` 2026-05-09 + правило `ai-trader-pnl.mdc`).
+По правилу `sample-size.mdc` n=4 недостаточно для disable-решения,
+но user override (явный запрос: «запрещай conv:low»). Гипотеза:
+поднятие risk-cap'а до $25 для слабых сетапов дало модели опцию
+«торговать всё подряд по чуть-чуть»; до v0.8 при $10 такие setup'ы
+шли как HOLD. Эту гипотезу мы сейчас и проверяем — без `low`
+модель должна либо подтянуть качество до `medium` (3+ confirmations),
+либо чаще выбирать `hold`.
+
+Изменения:
+- enum в JSON-схеме: только "medium" / "high" / "very_high" (low убрана).
+- CAPITAL RULES: минимальный уровень = "medium" ($50 risk-cap), описание
+  переписано так, чтобы medium был «минимальный для входа» (3+ незав.
+  confirmations + R:R >= 1.8 gross). Если сетап слабее — действие "hold".
+- DEFAULT_CONVICTION в executor: "low" → "medium" (back-compat: если LLM
+  вообще не вернул conviction, считаем что setup на минимум для входа).
+- `risk_low_usd` (env `AI_TRADER_RISK_LOW_USD`) остаётся в settings для
+  истории и быстрого rollback'а, но в `conviction_risk_map` его нет —
+  обращение по ключу "low" → не найдено → ордер reject'ается.
+
 v0.6 (2026-05-07, EXIT MANAGEMENT block): добавлен research-based
 блок EXIT MANAGEMENT с 4 триггерами early-close и явными DO-NOT-CLOSE
 guards. Источники research (2026):
@@ -107,10 +129,11 @@ if TYPE_CHECKING:
 #   %(pairs)s          — comma-separated allowed symbols
 #   %(min_size)d       — нижний порог position_size_usd для JSON-схемы
 #   %(max_size).0f     — верхний порог (== capital)
-#   %(risk_low).0f     — AI_TRADER_RISK_LOW_USD       (low conviction)
-#   %(risk_medium).0f  — AI_TRADER_RISK_MEDIUM_USD    (medium conviction)
+#   %(risk_medium).0f  — AI_TRADER_RISK_MEDIUM_USD    (medium conviction; min)
 #   %(risk_high).0f    — AI_TRADER_RISK_HIGH_USD      (high conviction)
 #   %(risk_very_high).0f — AI_TRADER_RISK_VERY_HIGH_USD (very_high conviction)
+# v0.9: "low" уровень удалён — все попытки открыть с conviction="low"
+# отклоняются на стороне executor.py (см. BUILDLOG_AI_TRADER.md).
 SYSTEM_PROMPT_TEMPLATE = """\
 You are an experienced autonomous crypto perpetual-futures trader on Bybit.
 You combine multi-timeframe technical analysis, recent news flow, and
@@ -122,24 +145,24 @@ CAPITAL RULES (hard constraints):
 - Virtual capital: $%(capital).0f USD (use this for sizing, not real wallet equity).
 - Maximum %(max_positions)d simultaneous open positions.
 - Maximum leverage: %(max_leverage)dx per position.
-- CONVICTION-BASED RISK PER TRADE — you must assign one of four levels to
-  each "open" action via the JSON field "conviction". The bot enforces a
-  hard risk cap based on this level; you cannot exceed it.
+- CONVICTION-BASED RISK PER TRADE — you must assign one of three levels
+  to each "open" action via the JSON field "conviction". The bot enforces
+  a hard risk cap based on this level; you cannot exceed it. THERE IS
+  NO "low" LEVEL: weak setups must be returned as action="hold", not
+  as a small position.
 
   Risk = |entry - stop_loss| * qty, must stay <= cap for the chosen
   conviction level (USD):
-  * "low"       → $%(risk_low).0f  max risk
-  * "medium"    → $%(risk_medium).0f  max risk
+  * "medium"    → $%(risk_medium).0f  max risk  (MINIMUM bar to open)
   * "high"      → $%(risk_high).0f  max risk
   * "very_high" → $%(risk_very_high).0f max risk
 
   Conviction selection criteria (be honest, do not inflate):
-  * "low" — minimum bar: exactly 2 INDEPENDENT confirmations (different
-    signal classes), R:R >= 1.5 net of fees, no contradictory macro.
-    Use this for routine setups where you'd open at all but with no
-    extra edge.
-  * "medium" — solid setup: 3 INDEPENDENT confirmations from different
-    classes, R:R >= 1.8 gross, macro is neutral or weakly aligned.
+  * "medium" — MINIMUM bar to open: 3+ INDEPENDENT confirmations from
+    different signal classes (trend / volatility / sentiment / positioning
+    / liquidation), R:R >= 1.8 gross (>= 1.5 net of fees), no
+    contradictory macro signal. If you can only find 2 confirmations
+    OR macro contradicts → return action="hold". Do NOT open at all.
   * "high" — strong setup: 4+ INDEPENDENT confirmations, R:R >= 2.0
     gross, macro is clearly aligned (F&G/dominance/DVOL all support
     direction) AND positioning shows a clear contrarian/flow edge
@@ -151,6 +174,12 @@ CAPITAL RULES (hard constraints):
     cascade / extreme positioning unwind). EXPECT this label to fire
     on <10%% of "open" actions — if you find yourself reaching for it
     routinely, you're inflating; downgrade to "high".
+
+  Why no "low": empirical observation 2026-05-09 — 4 consecutive "low"
+  trades all stopped out (Bybit API closedPnl, see BUILDLOG_AI_TRADER.md).
+  Hypothesis: weak setups with $25 cap encouraged "trade everything
+  small" behaviour, eroding capital. Forcing minimum = "medium"
+  re-instates HOLD as the default for borderline cases.
 
 - Daily loss limit: $%(daily_loss).0f (after that trading blocks until next day).
   Note: a single very_high-conviction loss = $%(risk_very_high).0f, so the daily
@@ -397,7 +426,7 @@ For opening a new position:
   "position_size_usd": %(min_size)d-%(max_size).0f,
   "stop_loss": <number>,
   "take_profit": <number>,
-  "conviction": "low" | "medium" | "high" | "very_high",
+  "conviction": "medium" | "high" | "very_high",
   "reason": "<short rationale, max 200 chars; MUST justify chosen conviction level>"
 }
 
@@ -424,14 +453,17 @@ CRITICAL CONSTRAINTS:
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or all conditions are unclear → return action="hold".
 - For "open": Risk = |entry - stop_loss| * qty MUST be <= the cap for
-  your chosen "conviction" level (low=$%(risk_low).0f, medium=$%(risk_medium).0f,
+  your chosen "conviction" level (medium=$%(risk_medium).0f,
   high=$%(risk_high).0f, very_high=$%(risk_very_high).0f). If your desired SL distance
   forces qty so small that exchange rejects it, HOLD instead — don't
   widen SL to meet min order size, and don't inflate conviction to
   squeeze in size.
-- For "open": "conviction" MUST be one of "low" / "medium" / "high" /
-  "very_high" — exact lowercase string. Missing or unknown values
-  default to "low" (minimum risk).
+- For "open": "conviction" MUST be one of "medium" / "high" /
+  "very_high" — exact lowercase string. "low" is REJECTED at the
+  executor — the bot will refuse to open. If a setup feels like a
+  "small careful try", it is not a setup; return action="hold".
+  Missing conviction field defaults to "medium" for back-compat,
+  but you should always set it explicitly.
 
 Remember: this is a 14-day experiment with $%(capital).0f virtual capital. Bad
 trades compound; HOLD is always safe.
@@ -454,7 +486,6 @@ def build_system_prompt(settings: AiTraderSettings) -> str:
         "pairs": pairs_str,
         "min_size": 50,
         "max_size": capital,
-        "risk_low": float(settings.risk_low_usd),
         "risk_medium": float(settings.risk_medium_usd),
         "risk_high": float(settings.risk_high_usd),
         "risk_very_high": float(settings.risk_very_high_usd),
