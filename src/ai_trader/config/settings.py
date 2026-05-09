@@ -96,28 +96,33 @@ class AiTraderSettings(BaseSettings):
     # standard 2026 (KuCoin Risk Management 2026, Atlas Peak Research,
     # Hyper-Quant: 1–2% — mainstream consensus, 5% соответствует full Kelly
     # с edge ~10% и опасен из-за drawdown-риска).
-    # При risk-per-trade 2% ($10) и max-pos 3:
-    # - $50/день = 5 убыточных сделок до блока
-    # - $200 total = 40% virtual capital, кончается раньше «доедания депо»
+    #
+    # 2026-05-09 (USER OVERRIDE): risk-per-trade 2% → 6% ($30 на сделку
+    # при $500 капитала). User override против industry standard
+    # (KuCoin/Tharp/Vince — 1-2% mainstream). Аргумент пользователя:
+    # промежуточный шаг между $10 (мало) и $25-$100 conviction-based
+    # (откатили). Лимиты подняты пропорционально:
+    # - daily $50 → $150 (5 макс позиций × $30 = риск дня в SL)
+    # - total $200 → $400 (80% капитала, ранний стоп эксперимента)
     max_daily_loss_usd: float = Field(
-        default=50.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
+        default=150.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
     )
     max_total_loss_usd: float = Field(
-        default=200.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
+        default=400.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
     )
     max_open_positions: int = Field(
         default=5, validation_alias="AI_TRADER_MAX_POSITIONS"
     )
     # 3 → 5 (2026-05-07): пул пар расширен с 5 до 10, увеличиваем
     # одновременную ёмкость пропорционально (50% пар = типичный режим
-    # «несколько setup'ов одновременно»). Risk-per-trade остаётся 2%
-    # ($10), значит max realised drawdown за один цикл = 5×$10 = $50,
-    # ровно равен `max_daily_loss_usd`. Дальше — killswitch.
+    # «несколько setup'ов одновременно»). При risk-per-trade 6% ($30)
+    # и max-pos 5: max realised drawdown за один цикл = 5×$30 = $150 =
+    # `max_daily_loss_usd`. Дальше — killswitch.
     max_leverage: int = Field(default=5, validation_alias="AI_TRADER_MAX_LEVERAGE")
-    # Risk per trade в долях (0.02 = 2%). Используется LLM в промпте + для
-    # будущих helper-функций position sizing.
+    # Risk per trade в долях (0.06 = 6%, см. user override выше).
+    # Используется LLM в промпте для расчёта position size.
     risk_per_trade_pct: float = Field(
-        default=0.02, validation_alias="AI_TRADER_RISK_PER_TRADE"
+        default=0.06, validation_alias="AI_TRADER_RISK_PER_TRADE"
     )
 
     # ─── Storage ─────────────────────────────────────────────────────────

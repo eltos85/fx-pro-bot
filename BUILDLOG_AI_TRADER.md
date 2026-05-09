@@ -1,5 +1,44 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-09 — feat(killswitch): risk_per_trade 2% → 6% ($30/trade) + лимиты ×3 (USER OVERRIDE)
+
+`<hash-pending>`
+
+После полного отката v0.8/v0.9 (см. запись ниже) user попросил
+поднять размер позиции с $10 до $30. Это компромисс между $10
+(маленький baseline) и $25-$100 conviction-based (откатанный
+эксперимент): один уровень для всех сделок без conviction-полей.
+
+Изменения в `settings.py`:
+- `risk_per_trade_pct = 0.02 → 0.06` (2% → 6% per trade, $10 → $30)
+- `max_daily_loss_usd = 50 → 150` (5 max-pos × $30 = риск дня в SL)
+- `max_total_loss_usd = 200 → 400` (40% → 80% капитала, ранний
+  стоп эксперимента после ~13 убыточных сделок при средней
+  потере $30)
+
+Промпт **не правится** — `%(risk_pct)` / `%(risk_usd)` /
+`%(daily_loss)` подставляются из настроек автоматически.
+
+Тесты: обновлён `test_default_prompt_contains_default_pairs_and_limits`
+под новые числа (6% / $30 / $150). 528 passed.
+
+Disclaimer (sample-size + no-data-fitting):
+- 6% per trade превышает industry standard 2026 (1-2%, KuCoin/Tharp
+  /Vince) в 3 раза. Это **явный user override**, не data-driven.
+- При $400 total loss = 80% капитала эксперимент оборвётся раньше,
+  чем накопится статистически значимая выборка (по правилу
+  `sample-size.mdc` нужно ≥100 сделок).
+- Если по результатам первых 30-50 сделок WR < 50% или drawdown
+  превысит $200 — рекомендуется откат на $10/$50/$200 baseline.
+
+### Файлы
+
+- `src/ai_trader/config/settings.py` (3 default'а)
+- `tests/test_ai_trader.py` (1 assert)
+- `BUILDLOG_AI_TRADER.md`
+
+---
+
 ## 2026-05-09 — revert: полный откат v0.8 (conviction-based sizing)
 
 `<hash-pending>`

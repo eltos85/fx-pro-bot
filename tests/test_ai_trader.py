@@ -523,8 +523,8 @@ class TestBuildSystemPrompt:
         assert "Maximum 5 simultaneous open positions" in prompt
         assert "Maximum leverage: 5x" in prompt
         assert "Virtual capital: $500 USD" in prompt
-        assert "Maximum risk per trade: 2% of capital ($10 max" in prompt
-        assert "Daily loss limit: $50" in prompt
+        assert "Maximum risk per trade: 6% of capital ($30 max" in prompt
+        assert "Daily loss limit: $150" in prompt
 
         # Все 10 дефолтных пар в списке ALLOWED.
         for sym in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
