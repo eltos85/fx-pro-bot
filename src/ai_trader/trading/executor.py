@@ -65,12 +65,22 @@ class ApplyResult:
     error: str | None = None
 
 
-def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | str:
+def parse_action(
+    text: str,
+    allowed_symbols: tuple[str, ...],
+    *,
+    review_mode: bool = False,
+) -> ParsedAction | str:
     """Возвращает ParsedAction или строку с описанием ошибки.
 
     v0.3 (AUDIT_2026.md): промпт теперь требует commentary + JSON, поэтому
     парсер ищет **последний** balanced JSON-блок в тексте, а не первый
     встреченный ``{``. Это устойчиво к фигурным скобкам в commentary.
+
+    v0.10 (2026-05-10): review-cycle support. Если ``review_mode=True`` —
+    action ``"open"`` отвергается явной ошибкой (review-промпт явно
+    запрещает open, но дополнительный hard-guard защищает от случаев
+    когда LLM проигнорировал инструкцию).
     """
     if not text:
         return "empty response"
@@ -127,6 +137,9 @@ def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | 
     action = obj.get("action")
     if action not in {"open", "close", "hold"}:
         return f"invalid action: {action!r}"
+
+    if review_mode and action == "open":
+        return "review_mode: 'open' action is forbidden in review cycle"
 
     if action == "open":
         sym = obj.get("symbol")

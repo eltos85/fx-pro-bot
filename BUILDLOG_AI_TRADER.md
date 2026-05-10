@@ -1,5 +1,65 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-12 — backport: dual-timer 15+5 мин (v0.10 → v0.3 база)
+
+**Запрос пользователя:** «надо вернуть функционал слежения за лотом
+обновления событий раз в 5 минут».
+
+**Что сделано.** Cherry-pick коммита `c6084b9 feat(v0.10): двойной таймер`
+из ветки `backup-pre-rollback-20260511-172246`. Конфликты в 4 файлах
+решены вручную под v0.3-базу (без i1–i6, без MacroProvider/OptionsIv):
+
+- `src/ai_trader/app/main.py`: dual-timer структура взята из v0.10
+  (один `cycle` счётчик, два `time.monotonic()` таймера для full/review),
+  но вызов `_run_cycle` без `macro_provider`/`options_iv_provider`
+  параметров. Imports — добавлены `SYSTEM_PROMPT_REVIEW`,
+  `build_system_prompt_review`, `build_user_prompt_review`.
+- `src/ai_trader/trading/context.py`: `_funding_band_label` сохранён;
+  `collect_review_context` упрощён — без `positioning` (нет OI/L-S/funding-
+  history полей в v0.3 SymbolSnapshot), `compute_snapshot` вызывается без
+  VWAP/RV параметров; `format_context_for_review` — без macro/positioning
+  блоков, только ticker + 1H closes + 1H indicators + funding band.
+- `src/ai_trader/config/settings.py`: `review_interval_sec=300` поле
+  добавлено (auto-merge).
+- `src/ai_trader/llm/prompts.py`: `SYSTEM_PROMPT_REVIEW` константа +
+  `build_system_prompt_review` + `build_user_prompt_review` (auto-merge).
+- `src/ai_trader/trading/executor.py`: `parse_action(review_mode=True)`
+  hard-guard от open в review-цикле (auto-merge).
+- `tests/test_ai_trader.py`: +15 тестов из v0.10 (auto-merge).
+- `.env.example`: только `AI_TRADER_POLL_INTERVAL_SEC` /
+  `AI_TRADER_REVIEW_INTERVAL_SEC` (без single-source-of-truth блока v0.4).
+
+**Что работает на v0.3-контексте:**
+- Full-cycle каждые 900s — RSI/MACD/ATR/EMA/BB по 1H/4H + news + open.
+- Review-cycle каждые 300s — только открытые позиции, 1H indicators,
+  ticker, funding label, без 4H/news. Только close/hold.
+- LLM получает 3× больше точек реакции для exit-decisions (по правилу
+  EXIT MANAGEMENT, добавленному в предыдущей записи).
+
+**Что НЕ перенесено** (зависит от i1–i6, остаётся в backup-ветке):
+- VWAP-deviation / RV в indicators (i1).
+- OI/funding-history / Long-Short ratio / orderbook L2 / liquidations
+  в positioning (i2/i4/i5).
+- F&G / BTC dominance / stables / DVOL macro-context (i3/i6).
+
+В `SYSTEM_PROMPT_REVIEW` ссылки на VWAP/L-S/liquidation cascade
+сохранены, но модель проигнорирует их (данных нет в lite-контексте);
+рабочие триггеры — RSI cross, MACD flip, funding flip, R-units.
+
+**Тесты:** `pytest tests/test_ai_trader.py` — все passed.
+
+**Файлы:**
+- `src/ai_trader/app/main.py`
+- `src/ai_trader/config/settings.py`
+- `src/ai_trader/llm/prompts.py`
+- `src/ai_trader/trading/context.py`
+- `src/ai_trader/trading/executor.py`
+- `tests/test_ai_trader.py`
+- `.env.example`
+- `BUILDLOG_AI_TRADER.md`
+
+---
+
 ## 2026-05-12 — backport: EXIT MANAGEMENT block (v0.6 prompt → v0.3 база)
 
 **Запрос пользователя:** «нужно найти в ветке backup функционал для

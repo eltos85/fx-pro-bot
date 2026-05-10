@@ -682,3 +682,266 @@ class TestReconcileClosedPositions:
         )
         assert eth_id not in {p.id for p in opens}
 
+
+# ─── Review-cycle (v0.10, 2026-05-10) ────────────────────────────────────
+
+
+class TestReviewModeParseAction:
+    """parse_action(review_mode=True) должен запрещать action='open',
+    но пропускать close/hold (то же что full-cycle).
+    """
+
+    def test_open_rejected_in_review_mode(self):
+        text = (
+            '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
+            '"leverage": 3, "position_size_usd": 200, '
+            '"stop_loss": 60000, "take_profit": 65000, "reason": "x"}'
+        )
+        result = parse_action(text, ALLOWED, review_mode=True)
+        assert isinstance(result, str)
+        assert "review_mode" in result
+        assert "forbidden" in result
+
+    def test_close_allowed_in_review_mode(self):
+        text = '{"action": "close", "position_id": 5, "reason": "invalidated"}'
+        result = parse_action(text, ALLOWED, review_mode=True)
+        assert isinstance(result, ParsedAction)
+        assert result.action == "close"
+        assert result.raw["position_id"] == 5
+
+    def test_hold_allowed_in_review_mode(self):
+        text = '{"action": "hold", "reason": "all setups intact"}'
+        result = parse_action(text, ALLOWED, review_mode=True)
+        assert isinstance(result, ParsedAction)
+        assert result.action == "hold"
+
+    def test_open_allowed_when_review_mode_false(self):
+        """Дефолтный режим (full cycle) не должен ломаться."""
+        text = (
+            '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
+            '"leverage": 3, "position_size_usd": 200, '
+            '"stop_loss": 60000, "take_profit": 65000, "reason": "x"}'
+        )
+        result = parse_action(text, ALLOWED)  # review_mode=False по умолчанию
+        assert isinstance(result, ParsedAction)
+        assert result.action == "open"
+
+
+class TestBuildSystemPromptReview:
+    """Промпт review-цикла должен:
+    - подставить review_min и full_min из настроек,
+    - явно запрещать 'open',
+    - не содержать неразрешённых плейсхолдеров.
+    """
+
+    @staticmethod
+    def _make_settings(monkeypatch, **env):
+        for key in list(__import__("os").environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        from ai_trader.config.settings import AiTraderSettings
+        return AiTraderSettings()
+
+    def test_default_review_prompt_intervals(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt_review
+
+        settings = self._make_settings(monkeypatch)
+        prompt = build_system_prompt_review(settings)
+
+        # Шаблон содержит переносы строк, поэтому ищем без позиционирования.
+        # 900s/60 = 15 min, 300s/60 = 5 min
+        assert "15 minutes" in prompt
+        assert "5 minutes" in prompt
+        assert "5 min later" in prompt
+
+    def test_review_prompt_forbids_open(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt_review
+
+        settings = self._make_settings(monkeypatch)
+        prompt = build_system_prompt_review(settings)
+        assert "FORBIDDEN" in prompt
+        assert "\"open\" is FORBIDDEN" in prompt
+        # JSON-схема НЕ должна содержать open-вариант
+        assert '"action": "close"' in prompt
+        assert '"action": "hold"' in prompt
+        # Отсутствует full open-схема (без position_size_usd / leverage)
+        assert "position_size_usd" not in prompt
+
+    def test_review_prompt_no_unresolved_placeholders(self, monkeypatch):
+        import re
+
+        from ai_trader.llm.prompts import build_system_prompt_review
+
+        settings = self._make_settings(monkeypatch)
+        prompt = build_system_prompt_review(settings)
+        leftovers = re.findall(r"%\([a-zA-Z_]+\)[a-zA-Z.0-9]+", prompt)
+        assert leftovers == [], f"unresolved placeholders: {leftovers}"
+
+    def test_review_prompt_custom_intervals(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt_review
+
+        settings = self._make_settings(
+            monkeypatch,
+            AI_TRADER_POLL_INTERVAL_SEC="600",   # 10 min
+            AI_TRADER_REVIEW_INTERVAL_SEC="120",  # 2 min
+        )
+        prompt = build_system_prompt_review(settings)
+        assert "10 minutes" in prompt
+        assert "2 minutes" in prompt
+        assert "2 min later" in prompt
+
+
+class TestFormatContextForReview:
+    """Lite-контекст должен содержать только то что нужно для exit-decision:
+    open positions, ticker, 1H индикаторы, positioning. БЕЗ macro/news/
+    options/4H — review-цикл не для нового анализа.
+    """
+
+    def test_empty_positions(self):
+        from ai_trader.trading.context import MarketContext, format_context_for_review
+
+        ctx = MarketContext(
+            snapshots=[], open_positions=[],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+        )
+        s = format_context_for_review(ctx)
+        assert "OPEN POSITIONS: 0" in s
+        assert "(none)" in s
+        # Не должно быть секций macro/news/options
+        assert "GLOBAL MACRO" not in s
+        assert "RECENT CRYPTO NEWS" not in s
+        assert "OPTIONS MARKET IV" not in s
+
+    def test_with_open_position(self):
+        from ai_trader.state.db import AiPosition
+        from ai_trader.trading.client import Ticker
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_review,
+        )
+
+        pos = AiPosition(
+            id=42, symbol="BTCUSDT", side="Sell", qty=0.01,
+            entry_price=60000.0, sl_price=61000.0, tp_price=58000.0,
+            leverage=3, order_link_id="ai_test",
+            opened_at="2026-05-10T00:00:00+00:00",
+            closed_at=None, exit_price=None, realized_pnl_usd=None,
+            close_reason=None, llm_reason="test",
+        )
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=60500.0, bid=60490, ask=60510,
+            funding_rate=0.0001, volume_24h=10000, price_change_pct_24h=0.5,
+        )
+        snap = SymbolSnapshot(
+            symbol="BTCUSDT", ticker=ticker, bars_1h=[], bars_4h=[],
+        )
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[pos],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+        )
+        s = format_context_for_review(ctx)
+        assert "OPEN POSITIONS: 1" in s
+        assert "BTCUSDT" in s
+        assert "id=42" in s
+        assert "lite review cycle" in s.lower()
+        # 4H блок не должен появиться
+        assert "4H INDICATORS" not in s
+
+
+class TestCollectReviewContext:
+    """Lite-сборщик: должен дёргать API только для символов с open positions
+    (не для всех 10 пар) и пропускать 4H/news/macro.
+    """
+
+    def test_skips_when_no_open_positions(self, tmp_path):
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.context import collect_review_context
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+
+        class NoCallsClient:
+            def get_ticker(self, *a, **kw):
+                raise AssertionError("должен пропустить — нет open positions")
+
+            def get_klines(self, *a, **kw):
+                raise AssertionError("должен пропустить — нет open positions")
+
+            def get_wallet_balance(self):
+                return 500.0
+
+        ctx = collect_review_context(NoCallsClient(), store, 500.0)
+        assert ctx.open_positions == []
+        assert ctx.snapshots == []
+        assert ctx.real_equity_usd == 500.0
+
+    def test_only_fetches_symbols_with_open_positions(self, tmp_path):
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.client import Ticker
+        from ai_trader.trading.context import collect_review_context
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        # Открываем одну BTC-позицию
+        store.open_position(
+            symbol="BTCUSDT", side="Sell", qty=0.01, entry_price=60000.0,
+            sl_price=61000.0, tp_price=58000.0, leverage=3,
+            order_link_id="ai_test", llm_reason="test",
+        )
+
+        called_symbols: list[str] = []
+
+        class TrackingClient:
+            def get_ticker(self, symbol: str):
+                called_symbols.append(symbol)
+                return Ticker(
+                    symbol=symbol, last_price=60500.0, bid=60490, ask=60510,
+                    funding_rate=0.0001, volume_24h=10000, price_change_pct_24h=0.5,
+                )
+
+            def get_klines(self, symbol: str, *, interval: str, limit: int):
+                # Возвращаем минимум баров (под порог 30) — индикаторы не считаем
+                return []
+
+            def get_funding_rate_history(self, *a, **kw):
+                return []
+
+            def get_long_short_ratio(self, *a, **kw):
+                return []
+
+            def get_wallet_balance(self):
+                return 500.0
+
+        ctx = collect_review_context(TrackingClient(), store, 500.0)
+        # Тикер запрашивался ТОЛЬКО для BTCUSDT — других 9 пар не дёргали
+        assert called_symbols == ["BTCUSDT"]
+        assert len(ctx.snapshots) == 1
+        assert ctx.snapshots[0].symbol == "BTCUSDT"
+        # 4H должно быть пустым (review не фетчит 4h)
+        assert ctx.snapshots[0].bars_4h == []
+        assert ctx.snapshots[0].ind_4h is None
+
+
+class TestReviewIntervalSettings:
+    """Дефолт review_interval_sec = 300 (5 мин). Ноль = review отключён."""
+
+    @staticmethod
+    def _make_settings(monkeypatch, **env):
+        for key in list(__import__("os").environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        from ai_trader.config.settings import AiTraderSettings
+        return AiTraderSettings()
+
+    def test_default_review_interval(self, monkeypatch):
+        settings = self._make_settings(monkeypatch)
+        assert settings.review_interval_sec == 300
+
+    def test_review_interval_override(self, monkeypatch):
+        settings = self._make_settings(monkeypatch, AI_TRADER_REVIEW_INTERVAL_SEC="120")
+        assert settings.review_interval_sec == 120
+
+    def test_review_disabled_when_zero(self, monkeypatch):
+        settings = self._make_settings(monkeypatch, AI_TRADER_REVIEW_INTERVAL_SEC="0")
+        assert settings.review_interval_sec == 0

@@ -121,6 +121,117 @@ def _funding_band_label(rate: float) -> str:
     return f" [STRONG: {side}, contrarian risk]"
 
 
+def collect_review_context(
+    client: AiBybitClient,
+    store: AiTraderStore,
+    virtual_capital_usd: float,
+) -> MarketContext:
+    """Lite-сборка контекста для review-цикла (5 мин). v0.10-backport на v0.3.
+
+    В отличие от `collect_market_context` (full): фетчит только символы
+    с open positions, не дёргает 4H бары, news. Цель: дёшево обновить
+    LLM-у картинку по уже открытым позициям, чтобы она могла принять
+    early-close решение между full-cycle'ами (раз в 5 мин против 15 мин).
+
+    Упрощения относительно v0.10-оригинала (под v0.3-базу без i1–i6):
+    - Без positioning (нет OI / L-S / funding_history — это i2/i4).
+    - Без VWAP/RV в indicators (i1) — compute_snapshot вызывается без
+      vwap_window/rv_window.
+
+    Если open positions == 0 → возвращает MarketContext с пустыми
+    snapshots (caller обычно пропускает review в этом случае).
+    """
+    open_positions = store.get_open_positions()
+    real_equity = client.get_wallet_balance()
+    if not open_positions:
+        return MarketContext(
+            snapshots=[],
+            open_positions=[],
+            virtual_capital_usd=virtual_capital_usd,
+            real_equity_usd=real_equity,
+            news=[],
+        )
+
+    review_symbols = sorted({p.symbol for p in open_positions})
+    snapshots: list[SymbolSnapshot] = []
+    for sym in review_symbols:
+        ticker = client.get_ticker(sym)
+        bars_1h = client.get_klines(sym, interval="60", limit=50)
+        ind_1h = None
+        if len(bars_1h) >= 30:
+            ind_1h = compute_snapshot(
+                [b.high for b in bars_1h],
+                [b.low for b in bars_1h],
+                [b.close for b in bars_1h],
+            )
+        snapshots.append(
+            SymbolSnapshot(
+                symbol=sym,
+                ticker=ticker,
+                bars_1h=bars_1h,
+                bars_4h=[],
+                ind_1h=ind_1h,
+                ind_4h=None,
+            )
+        )
+
+    return MarketContext(
+        snapshots=snapshots,
+        open_positions=open_positions,
+        virtual_capital_usd=virtual_capital_usd,
+        real_equity_usd=real_equity,
+        news=[],
+    )
+
+
+def format_context_for_review(ctx: MarketContext) -> str:
+    """Lite-форматтер: только текущее состояние открытых позиций. v0.3-вариант.
+
+    Без macro/news/options/4H/positioning — review-цикл фокусируется на
+    быстрых сигналах для exit-решения. Каждая позиция получает блок с её
+    символом + ticker + 1H closes + 1H индикаторы.
+    """
+    parts: list[str] = []
+    parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
+    parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
+    parts.append("")
+    parts.append("=== MARKET DATA (positions only, lite review cycle) ===")
+    for s in ctx.snapshots:
+        if s.ticker is None:
+            parts.append(f"\n[{s.symbol}] TICKER UNAVAILABLE")
+            continue
+        t = s.ticker
+        funding_label = _funding_band_label(t.funding_rate)
+        parts.append(
+            f"\n[{s.symbol}] price=${t.last_price:.6g} "
+            f"24h={t.price_change_pct_24h:+.2f}% "
+            f"funding={t.funding_rate * 100:+.4f}%{funding_label} "
+            f"vol24h={t.volume_24h:.0f}"
+        )
+        if s.bars_1h:
+            recent = s.bars_1h[-6:]
+            closes = [f"{b.close:.6g}" for b in recent]
+            parts.append("  1h closes (last 6h, oldest→newest):")
+            parts.append("  " + " ".join(closes))
+        if s.ind_1h is not None:
+            parts.append("  1H INDICATORS:")
+            parts.append(format_snapshot(s.ind_1h))
+
+    parts.append("")
+    parts.append("=== OPEN POSITIONS ===")
+    if not ctx.open_positions:
+        parts.append("(none)")
+    else:
+        for p in ctx.open_positions:
+            parts.append(
+                f"  id={p.id} {p.side} {p.symbol} qty={p.qty} entry=${p.entry_price:.6g} "
+                f"sl=${p.sl_price or 0:.6g} tp=${p.tp_price or 0:.6g} "
+                f"lev={p.leverage}x linkid={p.order_link_id}"
+            )
+
+    return "\n".join(parts)
+
+
 def _btc_dominance_estimate(snapshots: list[SymbolSnapshot]) -> str | None:
     """Грубая оценка BTC-силы относительно остальных allowed pairs за 24h.
 
