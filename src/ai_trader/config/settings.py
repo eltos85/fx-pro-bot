@@ -82,7 +82,17 @@ class AiTraderSettings(BaseSettings):
     )
     poll_interval_sec: int = Field(
         default=900, validation_alias="AI_TRADER_POLL_INTERVAL_SEC"
-    )  # 15 минут
+    )  # 15 минут — full cycle (полный анализ, может открывать сделки)
+
+    # Review-cycle (2026-05-10): между full-cycles запускается lite-цикл,
+    # который только следит за уже открытыми позициями (close/hold, без open).
+    # Контекст урезан до тикер + 1H индикаторы + funding (без macro/news/4H/DVOL).
+    # Цель: дать LLM в 3 раза больше точек реакции на adverse evidence,
+    # чтобы успеть закрыть позицию до SL hit (см. кейс TAO id=27).
+    # 0 = review отключён (только full-cycle 15min).
+    review_interval_sec: int = Field(
+        default=300, validation_alias="AI_TRADER_REVIEW_INTERVAL_SEC"
+    )
 
     # Виртуальный капитал для расчёта qty. На demo баланс может быть $50k+,
     # но мы хотим эмулировать поведение на $500. Все qty считаются как

@@ -1,5 +1,126 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-10 — feat(prompt v0.10): двойной таймер full(15min) + review(5min)
+
+`<hash-pending>`
+
+**Контекст.** Анализ 3 последних минусовых сделок ai_trader показал:
+из 3 лузов только **1** был закрыт биржей по SL (TAOUSDT id=27,
+−$5.98). Остальные два LLM закрыл сам (превентивно/по invalidation).
+Главная боль — TAO id=27: 28 циклов LLM держал позицию по mean-rev
+тезису «stretched above VWAP + retail heavy long → contrarian short»;
+позиция была в плюсе <1.5R, потом откат, между cycles ушло 16 минут,
+SL hit. Между full-cycles бот «слепой» — за 15 минут цена
+успевает пройти весь R-distance и сработать exchange SL раньше, чем
+LLM получит шанс среагировать на adverse evidence.
+
+**Решение пользователя:** не автоматизировать защиту в коде (не двигать
+SL автоматически), а дать LLM **в 3 раза больше точек реакции**.
+Между full-cycle (15 мин) добавить lite review-cycle (5 мин), который
+смотрит ТОЛЬКО на уже открытые позиции и может ИХ закрыть досрочно
+(или держать). Открытие новых позиций в review запрещено — это
+делается только в полном цикле с macro/news/options-IV контекстом.
+
+**Архитектура (v0.10).**
+
+1. **Двойной таймер в `app/main.py`:** один монотонный счётчик `cycle`,
+   два таймера `last_full_ts` / `last_review_ts` через `time.monotonic()`.
+   Каждую секунду просыпаемся:
+   - если прошло `poll_interval_sec` (900) с last_full → запускаем
+     `_run_cycle` (full, как раньше) и сбрасываем review-таймер;
+   - иначе если прошло `review_interval_sec` (300) с last_review →
+     запускаем `_run_review_cycle` (lite).
+
+   Без threads/asyncio — только `time.sleep(1)` с проверкой таймеров.
+   `cycle` инкрементится в обоих случаях; full и review различимы по
+   `prompt_system` в БД (review-промпт начинается с «You are reviewing
+   your existing open Bybit perpetual-futures…»).
+
+2. **Lite-контекст (`trading/context.py:collect_review_context`):**
+   фетчит ТОЛЬКО символы с open positions (не все 10 пар!). Для каждого:
+   - `get_ticker` (текущая цена + funding + 24h)
+   - `get_klines(interval=60, limit=50)` → 1H индикаторы
+   - `get_funding_rate_history(limit=2)` (свежий funding label)
+   - `get_long_short_ratio(period=1h, limit=2)` (retail extreme detection)
+
+   НЕ фетчит: 4H бары, news, macro (CoinGecko/F&G), Deribit DVOL,
+   OI history с большим limit, orderbook depth-50. Это уменьшает
+   количество API-вызовов в ~5 раз и дёшево обновляет картинку для
+   exit-decision.
+
+   Skip-логика: если open_positions == 0 → возвращает MarketContext
+   с пустыми snapshots; caller (`_run_review_cycle`) пропускает review.
+
+3. **Review-промпт (`llm/prompts.py:SYSTEM_PROMPT_REVIEW`):**
+   - Явно объясняет: lite-цикл, видишь меньше данных, в 3х больше
+     шансов реагировать.
+   - Запрещает `"open"` (action ∈ {"close", "hold"}). JSON-схема
+     не содержит open-варианта.
+   - 3 close-триггера (упрощённая версия EXIT MANAGEMENT v0.6):
+     (1) SETUP INVALIDATION (1H VWAP dev <0.5%, MACD flip),
+     (2) LOCKED-PROFIT GUARD (>=1.5R + invalidation),
+     (3) ADVERSE NEW EVIDENCE (funding flip, RSI cross from extreme).
+   - 3 DO-NOT-CLOSE guards (то же что в full).
+   - Параметризован через `%(full_min)d`/`%(review_min)d` — секунды/60.
+
+4. **Hard-guard в parse_action(`trading/executor.py`):** новый
+   keyword-only параметр `review_mode: bool = False`. Если
+   `review_mode=True` и LLM всё-таки вернул `"action": "open"` —
+   парсер отвергает с явной ошибкой `review_mode: 'open' action is
+   forbidden in review cycle`. Защита от случаев когда LLM проигнорирует
+   текстовую инструкцию промпта.
+
+5. **Telegram-нотификации:** review-цикл уведомляет только о `close`
+   (открытий не бывает по дизайну), errors → `notify_error("review N", ...)`.
+
+**Стоимость по факту.** За всё время работы (~3 дня) cumulative cost
+DeepSeek calls = $0.70 (USER feedback). Прирост от review-cycle ~3×
+(цикл в 5 раз чаще, но промпт ~5× короче) → +$0.50–$0.80 за тот же
+период. Приемлемо.
+
+**Конфиг (settings.py + .env.example):**
+- `review_interval_sec: int = 300` (5 мин). 0 = review отключён.
+- Параметризовано через `AI_TRADER_REVIEW_INTERVAL_SEC`.
+
+**Тесты (`tests/test_ai_trader.py`, +15 unit-тестов):**
+- `TestReviewModeParseAction` — 4 теста: open отвергнут, close/hold
+  пропущены, default режим не сломан.
+- `TestBuildSystemPromptReview` — 4 теста: дефолтные интервалы,
+  запрет open, no unresolved placeholders, custom intervals.
+- `TestFormatContextForReview` — 2 теста: empty positions
+  (без macro/news/options блоков), with open position.
+- `TestCollectReviewContext` — 2 теста: skip когда нет positions,
+  фетч только символов с open positions.
+- `TestReviewIntervalSettings` — 3 теста: дефолт, override, отключение
+  через 0.
+
+`python3 -m pytest tests/ -q` → **543 passed in 5.99s** (528 + 15 new).
+
+**По правилу `no-data-fitting.mdc`:** правка вытекает из конкретного
+артефакта анализа — `/tmp/last3_loses.py` показал что TAO id=27 был
+держан 28 циклов с mean-rev тезисом, между cycle 84 и 85 ушло 16
+минут — за это время сработал exchange SL. С 5-мин review между full
+было бы 3 точки проверки в этом окне. Sample size: 1 кейс реального
+SL-hit (TAO id=27) — этого недостаточно для disable-решений по правилу
+`sample-size.mdc`, но **достаточно** для добавления механики реакции,
+которая раньше была заявлена как TODO в v0.6. Это не «отключаем
+инструмент», это «даём LLM больше шансов работать по уже принятым
+правилам EXIT MANAGEMENT v0.6».
+
+**Файлы:**
+- `src/ai_trader/config/settings.py`: `review_interval_sec` поле
+- `src/ai_trader/trading/context.py`: `collect_review_context`,
+  `format_context_for_review`
+- `src/ai_trader/llm/prompts.py`: `SYSTEM_PROMPT_REVIEW`,
+  `build_system_prompt_review`, `build_user_prompt_review`
+- `src/ai_trader/trading/executor.py`: `parse_action(review_mode=True)`
+- `src/ai_trader/app/main.py`: `_run_review_cycle`, двойной таймер
+  в `run()`
+- `tests/test_ai_trader.py`: +15 тестов
+- `.env.example`: `AI_TRADER_REVIEW_INTERVAL_SEC` (default 300)
+
+---
+
 ## 2026-05-09 — feat(killswitch): risk_per_trade 2% → 6% ($30/trade) + лимиты ×3 (USER OVERRIDE)
 
 `<hash-pending>`

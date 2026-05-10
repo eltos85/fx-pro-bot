@@ -184,6 +184,133 @@ def collect_market_context(
     )
 
 
+def collect_review_context(
+    client: AiBybitClient,
+    store: AiTraderStore,
+    virtual_capital_usd: float,
+) -> MarketContext:
+    """Lite-сборка контекста для review-цикла (5 мин).
+
+    В отличие от `collect_market_context` (full): фетчит только символы
+    с open positions, не дёргает 4H бары, news, macro, options IV.
+    Цель: дёшево обновить LLM-у картинку по уже открытым позициям, чтобы
+    она могла принять early-close решение между full-cycle'ами.
+
+    Если open positions == 0 → возвращает MarketContext с пустыми
+    snapshots (caller обычно пропускает review в этом случае).
+    """
+    open_positions = store.get_open_positions()
+    real_equity = client.get_wallet_balance()
+    if not open_positions:
+        return MarketContext(
+            snapshots=[],
+            open_positions=[],
+            virtual_capital_usd=virtual_capital_usd,
+            real_equity_usd=real_equity,
+        )
+
+    review_symbols = sorted({p.symbol for p in open_positions})
+    snapshots: list[SymbolSnapshot] = []
+    for sym in review_symbols:
+        ticker = client.get_ticker(sym)
+        bars_1h = client.get_klines(sym, interval="60", limit=50)
+        ind_1h = None
+        if len(bars_1h) >= 30:
+            ind_1h = compute_snapshot(
+                [b.high for b in bars_1h],
+                [b.low for b in bars_1h],
+                [b.close for b in bars_1h],
+                volumes=[b.volume for b in bars_1h],
+                vwap_window=24,
+                rv_window=24,
+                bars_per_year=24 * 365,
+            )
+        # Funding и retail L/S — самые информативные positioning-сигналы
+        # для early-exit (funding flip / extreme retail). OI history
+        # дороже и менее прямой сигнал в краткосрок — пропускаем.
+        funding_hist = client.get_funding_rate_history(sym, limit=2)
+        ls_hist = client.get_long_short_ratio(sym, period="1h", limit=2)
+        positioning = build_positioning_snapshot(
+            oi_history=None,
+            funding_history=funding_hist,
+            funding_now=ticker.funding_rate if ticker is not None else None,
+            ls_history=ls_hist,
+            orderbook=None,
+            closes_1h=[b.close for b in bars_1h] if bars_1h else None,
+        )
+        snapshots.append(
+            SymbolSnapshot(
+                symbol=sym,
+                ticker=ticker,
+                bars_1h=bars_1h,
+                bars_4h=[],
+                ind_1h=ind_1h,
+                ind_4h=None,
+                positioning=positioning,
+            )
+        )
+
+    return MarketContext(
+        snapshots=snapshots,
+        open_positions=open_positions,
+        virtual_capital_usd=virtual_capital_usd,
+        real_equity_usd=real_equity,
+    )
+
+
+def format_context_for_review(ctx: MarketContext) -> str:
+    """Lite-форматтер: только текущее состояние открытых позиций.
+
+    Без macro/news/options/4H — review-цикл фокусируется на быстрых
+    сигналах для exit-решения. Каждая позиция получает блок с её
+    символом + ticker + 1H индикаторы + positioning (funding/L-S).
+    """
+    parts: list[str] = []
+    parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
+    parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
+    parts.append("")
+    parts.append("=== MARKET DATA (positions only, lite review cycle) ===")
+    for s in ctx.snapshots:
+        if s.ticker is None:
+            parts.append(f"\n[{s.symbol}] TICKER UNAVAILABLE")
+            continue
+        t = s.ticker
+        parts.append(
+            f"\n[{s.symbol}] price=${t.last_price:.6g} "
+            f"24h={t.price_change_pct_24h:+.2f}% "
+            f"funding={t.funding_rate * 100:+.4f}% "
+            f"vol24h={t.volume_24h:.0f}"
+        )
+        if s.bars_1h:
+            recent = s.bars_1h[-6:]
+            closes = [f"{b.close:.6g}" for b in recent]
+            parts.append("  1h closes (last 6h, oldest→newest):")
+            parts.append("  " + " ".join(closes))
+        if s.positioning is not None and (
+            s.positioning.funding_24h_cumulative is not None
+            or s.positioning.ls_now is not None
+        ):
+            parts.append("  POSITIONING (lite):")
+            parts.append(format_positioning(s.positioning))
+        if s.ind_1h is not None:
+            parts.append("  1H INDICATORS:")
+            parts.append(format_snapshot(s.ind_1h))
+
+    parts.append("")
+    parts.append("=== OPEN POSITIONS ===")
+    if not ctx.open_positions:
+        parts.append("(none)")
+    else:
+        for p in ctx.open_positions:
+            parts.append(
+                f"  id={p.id} {p.side} {p.symbol} qty={p.qty} entry=${p.entry_price:.6g} "
+                f"sl=${p.sl_price or 0:.6g} tp=${p.tp_price or 0:.6g} "
+                f"lev={p.leverage}x linkid={p.order_link_id}"
+            )
+
+    return "\n".join(parts)
+
+
 def _btc_dominance_estimate(snapshots: list[SymbolSnapshot]) -> str | None:
     """Грубая оценка BTC-силы относительно остальных allowed pairs за 24h.
 

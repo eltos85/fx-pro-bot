@@ -22,7 +22,12 @@ from datetime import UTC, datetime
 
 from ai_trader.config.settings import AiTraderSettings
 from ai_trader.llm.client import DeepSeekClient
-from ai_trader.llm.prompts import build_system_prompt, build_user_prompt
+from ai_trader.llm.prompts import (
+    build_system_prompt,
+    build_system_prompt_review,
+    build_user_prompt,
+    build_user_prompt_review,
+)
 from ai_trader.macro.external import MacroProvider
 from ai_trader.macro.options import OptionsIvProvider
 from ai_trader.news.rss import RssNewsProvider
@@ -30,7 +35,12 @@ from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from ai_trader.state.db import AiTraderStore
 from ai_trader.telegram.bot import TelegramBot, TelegramConfig, build_command_handlers
 from ai_trader.trading.client import AiBybitClient
-from ai_trader.trading.context import collect_market_context, format_context_for_prompt
+from ai_trader.trading.context import (
+    collect_market_context,
+    collect_review_context,
+    format_context_for_prompt,
+    format_context_for_review,
+)
 from ai_trader.trading.executor import apply_action, parse_action
 
 log = logging.getLogger("ai_trader")
@@ -129,7 +139,12 @@ def run() -> None:
     log.info("=" * 60)
     log.info("AI-Trader v0.2 запущен (DeepSeek-V4 + indicators + news + telegram)")
     log.info("Demo: %s | Symbols: %s", settings.bybit_demo, ", ".join(settings.symbols))
-    log.info("Virtual capital: $%.2f | Poll: %ds", settings.virtual_capital_usd, settings.poll_interval_sec)
+    log.info(
+        "Virtual capital: $%.2f | Full poll: %ds | Review poll: %ds",
+        settings.virtual_capital_usd,
+        settings.poll_interval_sec,
+        settings.review_interval_sec,
+    )
     log.info(
         "Killswitch: daily=$%.0f total=$%.0f maxpos=%d maxlev=%dx",
         settings.max_daily_loss_usd, settings.max_total_loss_usd,
@@ -218,23 +233,45 @@ def run() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    # Двойной таймер: full-cycle каждые `poll_interval_sec` секунд +
+    # review-cycle каждые `review_interval_sec` секунд между ними.
+    # `cycle` общий счётчик — full и review увеличивают его одинаково,
+    # в БД (`decisions.cycle`) хранится для audit-trail; различить full
+    # и review можно по `prompt_system` (review-промпт начинается с
+    # «You are reviewing your existing open Bybit perpetual-futures…»).
     cycle = 0
+    last_full_ts = 0.0  # monotonic timestamp последнего full-cycle (0 = ещё не было)
+    last_review_ts = 0.0
+    review_enabled = settings.review_interval_sec > 0
     while not _shutdown:
-        cycle += 1
-        try:
-            _run_cycle(
-                cycle, settings, store, bybit, llm, killswitch,
-                news_provider, macro_provider, options_iv_provider, tg,
-            )
-        except Exception as e:
-            log.exception("Cycle %d crashed (продолжаю)", cycle)
-            if tg:
-                tg.notify_error(f"cycle {cycle}", str(e))
+        now_mono = time.monotonic()
+        # full-cycle: первый запуск сразу, дальше — каждые poll_interval_sec
+        if last_full_ts == 0.0 or (now_mono - last_full_ts) >= settings.poll_interval_sec:
+            cycle += 1
+            try:
+                _run_cycle(
+                    cycle, settings, store, bybit, llm, killswitch,
+                    news_provider, macro_provider, options_iv_provider, tg,
+                )
+            except Exception as e:
+                log.exception("Cycle %d crashed (продолжаю)", cycle)
+                if tg:
+                    tg.notify_error(f"cycle {cycle}", str(e))
+            last_full_ts = time.monotonic()
+            last_review_ts = last_full_ts  # reset review-таймер от свежего full
+        elif review_enabled and (now_mono - last_review_ts) >= settings.review_interval_sec:
+            cycle += 1
+            try:
+                _run_review_cycle(cycle, settings, store, bybit, llm, killswitch, tg)
+            except Exception as e:
+                log.exception("Review %d crashed (продолжаю)", cycle)
+                if tg:
+                    tg.notify_error(f"review {cycle}", str(e))
+            last_review_ts = time.monotonic()
 
-        for _ in range(settings.poll_interval_sec):
-            if _shutdown:
-                break
-            time.sleep(1)
+        # Спим короткими отрезками (1с) чтобы быстро реагировать на
+        # SIGTERM. Между full и review проверяем таймеры каждую секунду.
+        time.sleep(1)
 
     if tg:
         tg.stop()
@@ -352,6 +389,116 @@ def _run_cycle(
                 tg.notify_open(apply.summary)
             elif parsed.action == "close":
                 tg.notify_close(apply.summary)
+
+
+def _run_review_cycle(
+    cycle: int,
+    settings: AiTraderSettings,
+    store: AiTraderStore,
+    bybit: AiBybitClient,
+    llm: DeepSeekClient,
+    killswitch: KillSwitch,
+    tg: TelegramBot | None,
+) -> None:
+    """Lite-цикл review (v0.10, 2026-05-10).
+
+    Запускается между full-cycles. Цель: дать LLM возможность принять
+    early-close решение по уже открытым позициям до того как сработает
+    биржевой SL. NEW open запрещён (validate в parse_action(review_mode=True)).
+
+    Skip-логика:
+    - PAUSE через /pause в Telegram → пропускаем.
+    - Killswitch → пропускаем (no trading allowed).
+    - Нет открытых позиций → пропускаем (нечего ревьюить).
+    """
+    log.info("─── Review %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
+
+    _reconcile_closed_positions(bybit, store, tg)
+
+    if store.is_paused():
+        log.info("PAUSED — пропускаю review")
+        return
+
+    gen = killswitch.check_can_trade()
+    if not gen.allowed:
+        log.info("KILLSWITCH (%s) — пропускаю review", gen.reason)
+        return
+
+    open_positions = store.get_open_positions()
+    if not open_positions:
+        log.info("Нет открытых позиций — пропускаю review")
+        return
+
+    ctx = collect_review_context(
+        bybit, store, settings.virtual_capital_usd
+    )
+    system_prompt = build_system_prompt_review(settings)
+    user_prompt = build_user_prompt_review(format_context_for_review(ctx))
+
+    log.info("Review LLM call: positions=%d", len(ctx.open_positions))
+    resp = llm.ask(system_prompt, user_prompt)
+    store.add_api_cost(resp.cost_usd)
+
+    if resp.error:
+        store.log_decision(
+            cycle=cycle,
+            prompt_system=system_prompt,
+            prompt_user=user_prompt,
+            response_raw=None,
+            parsed_action=None,
+            executed=False,
+            error=f"llm_error: {resp.error}",
+            tokens_input=resp.tokens_input,
+            tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        log.error("Review LLM error: %s", resp.error)
+        return
+
+    log.info(
+        "Review tokens: in=%d out=%d cost=$%.5f",
+        resp.tokens_input, resp.tokens_output, resp.cost_usd,
+    )
+    log.info("Review response: %s", resp.text[:200].replace("\n", " "))
+
+    parsed = parse_action(resp.text, settings.symbols, review_mode=True)
+    if isinstance(parsed, str):
+        store.log_decision(
+            cycle=cycle,
+            prompt_system=system_prompt,
+            prompt_user=user_prompt,
+            response_raw=resp.text,
+            parsed_action=None,
+            executed=False,
+            error=f"parse_error: {parsed}",
+            tokens_input=resp.tokens_input,
+            tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        log.error("Review parse error: %s", parsed)
+        return
+
+    apply = apply_action(
+        parsed, client=bybit, store=store, settings=settings, killswitch=killswitch
+    )
+    store.log_decision(
+        cycle=cycle,
+        prompt_system=system_prompt,
+        prompt_user=user_prompt,
+        response_raw=resp.text,
+        parsed_action=parsed.raw,
+        executed=apply.executed,
+        error=apply.error,
+        tokens_input=resp.tokens_input,
+        tokens_output=resp.tokens_output,
+        cost_usd=resp.cost_usd,
+    )
+    if apply.error:
+        log.error("Review apply error: %s", apply.error)
+    elif apply.summary:
+        log.info("REVIEW APPLY: %s", apply.summary)
+        if tg and apply.executed and parsed.action == "close":
+            tg.notify_close(apply.summary)
 
 
 if __name__ == "__main__":
