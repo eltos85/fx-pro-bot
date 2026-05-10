@@ -526,10 +526,13 @@ class TestBuildSystemPrompt:
         assert "Maximum risk per trade: 6% of capital ($30 max" in prompt
         assert "Daily loss limit: $150" in prompt
 
-        # Все 10 дефолтных пар в списке ALLOWED.
+        # 9 дефолтных пар в списке ALLOWED (TAOUSDT удалён 2026-05-10
+        # как USER OVERRIDE — 3 трейда подряд в минус, см. BUILDLOG).
         for sym in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
-                    "AVAXUSDT", "LTCUSDT", "ATOMUSDT", "WLDUSDT", "TAOUSDT"):
+                    "AVAXUSDT", "LTCUSDT", "ATOMUSDT", "WLDUSDT"):
             assert sym in prompt, f"{sym} должен быть в ALLOWED PAIRS"
+        # TAOUSDT — отключён, не должен быть в дефолтном промпте
+        assert "TAOUSDT" not in prompt
 
         # JSON-схема не сломана плейсхолдерами.
         assert '"action": "open"' in prompt
@@ -972,7 +975,7 @@ class TestFormatContextForReview:
 
 class TestCollectReviewContext:
     """Lite-сборщик: должен дёргать API только для символов с open positions
-    (не для всех 10 пар) и пропускать 4H/news/macro.
+    (не для всех 9 пар) и пропускать 4H/news/macro.
     """
 
     def test_skips_when_no_open_positions(self, tmp_path):

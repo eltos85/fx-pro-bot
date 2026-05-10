@@ -29,6 +29,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #   - WLDUSDT, TAOUSDT — narrative-плеи 2025-2026 (Worldcoin / identity,
 #     Bittensor / decentralized AI). Дают LLM-агенту возможность
 #     отыгрывать AI-флоу без перекрытия с bybit_bot.
+#
+# 2026-05-10 (USER OVERRIDE): TAOUSDT удалён из дефолтного списка.
+# 3 закрытых трейда подряд в минус (-$10.02 / -$5.98 / -$10.23 = -$26.23
+# total). По правилу sample-size.mdc n=3 — НЕ статистически значимо
+# (binomial test 0/3 vs 50% baseline даёт p=0.125). Пользователь принял
+# решение отключить осознанно как USER OVERRIDE правила. Остальные
+# 9 пар остаются. Подробности — BUILDLOG_AI_TRADER.md.
 DEFAULT_AI_SYMBOLS: tuple[str, ...] = (
     "BTCUSDT",
     "ETHUSDT",
@@ -39,7 +46,6 @@ DEFAULT_AI_SYMBOLS: tuple[str, ...] = (
     "LTCUSDT",
     "ATOMUSDT",
     "WLDUSDT",
-    "TAOUSDT",
 )
 
 

@@ -1,5 +1,67 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-10 — disable: TAOUSDT удалён из AI_TRADER_SYMBOLS (USER OVERRIDE)
+
+`<hash-pending>`
+
+**Контекст.** API-stat по 3 закрытым TAO-сделкам ai_trader (Bybit
+`get_closed_pnl`, источник истины по `ai-trader-pnl.mdc`):
+
+| Дата (UTC)        | Side | qty   | PnL     |
+|-------------------|------|-------|---------|
+| 2026-05-08 17:06  | Sell | 1.619 | −$10.02 |
+| 2026-05-10 02:16  | Sell | 1.61  | −$5.98  |
+| 2026-05-10 04:02  | Sell | 8.0   | −$10.23 |
+| **Итого: 3 трейда, 0% WR, −$26.23** |||
+
+**Нарушение `sample-size.mdc` (осознанное USER OVERRIDE):**
+
+Правило `.cursor/rules/sample-size.mdc` запрещает отключение инструмента
+по <100 сделок без обсуждения с пользователем:
+- ≥100 сделок: НЕТ (n=3)
+- ≥2 недели: НЕТ (3 дня)
+- p-value <0.05: НЕТ (binomial 0/3 vs baseline 50% → p=0.125)
+- Разница в R:R ≥0.3 или WR ≥10%: формально да (0% vs ~50%), но при n=3 — это шум.
+
+Правило также рекомендует «уменьшить размер позиции, не отключать».
+Это обсуждалось с пользователем; решение принято в пользу полного
+отключения (per-symbol sizing в боте сейчас не реализован, поэтому
+снижение лимита потребовало бы новой механики). Решение ОФОРМЛЕНО как
+USER OVERRIDE правила, аналогично risk-per-trade override от 2026-05-09.
+
+**Что изменено:**
+- `src/ai_trader/config/settings.py`: `DEFAULT_AI_SYMBOLS` 10 → 9 пар
+  (TAOUSDT удалён). Комментарий с обоснованием в коде.
+- `.env.example`: `AI_TRADER_SYMBOLS` 10 → 9 пар.
+- `.env` на VPS (`/root/fx-pro-bot/.env`): `AI_TRADER_SYMBOLS` обновлён
+  на VPS вручную (через ssh + sed) до селективного rebuild.
+- `tests/test_ai_trader.py`: assert на 9 пар + явная проверка что
+  TAOUSDT отсутствует в дефолтном промпте.
+
+**Что НЕ изменено (намеренно):**
+- Существующие открытые TAO-позиции остаются под управлением ai_trader
+  до их естественного закрытия (LLM получит OPEN POSITIONS list с TAO,
+  но новые TAO-сделки не сможет открыть — symbol not in allowed list,
+  rejected в `parse_action`).
+- `bybit_bot` и `advisor` НЕ затронуты — у них свои списки символов
+  (`BYBIT_BOT_SCAN_SYMBOLS`, `FX_PRO_BOT_INSTRUMENTS`).
+
+**Тесты:** `python3 -m pytest tests/ -q` → **543 passed in 5.96s**.
+
+**Пересмотр.** При желании вернуть TAOUSDT — добавить обратно в
+`.env` на VPS + (опционально) в `DEFAULT_AI_SYMBOLS` settings.py.
+Без code-rebuild достаточно правки `.env` + `docker compose up -d
+--no-deps ai-trader`. Через 2 недели имеет смысл переоценить решение
+с большей выборкой (если TAO рынок к тому времени поменяется —
+например, выход из downtrend / снижение retail-bias).
+
+**Файлы:**
+- `src/ai_trader/config/settings.py`: `DEFAULT_AI_SYMBOLS` minus TAOUSDT
+- `.env.example`: AI_TRADER_SYMBOLS minus TAOUSDT
+- `tests/test_ai_trader.py`: assert на 9 пар + проверка отсутствия TAO
+
+---
+
 ## 2026-05-10 — feat(prompt v0.10): двойной таймер full(15min) + review(5min)
 
 `<hash-pending>`
