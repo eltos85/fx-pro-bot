@@ -33,6 +33,21 @@ v0.5 (2026-05-07, P0 collision audit): WHAT YOU SEE и MARKET CONTEXT
 - Trading rules упоминают новые сигналы как valid evidence для
     counter-trend и mean-reversion entries.
 
+v0.11 (2026-05-11, STOP-LOSS DISCIPLINE + PRE-DECISION CHECKLIST):
+после разбора 3 крупных лоссов AVAX id=40, AVAX id=42, LTC id=44/45
+обнаружено что LLM ставит SL ~1x ATR(1H) — слишком тугой, выбивается
+обычным шумом. Добавлено:
+- блок STOP-LOSS DISCIPLINE с явным правилом >=1.5x ATR(1H);
+- pre-computed REFERENCE SL BOUNDARIES для каждого символа в context
+  (контекст печатает min/recommended SL distance в долларах);
+- обязательный PRE-DECISION CHECKLIST(open) перед JSON с конкретными
+  числами SL/ATR ratio, R:R, counter-trend?, confirmations list — чтобы
+  LLM проверял compliance явно и аудит был возможен пост-фактум;
+- CRITICAL CONSTRAINTS теперь упоминает оба правила (SL>=1.5xATR + checklist).
+В review-цикле SL для уже открытой позиции изменить нельзя, поэтому
+checklist там не вводится — но добавлена напоминалка про правило в
+шапке (только context-based, без нового invariant'а).
+
 v0.6 (2026-05-07, EXIT MANAGEMENT block): добавлен research-based
 блок EXIT MANAGEMENT с 4 триггерами early-close и явными DO-NOT-CLOSE
 guards. Источники research (2026):
@@ -91,6 +106,21 @@ CAPITAL RULES (hard constraints):
 - Each new position MUST have stop_loss and take_profit.
 - Reward-to-Risk MUST be >= 1.5 (i.e. distance to TP >= 1.5x distance to SL).
   If you can't find a setup with R:R >= 1.5, return action="hold".
+
+STOP-LOSS DISCIPLINE (HARD RULE — read before EVERY entry):
+- Minimum SL distance from entry: 1.5x ATR(1H). Recommended: 2.0x ATR(1H).
+- Each PER-SYMBOL section in the user message includes a block titled
+  "REFERENCE SL BOUNDARIES" with pre-computed numbers in DOLLARS for both
+  Buy and Sell at the current price. USE THOSE NUMBERS — do not estimate.
+- A SL closer than 1.5x ATR(1H) gets stopped out by ordinary noise long
+  before the thesis plays out (root cause of recent stop-outs in our log:
+  AVAXUSDT id=40, AVAXUSDT id=42 — SL was ~1x ATR, hit within hours).
+- If your "ideal" SL distance is below 1.5x ATR — this means EITHER:
+   a) you must widen SL to >= 1.5x ATR, recompute qty so that
+      |entry - SL| * qty <= $%(risk_usd).0f, and re-check R:R >= 1.5;
+   b) OR if widening makes R:R < 1.5 or qty < exchange minimum — HOLD.
+- DO NOT shrink SL distance just to fit a bigger qty / bigger position
+  size. Position size is a slave variable; risk and ATR are masters.
 
 ALLOWED PAIRS (only these):
 - %(pairs)s.
@@ -292,6 +322,35 @@ DO NOT CLOSE EARLY (HOLD the position) if:
 The ANALYSIS COMMENTARY for any close-action MUST cite which trigger
 (1/2/3/4) fired and which specific signal changed.
 
+PRE-DECISION CHECKLIST (MANDATORY for every "open" action — output BEFORE
+the JSON, EXACTLY in the format below; this is non-negotiable):
+
+If your DECISION is "open", include these lines verbatim with your numbers:
+
+  CHECKLIST(open):
+  - symbol: <SYM>
+  - side: <Buy|Sell>
+  - 1H ATR: $<X.XX>             (from the REFERENCE SL BOUNDARIES block)
+  - SL distance: $<X.XX>        (= |entry - stop_loss|)
+  - SL/ATR ratio: <X.XX>        (REQUIRED >= 1.50; if <1.50 -> action=hold)
+  - 4H trend: <up|down|range>   (EMA20 vs EMA50 + 4H VWAP slope)
+  - Counter-trend?: <yes|no>    (yes = trade fights 4H trend)
+  - If counter-trend: STRONG contrarian sentiment cluster present?: <yes|no>
+    (F&G extreme OR retail HEAVY one-sided OR funding STRONG OR liq cascade)
+  - Confirmations (>=2, DIFFERENT classes): <list, e.g.
+        "trend (4H EMA), positioning (retail HEAVY long contrarian short)">
+  - R:R (raw): <X.XX>           (REQUIRED >= 1.5)
+  - R:R (net of 0.12%% round-trip fee): <X.XX>  (REQUIRED >= 1.8)
+  - Risk USD: $<X.XX>           (REQUIRED <= $%(risk_usd).0f)
+
+If ANY required check FAILS — your DECISION MUST be "hold". Do NOT lower
+thresholds, do NOT shrink SL, do NOT inflate confirmations, do NOT skip
+any line. The checklist replaces vague phrasing like "setup looks ok"
+with concrete numbers anyone can audit after the fact.
+
+For "close" or "hold" actions the checklist is OPTIONAL but the analysis
+commentary still applies (see ANALYSIS APPROACH 8 steps + EXIT MANAGEMENT).
+
 DECISION FORMAT:
 
 After the analysis commentary, output EXACTLY ONE JSON object on its
@@ -332,11 +391,18 @@ CRITICAL CONSTRAINTS:
   Buy: SL < current price < TP. Sell: SL > current price > TP.
 - For "open": (TP-price)/(price-SL) for Buy, or (price-TP)/(SL-price)
   for Sell, MUST be >= 1.5. Otherwise return "hold".
+- For "open": |entry - stop_loss| MUST be >= 1.5x ATR(1H). The exact
+  per-symbol REQUIRED minimum dollar distance is printed in the
+  "REFERENCE SL BOUNDARIES" block of the user message. If your SL is
+  tighter than the printed REQUIRED min — return action="hold".
+- For "open": you MUST output the PRE-DECISION CHECKLIST block above the
+  JSON; otherwise the trade is treated as non-compliant.
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or all conditions are unclear → return action="hold".
 - Risk = |entry - stop_loss| * qty MUST be <= $%(risk_usd).0f (%(risk_pct).0f%% of $%(capital).0f). If your
   desired SL distance forces qty so small that exchange rejects it,
-  HOLD instead — don't widen SL to meet min order size.
+  HOLD instead — don't widen SL to meet min order size, and don't
+  shrink SL distance below 1.5x ATR(1H) either.
 
 Remember: this is a 14-day experiment with $%(capital).0f virtual capital. Bad
 trades compound; HOLD is always safe.
@@ -373,8 +439,10 @@ def build_user_prompt(market_context: str) -> str:
         "Now produce the analysis commentary (3-8 lines) following the "
         "MACRO → TREND → VOLATILITY → SENTIMENT/POSITIONING → "
         "OPEN POSITIONS REVIEW → CONFIRMATIONS → R:R CHECK → DECISION "
-        "structure (skip OPEN POSITIONS REVIEW if there are none), then "
-        "output the single JSON object."
+        "structure (skip OPEN POSITIONS REVIEW if there are none). "
+        "If your decision is 'open', also output the mandatory "
+        "PRE-DECISION CHECKLIST(open) block with concrete numbers from the "
+        "REFERENCE SL BOUNDARIES section. Then output the single JSON object."
     )
 
 

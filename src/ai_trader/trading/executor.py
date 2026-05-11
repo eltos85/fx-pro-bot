@@ -166,7 +166,17 @@ def apply_action(
     store: AiTraderStore,
     settings: AiTraderSettings,
     killswitch: KillSwitch,
+    atr_by_symbol: dict[str, float] | None = None,
 ) -> ApplyResult:
+    """Применить распарсенное действие LLM.
+
+    `atr_by_symbol` — опциональная мапа {symbol: ATR(1H)} для compliance-check
+    SL distance >= 1.5x ATR (см. STOP-LOSS DISCIPLINE в промпте, v0.11).
+    Если передана и LLM нарушил правило — это **только** логируется как
+    WARNING + помечается в summary (`sl_atr=X.XX`). Сделка НЕ блокируется
+    (soft enforcement). Если соберём ≥10 нарушений — переходим к hard-block
+    (см. BUILDLOG_AI_TRADER.md).
+    """
     if action.action == "hold":
         reason = action.raw.get("reason", "")
         return ApplyResult(executed=False, summary=f"HOLD: {reason}")
@@ -176,7 +186,12 @@ def apply_action(
 
     if action.action == "open":
         return _apply_open(
-            action, client=client, store=store, settings=settings, killswitch=killswitch
+            action,
+            client=client,
+            store=store,
+            settings=settings,
+            killswitch=killswitch,
+            atr_by_symbol=atr_by_symbol,
         )
 
     return ApplyResult(executed=False, summary="unknown action", error="impossible branch")
@@ -227,6 +242,7 @@ def _apply_open(
     store: AiTraderStore,
     settings: AiTraderSettings,
     killswitch: KillSwitch,
+    atr_by_symbol: dict[str, float] | None = None,
 ) -> ApplyResult:
     raw = action.raw
     symbol = raw["symbol"]
@@ -333,6 +349,30 @@ def _apply_open(
             ),
         )
 
+    sl_dist = abs(price - sl_price)
+    sl_atr_ratio: float | None = None
+    sl_compliance_tag = ""
+    if atr_by_symbol is not None:
+        atr = atr_by_symbol.get(symbol)
+        if atr is not None and atr > 0:
+            sl_atr_ratio = sl_dist / atr
+            if sl_atr_ratio < 1.5:
+                log.warning(
+                    "SL_DISCIPLINE_VIOLATION %s %s entry=%.6g SL=%.6g "
+                    "sl_dist=%.6g ATR(1H)=%.6g ratio=%.2f (required >=1.50) — "
+                    "trade allowed (soft enforcement); see prompt v0.11 STOP-LOSS DISCIPLINE",
+                    symbol,
+                    side,
+                    price,
+                    sl_price,
+                    sl_dist,
+                    atr,
+                    sl_atr_ratio,
+                )
+                sl_compliance_tag = f" [sl_atr={sl_atr_ratio:.2f}!]"
+            else:
+                sl_compliance_tag = f" [sl_atr={sl_atr_ratio:.2f}]"
+
     store.open_position(
         symbol=symbol,
         side=side,
@@ -348,6 +388,7 @@ def _apply_open(
         executed=True,
         summary=(
             f"OPEN {side} {symbol} qty={qty} @ ${price:.6g} "
-            f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x — {reason}"
+            f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x"
+            f"{sl_compliance_tag} — {reason}"
         ),
     )

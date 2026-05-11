@@ -1,5 +1,114 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-11 — feat(prompt v0.11): STOP-LOSS DISCIPLINE + PRE-DECISION CHECKLIST + soft enforcement
+
+`<hash-pending>`
+
+**Контекст.** Разбор последних 3 крупных лоссов (на бирже, источник —
+Bybit `get_closed_pnl` per `ai-trader-pnl.mdc`):
+
+| ID | Symbol | PnL (user) | PnL (DB) | LLM-decision pattern |
+|----|--------|------------|----------|----------------------|
+| 40 | AVAXUSDT | −$28.62 | −$25.68 | SL ~1×ATR (1.62% от entry); LLM сам признал "strongly bullish 4H trend", но 18 циклов держал counter-trend short → SL hit за 1.5 ч обычным шумом |
+| 45 | LTCUSDT  | +$24.13 | +$29.32 | Идеальное исполнение EXIT MANAGEMENT v0.6: Locked-Profit Guard на 1.8R, закрыли через 47 мин |
+| 42 | AVAXUSDT | −$9.48  | −$9.09  | Хороший close по Setup Invalidation (1) за 15 мин — лосс ограничен |
+
+Корневая причина id=40 — **слишком тугой SL** (~1× ATR(1H)). Промпт уже
+писал "SL distance typically 1.5-2.5 ATR" в Trading rules, но LLM это
+игнорировал. Нужен механизм enforcement.
+
+**Решение (per user request):** усилить промпт + добавить pre-computed
+числа в context + soft warning-log в executor. Hard-block отложен —
+если за 24-48 ч соберём ≥10 нарушений, переходим к executor reject
+(см. дальше).
+
+**Что добавлено:**
+
+1. `src/ai_trader/trading/context.py` — новый helper `_format_sl_reference(s)`:
+   - Печатает блок `REFERENCE SL BOUNDARIES (1H ATR=$X = Y% of price)`
+     с конкретными долларовыми числами min (1.5×ATR) и recommended (2.0×ATR)
+     дистанций для Buy и Sell. Пример (BTC@60000, ATR=$300):
+     ```
+     REQUIRED min |entry - SL| >= $450 (1.5xATR), RECOMMENDED >= $600 (2.0xATR)
+     For Buy at ~$60000: SL must be <= $59550 (recommend <= $59400)
+     For Sell at ~$60000: SL must be >= $60450 (recommend >= $60600)
+     ```
+   - Вставлен в `format_context_for_prompt` (full cycle) и
+     `format_context_for_review` (review cycle) после блока 1H INDICATORS.
+
+2. `src/ai_trader/llm/prompts.py` (SYSTEM_PROMPT_TEMPLATE) —
+   три новых блока:
+   - `STOP-LOSS DISCIPLINE (HARD RULE)` после CAPITAL RULES — явное
+     правило `>=1.5x ATR(1H)` со ссылкой на REFERENCE SL BOUNDARIES,
+     инструкция: при tight SL → widen + recompute qty, ИЛИ HOLD;
+     **запрет** «shrink SL чтобы вместить qty».
+   - `PRE-DECISION CHECKLIST (MANDATORY for every "open")` перед
+     DECISION FORMAT — обязательный машинно-читаемый блок с
+     конкретными числами:
+     ```
+     CHECKLIST(open):
+     - 1H ATR: $<X.XX>
+     - SL distance: $<X.XX>
+     - SL/ATR ratio: <X.XX>     (REQUIRED >= 1.50)
+     - 4H trend: <up/down/range>
+     - Counter-trend?: <yes/no>
+     - Confirmations (>=2, DIFFERENT classes): <list>
+     - R:R (raw): <X.XX>          (REQUIRED >= 1.5)
+     - R:R (net of 0.12% fee): <X.XX>  (REQUIRED >= 1.8)
+     - Risk USD: $<X.XX>          (REQUIRED <= $30)
+     ```
+     Любой failed check → action MUST be "hold". Replaces vague
+     "setup looks ok" с числами для пост-фактум аудита.
+   - `CRITICAL CONSTRAINTS` дополнен двумя пунктами:
+     `|entry - stop_loss| >= 1.5x ATR(1H)` и
+     `must output PRE-DECISION CHECKLIST above the JSON`.
+
+3. `src/ai_trader/trading/executor.py` — soft enforcement:
+   - `apply_action`/`_apply_open` принимают опциональный
+     `atr_by_symbol: dict[str, float] | None`.
+   - Если ATR передан, для real-order ветки (trading_enabled=true)
+     считаем `sl_atr_ratio = |entry-SL| / ATR(1H)`.
+   - Ratio < 1.5 → `log.warning("SL_DISCIPLINE_VIOLATION ...")` +
+     summary получает тег `[sl_atr=1.00!]` (восклицательный знак).
+   - Compliant → summary получает чистый тег `[sl_atr=2.00]`.
+   - Trade **НЕ блокируется** — это soft enforcement, по запросу
+     пользователя (опция C). Нарушения ловятся в логах для
+     последующего decision-making.
+   - PAPER mode пропускает проверку (нет real ордера).
+
+4. `src/ai_trader/app/main.py`:
+   - В full-cycle apply_action собирает `atr_by_symbol` из
+     `ctx.snapshots[*].ind_1h.atr14` (нет дополнительных API calls).
+   - В review-cycle ATR не нужен (open запрещён в review).
+
+**Тесты (+12, всего 555):**
+- `TestSlReferenceBoundaries` (5): формат boundaries, fallback при
+  отсутствии ATR/ticker, интеграция в full + review context.
+- `TestStopLossDisciplinePrompt` (3): STOP-LOSS DISCIPLINE block,
+  PRE-DECISION CHECKLIST содержит ключевые поля, CRITICAL CONSTRAINTS
+  упоминает оба правила.
+- `TestExecutorSlComplianceWarning` (4): violation→WARNING+tag,
+  compliant→clean tag, no_atr→no tag (back-compat), PAPER skip.
+
+**Метрика для решения hard vs soft (через 24-48 ч):**
+- Считаем `SL_DISCIPLINE_VIOLATION` в логах ai-trader.
+- ≥10 нарушений за 48 ч → переходим к hard-block (executor отвергает
+  ордер с SL/ATR < 1.5, возвращает HOLD).
+- 0-3 нарушения → промпт+context достаточны, оставляем soft.
+
+**Файлы:**
+- `src/ai_trader/trading/context.py` (+30 строк, helper + 2 встройки)
+- `src/ai_trader/llm/prompts.py` (+50 строк, 3 новых блока + history)
+- `src/ai_trader/trading/executor.py` (+30 строк, soft validation)
+- `src/ai_trader/app/main.py` (+5 строк, atr_by_symbol сбор)
+- `tests/test_ai_trader.py` (+260 строк, 12 новых тестов)
+
+**Известное ограничение:** review-cycle SL не редактирует (биржевой
+SL уже стоит) — discipline-check не применяется. Для уже открытых
+позиций тегов compliance нет; будут только для новых open.
+
+---
+
 ## 2026-05-10 — disable: TAOUSDT удалён из AI_TRADER_SYMBOLS (USER OVERRIDE)
 
 `<hash-pending>`

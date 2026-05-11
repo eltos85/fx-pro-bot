@@ -1069,3 +1069,341 @@ class TestReviewIntervalSettings:
     def test_review_disabled_when_zero(self, monkeypatch):
         settings = self._make_settings(monkeypatch, AI_TRADER_REVIEW_INTERVAL_SEC="0")
         assert settings.review_interval_sec == 0
+
+
+# ─── v0.11 (2026-05-11): STOP-LOSS DISCIPLINE + PRE-DECISION CHECKLIST ───
+#
+# Цель: заставить LLM соблюдать SL distance >= 1.5x ATR(1H).
+# Implementation:
+# 1) context: REFERENCE SL BOUNDARIES блок с pre-computed числами;
+# 2) prompts: STOP-LOSS DISCIPLINE раздел + обязательный CHECKLIST(open);
+# 3) executor: soft warning-log + summary tag `[sl_atr=X.XX]`/`[sl_atr=X.XX!]`.
+
+
+class TestSlReferenceBoundaries:
+    """Pre-computed REFERENCE SL BOUNDARIES для full и review контекста."""
+
+    @staticmethod
+    def _make_indicator(atr14: float | None):
+        from ai_trader.analysis.indicators import IndicatorSnapshot
+
+        return IndicatorSnapshot(
+            last_close=60000.0,
+            rsi14=50.0,
+            macd_line=0.0, macd_signal=0.0, macd_hist=0.0,
+            atr14=atr14,
+            atr14_pct=(atr14 / 60000.0 * 100) if atr14 else None,
+            ema20=60000.0, ema50=60000.0,
+            bb_upper=61000.0, bb_middle=60000.0, bb_lower=59000.0, bb_position=0.5,
+            vwap=60000.0, vwap_dev_pct=0.0,
+            rv_pct=80.0, rv_window_bars=24,
+        )
+
+    @staticmethod
+    def _make_ticker(price: float):
+        from ai_trader.trading.client import Ticker
+
+        return Ticker(
+            symbol="BTCUSDT", last_price=price, bid=price - 1, ask=price + 1,
+            funding_rate=0.0001, volume_24h=1000.0, price_change_pct_24h=0.0,
+        )
+
+    def test_format_with_atr_emits_boundaries(self):
+        from ai_trader.trading.context import SymbolSnapshot, _format_sl_reference
+
+        snap = SymbolSnapshot(
+            symbol="BTCUSDT",
+            ticker=self._make_ticker(60000.0),
+            bars_1h=[], bars_4h=[],
+            ind_1h=self._make_indicator(atr14=300.0),
+        )
+        out = _format_sl_reference(snap)
+        assert out is not None
+        assert "REFERENCE SL BOUNDARIES" in out
+        assert "1H ATR=$300" in out
+        # 1.5×300 = 450, 2.0×300 = 600
+        assert "$450" in out
+        assert "$600" in out
+        # Buy boundary: 60000 - 450 = 59550
+        assert "59550" in out
+        # Sell boundary: 60000 + 450 = 60450
+        assert "60450" in out
+
+    def test_format_returns_none_when_atr_missing(self):
+        from ai_trader.trading.context import SymbolSnapshot, _format_sl_reference
+
+        snap = SymbolSnapshot(
+            symbol="BTCUSDT",
+            ticker=self._make_ticker(60000.0),
+            bars_1h=[], bars_4h=[],
+            ind_1h=self._make_indicator(atr14=None),
+        )
+        assert _format_sl_reference(snap) is None
+
+    def test_format_returns_none_when_ticker_missing(self):
+        from ai_trader.trading.context import SymbolSnapshot, _format_sl_reference
+
+        snap = SymbolSnapshot(
+            symbol="BTCUSDT",
+            ticker=None,
+            bars_1h=[], bars_4h=[],
+            ind_1h=self._make_indicator(atr14=300.0),
+        )
+        assert _format_sl_reference(snap) is None
+
+    def test_full_context_includes_boundaries(self):
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_prompt,
+        )
+
+        snap = SymbolSnapshot(
+            symbol="BTCUSDT",
+            ticker=self._make_ticker(60000.0),
+            bars_1h=[], bars_4h=[],
+            ind_1h=self._make_indicator(atr14=300.0),
+        )
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+        )
+        out = format_context_for_prompt(ctx)
+        assert "REFERENCE SL BOUNDARIES" in out
+        assert "1.5xATR" in out
+
+    def test_review_context_includes_boundaries(self):
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_review,
+        )
+
+        snap = SymbolSnapshot(
+            symbol="BTCUSDT",
+            ticker=self._make_ticker(60000.0),
+            bars_1h=[], bars_4h=[],
+            ind_1h=self._make_indicator(atr14=300.0),
+        )
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+        )
+        out = format_context_for_review(ctx)
+        assert "REFERENCE SL BOUNDARIES" in out
+
+
+class TestStopLossDisciplinePrompt:
+    """v0.11: STOP-LOSS DISCIPLINE + PRE-DECISION CHECKLIST в SYSTEM_PROMPT."""
+
+    @staticmethod
+    def _make_settings(monkeypatch):
+        for key in list(__import__("os").environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        from ai_trader.config.settings import AiTraderSettings
+        return AiTraderSettings()
+
+    def test_prompt_contains_stop_loss_discipline_block(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt
+
+        prompt = build_system_prompt(self._make_settings(monkeypatch))
+        assert "STOP-LOSS DISCIPLINE" in prompt
+        assert "1.5x ATR" in prompt
+        # Должно ссылаться на pre-computed REFERENCE SL BOUNDARIES
+        assert "REFERENCE SL BOUNDARIES" in prompt
+
+    def test_prompt_contains_pre_decision_checklist(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt
+
+        prompt = build_system_prompt(self._make_settings(monkeypatch))
+        assert "PRE-DECISION CHECKLIST" in prompt
+        assert "CHECKLIST(open)" in prompt
+        # Ключевые поля чеклиста
+        assert "SL/ATR ratio" in prompt
+        assert "Counter-trend?" in prompt
+        assert "Confirmations" in prompt
+        assert "R:R (raw)" in prompt
+        assert "R:R (net of 0.12% round-trip fee)" in prompt
+
+    def test_critical_constraints_mention_min_sl_distance(self, monkeypatch):
+        from ai_trader.llm.prompts import build_system_prompt
+
+        prompt = build_system_prompt(self._make_settings(monkeypatch))
+        # CRITICAL CONSTRAINTS должен упомянуть оба правила: 1.5xATR + checklist
+        idx = prompt.find("CRITICAL CONSTRAINTS")
+        assert idx >= 0
+        tail = prompt[idx:]
+        assert "1.5x ATR" in tail
+        assert "PRE-DECISION CHECKLIST" in tail
+
+
+class TestExecutorSlComplianceWarning:
+    """soft enforcement: SL/ATR < 1.5 → WARNING + summary tag, но trade allowed."""
+
+    @staticmethod
+    def _make_executor_deps(monkeypatch, tmp_path, *, trading_enabled: bool = False):
+        """Минимальные fakes для apply_action(open). Без реальной биржи."""
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
+        from ai_trader.state.db import AiTraderStore
+
+        for key in list(__import__("os").environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("AI_TRADER_TRADING_ENABLED", "true" if trading_enabled else "false")
+        settings = AiTraderSettings()
+
+        db_path = tmp_path / "ai.sqlite"
+        store = AiTraderStore(str(db_path))
+
+        class FakeTicker:
+            symbol = "BTCUSDT"
+            last_price = 60000.0
+            bid = 59999.0
+            ask = 60001.0
+            funding_rate = 0.0001
+            volume_24h = 1000.0
+            price_change_pct_24h = 0.0
+
+        class FakeInfo:
+            tick_size = 0.1
+            qty_step = 0.001
+            min_order_qty = 0.001
+            max_order_qty = 100.0
+
+        class FakeClient:
+            def get_ticker(self, _sym):
+                return FakeTicker()
+
+            def get_instrument_info(self, _sym):
+                return FakeInfo()
+
+            def set_leverage(self, _sym, _lev):
+                return True
+
+            def place_order(self, **_kw):
+                return {"ok": True}
+
+            def close_position(self, *_a, **_kw):
+                return {"ok": True}
+
+            def get_positions(self, **_kw):
+                return []
+
+        ks = KillSwitch(
+            KillSwitchConfig(
+                max_daily_loss_usd=settings.max_daily_loss_usd,
+                max_total_loss_usd=settings.max_total_loss_usd,
+                max_open_positions=settings.max_open_positions,
+                max_leverage=settings.max_leverage,
+            ),
+            store,
+        )
+        return settings, store, FakeClient(), ks
+
+    def test_compliant_sl_emits_clean_tag(self, monkeypatch, tmp_path, caplog):
+        """SL/ATR = 2.0 (compliant) → tag [sl_atr=2.00], no warning."""
+        import logging
+        from ai_trader.trading.executor import ParsedAction, apply_action
+
+        settings, store, client, ks = self._make_executor_deps(monkeypatch, tmp_path)
+        # entry≈60000, SL=59400 → dist=600, ATR=300 → ratio=2.0
+        action = ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 59400.0, "take_profit": 61500.0,  # R:R = 1500/600 = 2.5
+                "reason": "test",
+            },
+        )
+        with caplog.at_level(logging.WARNING, logger="ai_trader.trading.executor"):
+            res = apply_action(
+                action, client=client, store=store, settings=settings,
+                killswitch=ks, atr_by_symbol={"BTCUSDT": 300.0},
+            )
+        # PAPER MODE: executed=False, но summary должен появиться (без compliance tag —
+        # PAPER ветка возвращается до compliance check). Это документированное
+        # поведение: compliance check срабатывает только в реальном ордере.
+        assert res.summary.startswith("[PAPER]")
+
+    def test_violation_logs_warning_via_real_order_path(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        """SL/ATR = 1.0 (violation) с trading_enabled=true → WARNING лог + tag [sl_atr=1.00!]."""
+        import logging
+        from ai_trader.trading.executor import ParsedAction, apply_action
+
+        settings, store, client, ks = self._make_executor_deps(
+            monkeypatch, tmp_path, trading_enabled=True
+        )
+        action = ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 59700.0, "take_profit": 60900.0,  # R:R = 900/300 = 3.0
+                "reason": "test",
+            },
+        )
+        with caplog.at_level(logging.WARNING, logger="ai_trader.trading.executor"):
+            res = apply_action(
+                action, client=client, store=store, settings=settings,
+                killswitch=ks, atr_by_symbol={"BTCUSDT": 300.0},
+            )
+        assert res.executed is True
+        assert "[sl_atr=1.00!]" in res.summary
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        violation_logs = [r for r in warnings if "SL_DISCIPLINE_VIOLATION" in r.getMessage()]
+        assert len(violation_logs) == 1, (
+            f"expected 1 SL_DISCIPLINE_VIOLATION warning, got {len(violation_logs)}: "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+
+    def test_compliant_sl_real_order_clean_tag(self, monkeypatch, tmp_path, caplog):
+        """SL/ATR = 2.0 (compliant) в real-order ветке → tag [sl_atr=2.00], no warning."""
+        import logging
+        from ai_trader.trading.executor import ParsedAction, apply_action
+
+        settings, store, client, ks = self._make_executor_deps(
+            monkeypatch, tmp_path, trading_enabled=True
+        )
+        action = ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 59400.0, "take_profit": 61500.0,
+                "reason": "test",
+            },
+        )
+        with caplog.at_level(logging.WARNING, logger="ai_trader.trading.executor"):
+            res = apply_action(
+                action, client=client, store=store, settings=settings,
+                killswitch=ks, atr_by_symbol={"BTCUSDT": 300.0},
+            )
+        assert res.executed is True
+        assert "[sl_atr=2.00]" in res.summary
+        violation_logs = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "SL_DISCIPLINE_VIOLATION" in r.getMessage()
+        ]
+        assert len(violation_logs) == 0
+
+    def test_no_atr_no_tag(self, monkeypatch, tmp_path):
+        """atr_by_symbol=None → ни warning, ни tag (back-compat)."""
+        from ai_trader.trading.executor import ParsedAction, apply_action
+
+        settings, store, client, ks = self._make_executor_deps(monkeypatch, tmp_path)
+        action = ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 59000.0, "take_profit": 62000.0,
+                "reason": "test",
+            },
+        )
+        res = apply_action(
+            action, client=client, store=store, settings=settings,
+            killswitch=ks,  # atr_by_symbol не передаём
+        )
+        # PAPER mode → не доходит до compliance ветки.
+        assert "sl_atr=" not in res.summary

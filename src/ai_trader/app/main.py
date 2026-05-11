@@ -365,8 +365,18 @@ def _run_cycle(
         log.error("Parse error: %s", parsed)
         return
 
+    atr_by_symbol: dict[str, float] = {
+        s.symbol: s.ind_1h.atr14
+        for s in ctx.snapshots
+        if s.ind_1h is not None and s.ind_1h.atr14 is not None and s.ind_1h.atr14 > 0
+    }
     apply = apply_action(
-        parsed, client=bybit, store=store, settings=settings, killswitch=killswitch
+        parsed,
+        client=bybit,
+        store=store,
+        settings=settings,
+        killswitch=killswitch,
+        atr_by_symbol=atr_by_symbol,
     )
     store.log_decision(
         cycle=cycle,

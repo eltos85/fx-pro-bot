@@ -295,6 +295,9 @@ def format_context_for_review(ctx: MarketContext) -> str:
         if s.ind_1h is not None:
             parts.append("  1H INDICATORS:")
             parts.append(format_snapshot(s.ind_1h))
+        sl_ref = _format_sl_reference(s)
+        if sl_ref is not None:
+            parts.append(sl_ref)
 
     parts.append("")
     parts.append("=== OPEN POSITIONS ===")
@@ -309,6 +312,36 @@ def format_context_for_review(ctx: MarketContext) -> str:
             )
 
     return "\n".join(parts)
+
+
+def _format_sl_reference(s: SymbolSnapshot) -> str | None:
+    """Pre-computed SL boundaries (1.5x/2.0x ATR(1H)) for compliance hint.
+
+    Цель — заставить LLM соблюдать правило «SL distance >= 1.5x ATR(1H)»
+    из STOP-LOSS DISCIPLINE в промпте. Печатаем КОНКРЕТНЫЕ числа в долларах,
+    чтобы модель не могла сослаться на «не знал ATR» / «не успел посчитать».
+    Используется и в full, и в review-цикле.
+
+    Возвращает None если ATR(1H) или текущая цена недоступны.
+    """
+    if s.ticker is None or s.ind_1h is None or s.ind_1h.atr14 is None:
+        return None
+    atr = s.ind_1h.atr14
+    price = s.ticker.last_price
+    if atr <= 0 or price <= 0:
+        return None
+    min_dist = 1.5 * atr
+    rec_dist = 2.0 * atr
+    atr_pct = atr / price * 100
+    return (
+        f"  REFERENCE SL BOUNDARIES (1H ATR=${atr:.4g} = {atr_pct:.2f}% of price):\n"
+        f"    REQUIRED min |entry - SL| >= ${min_dist:.4g} (1.5xATR), "
+        f"RECOMMENDED >= ${rec_dist:.4g} (2.0xATR)\n"
+        f"    For Buy at ~${price:.6g}: SL must be <= ${price - min_dist:.6g} "
+        f"(recommend <= ${price - rec_dist:.6g})\n"
+        f"    For Sell at ~${price:.6g}: SL must be >= ${price + min_dist:.6g} "
+        f"(recommend >= ${price + rec_dist:.6g})"
+    )
 
 
 def _btc_dominance_estimate(snapshots: list[SymbolSnapshot]) -> str | None:
@@ -426,6 +459,9 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
         if s.ind_4h is not None:
             parts.append("  4H INDICATORS (bigger trend):")
             parts.append(format_snapshot(s.ind_4h))
+        sl_ref = _format_sl_reference(s)
+        if sl_ref is not None:
+            parts.append(sl_ref)
 
     parts.append("")
     parts.append("=== OPEN POSITIONS ===")
