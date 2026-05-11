@@ -1,5 +1,148 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-11 — feat(v0.12): ADX regime filter + SL cooldown (hard enforcement)
+
+`5a750d1` (хеш данного коммита самого по себе сместится из-за amend
+этой ссылки — см. реальный `git log` на VPS после деплоя)
+
+**Контекст.** После v0.11.1 деплоя 2026-05-11 (~12:30 MSK) бот в первом
+же цикле открыл ATOMUSDT Sell (mean-reversion thesis: «stretched +5%
+above 4H VWAP, retail long 69.7% → contrarian short»). 11 циклов
+hold, цена выросла на +2% за 15 минут на 5-6× объёме, SL hit на $2.08,
+PnL = **-$33.18** = 6.6% капитала за одну сделку. Через 23 минуты
+(cycle 19) LLM открыл новый ATOM short на **тех же signals** — это
+recidivism / chasing losers. Анализ показал две корневые проблемы,
+которые не лечатся промптом, а только кодом:
+
+1. **Regime ignorance.** LLM применил mean-reversion thesis в strong
+   uptrend (1H ADX14 = 57, +DI = 41, -DI = 11 — выраженный bull
+   trend). По всему канону mean-reversion стратегий
+   (Connors/Raschke «Street Smarts» 1995, ch.2; botversusbot 2026
+   «Regime-aware Mean Reversion») mean-reversion в TRENDING регулярно
+   = suicide. «Stretch above VWAP» в trending market не сигнал
+   exhaustion, а сигнал продолжения тренда.
+2. **No cooldown after SL.** Сразу после SL — повторный вход в тот же
+   short. Канонический паттерн «losers in row» (TradingView
+   jannisMCMXCV 2026 «Mean-Reversion with Cooldown», AOTrading 2026
+   «3-5-7 Rule»): после SL по mean-reversion стратегии нужен
+   forced cooldown растущей длительности.
+
+Промпт-only решения уже исчерпаны (v0.11 STOP-LOSS DISCIPLINE,
+v0.11.1 compliance внутри JSON — LLM выполняет их частично, в кейсе
+ATOM сама себе соврала про `sl_atr_ratio` 2.0 при фактическом 1.68 —
+зафиксировано как `MODEL_MISREPORT`). LLM хорошо рассуждает, но
+плохо соблюдает механическую дисциплину. Поэтому два правила вынесены
+в hard-enforcement code-level gates (как kill-switch и SL discipline).
+
+**Изменения.**
+
+1. **ADX regime filter** — новый индикатор:
+   - `src/ai_trader/analysis/indicators.py`: функция `adx(highs, lows,
+     closes, period=14)` точно по Wilder 1978 (RMA-сглаживание TR/+DM/-DM,
+     затем RMA(DX, period)). Поля `adx14, plus_di14, minus_di14`
+     добавлены в `IndicatorSnapshot`. `compute_snapshot` считает
+     ADX/DI; `format_snapshot` выводит строку
+     `ADX14=X.X +DI=X.X -DI=X.X [TRENDING uptrend/downtrend | TRANSITION
+     | RANGING (mean-reversion zone)]`.
+   - Пороги (Wilder каноник): >=25 = TRENDING, <20 = RANGING, между =
+     TRANSITION. Конфигурируется через
+     `AI_TRADER_ADX_REGIME_THRESHOLD` (default 25.0).
+   - `src/ai_trader/trading/executor.py:_apply_open` принимает
+     `regime_by_symbol: dict[str, dict[str, float]]` (с `adx14/plus_di14/
+     minus_di14`). Перед place_order: если ADX>=threshold и направление
+     LLM-сделки **противоположно** направлению тренда (Sell в uptrend
+     или Buy в downtrend) → reject с `regime_block`. Это hard-blocker,
+     не предупреждение.
+   - `src/ai_trader/app/main.py:_run_cycle` собирает `regime_by_symbol`
+     из `ctx.snapshots[*].ind_1h` и передаёт в `apply_action` рядом с
+     `atr_by_symbol`. Никаких новых API-вызовов — данные уже есть в
+     контексте.
+   - `src/ai_trader/llm/prompts.py`: новый блок REGIME FILTER в SYSTEM
+     PROMPT описывает labels, hard rule и whitelist разрешённых
+     counter-trend условий (ADX<20 + sentiment/positioning extreme).
+     В блоке F) (PER-SYMBOL 1H/4H INDICATORS) добавлен пункт про
+     ADX14 / +DI / -DI и обратная ссылка на REGIME FILTER.
+
+2. **SL cooldown с Fibonacci-расписанием**:
+   - `src/ai_trader/state/db.py`: новая таблица `sl_cooldown` (symbol,
+     side, last_sl_at, consecutive_count). Методы:
+     - `record_sl(symbol, side) -> int` — пишет SL, инкрементирует
+       consecutive_count. Если предыдущий SL >=24ч назад — счётчик
+       сбрасывается на 1.
+     - `reset_cooldown(symbol, side)` — удаляет запись (при
+       прибыльном закрытии).
+     - `get_cooldown_remaining_minutes(symbol, side) -> int` — сколько
+       минут осталось до конца cooldown (0 если не активен).
+     - `_fib_cooldown_minutes(n)` — static helper. Расписание (минут):
+       n=1 → 15, n=2 → 15, n=3 → 30, n=4 → 45, n=5 → 75, n>=6 → 120 (cap).
+       Это Fibonacci-числа баров (1,1,2,3,5,8) × 15-min TF.
+   - `_reconcile_closed_positions` теперь:
+     - если pnl<0 (SL hit или manual close-in-loss) → `store.record_sl`
+       + лог `COOLDOWN recorded: SYM SIDE consecutive=N → ban for M min`;
+     - если pnl>=0 → `store.reset_cooldown`.
+   - `_apply_open` после killswitch чекает
+     `store.get_cooldown_remaining_minutes(symbol, side)` и при > 0
+     возвращает `cooldown_active: SYM SIDE blocked for K more min`.
+   - В SYSTEM PROMPT добавлен блок COOLDOWN AFTER STOP-LOSS — поясняет
+     LLM расписание и что executor вернёт `cooldown_active`.
+
+**Тесты.** +25 новых юнитов в `tests/test_ai_trader.py`:
+
+- `TestAdxIndicator` — 4 теста: short series → None, strong uptrend
+  → ADX>25 + +DI>-DI, strong downtrend → -DI>+DI, sideways → ADX<25.
+- `TestRegimeLabelInSnapshot` — 2 теста: `format_snapshot` содержит
+  строку ADX и правильный label TRENDING uptrend / RANGING.
+- `TestSlCooldownDB` — 8 тестов: initial=0, first SL → count=1 +
+  ~15 min, consecutive увеличивает, reset обнуляет, side/symbol
+  изолированы, Fibonacci schedule = [15,15,30,45,75,120], после 24ч
+  без SL счётчик сбрасывается на 1.
+- `TestExecutorCooldownAndRegimeGates` — 7 тестов: cooldown блокирует
+  + reset разрешает; regime блокирует Sell в uptrend и Buy в
+  downtrend; разрешает trend-following Buy в uptrend; разрешает
+  counter-trend при ADX<threshold; back-compat без `regime_by_symbol`.
+- `TestReconcileWritesCooldown` — 2 теста: pnl<0 пишет SL, pnl>0
+  сбрасывает cooldown.
+- `TestRegimeFilterPrompt` — 2 теста: SYSTEM PROMPT содержит блоки
+  REGIME FILTER и COOLDOWN AFTER STOP-LOSS.
+
+Итог: `pytest tests/` — 596 passed (было 571 → +25). Линтер чист.
+
+**Research basis (с указанием источников):**
+- ADX как regime filter: J. Welles Wilder Jr., «New Concepts in
+  Technical Trading Systems» (1978); botversusbot.com 2026
+  «Regime-aware Mean Reversion»; Connors & Raschke «Street Smarts:
+  High Probability Short-Term Trading Strategies» (1995, ch.2 —
+  каждая mean-reversion стратегия требует range-bound фильтр).
+- Cooldown: TradingView jannisMCMXCV 2026 «Mean-Reversion with
+  Cooldown»; AOTrading 2026 «3-5-7 Rule for mean-reversion cooldown».
+- Position sizing / risk-as-master: Van K. Tharp «Trade Your Way to
+  Financial Freedom» (2007, ch.11) — risk и ATR диктуют size, не
+  наоборот.
+
+**Файлы:**
+- `src/ai_trader/analysis/indicators.py` — adx(), поля ADX/DI,
+  format_snapshot.
+- `src/ai_trader/state/db.py` — sl_cooldown table + методы.
+- `src/ai_trader/app/main.py` — reconcile пишет cooldown, _run_cycle
+  собирает regime_by_symbol.
+- `src/ai_trader/trading/executor.py` — apply_action / _apply_open
+  cooldown + regime gates.
+- `src/ai_trader/llm/prompts.py` — блоки REGIME FILTER и COOLDOWN
+  AFTER STOP-LOSS; ADX14 в F).
+- `src/ai_trader/config/settings.py` — `adx_regime_threshold` 25.0.
+- `tests/test_ai_trader.py` — +25 тестов.
+
+**Метрики после деплоя планируется собрать.** Watch-list для
+audit-обсуждения через 1-2 недели:
+- `executor` логи: сколько `regime_block` и `cooldown_active` rejects
+  (если их 0 — feature не активирован реальностью).
+- Win rate / средний loss на mean-reversion entries (должен подняться,
+  т.к. трейды против сильного тренда исключены).
+- Recidivism rate: % случаев когда LLM пытается заходить в той же
+  паре/стороне в течение 2 часов после SL (наблюдение, не блокер).
+
+---
+
 ## 2026-05-11 — hotfix(prompt v0.11.1): compliance внутри JSON, fix max_tokens cutoff
 
 `<hash-pending>`

@@ -117,6 +117,19 @@ def _reconcile_closed_positions(
             realized_pnl_usd=pnl,
             close_reason="exchange_closed (SL/TP/manual)",
         )
+        # v0.12: cooldown after stop-loss. Если позиция закрылась в минус — это
+        # SL hit (или manual close-in-loss), увеличиваем счётчик recidivism.
+        # При закрытии в плюс — сбрасываем счётчик (профитный трейд = режим
+        # снова работает в нашу сторону).
+        if pnl < 0:
+            count = store.record_sl(db_pos.symbol, db_pos.side)
+            cooldown_min = AiTraderStore._fib_cooldown_minutes(count)
+            log.info(
+                "COOLDOWN recorded: %s %s consecutive=%d → ban for %d min",
+                db_pos.symbol, db_pos.side, count, cooldown_min,
+            )
+        else:
+            store.reset_cooldown(db_pos.symbol, db_pos.side)
         msg = (
             f"id={db_pos.id} {db_pos.side} {db_pos.symbol} qty={db_pos.qty}\n"
             f"entry=${db_pos.entry_price:.6g} exit=${exit_price:.6g}\n"
@@ -370,6 +383,17 @@ def _run_cycle(
         for s in ctx.snapshots
         if s.ind_1h is not None and s.ind_1h.atr14 is not None and s.ind_1h.atr14 > 0
     }
+    # v0.12: regime info (ADX/DI на 1H) для блокировки counter-trend mean-reversion
+    # в strong trend (см. executor._apply_open / settings.adx_regime_threshold).
+    regime_by_symbol: dict[str, dict[str, float | None]] = {
+        s.symbol: {
+            "adx14": s.ind_1h.adx14,
+            "plus_di14": s.ind_1h.plus_di14,
+            "minus_di14": s.ind_1h.minus_di14,
+        }
+        for s in ctx.snapshots
+        if s.ind_1h is not None
+    }
     apply = apply_action(
         parsed,
         client=bybit,
@@ -377,6 +401,7 @@ def _run_cycle(
         settings=settings,
         killswitch=killswitch,
         atr_by_symbol=atr_by_symbol,
+        regime_by_symbol=regime_by_symbol,
     )
     store.log_decision(
         cycle=cycle,

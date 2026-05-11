@@ -189,6 +189,7 @@ def apply_action(
     settings: AiTraderSettings,
     killswitch: KillSwitch,
     atr_by_symbol: dict[str, float] | None = None,
+    regime_by_symbol: dict[str, dict[str, float | None]] | None = None,
 ) -> ApplyResult:
     """Применить распарсенное действие LLM.
 
@@ -198,6 +199,12 @@ def apply_action(
     WARNING + помечается в summary (`sl_atr=X.XX`). Сделка НЕ блокируется
     (soft enforcement). Если соберём ≥10 нарушений — переходим к hard-block
     (см. BUILDLOG_AI_TRADER.md).
+
+    `regime_by_symbol` (v0.12) — мапа {symbol: {adx14, plus_di14, minus_di14}}
+    с 1H ADX/DI для regime-filter. Если ADX>=25 и направление сделки
+    противоположно направлению тренда (counter-trend) — сделка
+    БЛОКИРУЕТСЯ (hard enforcement). Research: Connors/Raschke 1995,
+    botversusbot 2026 — mean-reversion в strong trend = suicide.
     """
     if action.action == "hold":
         reason = action.raw.get("reason", "")
@@ -214,6 +221,7 @@ def apply_action(
             settings=settings,
             killswitch=killswitch,
             atr_by_symbol=atr_by_symbol,
+            regime_by_symbol=regime_by_symbol,
         )
 
     return ApplyResult(executed=False, summary="unknown action", error="impossible branch")
@@ -265,6 +273,7 @@ def _apply_open(
     settings: AiTraderSettings,
     killswitch: KillSwitch,
     atr_by_symbol: dict[str, float] | None = None,
+    regime_by_symbol: dict[str, dict[str, float | None]] | None = None,
 ) -> ApplyResult:
     raw = action.raw
     symbol = raw["symbol"]
@@ -278,6 +287,60 @@ def _apply_open(
     check = killswitch.check_can_open_position(leverage)
     if not check.allowed:
         return ApplyResult(executed=False, summary="", error=f"killswitch: {check.reason}")
+
+    # v0.12: SL cooldown gate. Если по паре (symbol, side) недавно был SL —
+    # пара в cooldown'е, открывать новый трейд запрещено. Длительность
+    # cooldown растёт по Fibonacci при повторяющихся SL подряд (см. db.py).
+    cooldown_left = store.get_cooldown_remaining_minutes(symbol, side)
+    if cooldown_left > 0:
+        log.info(
+            "COOLDOWN_BLOCK %s %s: %d min remaining (recent SL)",
+            symbol, side, cooldown_left,
+        )
+        return ApplyResult(
+            executed=False, summary="",
+            error=(
+                f"cooldown_active: {symbol} {side} blocked for {cooldown_left} more "
+                f"min after recent stop-loss (Fibonacci scheme, v0.12)"
+            ),
+        )
+
+    # v0.12: ADX-based regime gate. Counter-trend mean-reversion в strong
+    # trend (ADX>=25) — статистически проигрышная стратегия (Connors/Raschke
+    # 1995, botversusbot 2026). Блокируем такие входы.
+    # Threshold: settings.adx_regime_threshold (default 25, Wilder 1978).
+    if regime_by_symbol is not None:
+        reg = regime_by_symbol.get(symbol)
+        if reg is not None:
+            adx_v = reg.get("adx14")
+            pdi = reg.get("plus_di14")
+            mdi = reg.get("minus_di14")
+            if (
+                isinstance(adx_v, (int, float)) and adx_v >= settings.adx_regime_threshold
+                and isinstance(pdi, (int, float)) and isinstance(mdi, (int, float))
+            ):
+                trending_up = pdi > mdi
+                # counter-trend сделка: Sell в uptrend ИЛИ Buy в downtrend.
+                counter_trend = (side == "Sell" and trending_up) or (
+                    side == "Buy" and not trending_up
+                )
+                if counter_trend:
+                    direction = "uptrend" if trending_up else "downtrend"
+                    log.info(
+                        "REGIME_BLOCK %s %s: ADX=%.1f +DI=%.1f -DI=%.1f (%s) — "
+                        "counter-trend mean-reversion forbidden in trending regime",
+                        symbol, side, adx_v, pdi, mdi, direction,
+                    )
+                    return ApplyResult(
+                        executed=False, summary="",
+                        error=(
+                            f"regime_block: {symbol} {side} forbidden — "
+                            f"ADX={adx_v:.1f} {direction} "
+                            f"(+DI={pdi:.1f} -DI={mdi:.1f}); "
+                            f"counter-trend mean-reversion in strong trend "
+                            f"is statistically unprofitable (v0.12)"
+                        ),
+                    )
 
     ticker = client.get_ticker(symbol)
     if ticker is None or ticker.last_price <= 0:

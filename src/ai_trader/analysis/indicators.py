@@ -61,6 +61,14 @@ class IndicatorSnapshot:
     vwap_dev_pct: float | None = None      # (close-vwap)/vwap*100 — отклонение от institutional fair-value
     rv_pct: float | None = None            # rolling annualised realized volatility, в %
     rv_window_bars: int | None = None      # сколько баров пошло в RV (для интерпретации)
+    # v0.12 (2026-05-11): regime classifier по ADX (Wilder 1978). ADX —
+    # сила тренда (любого направления), 0-100. >25 = trending, <20 = ranging.
+    # +DI / -DI показывают направление: +DI>-DI = uptrend, иначе downtrend.
+    # Используется как regime filter: mean-reversion разрешён только в ranging
+    # (botversusbot 2026, Connors/Raschke 1995).
+    adx14: float | None = None             # сила тренда
+    plus_di14: float | None = None         # бычья сила (Directional Indicator +)
+    minus_di14: float | None = None        # медвежья сила (Directional Indicator -)
 
 
 # ─── Базовые helpers ─────────────────────────────────────────────────────
@@ -181,6 +189,102 @@ def atr(
     if len(trs) < period:
         return None
     return _rma(trs, period)
+
+
+def adx(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    period: int = 14,
+) -> tuple[float | None, float | None, float | None]:
+    """ADX/+DI/-DI по Wilder 1978 ("New Concepts in Technical Trading Systems").
+
+    ADX — мера СИЛЫ тренда (не направления), 0-100. Стандартные пороги:
+    - ADX > 25 — выраженный тренд (любой);
+    - ADX 20-25 — слабый / формирующийся тренд;
+    - ADX < 20 — рынок в боковике (ranging).
+
+    +DI > -DI означает uptrend, -DI > +DI — downtrend.
+
+    Алгоритм точно по Wilder (с RMA-сглаживанием TR/DM, не SMA):
+    1. TR  = max(high-low, |high-prevClose|, |low-prevClose|)
+    2. +DM = up_move если up_move > down_move и >0 иначе 0
+    3. -DM = down_move если down_move > up_move и >0 иначе 0
+    4. RMA(TR, period), RMA(+DM, period), RMA(-DM, period)
+    5. +DI = +DM_smooth / TR_smooth * 100
+       -DI = -DM_smooth / TR_smooth * 100
+    6. DX  = |+DI - -DI| / (+DI + -DI) * 100
+    7. ADX = RMA(DX, period)
+
+    Возвращает (adx, +DI, -DI). None если данных <2*period+1.
+
+    Research basis: J. Welles Wilder Jr., "New Concepts in Technical Trading
+    Systems" (1978). Применение как regime filter: botversusbot 2026, AOTrading
+    "3-5-7 Rule 2026", canonical Connors/Raschke "Street Smarts" (1995).
+    """
+    n = len(closes)
+    if n != len(highs) or n != len(lows):
+        return (None, None, None)
+    # Нужно как минимум 2*period+1 баров (period для сглаживания TR/DM +
+    # ещё period для сглаживания DX).
+    if n < 2 * period + 1:
+        return (None, None, None)
+
+    tr_list: list[float] = []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    for i in range(1, n):
+        hi = highs[i]
+        lo = lows[i]
+        prev_close = closes[i - 1]
+        prev_hi = highs[i - 1]
+        prev_lo = lows[i - 1]
+        tr = max(hi - lo, abs(hi - prev_close), abs(lo - prev_close))
+        tr_list.append(tr)
+        up = hi - prev_hi
+        down = prev_lo - lo
+        plus_dm.append(up if (up > down and up > 0) else 0.0)
+        minus_dm.append(down if (down > up and down > 0) else 0.0)
+
+    # Wilder использует RMA (= EMA с alpha=1/period), реализован как _rma.
+    # Считаем сглаженные ряды TR/+DM/-DM пошагово, чтобы получить ряд DX.
+    def rma_series(values: list[float], p: int) -> list[float]:
+        if len(values) < p:
+            return []
+        out: list[float] = []
+        seed = sum(values[:p]) / p
+        out.append(seed)
+        for v in values[p:]:
+            out.append((out[-1] * (p - 1) + v) / p)
+        return out
+
+    tr_s = rma_series(tr_list, period)
+    pdm_s = rma_series(plus_dm, period)
+    mdm_s = rma_series(minus_dm, period)
+    if not tr_s or len(tr_s) != len(pdm_s):
+        return (None, None, None)
+
+    dx_list: list[float] = []
+    for i in range(len(tr_s)):
+        if tr_s[i] <= 0:
+            continue
+        pdi = pdm_s[i] / tr_s[i] * 100
+        mdi = mdm_s[i] / tr_s[i] * 100
+        denom = pdi + mdi
+        if denom <= 0:
+            dx_list.append(0.0)
+        else:
+            dx_list.append(abs(pdi - mdi) / denom * 100)
+
+    if len(dx_list) < period:
+        return (None, None, None)
+    adx_smoothed = rma_series(dx_list, period)
+    if not adx_smoothed:
+        return (None, None, None)
+    adx_val = adx_smoothed[-1]
+    plus_di_last = pdm_s[-1] / tr_s[-1] * 100 if tr_s[-1] > 0 else None
+    minus_di_last = mdm_s[-1] / tr_s[-1] * 100 if tr_s[-1] > 0 else None
+    return (adx_val, plus_di_last, minus_di_last)
 
 
 def bollinger(closes: list[float], period: int = 20, sigma: float = 2.0) -> tuple[float | None, float | None, float | None]:
@@ -315,6 +419,8 @@ def compute_snapshot(
     rv_pct = rv * 100 if rv is not None else None
     rv_n = min(rv_window or len(closes), max(0, len(closes) - 1))
 
+    adx_v, plus_di_v, minus_di_v = adx(highs, lows, closes, 14)
+
     return IndicatorSnapshot(
         last_close=last_close,
         rsi14=rsi_v,
@@ -333,6 +439,9 @@ def compute_snapshot(
         vwap_dev_pct=vwap_dev,
         rv_pct=rv_pct,
         rv_window_bars=rv_n if rv is not None else None,
+        adx14=adx_v,
+        plus_di14=plus_di_v,
+        minus_di14=minus_di_v,
     )
 
 
@@ -402,6 +511,20 @@ def format_snapshot(s: IndicatorSnapshot) -> str:
         else:
             rv_label = " [low vol / squeeze candidate]"
 
+    # v0.12: ADX-based regime classifier. Используется LLM как блокер
+    # counter-trend mean-reversion (см. REGIME FILTER в SYSTEM_PROMPT).
+    adx_label = ""
+    if s.adx14 is not None and s.plus_di14 is not None and s.minus_di14 is not None:
+        regime: str
+        if s.adx14 >= 25:
+            direction = "uptrend" if s.plus_di14 > s.minus_di14 else "downtrend"
+            regime = f"TRENDING {direction}"
+        elif s.adx14 < 20:
+            regime = "RANGING (mean-reversion zone)"
+        else:
+            regime = "TRANSITION"
+        adx_label = f" [{regime}]"
+
     return (
         f"  RSI14={fmt(s.rsi14, '{:.1f}')}{rsi_label} "
         f"MACD={fmt(s.macd_line, '{:.4g}')}/sig={fmt(s.macd_signal, '{:.4g}')}/"
@@ -411,5 +534,7 @@ def format_snapshot(s: IndicatorSnapshot) -> str:
         f"  BB(20,2): upper={fmt(s.bb_upper, '{:.4g}')} mid={fmt(s.bb_middle, '{:.4g}')} "
         f"lower={fmt(s.bb_lower, '{:.4g}')} pos={fmt(s.bb_position, '{:.2f}')}{bb_label}\n"
         f"  VWAP={fmt(s.vwap, '{:.6g}')} dev={fmt(s.vwap_dev_pct, '{:+.2f}')}%{vwap_label}  "
-        f"RV(annualised, n={s.rv_window_bars or 0})={fmt(s.rv_pct, '{:.1f}')}%{rv_label}"
+        f"RV(annualised, n={s.rv_window_bars or 0})={fmt(s.rv_pct, '{:.1f}')}%{rv_label}\n"
+        f"  ADX14={fmt(s.adx14, '{:.1f}')} +DI={fmt(s.plus_di14, '{:.1f}')} "
+        f"-DI={fmt(s.minus_di14, '{:.1f}')}{adx_label}"
     )

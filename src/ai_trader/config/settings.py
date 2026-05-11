@@ -141,6 +141,18 @@ class AiTraderSettings(BaseSettings):
         default=0.06, validation_alias="AI_TRADER_RISK_PER_TRADE"
     )
 
+    # ─── Regime Filter (v0.12, 2026-05-11) ───────────────────────────────
+    # ADX(14) на 1H — мера силы тренда (Wilder 1978). Counter-trend
+    # mean-reversion в strong trend (ADX >= порог) блокируется executor'ом.
+    # Default 25 — каноничный Wilder threshold; 20 — мягче, 30 — строже.
+    # Research basis: Wilder "New Concepts in Technical Trading Systems"
+    # (1978); Connors/Raschke "Street Smarts" (1995, ch.2 — каждая
+    # mean-reversion стратегия требует range-bound фильтр); botversusbot
+    # 2026 "Regime-aware Mean Reversion".
+    adx_regime_threshold: float = Field(
+        default=25.0, validation_alias="AI_TRADER_ADX_REGIME_THRESHOLD"
+    )
+
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_TRADER_DATA_DIR")
     db_filename: str = Field(

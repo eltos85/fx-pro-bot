@@ -41,6 +41,25 @@ v0.11 (2026-05-11, STOP-LOSS DISCIPLINE + REFERENCE SL BOUNDARIES):
 - pre-computed REFERENCE SL BOUNDARIES для каждого символа в context
   (контекст печатает min/recommended SL distance в долларах).
 
+v0.12 (2026-05-11, REGIME FILTER + SL COOLDOWN):
+после ATOMUSDT id=48 (-$33.18 SL hit + cycle 19 immediate recidivism в
+тот же setup через 23 минуты) добавлены два hard-enforcement правила:
+- REGIME FILTER (ADX14 на 1H): counter-trend mean-reversion в TRENDING
+  регулярно (ADX>=25 + DI alignment против трейда) **блокируется
+  executor'ом** до place_order. Промпт описывает правило и labels;
+  enforcement в `trading/executor.py:_apply_open` через
+  `regime_by_symbol` мапу из `app/main.py`.
+- COOLDOWN AFTER SL: повторный вход в той же (symbol, side) после SL
+  запрещён на Fibonacci-окно (15→15→30→45→75→120 мин). Реализация:
+  таблица `sl_cooldown` в SQLite, методы `record_sl`,
+  `get_cooldown_remaining_minutes`, `reset_cooldown` в `state/db.py`;
+  `_reconcile_closed_positions` пишет SL при pnl<0 и сбрасывает счётчик
+  при pnl>0; executor чекает remaining до открытия.
+Research basis: J.W. Wilder "New Concepts in Technical Trading Systems"
+(1978); Connors/Raschke "Street Smarts" (1995, ch.2); botversusbot 2026
+"Regime-aware Mean Reversion"; TradingView jannisMCMXCV 2026
+"Mean-Reversion with Cooldown"; AOTrading 2026 "3-5-7 Rule".
+
 v0.11.1 (2026-05-11, compliance внутри JSON, hotfix max_tokens cutoff):
 первоначальная v0.11 включала текстовый PRE-DECISION CHECKLIST блок ~10
 строк перед JSON. После деплоя 3 цикла подряд били `out=4096` → JSON
@@ -127,6 +146,38 @@ STOP-LOSS DISCIPLINE (HARD RULE — read before EVERY entry):
 - DO NOT shrink SL distance just to fit a bigger qty / bigger position
   size. Position size is a slave variable; risk and ATR are masters.
 
+REGIME FILTER (HARD RULE — read before EVERY mean-reversion entry):
+- Each 1H indicators block prints ADX14 with a label:
+   * "TRENDING uptrend"   = ADX >= 25 and +DI > -DI;
+   * "TRENDING downtrend" = ADX >= 25 and -DI > +DI;
+   * "TRANSITION"         = ADX 20..25 (forming trend, weak signal);
+   * "RANGING (mean-reversion zone)" = ADX < 20 (sideways).
+- Counter-trend mean-reversion (e.g. SHORT a "stretched-above-VWAP" rally
+  inside a TRENDING uptrend, or LONG a "stretched-below-VWAP" sell-off
+  inside a TRENDING downtrend) is FORBIDDEN. Such trades are blocked by
+  the executor with reason="regime_block" — don't waste a cycle on them.
+- Why: mean-reversion only works in RANGING markets. In a TRENDING regime
+  the strech is the trend continuing, not an exhaustion (Connors/Raschke
+  "Street Smarts" 1995, ch.2; botversusbot 2026).
+- ALLOWED counter-trend entries (still require strict confirmations):
+  ONLY when 1H ADX < 20 AND the "stretch" signals (RSI extreme, VWAP dev,
+  BB extreme) line up with a separate sentiment/positioning extreme
+  (F&G extreme, retail L/S extreme, liquidation cascade).
+- In TRENDING regime: prefer TREND-FOLLOWING entries (with the trend) OR
+  HOLD. Pullbacks to EMA20/VWAP in the direction of the trend are valid;
+  fading the trend is not.
+
+COOLDOWN AFTER STOP-LOSS (HARD RULE — enforced by executor):
+- After a stop-loss on a pair (symbol, side), opening another trade in
+  the SAME direction on the SAME pair is blocked for a cooldown window
+  whose length grows with consecutive stop-outs (Fibonacci scheme on the
+  15-min TF: 1st = 15 min, 2nd = 15 min, 3rd = 30 min, 4th = 45 min,
+  5th = 75 min, 6th+ = 120 min). 24h without a new SL OR a profitable
+  trade on that pair resets the counter.
+- Don't propose the exact same losing setup again right after a stop:
+  the executor will return error="cooldown_active". Either pick a
+  different pair, the opposite side (only if regime supports it), or HOLD.
+
 ALLOWED PAIRS (only these):
 - %(pairs)s.
 
@@ -175,6 +226,9 @@ F) PER-SYMBOL 1H AND 4H INDICATORS (per timeframe):
      extended.
    - Realized Volatility annualised (RV) — modern alternative to ATR;
      low <50%%, normal 50-100%%, elevated 100-200%%, extreme >200%%.
+   - ADX14 + +DI / -DI with regime label (Wilder 1978). Drives the
+     REGIME FILTER hard rule above. ADX is a STRENGTH metric only;
+     direction comes from +DI vs -DI. Don't try to fade a TRENDING regime.
 
 G) RECENT NEWS HEADLINES (last 1-3h, when available).
 

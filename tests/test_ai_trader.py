@@ -1481,3 +1481,384 @@ class TestExecutorSlComplianceWarning:
         )
         # PAPER mode → не доходит до compliance ветки.
         assert "sl_atr=" not in res.summary
+
+
+# ─── v0.12 (2026-05-11): ADX regime filter + SL cooldown ────────────────────
+
+
+class TestAdxIndicator:
+    """ADX(14) по Wilder 1978. Проверки на well-known последовательностях."""
+
+    def test_adx_returns_none_on_short_series(self):
+        from ai_trader.analysis.indicators import adx
+
+        highs = [10.0] * 10
+        lows = [9.0] * 10
+        closes = [9.5] * 10
+        assert adx(highs, lows, closes, 14) == (None, None, None)
+
+    def test_adx_strong_uptrend_high_positive_di(self):
+        """Чистый монотонный аптренд: ADX >> 25, +DI >> -DI."""
+        from ai_trader.analysis.indicators import adx
+
+        n = 60
+        closes = [100.0 + i for i in range(n)]
+        highs = [c + 0.5 for c in closes]
+        lows = [c - 0.5 for c in closes]
+        adx_v, pdi, mdi = adx(highs, lows, closes, 14)
+        assert adx_v is not None and pdi is not None and mdi is not None
+        assert adx_v >= 25, f"expected strong-trend ADX>=25, got {adx_v:.1f}"
+        assert pdi > mdi, f"+DI должен доминировать в uptrend (got {pdi:.1f} vs {mdi:.1f})"
+
+    def test_adx_strong_downtrend_high_negative_di(self):
+        from ai_trader.analysis.indicators import adx
+
+        n = 60
+        closes = [200.0 - i for i in range(n)]
+        highs = [c + 0.5 for c in closes]
+        lows = [c - 0.5 for c in closes]
+        adx_v, pdi, mdi = adx(highs, lows, closes, 14)
+        assert adx_v is not None and pdi is not None and mdi is not None
+        assert adx_v >= 25
+        assert mdi > pdi
+
+    def test_adx_ranging_market_low_adx(self):
+        """Sideways движение: ADX должен быть низким (<20-25)."""
+        from ai_trader.analysis.indicators import adx
+
+        n = 80
+        base = 100.0
+        closes = [base + (1.0 if i % 2 else -1.0) for i in range(n)]
+        highs = [c + 0.2 for c in closes]
+        lows = [c - 0.2 for c in closes]
+        adx_v, _, _ = adx(highs, lows, closes, 14)
+        assert adx_v is not None
+        assert adx_v < 25, f"sideways market should have ADX<25, got {adx_v:.1f}"
+
+
+class TestRegimeLabelInSnapshot:
+    """ADX/DI попадают в IndicatorSnapshot.format и дают regime label."""
+
+    def test_format_snapshot_emits_adx_line_and_trending_label(self):
+        from ai_trader.analysis.indicators import compute_snapshot, format_snapshot
+
+        n = 60
+        closes = [100.0 + i for i in range(n)]
+        highs = [c + 0.5 for c in closes]
+        lows = [c - 0.5 for c in closes]
+        snap = compute_snapshot(highs, lows, closes, volumes=[100.0] * n)
+        text = format_snapshot(snap)
+        assert "ADX14=" in text
+        assert "+DI=" in text and "-DI=" in text
+        assert "TRENDING uptrend" in text
+
+    def test_format_snapshot_ranging_label(self):
+        from ai_trader.analysis.indicators import compute_snapshot, format_snapshot
+
+        n = 80
+        closes = [100.0 + (1.0 if i % 2 else -1.0) for i in range(n)]
+        highs = [c + 0.2 for c in closes]
+        lows = [c - 0.2 for c in closes]
+        snap = compute_snapshot(highs, lows, closes, volumes=[100.0] * n)
+        text = format_snapshot(snap)
+        assert "ADX14=" in text
+        assert "RANGING" in text
+
+
+class TestSlCooldownDB:
+    """sl_cooldown table в AiTraderStore — Fibonacci scheme, reset rules."""
+
+    @staticmethod
+    def _store(tmp_path):
+        from ai_trader.state.db import AiTraderStore
+
+        return AiTraderStore(str(tmp_path / "cd.sqlite"))
+
+    def test_initial_no_cooldown(self, tmp_path):
+        store = self._store(tmp_path)
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") == 0
+
+    def test_record_sl_first_increments_to_1_and_sets_15min_cooldown(self, tmp_path):
+        store = self._store(tmp_path)
+        count = store.record_sl("BTCUSDT", "Buy")
+        assert count == 1
+        remaining = store.get_cooldown_remaining_minutes("BTCUSDT", "Buy")
+        # 15 минут schedule, минус доли секунды на выполнение → 14..15
+        assert 14 <= remaining <= 15
+
+    def test_record_sl_consecutive_increments_counter(self, tmp_path):
+        store = self._store(tmp_path)
+        store.record_sl("BTCUSDT", "Buy")
+        count = store.record_sl("BTCUSDT", "Buy")
+        assert count == 2
+
+    def test_reset_cooldown_clears_remaining(self, tmp_path):
+        store = self._store(tmp_path)
+        store.record_sl("BTCUSDT", "Buy")
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") > 0
+        store.reset_cooldown("BTCUSDT", "Buy")
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") == 0
+
+    def test_side_isolated(self, tmp_path):
+        store = self._store(tmp_path)
+        store.record_sl("BTCUSDT", "Buy")
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") > 0
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Sell") == 0
+
+    def test_symbol_isolated(self, tmp_path):
+        store = self._store(tmp_path)
+        store.record_sl("BTCUSDT", "Buy")
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") > 0
+        assert store.get_cooldown_remaining_minutes("ETHUSDT", "Buy") == 0
+
+    def test_fib_schedule(self):
+        from ai_trader.state.db import AiTraderStore
+
+        # 1→15, 2→15, 3→30, 4→45, 5→75, 6+→120
+        assert AiTraderStore._fib_cooldown_minutes(1) == 15
+        assert AiTraderStore._fib_cooldown_minutes(2) == 15
+        assert AiTraderStore._fib_cooldown_minutes(3) == 30
+        assert AiTraderStore._fib_cooldown_minutes(4) == 45
+        assert AiTraderStore._fib_cooldown_minutes(5) == 75
+        assert AiTraderStore._fib_cooldown_minutes(6) == 120
+        assert AiTraderStore._fib_cooldown_minutes(10) == 120
+
+    def test_record_sl_after_24h_resets_consecutive_count(self, tmp_path):
+        """Если предыдущий SL был >=24ч назад — счётчик начинается с 1."""
+        from datetime import datetime, timedelta, timezone
+
+        store = self._store(tmp_path)
+        store.record_sl("BTCUSDT", "Buy")
+        # Подмешиваем last_sl_at = 25 часов назад напрямую в БД
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+        with store._conn() as c:
+            c.execute(
+                "UPDATE sl_cooldown SET last_sl_at=? WHERE symbol=? AND side=?",
+                (old_ts, "BTCUSDT", "buy"),
+            )
+        count = store.record_sl("BTCUSDT", "Buy")
+        assert count == 1
+
+
+class TestExecutorCooldownAndRegimeGates:
+    """v0.12: cooldown gate + ADX regime gate в _apply_open."""
+
+    @staticmethod
+    def _deps(monkeypatch, tmp_path):
+        return TestExecutorSlComplianceWarning._make_executor_deps(
+            monkeypatch, tmp_path, trading_enabled=True
+        )
+
+    @staticmethod
+    def _open_action():
+        from ai_trader.trading.executor import ParsedAction
+
+        return ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Sell",
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 60900.0, "take_profit": 58200.0,  # SL>price>TP
+                "reason": "regime/cooldown test",
+            },
+        )
+
+    def test_cooldown_blocks_reopen_after_sl(self, monkeypatch, tmp_path):
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        store.record_sl("BTCUSDT", "Sell")
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+        )
+        assert res.executed is False
+        assert res.error is not None
+        assert "cooldown_active" in res.error
+        assert "BTCUSDT" in res.error and "Sell" in res.error
+
+    def test_cooldown_allows_after_reset(self, monkeypatch, tmp_path):
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        store.record_sl("BTCUSDT", "Sell")
+        store.reset_cooldown("BTCUSDT", "Sell")
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+        )
+        assert res.executed is True
+
+    def test_regime_block_sell_in_uptrend(self, monkeypatch, tmp_path):
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        regime = {"BTCUSDT": {"adx14": 32.0, "plus_di14": 36.0, "minus_di14": 12.0}}
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+            regime_by_symbol=regime,
+        )
+        assert res.executed is False
+        assert res.error is not None
+        assert "regime_block" in res.error
+        assert "uptrend" in res.error
+
+    def test_regime_block_buy_in_downtrend(self, monkeypatch, tmp_path):
+        from ai_trader.trading.executor import ParsedAction, apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        action = ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 59400.0, "take_profit": 61500.0,
+                "reason": "test",
+            },
+        )
+        regime = {"BTCUSDT": {"adx14": 30.0, "plus_di14": 10.0, "minus_di14": 32.0}}
+        res = apply_action(
+            action,
+            client=client, store=store, settings=settings, killswitch=ks,
+            regime_by_symbol=regime,
+        )
+        assert res.executed is False
+        assert "regime_block" in (res.error or "")
+        assert "downtrend" in (res.error or "")
+
+    def test_regime_allows_with_trend(self, monkeypatch, tmp_path):
+        """Buy в uptrend (trend-following) — разрешён."""
+        from ai_trader.trading.executor import ParsedAction, apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        action = ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 59400.0, "take_profit": 61500.0,
+                "reason": "test",
+            },
+        )
+        regime = {"BTCUSDT": {"adx14": 32.0, "plus_di14": 36.0, "minus_di14": 12.0}}
+        res = apply_action(
+            action,
+            client=client, store=store, settings=settings, killswitch=ks,
+            regime_by_symbol=regime,
+        )
+        assert res.executed is True
+
+    def test_regime_allows_weak_trend_below_threshold(self, monkeypatch, tmp_path):
+        """ADX < threshold (по умолчанию 25) → counter-trend разрешён."""
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        regime = {"BTCUSDT": {"adx14": 18.0, "plus_di14": 22.0, "minus_di14": 17.0}}
+        res = apply_action(
+            self._open_action(),  # Sell
+            client=client, store=store, settings=settings, killswitch=ks,
+            regime_by_symbol=regime,
+        )
+        assert res.executed is True
+
+    def test_regime_back_compat_no_regime_arg(self, monkeypatch, tmp_path):
+        """Без regime_by_symbol старое поведение."""
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+        )
+        assert res.executed is True
+
+
+class TestReconcileWritesCooldown:
+    """_reconcile_closed_positions пишет SL при pnl<0, сбрасывает при pnl>0."""
+
+    @staticmethod
+    def _store(tmp_path):
+        from ai_trader.state.db import AiTraderStore
+
+        return AiTraderStore(str(tmp_path / "rec.sqlite"))
+
+    def test_reconcile_records_sl_on_loss(self, tmp_path):
+        from ai_trader.app.main import _reconcile_closed_positions
+        from ai_trader.trading.client import Ticker
+
+        store = self._store(tmp_path)
+        store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.01, entry_price=60000.0,
+            sl_price=59000.0, tp_price=62000.0, leverage=1,
+            order_link_id="ai_test_loss", llm_reason="t",
+        )
+
+        class C:
+            def get_positions(self, symbol=None):
+                return []  # биржа говорит позиции нет
+
+            def get_ticker(self, symbol):
+                return Ticker(
+                    symbol=symbol, last_price=59000.0, bid=58999, ask=59001,
+                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+                )
+
+        _reconcile_closed_positions(C(), store, tg=None)
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") > 0
+
+    def test_reconcile_resets_cooldown_on_win(self, tmp_path):
+        from ai_trader.app.main import _reconcile_closed_positions
+        from ai_trader.trading.client import Ticker
+
+        store = self._store(tmp_path)
+        # Засеваем cooldown по этой паре
+        store.record_sl("BTCUSDT", "Buy")
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") > 0
+
+        store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.01, entry_price=60000.0,
+            sl_price=59000.0, tp_price=62000.0, leverage=1,
+            order_link_id="ai_test_win", llm_reason="t",
+        )
+
+        class C:
+            def get_positions(self, symbol=None):
+                return []
+
+            def get_ticker(self, symbol):
+                return Ticker(
+                    symbol=symbol, last_price=61000.0, bid=60999, ask=61001,
+                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+                )
+
+        _reconcile_closed_positions(C(), store, tg=None)
+        assert store.get_cooldown_remaining_minutes("BTCUSDT", "Buy") == 0
+
+
+class TestRegimeFilterPrompt:
+    """SYSTEM_PROMPT упоминает REGIME FILTER + COOLDOWN правила."""
+
+    def test_prompt_contains_regime_filter_block(self, monkeypatch):
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt
+
+        for key in list(__import__("os").environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        prompt = build_system_prompt(AiTraderSettings())
+        assert "REGIME FILTER" in prompt
+        assert "ADX14" in prompt
+        assert "TRENDING" in prompt
+        assert "RANGING" in prompt
+
+    def test_prompt_contains_cooldown_block(self, monkeypatch):
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt
+
+        for key in list(__import__("os").environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        prompt = build_system_prompt(AiTraderSettings())
+        assert "COOLDOWN AFTER STOP-LOSS" in prompt
+        assert "cooldown_active" in prompt

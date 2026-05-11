@@ -90,6 +90,20 @@ CREATE TABLE IF NOT EXISTS kv_state (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- v0.12 (2026-05-11): cooldown after stop-loss. После SL по паре (symbol, side)
+-- хранится timestamp последнего SL и количество SL подряд (consecutive). Этот
+-- счётчик используется как N в Fibonacci scheme (1,1,2,3,5,8 баров на TF=15м).
+-- Сбрасывается на 0 если по этой паре была прибыльная сделка ИЛИ прошло >=24ч
+-- без новых SL.
+-- Research basis: TradingView 2026 "Mean-Reversion with Cooldown" (jannisMCMXCV).
+CREATE TABLE IF NOT EXISTS sl_cooldown (
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    last_sl_at TEXT NOT NULL,
+    consecutive_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (symbol, side)
+);
 """
 
 
@@ -298,6 +312,88 @@ class AiTraderStore:
 
     def set_paused(self, value: bool) -> None:
         self.kv_set("paused", "1" if value else "0")
+
+    # ─── SL Cooldown (v0.12) ────────────────────────────────────────────────
+    # После SL по паре (symbol, side) запрещаем повторный вход на N минут.
+    # Длительность растёт по Fibonacci при повторяющихся SL подряд:
+    # 1-й SL → 15 мин, 2-й → 15 мин, 3-й → 30 мин, 4-й → 45 мин,
+    # 5-й → 75 мин, 6+ → 120 мин (cap).
+    # Сброс счётчика: 24ч без новых SL ИЛИ закрытие в плюс по этой паре.
+    # Research basis: TradingView jannisMCMXCV 2026, AOTrading 2026 "3-5-7
+    # Rule for mean-reversion cooldown".
+
+    @staticmethod
+    def _fib_cooldown_minutes(consecutive: int) -> int:
+        # consecutive_count это сколько SL было ПОДРЯД (включая текущий).
+        # Fibonacci-баров для TF=15м, умноженные на 15:
+        # n=1 → 1 bar, n=2 → 1 bar, n=3 → 2 bar, n=4 → 3, n=5 → 5, n>=6 → 8.
+        schedule = {1: 1, 2: 1, 3: 2, 4: 3, 5: 5}
+        bars = schedule.get(max(1, consecutive), 8)
+        return bars * 15
+
+    def record_sl(self, symbol: str, side: str) -> int:
+        """Записывает SL по (symbol, side); инкрементирует consecutive_count.
+        Возвращает новый consecutive_count."""
+        side_n = side.lower()
+        now_iso = datetime.now(tz=UTC).isoformat()
+        with self._conn() as c:
+            row = c.execute(
+                """
+                SELECT consecutive_count, last_sl_at FROM sl_cooldown
+                WHERE symbol = ? AND side = ?
+                """,
+                (symbol, side_n),
+            ).fetchone()
+            if row is None:
+                c.execute(
+                    """
+                    INSERT INTO sl_cooldown (symbol, side, last_sl_at, consecutive_count)
+                    VALUES (?, ?, ?, 1)
+                    """,
+                    (symbol, side_n, now_iso),
+                )
+                return 1
+            prev_count = int(row["consecutive_count"])
+            prev_at = datetime.fromisoformat(row["last_sl_at"])
+            age_hours = (datetime.now(tz=UTC) - prev_at).total_seconds() / 3600
+            new_count = 1 if age_hours >= 24 else prev_count + 1
+            c.execute(
+                """
+                UPDATE sl_cooldown SET last_sl_at = ?, consecutive_count = ?
+                WHERE symbol = ? AND side = ?
+                """,
+                (now_iso, new_count, symbol, side_n),
+            )
+            return new_count
+
+    def reset_cooldown(self, symbol: str, side: str) -> None:
+        """Сбросить счётчик SL по паре (например, после прибыльной сделки)."""
+        side_n = side.lower()
+        with self._conn() as c:
+            c.execute(
+                "DELETE FROM sl_cooldown WHERE symbol = ? AND side = ?",
+                (symbol, side_n),
+            )
+
+    def get_cooldown_remaining_minutes(self, symbol: str, side: str) -> int:
+        """Сколько минут осталось до конца cooldown по (symbol, side).
+        0 если cooldown не активен."""
+        side_n = side.lower()
+        with self._conn() as c:
+            row = c.execute(
+                """
+                SELECT consecutive_count, last_sl_at FROM sl_cooldown
+                WHERE symbol = ? AND side = ?
+                """,
+                (symbol, side_n),
+            ).fetchone()
+        if row is None:
+            return 0
+        last_sl_at = datetime.fromisoformat(row["last_sl_at"])
+        cooldown_min = self._fib_cooldown_minutes(int(row["consecutive_count"]))
+        elapsed_min = (datetime.now(tz=UTC) - last_sl_at).total_seconds() / 60
+        remaining = cooldown_min - elapsed_min
+        return int(max(0, remaining))
 
     def get_telegram_chat_id(self) -> int | None:
         v = self.kv_get("telegram_chat_id")
