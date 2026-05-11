@@ -1,0 +1,55 @@
+---
+description: Connection/API decisions must cite official docs (cTrader, Bybit)
+alwaysApply: true
+---
+
+# API connections — only cite official docs
+
+Любые правки в логике подключения, авторизации, reconnect-policy,
+heartbeat, rate-limit, retry/backoff, websocket subscriptions —
+**должны ссылаться на официальную документацию** соответствующей
+биржи / брокера. Угадывание ("кажется так должно работать") не
+принимается.
+
+## Источники правды
+
+| Бот / модуль | Документация | Что в ней искать |
+|---|---|---|
+| `src/fx_pro_bot/trading/client.py`, `auth.py`, `executor.py`, `copytrading/ctrader.py` | <https://help.ctrader.com/open-api/> | connection limits (≤2 per app), heartbeat (≤10s), rate limits (50/sec, 5/sec для historical), `ProtoOAAccountDisconnectEvent`, refresh-token flow |
+| `src/bybit_bot/trading/client.py` и любой модуль поверх `pybit` | <https://bybit-exchange.github.io/docs/v5/intro> + <https://github.com/bybit-exchange/pybit> | rate limits (UID-based), websocket auth/keep-alive, retry-codes, `set_leverage` / `place_order` flows |
+
+## Что обязательно сделать перед коммитом
+
+1. **Прочитать релевантный раздел доки** (использовать
+   `WebFetch` / `WebSearch` или офиц. github проекта). Не доверять
+   "помнящимся из памяти" числам.
+2. **В коде**: оставить ссылку на источник в docstring или комментарии
+   рядом с константой / параметром:
+   ```python
+   # Heartbeat ≤10s — иначе server disconnect.
+   # https://help.ctrader.com/open-api/connection/
+   HEARTBEAT_INTERVAL_SEC = 10
+   ```
+3. **В commit message** и в `BUILDLOG.md` / `BUILDLOG_BYBIT.md` —
+   ссылка на конкретную страницу + цитата правила, на которое опираемся.
+
+## Что запрещено
+
+- **ЗАПРЕЩЕНО** менять reconnect/backoff/heartbeat/rate-limit
+  параметры по интуиции, "посмотрев на симптом". Сначала — дока.
+- **ЗАПРЕЩЕНО** копировать значения из Stack Overflow / форумов
+  без проверки в офиц. доке (форумы часто содержат устаревшие или
+  неверные параметры).
+- **ЗАПРЕЩЕНО** оставлять "magic numbers" (delays, timeouts, max
+  attempts) без ссылки на источник.
+
+## Связанное
+
+- `no-data-fitting.mdc` — запрет подгонки. Параметры коннектов —
+  тот же класс constraints, что и параметры стратегий: они должны
+  иметь источник правды (research / спецификация API), а не быть
+  результатом "потюнили пока заработало".
+- BUILDLOG 2026-05-07 (`fix(ctrader-client): exponential backoff up
+  to 15min + smart attempt-reset`) — реальный кейс: 244 попытки
+  reconnect за 11ч ввели нас в server-side throttle на client_id.
+  Лечение пришло из официальной доки cTrader (max 2 connections per app).

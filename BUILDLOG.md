@@ -4,6 +4,122 @@
 
 ---
 
+## 2026-05-11
+
+### fix(ctrader-client): proactive token-refresh + smart-reset gating
+
+`коммит при deploy`
+
+**Симптом.** Бот молчал с 9.05 ~11:13 UTC (после weekend без активности).
+В логах 11.05 с 10:49 UTC бесконечный reconnect-loop:
+
+```
+INFO  cTrader: соединение было стабильно 171244s — сброс reconnect attempt counter
+INFO  cTrader: подключено к demo.ctraderapi.com
+INFO  cTrader: приложение авторизовано
+ERROR cTrader: reconnect failed: cTrader: таймаут ожидания ответа (type=2150)
+INFO  cTrader: reconnect #2 через 10s...
+WARNING cTrader: отключено (uptime 171276s) — ConnectionDone (cleanly)
+INFO  cTrader: соединение было стабильно 171276s — сброс reconnect attempt counter
+... (бесконечно, ~30 connects за 6 минут)
+```
+
+`type=2150` = `ProtoOAGetAccountListByAccessTokenRes`. После app_auth
+сервер 30 секунд не отвечал, потом cleanly закрывал TCP.
+
+**Причина (с привязкой к официальной документации).**
+
+1. **Silent token rotation на стороне Spotware** (см.
+ [community.ctrader.com/forum/.../45954](https://community.ctrader.com/forum/connect-api-support/45954)):
+ при длительном idle (47ч weekend) серверная сторона может ротировать
+ access_token БЕЗ отправки `ProtoOAAccountsTokenInvalidatedEvent`
+ (мы offline в момент события). При следующем connect app_auth
+ (client-credentials) проходит, а `GetAccountListByAccessTokenReq`
+ со старым токеном **игнорируется и сервер закрывает TCP cleanly**
+ без `ProtoOAErrorRes`.
+
+2. **Bug #1 в нашем smart-reset (`_on_disconnected`).** В фиксе 07.05
+ `_last_successful_connect_ts` устанавливался в `_connect_and_auth`
+ ПОСЛЕ полного `_do_auth`. Но если `_do_auth` падал на втором этапе
+ (GetAccountList timeout) — флаг **не обнулялся**, оставался от
+ предыдущей сессии (9.05 11:13 UTC, 47.6 часов назад). На каждом
+ disconnect `uptime = now - 9.05_ts ≈ 171k` >> `STABLE_UPTIME_SEC=300`
+ → counter сбрасывался в 0 → `RECONNECT_DELAYS_SEC[0] = 5s` →
+ бесконечный loop с минимальным backoff. 30+ TCP-connections за
+ 6 минут → server-throttle усиливался, не снимался.
+
+3. **Bug #2: отсутствие proactive refresh.** Refresh вызывался ТОЛЬКО
+ при получении `ProtoOAAccountsTokenInvalidatedEvent` через
+ `_on_message`. Но при silent rotation это событие не приходит —
+ нужно триггерить refresh по symptom (`TimeoutError` на
+ `GetAccountListByAccessTokenRes`).
+
+4. **Bug #3: heartbeat first-fire `now=False`** → первый
+ ProtoHeartbeatEvent через 10s, на самом краю server hard cap
+ (Spotware закрывает по inactivity ≥10s, [help.ctrader.com/.../faq](https://help.ctrader.com/open-api/faq/)).
+ Если app_auth медленный — сервер успевал закрыть до первого HB.
+
+**Решение.**
+
+1. **`_cleanup_client` + начало `_connect_and_auth`:** обнуляем
+ `_last_successful_connect_ts = 0.0`. Smart-reset gating теперь видит
+ «нет валидной сессии», пока auth полностью не завершится.
+
+2. **`_on_disconnected` smart-reset gated на двух условиях:**
+ - `_last_successful_connect_ts > 0` (был полный auth-handshake);
+ - `uptime ≥ STABLE_UPTIME_SEC` (5 минут).
+ Если auth никогда не завершался — это server-side reject, копим
+ backoff (5 → 10 → 30 → 60 → 120 → 300 → 900s).
+
+3. **`_do_auth(allow_refresh=True)`:** при `TimeoutError` на
+ `GetAccountListByAccessTokenRes` вызываем новый хелпер
+ `_try_refresh_token()` (обновление через OAuth refresh-endpoint
+ + callback `on_token_refreshed` для записи в `TokenStore`).
+ После refresh — `raise ConnectionError("token refreshed, reconnect required")`,
+ чтобы основной loop reconnect-а сделал чистый connect с новым
+ токеном.
+
+4. **`HEARTBEAT_INTERVAL_SEC = 8`** (был 10) + `LoopingCall.start(8, now=True)` —
+ первый heartbeat сразу при connect, чтобы сервер видел признак жизни
+ ДО завершения app_auth.
+
+5. **`_handle_token_invalidated`** рефакторен: выделил
+ `_try_refresh_token()` (sync, без reconnect), реактивный handler
+ теперь zovёт `_do_auth(allow_refresh=False)` чтобы не зациклиться.
+
+**Соответствие официальной документации.**
+
+| Правило Spotware | Источник | Реализация |
+|---|---|---|
+| Heartbeat ≤10s | [help.ctrader.com/.../connection](https://help.ctrader.com/open-api/connection/) | 8s + `now=True` |
+| 50 req/s non-historical, 5 req/s historical | [help.ctrader.com/.../faq](https://help.ctrader.com/open-api/faq/) | backoff до 15 мин |
+| ≤25 concurrent connections per client_id | help.ctrader.com/.../faq | smart-reset не плодит TCP-сокеты при auth-failure |
+| `TokenInvalidatedEvent` через `_on_message` | `OpenApiMessages.proto` | существующий handler |
+| Silent rotation (не объявлено в docs, см. forum) | community.ctrader.com/.../45954 | **новое:** refresh by timeout on type=2150 |
+
+**Тактика на live (proven 7.05).** Остановили `advisor` на 15 минут
+(`docker compose stop advisor`) чтобы Spotware backend очистил stale
+sessions по нашему `client_id`, потом selective rebuild с новым кодом
+и стартанули заново.
+
+**Тесты.** `tests/test_ctrader_client_reconnect.py` (12 кейсов):
+- heartbeat <10s, backoff монотонный + max=900s;
+- smart-reset NE срабатывает без успешного auth;
+- smart-reset срабатывает при stable session ≥5 мин;
+- smart-reset NE срабатывает при <5 мин uptime;
+- `_cleanup_client` обнуляет timestamp;
+- `_do_auth` триггерит refresh при timeout type=2150;
+- `allow_refresh=False` не зацикливается в refresh-loop;
+- refresh skipped если refresh_token пустой;
+- callback `on_token_refreshed` вызывается с новыми токенами.
+
+**Файлы:**
+- `src/fx_pro_bot/trading/client.py` (smart-reset gating, proactive
+ refresh, heartbeat now=True / 8s, рефакторинг `_handle_token_invalidated`)
+- `tests/test_ctrader_client_reconnect.py` (новый, 12 тестов)
+
+---
+
 ## 2026-05-07
 
 ### fix(ctrader-client): расширенный reconnect backoff + smart attempt-reset
