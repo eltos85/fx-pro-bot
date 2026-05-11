@@ -153,6 +153,19 @@ class AiTraderSettings(BaseSettings):
         default=25.0, validation_alias="AI_TRADER_ADX_REGIME_THRESHOLD"
     )
 
+    # ─── Price-drift guard (v0.13, 2026-05-11) ───────────────────────────
+    # Между сбором context и фактическим place_order проходит 30-60 сек
+    # (LLM thinking + I/O). За это время цена может уйти, и SL/TP,
+    # рассчитанные LLM по «старой» цене, попадут не туда. Если drift
+    # выше порога — отменяем ордер с reason='price_drift_too_large',
+    # ждём следующий цикл со свежей картинкой.
+    # Default 0.5% = типичное движение крипто-перпов за 30-60 сек в
+    # средней волатильности. 1.0% = более терпимый порог при низкой
+    # волатильности, 0.3% = строгий (часто будет блокировать).
+    price_drift_threshold_pct: float = Field(
+        default=0.5, validation_alias="AI_TRADER_PRICE_DRIFT_THRESHOLD_PCT"
+    )
+
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_TRADER_DATA_DIR")
     db_filename: str = Field(

@@ -1,5 +1,124 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-11 — fix(v0.13): closed-bars-only + price-drift guard (look-ahead bias fix)
+
+`<hash-pending>`
+
+**Симптом (наблюдение пользователя).** ATOMUSDT: id=48 (08:55 UTC) Sell
+@ 2.0363 → SL hit за 1ч16м, **-$38.33**. id=49 (10:34 UTC, через 23
+минуты после SL) Sell @ 2.0693 → сейчас **+$9.40**. Две сделки с
+**одной и той же логикой** на одном символе с разницей в 1.5 часа —
+диаметрально противоположный результат. Пользователь: «есть подозрение
+что бот принял решение войти слишком рано, как будто у него есть
+рассинхрон со временем новостей и графиков».
+
+**Корневая причина (эмпирически подтверждена 2026-05-11 12:07 UTC).**
+Bybit V5 `get_kline` всегда возвращает массив свечей, где **последняя**
+свеча — это **открытый бар** текущего интервала: его `close` равен
+live `ticker.last_price`, а `high`/`low`/`volume` меняются вплоть до
+закрытия. Эмпирический snapshot ATOMUSDT (12:07 UTC):
+
+```
+bar_start=2026-05-11T12:00:00+00:00  age=7.6m   close=$2.0267
+ATOMUSDT ticker.last_price (live):           $2.0267
+```
+
+Последний 1H бар начался 7.6 минут назад, его `close` совпадает с
+текущей рыночной ценой и **будет меняться** ещё 52 минуты. До v0.13
+весь pipeline индикаторов считался по 100 1H и 50 4H барам, **включая
+этот open bar**. Это даёт нестабильный сигнал: RSI/ATR/ADX/VWAP/BB
+через 5-10 минут на тех же входных аргументах дадут другие значения.
+Стандартный quant pitfall — look-ahead bias на open-bar.
+
+Конкретно по ATOMUSDT:
+- id=48 (8:55): бар 08:00 был открыт 55 минут, его «close» уже
+  показывал откат вниз. Но открытый бар не завершился — в последние
+  минуты пошёл второй pump, который продолжился ещё час → SL hit.
+- id=49 (10:34): бар 10:00 был открыт 34 минут, в нём уже состоялся
+  pump до 2.1055 и начался revert. LLM увидел уже «полузакрытую»
+  историю и угадал.
+
+Дополнительная проблема — **latency** между сбором context и
+`place_order`: 30-60 сек (LLM thinking + I/O). За это время цена в
+средней крипто-волатильности уходит на 0.1-0.5%. LLM выбрал SL/TP
+по «той» цене, executor поставил по «этой» — SL оказывается ближе чем
+рассчитывал LLM.
+
+**Изменения.**
+
+1. **closed-bars-only** в сборщике context'а:
+   - `src/ai_trader/trading/context.py`: новая helper `_drop_open_bar(bars)`,
+     которая отбрасывает последний бар (объяснение и research-ссылки в
+     docstring). Применяется к `bars_1h` и `bars_4h` в
+     `collect_market_context` и к `bars_1h` в `collect_review_context`.
+     Limit в Bybit запросах поднят на +1 (101 / 51), чтобы после trim
+     осталось привычное число закрытых баров (100/50/50). EMA50 на 4H
+     требует >=50 закрытых, теперь это снова выполнено.
+   - Прямой эффект: RSI(14), MACD, ATR(14), EMA, Bollinger, VWAP, RV,
+     ADX(14) — все теперь считаются по закрытым барам. Сигнал
+     становится стабильным: в 12:10 и 12:30 на той же 1H-картине
+     числа совпадут (в отличие от прежнего поведения).
+   - Поведенческий side-effect: bot реагирует на закрытие часа (или
+     4 часов), не на середину бара. Это «опоздание на 0-59 минут»
+     — норма для pro-quant систems (vectorbt closed-bar convention,
+     TradingView `barstate.isconfirmed`).
+
+2. **price-drift guard** в executor:
+   - `src/ai_trader/config/settings.py`: новая настройка
+     `price_drift_threshold_pct` (default 0.5, env
+     `AI_TRADER_PRICE_DRIFT_THRESHOLD_PCT`). Что считается допустимым
+     drift'ом цены между LLM call и place_order.
+   - `src/ai_trader/app/main.py`: `_run_cycle` собирает
+     `reference_price_by_symbol = {sym: ticker.last_price}` из
+     `ctx.snapshots` и передаёт в `apply_action`. Это «цена, которую
+     LLM видел при принятии решения».
+   - `src/ai_trader/trading/executor.py`: `apply_action` / `_apply_open`
+     принимают новую опц. мапу `reference_price_by_symbol`. Сразу после
+     получения live ticker'а в `_apply_open` вычисляется
+     `drift_pct = |current - reference| / reference * 100` и при
+     превышении threshold ордер отклоняется с
+     reason=`price_drift_too_large`. Лог `PRICE_DRIFT_BLOCK SYM SIDE …`
+     для аудита.
+
+**Тесты.** +11 новых юнитов в `tests/test_ai_trader.py`:
+
+- `TestDropOpenBar` — 5 тестов: helper на empty/single/multi массивах;
+  `collect_market_context` после трим имеет 100 1H + 50 4H баров
+  (а не 101/51 как пришли из Bybit); `collect_review_context` —
+  50 1H баров.
+- `TestPriceDriftGuard` — 6 тестов: drift в пределах threshold
+  пропускает; drift выше threshold (вверх/вниз) блокирует с
+  `price_drift_too_large`; back-compat без `reference_price_by_symbol`;
+  unknown symbol в map не блокирует; threshold конфигурируется через
+  `AI_TRADER_PRICE_DRIFT_THRESHOLD_PCT`.
+
+Итог: `pytest tests/` — 607 passed (было 596 → +11). Линтер чист.
+
+**Research basis (короткий):**
+- Look-ahead bias на open bar: вечный quant pitfall. Стандарт closed-bar
+  evaluation в vectorbt (`bartime: close`), backtrader (`runonce=False`
+  + `next()` после закрытия бара), Pine Script (`barstate.isconfirmed`).
+- 30-60 сек drift в крипто-перпах: при средней RV ~80% годовых и
+  крупно-капных альтах 1σ для интервала 60 сек ≈ 0.18%, для тонко-
+  ликвидных — выше. 0.5% threshold отсекает крупные drift'ы и не
+  бьёт по большинству нормальных циклов.
+
+**Файлы:**
+- `src/ai_trader/trading/context.py` — `_drop_open_bar` + использование
+  в full/review.
+- `src/ai_trader/config/settings.py` — `price_drift_threshold_pct`.
+- `src/ai_trader/app/main.py` — сбор `reference_price_by_symbol`.
+- `src/ai_trader/trading/executor.py` — price-drift guard.
+- `tests/test_ai_trader.py` — +11 юнитов.
+
+**Что наблюдать в логах после деплоя:**
+- `PRICE_DRIFT_BLOCK` — должен срабатывать редко (если часто, рынок
+  слишком волатилен под нашу частоту циклов; threshold можно поднять).
+- Снижение recidivism rate после v0.12 cooldown + более стабильные
+  сигналы после v0.13 closed-bars-only.
+
+---
+
 ## 2026-05-11 — feat(v0.12): ADX regime filter + SL cooldown (hard enforcement)
 
 `5a750d1` (хеш данного коммита самого по себе сместится из-за amend

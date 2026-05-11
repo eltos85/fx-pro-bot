@@ -40,6 +40,30 @@ from ai_trader.trading.client import AiBybitClient, Bar, Ticker
 log = logging.getLogger(__name__)
 
 
+def _drop_open_bar(bars: list[Bar]) -> list[Bar]:
+    """v0.13: отбрасываем последний бар (всегда in-progress на Bybit V5).
+
+    Bybit `get_kline` возвращает массив свечей, последняя из которых —
+    **открытый** бар текущего интервала (close=live price, hi/lo/vol
+    меняются вплоть до закрытия). Использование этого бара для расчёта
+    индикаторов (RSI, ATR, ADX, VWAP, MACD) даёт нестабильный сигнал:
+    через 5-10 мин на тех же входных параметрах получим другие значения.
+    Это известный look-ahead bias на open bar (см. TradingView
+    `barstate.isconfirmed`, vectorbt closed-bar convention).
+
+    Эмпирически подтверждено 2026-05-11 на ATOMUSDT (см.
+    `BUILDLOG_AI_TRADER.md` 2026-05-11 v0.13): `bar_start=12:00 UTC`,
+    `age=7.6m`, `close == live_ticker.last_price`. Это и есть open bar.
+
+    Все индикаторы должны считаться по **закрытым** барам. Эта функция
+    отбрасывает последний бар; для индикатора, требующего N точек, нужно
+    запрашивать N+1 у Bybit.
+    """
+    if not bars:
+        return bars
+    return bars[:-1]
+
+
 @dataclass
 class SymbolSnapshot:
     symbol: str
@@ -81,8 +105,11 @@ def collect_market_context(
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
         ticker = client.get_ticker(sym)
-        bars_1h = client.get_klines(sym, interval="60", limit=100)
-        bars_4h = client.get_klines(sym, interval="240", limit=50)
+        # v0.13: limit подкручен на +1, чтобы после _drop_open_bar
+        # осталось ровно столько закрытых баров, сколько раньше «получалось»
+        # вместе с open. EMA50 на 4H требует ≥50 closed bars.
+        bars_1h = _drop_open_bar(client.get_klines(sym, interval="60", limit=101))
+        bars_4h = _drop_open_bar(client.get_klines(sym, interval="240", limit=51))
         ind_1h = ind_4h = None
         if len(bars_1h) >= 50:
             ind_1h = compute_snapshot(
@@ -213,7 +240,9 @@ def collect_review_context(
     snapshots: list[SymbolSnapshot] = []
     for sym in review_symbols:
         ticker = client.get_ticker(sym)
-        bars_1h = client.get_klines(sym, interval="60", limit=50)
+        # v0.13: closed-bars-only (см. _drop_open_bar). +1 чтобы после trim
+        # осталось привычное число баров для ADX/EMA50/RV окон.
+        bars_1h = _drop_open_bar(client.get_klines(sym, interval="60", limit=51))
         ind_1h = None
         if len(bars_1h) >= 30:
             ind_1h = compute_snapshot(

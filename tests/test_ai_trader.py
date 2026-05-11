@@ -1862,3 +1862,240 @@ class TestRegimeFilterPrompt:
         prompt = build_system_prompt(AiTraderSettings())
         assert "COOLDOWN AFTER STOP-LOSS" in prompt
         assert "cooldown_active" in prompt
+
+
+# ─── v0.13 (2026-05-11): closed-bars-only + price-drift guard ───────────────
+
+
+class TestDropOpenBar:
+    """v0.13: context отбрасывает последний (open) бар перед расчётом
+    индикаторов. Цель — устранить look-ahead bias на in-progress свече."""
+
+    def test_drop_open_bar_helper(self):
+        from ai_trader.trading.client import Bar
+        from ai_trader.trading.context import _drop_open_bar
+
+        bars = [
+            Bar(ts=1, open=1, high=1, low=1, close=1, volume=1),
+            Bar(ts=2, open=2, high=2, low=2, close=2, volume=2),
+            Bar(ts=3, open=3, high=3, low=3, close=3, volume=3),
+        ]
+        result = _drop_open_bar(bars)
+        assert len(result) == 2
+        assert result[-1].ts == 2
+
+    def test_drop_open_bar_empty(self):
+        from ai_trader.trading.context import _drop_open_bar
+
+        assert _drop_open_bar([]) == []
+
+    def test_drop_open_bar_single(self):
+        from ai_trader.trading.client import Bar
+        from ai_trader.trading.context import _drop_open_bar
+
+        bars = [Bar(ts=1, open=1, high=1, low=1, close=1, volume=1)]
+        assert _drop_open_bar(bars) == []
+
+    def test_collect_market_context_drops_last_bar(self, tmp_path):
+        """В collect_market_context bars_1h/bars_4h в SymbolSnapshot не
+        содержат последний бар, который Bybit вернул как in-progress."""
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.client import Bar, Ticker
+        from ai_trader.trading.context import collect_market_context
+
+        store = AiTraderStore(str(tmp_path / "ctx.sqlite"))
+
+        # Делаем 101 свечу 1H и 51 свечу 4H — это что Bybit отдаст после
+        # +1 в limit'е. После _drop_open_bar должно остаться 100 и 50.
+        bars_1h_full = [
+            Bar(ts=i, open=100.0 + i, high=101.0 + i, low=99.0 + i,
+                close=100.0 + i, volume=1000.0)
+            for i in range(101)
+        ]
+        bars_4h_full = [
+            Bar(ts=i, open=100.0 + i, high=101.0 + i, low=99.0 + i,
+                close=100.0 + i, volume=1000.0)
+            for i in range(51)
+        ]
+
+        class FakeClient:
+            def get_ticker(self, _sym):
+                return Ticker(
+                    symbol="BTCUSDT", last_price=200.0, bid=199.9, ask=200.1,
+                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+                )
+
+            def get_klines(self, _sym, interval, limit):
+                # Bybit limit=101 для 1h, 51 для 4h после v0.13
+                if interval == "60":
+                    return bars_1h_full[:limit]
+                if interval == "240":
+                    return bars_4h_full[:limit]
+                return []
+
+            def get_open_interest_history(self, *_a, **_kw): return []
+            def get_funding_rate_history(self, *_a, **_kw): return []
+            def get_long_short_ratio(self, *_a, **_kw): return []
+            def get_orderbook(self, *_a, **_kw): return None
+            def get_wallet_balance(self): return 500.0
+
+        ctx = collect_market_context(
+            FakeClient(), store, symbols=("BTCUSDT",),
+            virtual_capital_usd=500.0,
+        )
+        assert len(ctx.snapshots) == 1
+        s = ctx.snapshots[0]
+        # Должно быть 100 (101−1) на 1H и 50 (51−1) на 4H.
+        assert len(s.bars_1h) == 100
+        assert len(s.bars_4h) == 50
+        # Последний бар, который Bybit отдал как «open», уже не в snapshot.
+        assert s.bars_1h[-1].ts == 99
+        assert s.bars_4h[-1].ts == 49
+
+    def test_collect_review_context_drops_last_bar(self, tmp_path):
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.client import Bar, Ticker
+        from ai_trader.trading.context import collect_review_context
+
+        store = AiTraderStore(str(tmp_path / "rev.sqlite"))
+        store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.01, entry_price=200.0,
+            sl_price=190.0, tp_price=220.0, leverage=1,
+            order_link_id="ai_test_rev_drop", llm_reason="t",
+        )
+
+        bars_1h_full = [
+            Bar(ts=i, open=100.0 + i, high=101.0 + i, low=99.0 + i,
+                close=100.0 + i, volume=1000.0)
+            for i in range(51)
+        ]
+
+        class FakeClient:
+            def get_ticker(self, _sym):
+                return Ticker(
+                    symbol="BTCUSDT", last_price=200.0, bid=199.9, ask=200.1,
+                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+                )
+
+            def get_klines(self, _sym, interval, limit):
+                if interval == "60":
+                    return bars_1h_full[:limit]
+                return []
+
+            def get_funding_rate_history(self, *_a, **_kw): return []
+            def get_long_short_ratio(self, *_a, **_kw): return []
+            def get_wallet_balance(self): return 500.0
+
+        ctx = collect_review_context(FakeClient(), store, virtual_capital_usd=500.0)
+        assert len(ctx.snapshots) == 1
+        s = ctx.snapshots[0]
+        assert len(s.bars_1h) == 50
+        assert s.bars_1h[-1].ts == 49
+
+
+class TestPriceDriftGuard:
+    """v0.13: executor блокирует open если цена ушла > threshold% между
+    моментом сбора context и фактическим place_order."""
+
+    @staticmethod
+    def _deps(monkeypatch, tmp_path):
+        return TestExecutorSlComplianceWarning._make_executor_deps(
+            monkeypatch, tmp_path, trading_enabled=True
+        )
+
+    @staticmethod
+    def _open_action(symbol="BTCUSDT", side="Buy"):
+        from ai_trader.trading.executor import ParsedAction
+
+        return ParsedAction(
+            action="open",
+            raw={
+                "action": "open", "symbol": symbol, "side": side,
+                "leverage": 1, "position_size_usd": 100,
+                "stop_loss": 59400.0, "take_profit": 61500.0,  # SL<price<TP @60000
+                "reason": "drift test",
+            },
+        )
+
+    def test_drift_within_threshold_allowed(self, monkeypatch, tmp_path):
+        """ticker=60000, reference=60100 → drift 0.166% < 0.5% → allowed."""
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+            reference_price_by_symbol={"BTCUSDT": 60100.0},
+        )
+        assert res.executed is True
+
+    def test_drift_above_threshold_blocked(self, monkeypatch, tmp_path):
+        """ticker=60000, reference=60500 → drift 0.83% > 0.5% → blocked."""
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+            reference_price_by_symbol={"BTCUSDT": 60500.0},
+        )
+        assert res.executed is False
+        assert res.error is not None
+        assert "price_drift_too_large" in res.error
+        assert "BTCUSDT" in res.error
+
+    def test_drift_above_threshold_blocked_downward(self, monkeypatch, tmp_path):
+        """ticker=60000, reference=59500 → drift 0.84% > 0.5% → blocked (вниз)."""
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+            reference_price_by_symbol={"BTCUSDT": 59500.0},
+        )
+        assert res.executed is False
+        assert "price_drift_too_large" in (res.error or "")
+
+    def test_no_reference_back_compat(self, monkeypatch, tmp_path):
+        """reference_price_by_symbol=None → старое поведение, не блокирует."""
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+        )
+        assert res.executed is True
+
+    def test_unknown_symbol_in_reference_map_no_block(self, monkeypatch, tmp_path):
+        """Если для символа нет reference price — не блокируем."""
+        from ai_trader.trading.executor import apply_action
+
+        settings, store, client, ks = self._deps(monkeypatch, tmp_path)
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+            reference_price_by_symbol={"ETHUSDT": 3000.0},
+        )
+        assert res.executed is True
+
+    def test_threshold_configurable(self, monkeypatch, tmp_path):
+        """AI_TRADER_PRICE_DRIFT_THRESHOLD_PCT=0.1 → 0.166% уже блокирует."""
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.trading.executor import apply_action
+
+        _, store, client, ks = self._deps(monkeypatch, tmp_path)
+        # _deps стёрла AI_TRADER_* env — выставим threshold ПОСЛЕ неё и
+        # перечитаем settings, чтобы pydantic подхватил.
+        monkeypatch.setenv("AI_TRADER_PRICE_DRIFT_THRESHOLD_PCT", "0.1")
+        monkeypatch.setenv("AI_TRADER_TRADING_ENABLED", "true")
+        settings = AiTraderSettings()
+        assert settings.price_drift_threshold_pct == 0.1
+        res = apply_action(
+            self._open_action(),
+            client=client, store=store, settings=settings, killswitch=ks,
+            reference_price_by_symbol={"BTCUSDT": 60100.0},
+        )
+        assert res.executed is False
+        assert "price_drift_too_large" in (res.error or "")

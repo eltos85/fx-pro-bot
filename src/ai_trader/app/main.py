@@ -394,6 +394,14 @@ def _run_cycle(
         for s in ctx.snapshots
         if s.ind_1h is not None
     }
+    # v0.13: price reference из момента сбора context (last_price тикера).
+    # Используется executor'ом для detection ценового drift'а между LLM call
+    # и фактическим place_order. См. settings.price_drift_threshold_pct.
+    reference_price_by_symbol: dict[str, float] = {
+        s.symbol: s.ticker.last_price
+        for s in ctx.snapshots
+        if s.ticker is not None and s.ticker.last_price > 0
+    }
     apply = apply_action(
         parsed,
         client=bybit,
@@ -402,6 +410,7 @@ def _run_cycle(
         killswitch=killswitch,
         atr_by_symbol=atr_by_symbol,
         regime_by_symbol=regime_by_symbol,
+        reference_price_by_symbol=reference_price_by_symbol,
     )
     store.log_decision(
         cycle=cycle,

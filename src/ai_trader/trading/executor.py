@@ -190,6 +190,7 @@ def apply_action(
     killswitch: KillSwitch,
     atr_by_symbol: dict[str, float] | None = None,
     regime_by_symbol: dict[str, dict[str, float | None]] | None = None,
+    reference_price_by_symbol: dict[str, float] | None = None,
 ) -> ApplyResult:
     """Применить распарсенное действие LLM.
 
@@ -205,6 +206,13 @@ def apply_action(
     противоположно направлению тренда (counter-trend) — сделка
     БЛОКИРУЕТСЯ (hard enforcement). Research: Connors/Raschke 1995,
     botversusbot 2026 — mean-reversion в strong trend = suicide.
+
+    `reference_price_by_symbol` (v0.13) — мапа {symbol: last_price} в
+    момент сбора context (то есть «цена, которую видел LLM при принятии
+    решения»). _apply_open сравнивает её с live ticker'ом в момент
+    place_order; при drift > settings.price_drift_threshold_pct сделка
+    отменяется (price_drift_too_large). Это устраняет ситуацию когда
+    LLM выбрал SL/TP по «старой» цене, а к моменту fill цена уже ушла.
     """
     if action.action == "hold":
         reason = action.raw.get("reason", "")
@@ -222,6 +230,7 @@ def apply_action(
             killswitch=killswitch,
             atr_by_symbol=atr_by_symbol,
             regime_by_symbol=regime_by_symbol,
+            reference_price_by_symbol=reference_price_by_symbol,
         )
 
     return ApplyResult(executed=False, summary="unknown action", error="impossible branch")
@@ -274,6 +283,7 @@ def _apply_open(
     killswitch: KillSwitch,
     atr_by_symbol: dict[str, float] | None = None,
     regime_by_symbol: dict[str, dict[str, float | None]] | None = None,
+    reference_price_by_symbol: dict[str, float] | None = None,
 ) -> ApplyResult:
     raw = action.raw
     symbol = raw["symbol"]
@@ -346,6 +356,31 @@ def _apply_open(
     if ticker is None or ticker.last_price <= 0:
         return ApplyResult(executed=False, summary="", error=f"ticker unavailable for {symbol}")
     price = ticker.last_price
+
+    # v0.13: price-drift guard. Между сбором context (где LLM «увидел»
+    # цену = ticker.last_price на тот момент) и текущим place_order
+    # прошло 30-60 сек (LLM thinking + I/O). Если цена ушла >threshold,
+    # SL/TP, рассчитанные по «той» цене, попадут не туда — отменяем.
+    if reference_price_by_symbol is not None:
+        ref_price = reference_price_by_symbol.get(symbol)
+        if ref_price is not None and ref_price > 0:
+            drift_pct = abs(price - ref_price) / ref_price * 100
+            if drift_pct > settings.price_drift_threshold_pct:
+                log.info(
+                    "PRICE_DRIFT_BLOCK %s %s: reference=%.6g current=%.6g "
+                    "drift=%.3f%% > threshold=%.2f%% — order cancelled",
+                    symbol, side, ref_price, price, drift_pct,
+                    settings.price_drift_threshold_pct,
+                )
+                return ApplyResult(
+                    executed=False, summary="",
+                    error=(
+                        f"price_drift_too_large: {symbol} reference=${ref_price:.6g} "
+                        f"current=${price:.6g} drift={drift_pct:.3f}% > "
+                        f"{settings.price_drift_threshold_pct:.2f}% — SL/TP from "
+                        f"LLM are stale; waiting for next cycle (v0.13)"
+                    ),
+                )
 
     # instruments-info — для round'инга qty/SL/TP под Bybit фильтры.
     info = client.get_instrument_info(symbol)
