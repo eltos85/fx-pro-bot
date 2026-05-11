@@ -15,28 +15,52 @@ log = logging.getLogger(__name__)
 _reactor_started = False
 _reactor_lock = threading.Lock()
 
-HEARTBEAT_INTERVAL_SEC = 10
+# Heartbeat policy.
+#
+# Spotware (help.ctrader.com/open-api/connection/, .../faq/) требует
+# отправлять ProtoHeartbeatEvent **не реже чем раз в 10 секунд**, иначе
+# сервер закрывает TCP-сессию за inactivity. 10s — это hard cap, поэтому
+# берём 8s как запас на jitter сети/планирования reactor-потока.
+# `now=True` в LoopingCall — первый heartbeat сразу при connect,
+# не на 10-й секунде (иначе серверная сторона может закрыть сессию
+# до получения первого heartbeat при медленном app_auth).
+HEARTBEAT_INTERVAL_SEC = 8
 
 # Reconnect policy.
 #
-# cTrader Open API docs (https://help.ctrader.com/open-api/) рекомендуют:
-# - Не более 2 соединений на app (одно demo + одно live).
-# - Heartbeat каждые ≤10s — иначе сервер дисконнектит за inactivity.
+# cTrader Open API docs (help.ctrader.com/open-api/connection/, .../faq/):
+# - Heartbeat ≤10s, иначе server disconnect by inactivity.
+# - Rate limits: 50 req/s non-historical, 5 req/s historical, 25 concurrent
+#   connections per app (client_id).
+# - При throttle сервер шлёт REQUEST_FREQUENCY_EXCEEDED (или закрывает
+#   TCP cleanly без ErrorRes если spam новых connections превысил лимит
+#   на client_id).
 #
-# Если контейнер агрессивно реконнектит (наш bug 06–07.05.2026: 244 попыток
-# за 11ч с фиксированным delay=120s после server-side disconnect), сервер
-# распознаёт паттерн "много новых TCP-сессий с одного app_id" и активно
-# отвергает каждое новое соединение (`Connection was closed cleanly`
-# сразу после TCP handshake) — фактически throttle/ban на client_id.
+# История багов:
+# - 06-07.05.2026: 244 reconnects за 11ч с фиксированным delay=120s →
+#   server-side throttle на client_id, каждое новое connection отвергается
+#   cleanly сразу после handshake. Лечили: пауза 16 мин + расширенный backoff.
+# - 11.05.2026: после 47ч idle (weekend, markets closed) серверная сторона
+#   silent-rotated access token. App-auth работает (это OAuth client-cred),
+#   но `ProtoOAGetAccountListByAccessTokenReq` → 30s timeout без ответа,
+#   сервер закрывает TCP cleanly. См. community.ctrader.com/forum/.../45954.
+#   Требовался proactive refresh token + smart-reset фикс.
 #
 # Решение:
 # 1. Расширенный exponential backoff до 15 минут max.
-# 2. STABLE_UPTIME_SEC: attempt-counter сбрасывается ТОЛЬКО если
-#    предыдущее соединение прожило ≥5 минут. Если соединение упало
-#    раньше — это server-side reject, продолжаем экспоненциальный
-#    backoff (не возвращаемся к малым delays).
+# 2. STABLE_UPTIME_SEC + _account_auth_done: attempt-counter сбрасывается
+#    ТОЛЬКО если предыдущее соединение прошло ПОЛНЫЙ auth-handshake И
+#    прожило ≥5 минут. Если упало раньше или на этапе auth — это
+#    server-side reject, продолжаем backoff.
+# 3. При TimeoutError на GetAccountListByAccessTokenRes (type=2150) —
+#    proactive token refresh, не уход в reconnect-loop.
 RECONNECT_DELAYS_SEC: tuple[int, ...] = (5, 10, 30, 60, 120, 300, 900)
 STABLE_UPTIME_SEC = 300
+
+# Payload type для GetAccountListByAccessTokenRes (см. OpenApiMessages.proto).
+# Используется для распознавания «silent token rotation» по timeout этого
+# конкретного ответа — тогда триггерим refresh, а не общий reconnect.
+_ACCOUNT_LIST_RES_TYPE = 2150
 
 
 def _ensure_reactor() -> None:
@@ -164,6 +188,11 @@ class CTraderClient:
         self._connected.clear()
         self._app_auth_done.clear()
         self._account_auth_done.clear()
+        # Сбрасываем timestamp ДО попытки auth: smart-reset в
+        # _on_disconnected должен видеть «нет валидной сессии», пока
+        # _do_auth() не завершится полностью успехом. Иначе uptime
+        # считается от ПРЕДЫДУЩЕЙ успешной сессии (баг 11.05.2026).
+        self._last_successful_connect_ts = 0.0
 
         with self._lock:
             self._waiters.clear()
@@ -195,6 +224,9 @@ class CTraderClient:
         self._stop_heartbeat()
         self._connected.clear()
         self._account_auth_done.clear()
+        # Smart-reset не должен видеть «стабильный uptime» от мёртвой
+        # сессии — иначе counter сбрасывается в 0 и backoff не растёт.
+        self._last_successful_connect_ts = 0.0
         with self._lock:
             for waiters in self._waiters.values():
                 for ev, res in waiters:
@@ -208,8 +240,15 @@ class CTraderClient:
             except Exception:
                 pass
 
-    def _do_auth(self, timeout: float = 30) -> None:
-        """Авторизация приложения и аккаунта (вызывается из start и reconnect)."""
+    def _do_auth(self, timeout: float = 30, allow_refresh: bool = True) -> None:
+        """Авторизация приложения и аккаунта (вызывается из start и reconnect).
+
+        Если `GetAccountListByAccessTokenRes` падает по timeout — это
+        классический симптом silent token-rotation на серверной стороне
+        cTrader (Spotware закрывает TCP cleanly без ProtoOAErrorRes).
+        В этом случае при `allow_refresh=True` пробуем обновить access_token
+        через refresh_token и переавторизоваться ОДИН раз; иначе пробрасываем.
+        """
         from ctrader_open_api.messages.OpenApiMessages_pb2 import (
             ProtoOAAccountAuthReq,
             ProtoOAAccountAuthRes,
@@ -232,11 +271,27 @@ class CTraderClient:
         account_id = self._account_id
         acct_list_req = ProtoOAGetAccountListByAccessTokenReq()
         acct_list_req.accessToken = self._access_token
-        acct_list_res = self._send_and_wait(
-            acct_list_req,
-            ProtoOAGetAccountListByAccessTokenRes().payloadType,
-            timeout=timeout,
-        )
+        try:
+            acct_list_res = self._send_and_wait(
+                acct_list_req,
+                ProtoOAGetAccountListByAccessTokenRes().payloadType,
+                timeout=timeout,
+            )
+        except TimeoutError as exc:
+            if allow_refresh and self._refresh_token:
+                log.warning(
+                    "cTrader: GetAccountListByAccessTokenRes timeout — "
+                    "пробуем proactive refresh access_token (silent rotation?)"
+                )
+                if self._try_refresh_token():
+                    # После refresh access_token cessия сервера, скорее всего,
+                    # уже невалидна — нужен новый TCP-connect. Пробрасываем
+                    # специфический exception, чтобы reconnect-loop повторил
+                    # connect+auth с новым токеном.
+                    raise ConnectionError(
+                        "cTrader: token refreshed, reconnect required"
+                    ) from exc
+            raise
         accounts = getattr(acct_list_res, "ctidTraderAccount", [])
         if accounts:
             is_live = self._host_type == "live"
@@ -578,11 +633,15 @@ class CTraderClient:
                     ev.set()
             self._waiters.clear()
 
-        # Reset reconnect attempt counter ТОЛЬКО если соединение
-        # прожило ≥STABLE_UPTIME_SEC. Если упало раньше — это
-        # server-side reject (cTrader throttle), продолжаем
-        # накапливать backoff до 15-минутной паузы (RECONNECT_DELAYS_SEC).
-        if uptime >= STABLE_UPTIME_SEC:
+        # Smart-reset attempt counter. Сбрасываем ТОЛЬКО если:
+        #  (1) предыдущая сессия прошла полный auth-handshake
+        #      (_last_successful_connect_ts > 0 — устанавливается в
+        #      _connect_and_auth ПОСЛЕ _do_auth success);
+        #  (2) сессия прожила ≥STABLE_UPTIME_SEC.
+        # Иначе это либо server-throttle (TCP закрыт сразу), либо
+        # silent-token-rotation (TCP закрыт после app_auth) — оба
+        # случая требуют накапливать backoff, не возвращаться к 5s.
+        if self._last_successful_connect_ts > 0 and uptime >= STABLE_UPTIME_SEC:
             if self._reconnect_attempt > 0:
                 log.info(
                     "cTrader: соединение было стабильно %.0fs — "
@@ -597,14 +656,19 @@ class CTraderClient:
     # -- heartbeat ----------------------------------------------------------------
 
     def _start_heartbeat(self) -> None:
-        """Запустить периодическую отправку ProtoHeartbeatEvent (каждые 10 сек)."""
+        """Запустить периодическую отправку ProtoHeartbeatEvent.
+
+        Spotware закрывает TCP, если не получает activity ≥10s. Используем
+        интервал 8s с `now=True` — первый heartbeat шлётся сразу при connect,
+        чтобы сервер увидел признак жизни до завершения app_auth.
+        """
         from twisted.internet import reactor, task
 
         self._stop_heartbeat()
         loop = task.LoopingCall(self._send_heartbeat)
         self._heartbeat_loop = loop
-        reactor.callFromThread(loop.start, HEARTBEAT_INTERVAL_SEC, now=False)
-        log.debug("cTrader: heartbeat запущен (каждые %ds)", HEARTBEAT_INTERVAL_SEC)
+        reactor.callFromThread(loop.start, HEARTBEAT_INTERVAL_SEC, now=True)
+        log.debug("cTrader: heartbeat запущен (каждые %ds, now=True)", HEARTBEAT_INTERVAL_SEC)
 
     def _stop_heartbeat(self) -> None:
         if self._heartbeat_loop and self._heartbeat_loop.running:
@@ -763,13 +827,16 @@ class CTraderClient:
             if self._running:
                 self._schedule_reconnect()
 
-    def _handle_token_invalidated(self) -> None:
-        """Обновить токен и переавторизовать аккаунт после TokenInvalidatedEvent."""
+    def _try_refresh_token(self) -> bool:
+        """Обновить access_token через refresh_token и обновить in-memory + callback.
+
+        НЕ делает reauth и НЕ трогает соединение — это задача вызывающей стороны.
+        Возвращает True если access_token успешно обновлён, False если
+        refresh_token отсутствует или OAuth-endpoint вернул ошибку.
+        """
         if not self._refresh_token:
-            log.error("cTrader: refresh_token отсутствует, reconnect невозможен через refresh")
-            if self._running:
-                self._schedule_reconnect()
-            return
+            log.error("cTrader: refresh_token отсутствует — refresh невозможен")
+            return False
 
         try:
             from fx_pro_bot.trading.auth import refresh_access_token
@@ -783,13 +850,30 @@ class CTraderClient:
 
             if self._on_token_refreshed:
                 try:
-                    self._on_token_refreshed(new_token.access_token, new_token.refresh_token)
+                    self._on_token_refreshed(
+                        new_token.access_token, new_token.refresh_token,
+                    )
                 except Exception as cb_err:
                     log.warning("cTrader: on_token_refreshed callback error: %s", cb_err)
+            return True
+        except Exception as exc:
+            log.error("cTrader: refresh_access_token не удался: %s", exc)
+            return False
 
-            self._do_auth(timeout=30)
+    def _handle_token_invalidated(self) -> None:
+        """Обновить токен и переавторизовать аккаунт после TokenInvalidatedEvent."""
+        if not self._try_refresh_token():
+            if self._running:
+                self._schedule_reconnect()
+            return
+
+        try:
+            # allow_refresh=False — мы уже только что обновились; второй
+            # подряд refresh при том же symptom скорее всего бесполезен,
+            # лучше уйти в reconnect.
+            self._do_auth(timeout=30, allow_refresh=False)
             log.info("cTrader: аккаунт переавторизован после обновления токена")
         except Exception as exc:
-            log.error("cTrader: refresh + reauth не удался (%s), полный reconnect", exc)
+            log.error("cTrader: reauth после refresh не удался (%s), полный reconnect", exc)
             if self._running:
                 self._schedule_reconnect()
