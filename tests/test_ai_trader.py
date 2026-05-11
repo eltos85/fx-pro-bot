@@ -16,6 +16,18 @@ ALLOWED = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT")
 # ─── parse_action ────────────────────────────────────────────────────────
 
 
+# v0.11.1: для action="open" JSON обязан содержать compliance sub-object.
+# Чтобы не дублировать его в каждом тесте — собран в константу.
+_VALID_COMPLIANCE = (
+    '"compliance": {'
+    '"sl_atr_ratio": 1.8, '
+    '"rr_net_fee": 2.0, '
+    '"counter_trend": false, '
+    '"confirmations": ["trend (4H EMA up)", "positioning (retail neutral)"]'
+    '}'
+)
+
+
 class TestParseAction:
     def test_hold(self):
         text = '{"action": "hold", "reason": "no clear setup"}'
@@ -27,13 +39,16 @@ class TestParseAction:
         text = (
             '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
             '"leverage": 3, "position_size_usd": 200, '
-            '"stop_loss": 60000, "take_profit": 65000, "reason": "breakout"}'
+            '"stop_loss": 60000, "take_profit": 65000, '
+            f'{_VALID_COMPLIANCE}, '
+            '"reason": "breakout"}'
         )
         result = parse_action(text, ALLOWED)
         assert isinstance(result, ParsedAction)
         assert result.action == "open"
         assert result.raw["symbol"] == "BTCUSDT"
         assert result.raw["leverage"] == 3
+        assert result.raw["compliance"]["sl_atr_ratio"] == 1.8
 
     def test_open_with_markdown_fence(self):
         """LLM иногда оборачивает в ```json ... ``` несмотря на инструкцию."""
@@ -73,7 +88,9 @@ class TestParseAction:
         text = (
             '{"action": "open", "symbol": "SOLUSDT", "side": "Buy", '
             '"leverage": 3, "position_size_usd": 100, '
-            '"stop_loss": 100, "take_profit": 110, "reason": "x"}'
+            '"stop_loss": 100, "take_profit": 110, '
+            f'{_VALID_COMPLIANCE}, '
+            '"reason": "x"}'
         )
         result = parse_action(text, ALLOWED)
         assert isinstance(result, str)
@@ -83,11 +100,65 @@ class TestParseAction:
         text = (
             '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
             '"leverage": -1, "position_size_usd": 100, '
-            '"stop_loss": 60000, "take_profit": 65000, "reason": "x"}'
+            '"stop_loss": 60000, "take_profit": 65000, '
+            f'{_VALID_COMPLIANCE}, '
+            '"reason": "x"}'
         )
         result = parse_action(text, ALLOWED)
         assert isinstance(result, str)
         assert "leverage" in result.lower()
+
+    # v0.11.1: новые тесты compliance валидации.
+
+    def test_open_missing_compliance(self):
+        text = (
+            '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
+            '"leverage": 3, "position_size_usd": 200, '
+            '"stop_loss": 60000, "take_profit": 65000, "reason": "x"}'
+        )
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, str)
+        assert "compliance" in result
+
+    def test_open_compliance_bad_sl_ratio(self):
+        text = (
+            '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
+            '"leverage": 3, "position_size_usd": 200, '
+            '"stop_loss": 60000, "take_profit": 65000, '
+            '"compliance": {"sl_atr_ratio": "not-a-number", '
+            '"rr_net_fee": 2.0, "counter_trend": false, '
+            '"confirmations": ["a", "b"]}, '
+            '"reason": "x"}'
+        )
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, str)
+        assert "sl_atr_ratio" in result
+
+    def test_open_compliance_confirmations_too_few(self):
+        text = (
+            '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
+            '"leverage": 3, "position_size_usd": 200, '
+            '"stop_loss": 60000, "take_profit": 65000, '
+            '"compliance": {"sl_atr_ratio": 1.8, "rr_net_fee": 2.0, '
+            '"counter_trend": false, "confirmations": ["only-one"]}, '
+            '"reason": "x"}'
+        )
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, str)
+        assert "confirmations" in result
+
+    def test_open_compliance_counter_trend_not_bool(self):
+        text = (
+            '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
+            '"leverage": 3, "position_size_usd": 200, '
+            '"stop_loss": 60000, "take_profit": 65000, '
+            '"compliance": {"sl_atr_ratio": 1.8, "rr_net_fee": 2.0, '
+            '"counter_trend": "yes", "confirmations": ["a", "b"]}, '
+            '"reason": "x"}'
+        )
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, str)
+        assert "counter_trend" in result
 
     def test_close_string_id(self):
         text = '{"action": "close", "position_id": "seven", "reason": "x"}'
@@ -844,7 +915,9 @@ class TestReviewModeParseAction:
         text = (
             '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
             '"leverage": 3, "position_size_usd": 200, '
-            '"stop_loss": 60000, "take_profit": 65000, "reason": "x"}'
+            '"stop_loss": 60000, "take_profit": 65000, '
+            f'{_VALID_COMPLIANCE}, '
+            '"reason": "x"}'
         )
         result = parse_action(text, ALLOWED)  # review_mode=False по умолчанию
         assert isinstance(result, ParsedAction)
@@ -1209,29 +1282,30 @@ class TestStopLossDisciplinePrompt:
         # Должно ссылаться на pre-computed REFERENCE SL BOUNDARIES
         assert "REFERENCE SL BOUNDARIES" in prompt
 
-    def test_prompt_contains_pre_decision_checklist(self, monkeypatch):
+    def test_prompt_contains_compliance_in_open_schema(self, monkeypatch):
+        """v0.11.1: compliance — обязательный sub-object в JSON-схеме open."""
         from ai_trader.llm.prompts import build_system_prompt
 
         prompt = build_system_prompt(self._make_settings(monkeypatch))
-        assert "PRE-DECISION CHECKLIST" in prompt
-        assert "CHECKLIST(open)" in prompt
-        # Ключевые поля чеклиста
-        assert "SL/ATR ratio" in prompt
-        assert "Counter-trend?" in prompt
-        assert "Confirmations" in prompt
-        assert "R:R (raw)" in prompt
-        assert "R:R (net of 0.12% round-trip fee)" in prompt
+        # JSON-схема open должна включать compliance с 4 полями.
+        assert "compliance" in prompt
+        assert "sl_atr_ratio" in prompt
+        assert "rr_net_fee" in prompt
+        assert "counter_trend" in prompt
+        assert "confirmations" in prompt
+        # Должен быть COMPLIANCE-блок с правилами.
+        assert "COMPLIANCE" in prompt
 
     def test_critical_constraints_mention_min_sl_distance(self, monkeypatch):
+        """v0.11.1: CRITICAL CONSTRAINTS должен упоминать 1.5xATR и compliance в JSON."""
         from ai_trader.llm.prompts import build_system_prompt
 
         prompt = build_system_prompt(self._make_settings(monkeypatch))
-        # CRITICAL CONSTRAINTS должен упомянуть оба правила: 1.5xATR + checklist
         idx = prompt.find("CRITICAL CONSTRAINTS")
         assert idx >= 0
         tail = prompt[idx:]
         assert "1.5x ATR" in tail
-        assert "PRE-DECISION CHECKLIST" in tail
+        assert "compliance" in tail
 
 
 class TestExecutorSlComplianceWarning:

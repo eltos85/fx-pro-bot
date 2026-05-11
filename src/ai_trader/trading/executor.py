@@ -151,6 +151,28 @@ def parse_action(
             v = obj.get(key)
             if not isinstance(v, (int, float)) or v <= 0:
                 return f"invalid {key}: {v!r}"
+        # v0.11.1 (2026-05-11): compliance — обязательный sub-object для open.
+        # Структура: sl_atr_ratio (float), rr_net_fee (float),
+        # counter_trend (bool), confirmations (list of >=2 strings).
+        comp = obj.get("compliance")
+        if not isinstance(comp, dict):
+            return "missing or non-object 'compliance' (required for open)"
+        sl_ratio = comp.get("sl_atr_ratio")
+        if not isinstance(sl_ratio, (int, float)) or sl_ratio <= 0:
+            return f"invalid compliance.sl_atr_ratio: {sl_ratio!r}"
+        rr_net = comp.get("rr_net_fee")
+        if not isinstance(rr_net, (int, float)) or rr_net <= 0:
+            return f"invalid compliance.rr_net_fee: {rr_net!r}"
+        if not isinstance(comp.get("counter_trend"), bool):
+            return f"invalid compliance.counter_trend: {comp.get('counter_trend')!r}"
+        confirms = comp.get("confirmations")
+        if not isinstance(confirms, list) or len(confirms) < 2:
+            return (
+                f"compliance.confirmations must be a list of >=2 strings, "
+                f"got {confirms!r}"
+            )
+        if not all(isinstance(c, str) and c.strip() for c in confirms):
+            return "compliance.confirmations must be non-empty strings"
 
     if action == "close":
         if not isinstance(obj.get("position_id"), int):
@@ -372,6 +394,25 @@ def _apply_open(
                 sl_compliance_tag = f" [sl_atr={sl_atr_ratio:.2f}!]"
             else:
                 sl_compliance_tag = f" [sl_atr={sl_atr_ratio:.2f}]"
+
+            # v0.11.1: cross-check заявленного LLM compliance.sl_atr_ratio vs
+            # фактического (наш расчёт). Расхождение > 10% = модель неточно
+            # отчиталась — логируем для аудита (не блокирует сделку).
+            comp = raw.get("compliance")
+            if isinstance(comp, dict):
+                claimed = comp.get("sl_atr_ratio")
+                if isinstance(claimed, (int, float)) and claimed > 0:
+                    drift = abs(claimed - sl_atr_ratio) / sl_atr_ratio
+                    if drift > 0.10:
+                        log.warning(
+                            "MODEL_MISREPORT %s sl_atr_ratio claimed=%.2f "
+                            "actual=%.2f drift=%.0f%% — LLM reported a "
+                            "compliance value that does not match the math",
+                            symbol,
+                            claimed,
+                            sl_atr_ratio,
+                            drift * 100,
+                        )
 
     store.open_position(
         symbol=symbol,

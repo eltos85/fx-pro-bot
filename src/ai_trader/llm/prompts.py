@@ -33,20 +33,25 @@ v0.5 (2026-05-07, P0 collision audit): WHAT YOU SEE и MARKET CONTEXT
 - Trading rules упоминают новые сигналы как valid evidence для
     counter-trend и mean-reversion entries.
 
-v0.11 (2026-05-11, STOP-LOSS DISCIPLINE + PRE-DECISION CHECKLIST):
+v0.11 (2026-05-11, STOP-LOSS DISCIPLINE + REFERENCE SL BOUNDARIES):
 после разбора 3 крупных лоссов AVAX id=40, AVAX id=42, LTC id=44/45
 обнаружено что LLM ставит SL ~1x ATR(1H) — слишком тугой, выбивается
 обычным шумом. Добавлено:
 - блок STOP-LOSS DISCIPLINE с явным правилом >=1.5x ATR(1H);
 - pre-computed REFERENCE SL BOUNDARIES для каждого символа в context
-  (контекст печатает min/recommended SL distance в долларах);
-- обязательный PRE-DECISION CHECKLIST(open) перед JSON с конкретными
-  числами SL/ATR ratio, R:R, counter-trend?, confirmations list — чтобы
-  LLM проверял compliance явно и аудит был возможен пост-фактум;
-- CRITICAL CONSTRAINTS теперь упоминает оба правила (SL>=1.5xATR + checklist).
-В review-цикле SL для уже открытой позиции изменить нельзя, поэтому
-checklist там не вводится — но добавлена напоминалка про правило в
-шапке (только context-based, без нового invariant'а).
+  (контекст печатает min/recommended SL distance в долларах).
+
+v0.11.1 (2026-05-11, compliance внутри JSON, hotfix max_tokens cutoff):
+первоначальная v0.11 включала текстовый PRE-DECISION CHECKLIST блок ~10
+строк перед JSON. После деплоя 3 цикла подряд били `out=4096` → JSON
+обрезался / приходил пустой ответ (thinking-tokens + checklist съели
+буфер). Решение Вариант 2: чеклист вынесен ВНУТРЬ JSON как
+`compliance: {sl_atr_ratio, rr_net_fee, counter_trend, confirmations}`.
+- Output сокращается на ~300-400 токенов (нет дубля текст+JSON).
+- executor.parse_action валидирует структуру `compliance`.
+- executor._apply_open делает cross-check: заявленный
+  `sl_atr_ratio` vs фактический `|entry-SL|/ATR`; расхождение >10%
+  → лог `MODEL_MISREPORT` для аудита.
 
 v0.6 (2026-05-07, EXIT MANAGEMENT block): добавлен research-based
 блок EXIT MANAGEMENT с 4 триггерами early-close и явными DO-NOT-CLOSE
@@ -322,34 +327,32 @@ DO NOT CLOSE EARLY (HOLD the position) if:
 The ANALYSIS COMMENTARY for any close-action MUST cite which trigger
 (1/2/3/4) fired and which specific signal changed.
 
-PRE-DECISION CHECKLIST (MANDATORY for every "open" action — output BEFORE
-the JSON, EXACTLY in the format below; this is non-negotiable):
+COMPLIANCE (MANDATORY for every "open" action — emitted INSIDE the JSON):
 
-If your DECISION is "open", include these lines verbatim with your numbers:
+For any "open" action you MUST include a `compliance` sub-object in the
+JSON with FOUR fields verifying you respected the rules above:
 
-  CHECKLIST(open):
-  - symbol: <SYM>
-  - side: <Buy|Sell>
-  - 1H ATR: $<X.XX>             (from the REFERENCE SL BOUNDARIES block)
-  - SL distance: $<X.XX>        (= |entry - stop_loss|)
-  - SL/ATR ratio: <X.XX>        (REQUIRED >= 1.50; if <1.50 -> action=hold)
-  - 4H trend: <up|down|range>   (EMA20 vs EMA50 + 4H VWAP slope)
-  - Counter-trend?: <yes|no>    (yes = trade fights 4H trend)
-  - If counter-trend: STRONG contrarian sentiment cluster present?: <yes|no>
-    (F&G extreme OR retail HEAVY one-sided OR funding STRONG OR liq cascade)
-  - Confirmations (>=2, DIFFERENT classes): <list, e.g.
-        "trend (4H EMA), positioning (retail HEAVY long contrarian short)">
-  - R:R (raw): <X.XX>           (REQUIRED >= 1.5)
-  - R:R (net of 0.12%% round-trip fee): <X.XX>  (REQUIRED >= 1.8)
-  - Risk USD: $<X.XX>           (REQUIRED <= $%(risk_usd).0f)
+  "compliance": {
+    "sl_atr_ratio": <number>,        // |entry - SL| / ATR(1H); REQUIRED >= 1.5
+    "rr_net_fee": <number>,          // R:R after 0.12%% round-trip fee; REQUIRED >= 1.8
+    "counter_trend": <true|false>,   // true if trade fights 4H trend (EMA20<>EMA50 + VWAP)
+    "confirmations": [<string>, ...] // >=2 entries from DIFFERENT classes (trend, vol,
+                                     // sentiment, positioning, mean-revert). Counter-trend
+                                     // trades REQUIRE a STRONG contrarian sentiment item
+                                     // in the list (F&G extreme / retail HEAVY / funding
+                                     // STRONG / liq cascade).
+  }
 
-If ANY required check FAILS — your DECISION MUST be "hold". Do NOT lower
-thresholds, do NOT shrink SL, do NOT inflate confirmations, do NOT skip
-any line. The checklist replaces vague phrasing like "setup looks ok"
-with concrete numbers anyone can audit after the fact.
+If ANY required check FAILS (sl_atr_ratio < 1.5, rr_net_fee < 1.8,
+confirmations < 2, or counter-trend without STRONG contrarian) — your
+DECISION MUST be "hold". Do NOT lower thresholds, do NOT shrink SL,
+do NOT pad confirmations with same-class duplicates.
 
-For "close" or "hold" actions the checklist is OPTIONAL but the analysis
-commentary still applies (see ANALYSIS APPROACH 8 steps + EXIT MANAGEMENT).
+The executor automatically cross-checks `sl_atr_ratio` against the
+fact (|entry - SL| / ATR_from_REFERENCE_BOUNDARIES). A discrepancy
+> 10%% is logged as MODEL_MISREPORT and used for compliance audit.
+
+For "close" or "hold" actions the `compliance` field is NOT required.
 
 DECISION FORMAT:
 
@@ -368,6 +371,12 @@ For opening a new position:
   "position_size_usd": %(min_size)d-%(max_size).0f,
   "stop_loss": <number>,
   "take_profit": <number>,
+  "compliance": {
+    "sl_atr_ratio": <number>,
+    "rr_net_fee": <number>,
+    "counter_trend": <true|false>,
+    "confirmations": [<string>, <string>, ...]
+  },
   "reason": "<short rationale, max 200 chars>"
 }
 
@@ -395,8 +404,10 @@ CRITICAL CONSTRAINTS:
   per-symbol REQUIRED minimum dollar distance is printed in the
   "REFERENCE SL BOUNDARIES" block of the user message. If your SL is
   tighter than the printed REQUIRED min — return action="hold".
-- For "open": you MUST output the PRE-DECISION CHECKLIST block above the
-  JSON; otherwise the trade is treated as non-compliant.
+- For "open": the JSON MUST include a `compliance` sub-object with
+  `sl_atr_ratio`, `rr_net_fee`, `counter_trend`, `confirmations` (>=2
+  entries from DIFFERENT classes). Missing or malformed compliance →
+  parse error.
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or all conditions are unclear → return action="hold".
 - Risk = |entry - stop_loss| * qty MUST be <= $%(risk_usd).0f (%(risk_pct).0f%% of $%(capital).0f). If your
@@ -436,13 +447,12 @@ def build_user_prompt(market_context: str) -> str:
     return (
         "Current market state and your open positions:\n\n"
         f"{market_context}\n\n"
-        "Now produce the analysis commentary (3-8 lines) following the "
+        "Now produce a brief analysis commentary (3-6 lines) following the "
         "MACRO → TREND → VOLATILITY → SENTIMENT/POSITIONING → "
         "OPEN POSITIONS REVIEW → CONFIRMATIONS → R:R CHECK → DECISION "
         "structure (skip OPEN POSITIONS REVIEW if there are none). "
-        "If your decision is 'open', also output the mandatory "
-        "PRE-DECISION CHECKLIST(open) block with concrete numbers from the "
-        "REFERENCE SL BOUNDARIES section. Then output the single JSON object."
+        "Then output the single JSON object. If the decision is 'open', "
+        "the JSON MUST include the `compliance` sub-object."
     )
 
 

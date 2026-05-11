@@ -1,5 +1,87 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-11 — hotfix(prompt v0.11.1): compliance внутри JSON, fix max_tokens cutoff
+
+`<hash-pending>`
+
+**Симптом (после деплоя v0.11 в 04:32 UTC / 07:32 MSK):**
+3 цикла подряд `ERROR in LLM: empty response after 2 attempts
+(+1 no-thinking fallback)` в 07:53, 09:50, 11:34 MSK. Между ними часть
+циклов проходила с `out=4096` (ровно лимит) и `Parse error: no JSON
+object found in response`.
+
+**Корневая причина.** В v0.11 я добавил перед JSON большой текстовый
+блок `PRE-DECISION CHECKLIST(open)` ~10 строк со структурой полей
+(symbol/side/ATR/SL distance/ratio/trend/counter-trend?/confirmations/
+RR raw/RR net/risk). Это раздуло output модели на ~300-400 токенов.
+У DeepSeek-V4 thinking-токены + текст ответа делят общий буфер
+`max_tokens=4096`. После v0.11 reasoning-toкены + commentary + чеклист
++ JSON уже не помещались — модель упиралась в лимит и обрезала JSON
+(parse error) или вовсе ничего не выводила (empty response).
+
+**Решение (вариант 2 по обсуждению с пользователем):** чеклист вынесен
+ВНУТРЬ JSON как `compliance: {sl_atr_ratio, rr_net_fee, counter_trend,
+confirmations}`. Один и тот же набор данных теперь не дублируется
+текст+JSON, а живёт только в JSON. Output сокращается на ~300-400 ток.,
+форма стала строго машинной (можно валидировать кодом).
+
+**Что изменено:**
+
+1. `src/ai_trader/llm/prompts.py`:
+   - Удалён текстовый `PRE-DECISION CHECKLIST(open)` блок (~25 строк).
+   - Добавлен раздел `COMPLIANCE (MANDATORY for every "open")` — короткое
+     описание sub-object'а и требований к нему.
+   - JSON-схема `open` дополнена полем `compliance` с 4 sub-полями.
+   - `CRITICAL CONSTRAINTS` дополнен упоминанием обязательного
+     `compliance` в JSON (вместо упоминания текстового CHECKLIST'а).
+   - User-prompt: убрана инструкция "output PRE-DECISION CHECKLIST",
+     добавлена "JSON MUST include the `compliance` sub-object".
+   - История версий: добавлен блок про v0.11.1.
+
+2. `src/ai_trader/trading/executor.py`:
+   - `parse_action` для `action="open"` валидирует структуру
+     `compliance`: `sl_atr_ratio` (float>0), `rr_net_fee` (float>0),
+     `counter_trend` (bool), `confirmations` (list of >=2 non-empty
+     strings). Любое нарушение → parse error (ParsedAction не создан,
+     ордер не уйдёт).
+   - `_apply_open` делает **cross-check**: заявленный
+     `compliance.sl_atr_ratio` сравнивается с фактическим
+     `|entry-SL|/ATR(1H)`. Расхождение > 10% → `log.warning(
+     "MODEL_MISREPORT ...")`. Не блокирует трейд — это аудиторный
+     сигнал, нужен чтобы поймать "модель врёт о соблюдении правил".
+
+3. `tests/test_ai_trader.py`:
+   - В `TestParseAction` константа `_VALID_COMPLIANCE` для повторного
+     использования; обновлены `test_open_buy_valid`, `test_unknown_symbol`,
+     `test_open_negative_leverage` (контракт парсера изменился).
+   - Добавлены 4 новых: `test_open_missing_compliance`,
+     `test_open_compliance_bad_sl_ratio`,
+     `test_open_compliance_confirmations_too_few`,
+     `test_open_compliance_counter_trend_not_bool`.
+   - В `TestReviewModeParseAction.test_open_allowed_when_review_mode_false`
+     добавлено `_VALID_COMPLIANCE`.
+   - В `TestStopLossDisciplinePrompt`: переименован/переписан
+     `test_prompt_contains_pre_decision_checklist` →
+     `test_prompt_contains_compliance_in_open_schema` (проверяет
+     compliance в JSON-схеме, а не текстовый чеклист).
+   - В `test_critical_constraints_mention_min_sl_distance` ассерт на
+     `"compliance"` вместо `"PRE-DECISION CHECKLIST"`.
+
+**`max_tokens` оставлен 4096.** После того как чеклист ушёл в JSON,
+обычный output должен снова укладываться в 2500-3500 токенов с запасом.
+Если эти ошибки повторятся — поднимем до 8192, но сначала смотрим
+24-48 ч новой v0.11.1.
+
+**Тесты:** 559 (+4 новых compliance, +1 обновлён в review-mode,
+2 переписаны на новый контракт). Все зелёные.
+
+**Файлы:**
+- `src/ai_trader/llm/prompts.py` (–30 строк чеклиста, +20 строк compliance)
+- `src/ai_trader/trading/executor.py` (+30 строк compliance валидация + cross-check)
+- `tests/test_ai_trader.py` (+50 строк compliance тесты, обновления контракта)
+
+---
+
 ## 2026-05-11 — feat(prompt v0.11): STOP-LOSS DISCIPLINE + PRE-DECISION CHECKLIST + soft enforcement
 
 `<hash-pending>`
