@@ -41,6 +41,17 @@ v0.11 (2026-05-11, STOP-LOSS DISCIPLINE + REFERENCE SL BOUNDARIES):
 - pre-computed REFERENCE SL BOUNDARIES для каждого символа в context
   (контекст печатает min/recommended SL distance в долларах).
 
+v0.13.1 (2026-05-11, hotfix: rr_net_fee 1.8 → 1.5):
+В v0.11.1 при добавлении `compliance` блока в JSON-схему я ошибочно
+указал `rr_net_fee >= 1.8` (и в строке 400 — "FAILS если < 1.8").
+Это **противоречило** базовому правилу промпта `R:R >= 1.5` (Tharp
+2007 ch.11, Vince 2009 — индустриальный канон). LLM применял более
+строгое значение из compliance JSON, из-за чего блокировались сетапы
+с R:R 1.5..1.8 (типичные mean-reversion). Это было нарушение
+`strategy-guard.mdc` — изменение research-параметра без ссылки на
+источник. Хотfix: возвращаем 1.5 в JSON-схеме (синхрон с текстом).
+Никаких других изменений промпта.
+
 v0.12 (2026-05-11, REGIME FILTER + SL COOLDOWN):
 после ATOMUSDT id=48 (-$33.18 SL hit + cycle 19 immediate recidivism в
 тот же setup через 23 минуты) добавлены два hard-enforcement правила:
@@ -388,7 +399,7 @@ JSON with FOUR fields verifying you respected the rules above:
 
   "compliance": {
     "sl_atr_ratio": <number>,        // |entry - SL| / ATR(1H); REQUIRED >= 1.5
-    "rr_net_fee": <number>,          // R:R after 0.12%% round-trip fee; REQUIRED >= 1.8
+    "rr_net_fee": <number>,          // R:R after 0.12%% round-trip fee; REQUIRED >= 1.5
     "counter_trend": <true|false>,   // true if trade fights 4H trend (EMA20<>EMA50 + VWAP)
     "confirmations": [<string>, ...] // >=2 entries from DIFFERENT classes (trend, vol,
                                      // sentiment, positioning, mean-revert). Counter-trend
@@ -397,7 +408,7 @@ JSON with FOUR fields verifying you respected the rules above:
                                      // STRONG / liq cascade).
   }
 
-If ANY required check FAILS (sl_atr_ratio < 1.5, rr_net_fee < 1.8,
+If ANY required check FAILS (sl_atr_ratio < 1.5, rr_net_fee < 1.5,
 confirmations < 2, or counter-trend without STRONG contrarian) — your
 DECISION MUST be "hold". Do NOT lower thresholds, do NOT shrink SL,
 do NOT pad confirmations with same-class duplicates.

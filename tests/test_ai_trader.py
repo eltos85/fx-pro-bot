@@ -1296,6 +1296,26 @@ class TestStopLossDisciplinePrompt:
         # Должен быть COMPLIANCE-блок с правилами.
         assert "COMPLIANCE" in prompt
 
+    def test_prompt_rr_net_fee_threshold_is_1_5(self, monkeypatch):
+        """v0.13.1 regression-guard: rr_net_fee в JSON-схеме и в FAILS-блоке
+        ОБЯЗАН быть 1.5 (синхрон с базовым текстовым R:R >= 1.5).
+        Раньше в v0.11.1 я ошибочно поставил 1.8 без research-обоснования —
+        нарушение strategy-guard.mdc."""
+        from ai_trader.llm.prompts import build_system_prompt
+
+        prompt = build_system_prompt(self._make_settings(monkeypatch))
+        # В описании поля rr_net_fee — REQUIRED >= 1.5.
+        assert "rr_net_fee" in prompt
+        assert "REQUIRED >= 1.5" in prompt or "rr_net_fee>=1.5" in prompt or \
+               '"rr_net_fee": <number>,          // R:R after 0.12% round-trip fee; REQUIRED >= 1.5' in prompt
+        # В FAILS-условиях — rr_net_fee < 1.5 (не 1.8).
+        assert "rr_net_fee < 1.5" in prompt
+        assert "rr_net_fee < 1.8" not in prompt, (
+            "Регрессия: rr_net_fee порог снова поднят до 1.8 без research. "
+            "Базовое правило R:R >= 1.5 (Tharp 2007 ch.11); не менять без "
+            "обновления текстовой ссылки и обсуждения с пользователем."
+        )
+
     def test_critical_constraints_mention_min_sl_distance(self, monkeypatch):
         """v0.11.1: CRITICAL CONSTRAINTS должен упоминать 1.5xATR и compliance в JSON."""
         from ai_trader.llm.prompts import build_system_prompt
