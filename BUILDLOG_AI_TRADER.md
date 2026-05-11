@@ -1,5 +1,66 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-11 — rollback: HEAD → f3ce9795 (откат всех изменений 07–11 мая)
+
+**Запрос пользователя:** откатить все ai_trader-коммиты ПОСЛЕ `f3ce9795`
+(включая расширение пула 5→10 пар, индикаторы i1–i6, EXIT MANAGEMENT,
+conviction sizing, dual-timer, SL discipline, ADX regime filter,
+SL cooldown, closed-bars-only, price-drift guard).
+
+**Что показали данные (Bybit closed-pnl API + local DB):**
+
+| Период | n trades | WR (API) | Total PnL (API) | PF | Expectancy/tr |
+|---|---|---|---|---|---|
+| ДО b5c2c679 (05-04 → 05-07 07:58 UTC) | 12 | 58.3% | +$2.66 | 1.22 | +$0.39 |
+| ПОСЛЕ b5c2c679 (05-07 → 05-11 14:10 UTC) | 42 | 35.7% | −$120.63 | 0.70 | −$1.61 |
+
+Главные потери: AVAX (−$65), WLD (−$25), ATOM (−$20) — все из расширения
+пула в `6d51360`.
+
+**Sample-size warning (по правилу `sample-size.mdc`):**
+- n=12 ДО — слишком мало для статистической уверенности.
+- n=42 ПОСЛЕ < 100 (порог правила).
+- Fisher exact test разницы WR: p ≈ 0.20 — **не значимо**.
+- Однако −$120 (−24% capital) — финансовый факт, USER OVERRIDE правила.
+
+**Как сделан откат:**
+1. Backup всего предшествующего HEAD в ветке
+   `backup-pre-rollback-20260511-172246` (запушена на origin для
+   полной сохранности истории — все 28 ai_trader-коммитов и текст
+   BUILDLOG_AI_TRADER.md с детальным разбором каждой версии).
+2. `git reset --hard f3ce9795` (откат всех 32 коммитов после `f3ce9795`,
+   включая 28 ai_trader-фичей и 3 фикса других ботов).
+3. Cherry-pick 3 фикса по другим ботам обратно (правило
+   `strategy-guard.mdc` про изоляцию кодовых баз):
+   - `2856293` ← `5d73b13` fix(ctrader): exponential backoff
+   - `a203362` ← `1a1a75a` fix(bybit-bot): dedup closedPnl
+   - `fb0ffd1` ← `1699b29` fix(ctrader): proactive token-refresh
+4. Тесты: 101 passed (test_ai_trader + test_bybit_bot + test_ctrader).
+5. Force-push main с `--force-with-lease`.
+
+**Что вернулось в строй (старое поведение):**
+- 5 пар: BTC, ETH, BNB, XRP, DOGE
+- `max_positions=3`, `risk_per_trade=2%` ($10/trade при $500 capital)
+- `max_daily_loss=$50`, `max_total_loss=$200`
+- Базовые индикаторы 1H/4H: RSI, MACD, ATR, EMA, BB (без VWAP/RV/OI/funding/F&G/dom/L-S/L2/liquidations/DVOL)
+- Промпт без EXIT MANAGEMENT, без SL DISCIPLINE, без compliance-JSON
+- Цикл 15 мин (без review 5 мин)
+- Без ADX regime filter, без SL cooldown, без price-drift guard
+
+**Что НЕ откатывали (правило `strategy-guard.mdc`, изоляция):**
+- Фиксы advisor/cTrader (token-refresh, exponential backoff)
+- Фикс bybit_bot (dedup closedPnl)
+
+**Восстановление если понадобится:**
+```
+git checkout backup-pre-rollback-20260511-172246
+# или cherry-pick конкретных фичей из этой ветки
+```
+
+**Файлы:** `git reset --hard` + cherry-pick (см. выше).
+
+---
+
 ## 2026-05-07 — fix(reconcile): не помечать позицию closed при API failure биржи
 
 `75d85a7`
