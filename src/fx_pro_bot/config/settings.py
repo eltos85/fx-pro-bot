@@ -367,6 +367,12 @@ class Settings(BaseSettings):
     # [Van K. Tharp «Trade Your Way to Financial Freedom» (2007) ch.11].
     # При risk=0 → fallback на фиксированный lot_size (обратная совместимость).
     risk_per_trade_usd: float = Field(default=15.0, validation_alias="RISK_PER_TRADE_USD")
+    # Cap на ATR-scaled lot. Default 0.05 — safeguard после инцидента
+    # 23.04.2026 (SL-bug на commodities, -$128/час при MAX=0.20).
+    # Поднимать через env только когда (1) SL-bug вылечен, (2) ATR-sizing
+    # отработан в проде, (3) явное user-acceptance высокого риска.
+    # См. BUILDLOG.md 2026-05-11 «user-override: risk $50, MAX_LOT 0.50».
+    max_lot_size: float = Field(default=0.05, validation_alias="MAX_LOT_SIZE")
 
     fxpro_enabled: bool = Field(default=False, validation_alias="FXPRO_ENABLED")
     fxpro_client_id: str = Field(default="", validation_alias="FXPRO_CLIENT_ID")

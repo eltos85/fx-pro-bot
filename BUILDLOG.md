@@ -6,6 +6,66 @@
 
 ## 2026-05-11
 
+### feat(sizing): user-override RISK_PER_TRADE_USD=$50, MAX_LOT_SIZE=0.50
+
+`коммит при deploy`
+
+**Контекст.** На балансе $412.94 (демо cTrader) Gold-ORB торговал с
+дефолтным `RISK_PER_TRADE_USD=$15` (research-baseline Van K. Tharp, 1%
+от $1500). Фактический риск на сделку ≈$1 из-за `MAX_LOT_SIZE=0.05`
+cap, установленного 23.04.2026 после SL-bug инцидента (-$128/час при
+`MAX=0.20`). За 17 сделок 04–08.05 итог +$69.24 — корректно,
+но кратно меньше потенциала: тот же edge при правильном sizing'е дал
+бы ~$285 (4x).
+
+**User-override (demo-счёт, явное согласие на повышенный риск).**
+- `RISK_PER_TRADE_USD = 50.0` (~12% balance, в 12× выше Van K. Tharp baseline)
+- `MAX_LOT_SIZE = 0.50` (поднят с 0.05, через env)
+
+Пользователь явно подтвердил: «это демо счёт, я могу позволить риск».
+Записано как user-override против `sample-size.mdc` и
+`strategy-guard.mdc` baseline-параметров.
+
+**Risk acknowledgement.** При $50 риск:
+- 4 проигрыша подряд → −50% balance ($412 → $200)
+- 8 подряд → ноль
+- Стат: даже у стратегии WR 70% серия из 4 поражений случается
+ ~1 раз в 100 сделок
+
+Защищены killswitch-ами (на VPS): max_daily_loss=$999,
+max_loss_per_trade=$999, max_drawdown_pct=95%, max_positions=50.
+То есть на демо kill switch не блокирует — пользователь сам управляет
+размером риска через `RISK_PER_TRADE_USD`.
+
+**Что НЕ менялось.**
+- H5 liquidity-sweep filter остаётся **активным** (PF 2.98, 7/7 wins
+ на нашей выборке). Никакого «ослабления фильтра».
+- Параметры стратегии Gold-ORB (`H5_LOOKBACK_BARS=50`,
+ `H5_PRIOR_END_OFFSET=10`) frozen по `no-data-fitting.mdc`.
+- Логика `_resolve_lot_size()` / `calc_lot_size()` не изменена,
+ только параметризован `max_lot` через env.
+
+**Файлы:**
+- `src/fx_pro_bot/config/settings.py` (новый `Settings.max_lot_size`
+ с дефолтом 0.05 = safeguard)
+- `src/fx_pro_bot/app/main.py` (`_resolve_lot_size` принимает
+ `settings.max_lot_size`)
+- `.env` на VPS: `RISK_PER_TRADE_USD=50.0`, `MAX_LOT_SIZE=0.50`
+- `.env.example` (документация дефолтов)
+
+**Расчёт лота при новых параметрах (Gold-ORB на GC=F, SL обычно 10–20 pips):**
+| SL pips | lot (формула) | реальный lot (cap=0.50) | риск |
+|---|---|---|---|
+| 5 | 1.00 | 0.50 | $25 |
+| 10 | 0.50 | 0.50 | **$50** |
+| 15 | 0.33 | 0.33 | $50 |
+| 20 | 0.25 | 0.25 | $50 |
+
+Тесты: 464/464 pass (полный suite). Sizing-функция уже была покрыта,
+изменения чисто параметрические.
+
+---
+
 ### fix(ctrader-client): proactive token-refresh + smart-reset gating
 
 `коммит при deploy`

@@ -1058,6 +1058,9 @@ def _resolve_lot_size(instrument: str, sl_distance: float | None, settings: Sett
     """Подобрать лот: ATR-scaled если есть SL и risk>0, иначе settings.lot_size."""
     risk = getattr(settings, "risk_per_trade_usd", 0.0) or 0.0
     if risk > 0 and sl_distance and sl_distance > 0:
+        max_lot = getattr(settings, "max_lot_size", None)
+        if max_lot is not None:
+            return calc_lot_size(instrument, sl_distance, risk, max_lot=max_lot)
         return calc_lot_size(instrument, sl_distance, risk)
     return settings.lot_size
 
