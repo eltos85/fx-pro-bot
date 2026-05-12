@@ -199,14 +199,14 @@ services:
       AI_FX_TRADER_POLL_INTERVAL_SEC: ${AI_FX_TRADER_POLL_INTERVAL_SEC:-900}
       AI_FX_TRADER_REVIEW_INTERVAL_SEC: ${AI_FX_TRADER_REVIEW_INTERVAL_SEC:-300}
       AI_FX_TRADER_VIRTUAL_CAPITAL: ${AI_FX_TRADER_VIRTUAL_CAPITAL:-500}
-      # KillSwitch: $25 risk × 6 убыточных = $150 daily. Total $300 = halt.
+      # KillSwitch v1.0 (broker-safety only): R:R/risk/correlation сняты —
+      # LLM решает сам как discretionary trader. Остались catastrophic
+      # loss caps + broker margin safety.
       AI_FX_TRADER_MAX_DAILY_LOSS: ${AI_FX_TRADER_MAX_DAILY_LOSS:-150}
       AI_FX_TRADER_MAX_TOTAL_LOSS: ${AI_FX_TRADER_MAX_TOTAL_LOSS:-300}
       AI_FX_TRADER_MAX_POSITIONS: ${AI_FX_TRADER_MAX_POSITIONS:-3}
-      AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL: ${AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL:-2}
-      AI_FX_TRADER_RISK_PER_TRADE_USD: ${AI_FX_TRADER_RISK_PER_TRADE_USD:-25}
+      AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL: ${AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL:-3}
       AI_FX_TRADER_MAX_LOT_SIZE: ${AI_FX_TRADER_MAX_LOT_SIZE:-0.50}
-      AI_FX_TRADER_CORRELATION_HAIRCUT: ${AI_FX_TRADER_CORRELATION_HAIRCUT:-0.7}
       # cTrader OAuth — те же creds что у Advisor (один demo-аккаунт).
       # Token-store шарится через /data/ctrader_tokens.json. Concurrent refresh
       # защищён через fcntl.flock (см. fx_ai_trader/trading/token_lock.py;
