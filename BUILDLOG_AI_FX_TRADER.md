@@ -1,5 +1,116 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-12 — Phase 1 deploy + fix LLM max_tokens 4096→8000
+
+`коммит при deploy`
+
+**Контекст.** После коммита `871e67c` (MVP scaffold) — selective rebuild
+fx-ai-trader на VPS. Контейнер изначально упал в restart-loop:
+
+```
+RuntimeError: cTrader refresh error: Access denied
+```
+
+**Причина (НЕ наш код).** Shared `/data/ctrader_tokens.json` содержал
+`refresh_token`, который Spotware уже признал недействительным (cTrader
+OAuth2: refresh_token rotation = single-use grant, RFC 6749 §6).
+Последний успешный refresh-callback Advisor'а датируется ≈9 апреля
+(вычислено по `expires_at = 1778349598` минус 30-дневное окно). С тех пор
+файл не обновлялся, а в `client.py` proactive-refresh (`fb0ffd1`,
+11.05.2026) использует тот же spent token.
+
+На момент моей диагностики Advisor сам тоже шёл с `cTrader: торговля
+отключена` (видно в его свежих логах) — то есть проблема общая, не у
+fx-ai-trader специфическая.
+
+**Решение.** Полный re-auth через `fx-pro-auth`-flow:
+1. Сгенерировал auth URL, пользователь авторизовался в браузере
+   ([id.ctrader.com](https://id.ctrader.com/my/settings/openapi/grantingaccess/)).
+2. На VPS внутри образа `fx-pro-bot:local` (`docker run --rm
+   --env-file .env`) сделал `exchange_code_for_tokens(...)` →
+   `TokenStore.save(...)`. Новый `expires_at = 1781200153` (≈11 июня).
+3. `docker compose restart advisor` + `docker compose up -d --no-deps
+   fx-ai-trader` → оба контейнера подхватили свежие токены из
+   `/data/ctrader_tokens.json` через свои `TokenStore.load()` / наш
+   `ensure_valid_token_race_safe()`.
+
+После рестарта:
+- Advisor: `cTrader: аккаунт 46883073 авторизован, готов к торговле`.
+- fx-ai-trader: `SymbolCache 252`, `XAUUSD → XAUUSD (id=41)`,
+  `BZ=F → BRENT (id=1117)`, `Full cycle 1`, RSS 40 items (8–9 после
+  gold+oil фильтра), DeepSeek 200 OK, цена цикла $0.00174.
+
+**Урок и follow-up для будущего.** Когда оба бота держат `ctrader_tokens.json`
+в общем volume — потеря синхронизации возможна (Advisor рефрешит in-memory,
+но если callback `_on_token_refreshed → token_store.save` падает между
+вызовом OAuth-endpoint и `json.dump` — token-store остаётся со spent refresh).
+Наш `token_lock.py` решает concurrent refresh между процессами, но не
+решает «callback failed mid-write». Phase 2: либо отдельный
+`/data/ctrader_tokens_ai_fx.json` (полная изоляция OAuth у каждого бота),
+либо health-check «is refresh-token still valid» в Advisor с alert через
+RSS/Telegram. Сейчас зафиксировано как known-risk, без code-fix.
+
+---
+
+### fix(fx_ai_trader): LLM max_tokens 4096 → 8000 (JSON режется)
+
+`коммит при deploy`
+
+**Симптом.** После успешного старта в `07:50–08:08 UTC` 12.05 контейнер
+работал, но 2 full-cycle подряд:
+
+```
+LLM tokens: in=4247 out=4096    ← упёрся в max_tokens
+LLM response: ## Analysis Commentary 1. TREND: XAUUSD 4H EMA20 (4699)...
+Parse error: no JSON object with 'action' found
+Parse error: JSON parse error: not a decision dict (missing 'action'): dict
+```
+
+LLM выдавал полный analysis commentary (TREND / VOLATILITY / MACRO /
+SENTIMENT для двух символов) и **обрезался по `max_tokens=4096`** до того
+как добирался до финального JSON-блока. В результате `parse_action` не
+находил decision-объект → `apply_action` не вызывался → бот не торговал.
+
+**Причина (тех-параметр, не торговая логика).** Анти-Anthropic-compat
+endpoint DeepSeek-V4 включает thinking-блок (внутренний reasoning) поверх
+max_tokens. На bybit-варианте `ai_trader` 4096 достаточно (1 символ,
+без EIA блока). У `fx_ai_trader` промпт ×2 длиннее:
+- 2 символа × (current/1H × 24 / 4H × 30 / индикаторы)
+- macro-block (DXY + EIA для oil)
+- multi-dim sentiment блок per news × 5 items
+- двойной EXIT MANAGEMENT блок (full vs review)
+
+Соответственно ответ тоже ×2 длиннее. 4096 = thinking + commentary, на
+JSON ничего не остаётся.
+
+**Решение.** В `AiFxTraderSettings.deepseek_max_tokens` дефолт
+`4096 → 8000`. Anthropic-compat API DeepSeek поддерживает до 8192
+(см. [api-docs.deepseek.com/guides/anthropic_api](https://api-docs.deepseek.com/guides/anthropic_api)).
+Стоимость full-cycle растёт с $0.00174 до ~$0.0028 (+60%) — для
+paper-mode наблюдения за ~14 дней при 96 циклах/сутки = $3.9/мес вместо
+$2.4, незначимо.
+
+**Без изменений.** Промпт `SYSTEM_PROMPT` НЕ редактируется (он заморожен
+правилом `no-data-fitting.mdc` на ≥14 дней paper-observation). Только
+бюджет на output. KillSwitch, multi-dim sentiment, R:R 1.5 gate, paper
+reconcile — без изменений.
+
+**Compliance.** Не нарушает `strategy-guard.mdc` (тех-параметр клиента
+LLM, не торговый порог), `no-data-fitting.mdc` (выход режется по
+объективной причине: `out=4096` в логе, не подгонка под результаты
+бэктеста), `sample-size.mdc` (не connection между сделками, n=0 на
+момент фикса).
+
+**Файлы:**
+- `src/fx_ai_trader/config/settings.py` (default 4096 → 8000 + комментарий)
+- `.env.example` (раздел AI_FX_TRADER, новый default)
+- `BUILDLOG_AI_FX_TRADER.md` (эта запись)
+
+**Тесты.** 34/34 fx-ai-trader pass; полный suite 513/513 pass (max_tokens
+не влияет ни на parser, ни на бизнес-логику).
+
+---
+
 ## 2026-05-12 — Phase 1 MVP scaffold (paper-mode)
 
 **Запрос пользователя:** «создать AI-агента для FX (gold + oil), аналог

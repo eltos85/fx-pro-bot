@@ -43,8 +43,15 @@ class AiFxTraderSettings(BaseSettings):
         default="deepseek-v4-flash",
         validation_alias="AI_FX_TRADER_DEEPSEEK_MODEL",
     )
+    # max_tokens=8000: full-cycle output = thinking-блок (DeepSeek-V4
+    # внутренний reasoning) + commentary (4–8 строк) + JSON c multi-dim
+    # sentiment блоком (~300–600 токенов). С 4096 наблюдался ``out=4096``
+    # и оборванный JSON («no JSON object with 'action' found»). 8K даёт
+    # запас в ~×2 без заметного удара по стоимости (~$0.0028/full cycle
+    # по DeepSeek-V4 pricing). Anthropic-compat API DeepSeek поддерживает
+    # max_tokens до 8192 (см. api-docs.deepseek.com Anthropic guide).
     deepseek_max_tokens: int = Field(
-        default=4096, validation_alias="AI_FX_TRADER_DEEPSEEK_MAX_TOKENS"
+        default=8000, validation_alias="AI_FX_TRADER_DEEPSEEK_MAX_TOKENS"
     )
     deepseek_thinking_enabled: bool = Field(
         default=True, validation_alias="AI_FX_TRADER_DEEPSEEK_THINKING"
