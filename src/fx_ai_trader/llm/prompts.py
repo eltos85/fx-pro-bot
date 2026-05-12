@@ -1,5 +1,19 @@
 """Промпты для FX AI Trader — gold (XAUUSD spot) + oil (BZ=F → BRENT).
 
+Версии:
+- ``v0.1`` (12.05.2026 утром, MVP): базовый SYSTEM_PROMPT.
+- ``v0.2`` (12.05.2026 после-обеда, **bug-fix LLM pip-confusion**): после
+  13 decisions с 0 executed обнаружено что LLM путает определение pip
+  для XAUUSD/BRENT spot CFD (использует 0.0001 как для major FX вместо
+  0.01). Добавлены: блок «PIP CALCULATION — CRITICAL» с конкретными
+  numerical примерами под рабочие диапазоны 4690/100; HARD CEILING на
+  SL distance (100 pips XAUUSD / 80 pips BRENT) с инструкцией HOLD;
+  MANDATORY SANITY-CHECK перед открытием. Стратегические пороги
+  (R:R 1.5, risk $25, max_lot 0.5, sentiment 0.7) НЕ менялись.
+  Считается **bug-fix LLM-понимания**, не curve-fitting (аналог
+  Advisor `MIN_BARS=5→50` инцидента). Эксперимент НЕ перезапущен,
+  14-day-counter продолжает идти.
+
 Дизайн:
 - ``SYSTEM_PROMPT`` — фиксированные правила для full-cycle (15 мин): role,
   ограничения, multi-dim sentiment блок (research arxiv 2603.11408
@@ -10,8 +24,9 @@
   multi-dim sentiment для каждой news.
 
 Промпты ЗАМОРОЖЕНЫ на Phase 1 paper-observation period (≥14 дней).
-Любая правка → перезапуск эксперимента с n=0 (правило
-``no-data-fitting.mdc``).
+Любая правка стратегических порогов → перезапуск эксперимента с n=0
+(правило ``no-data-fitting.mdc``). Bug-fix LLM-понимания (v0.2)
+эквивалентен fix'у бага в коде стратегии — счётчик не сбрасывается.
 
 Research basis (2026):
 - arxiv 2603.11408 «Beyond Polarity: Multi-Dimensional LLM Sentiment
@@ -224,6 +239,52 @@ Schema for doing nothing:
   "sentiment": { "aggregate_uncertainty": <0..1>, "items": [...] }
 }
 
+PIP CALCULATION — CRITICAL (most common LLM mistake source):
+
+The pip unit for XAUUSD and BRENT is DIFFERENT from EUR/USD. Do NOT
+copy habits from majors.
+
+For XAUUSD (spot gold) at typical price 2400–4800:
+- 1 pip = 0.01 USD per ounce. NOT 0.0001 (that's for EUR/USD majors).
+- SL distance in pips = |entry - SL| / 0.01.
+- Example A: price=4690, SL=4685 → distance = 5 USD = 500 pips? NO.
+  CORRECT: distance = 5 / 0.01 = 500 pips. Risk @ 0.5 lots = $250. TOO BIG.
+- Example B: price=4690, SL=4689.70 → distance = 0.30 USD = 30 pips.
+  Risk @ 0.5 lots = $15. OK (under $25 limit).
+- Typical M15–H1 XAUUSD SL distance: 20–60 pips (= 0.20–0.60 in price).
+- HARD CEILING: if your computed SL distance > 100 pips on XAUUSD
+  (= > 1.00 in price) — you almost certainly miscount. Return "hold"
+  and recompute next cycle.
+
+For BRENT (oil) at typical price 60–110:
+- 1 pip = 0.01 USD per barrel. Same formula as XAUUSD.
+- Typical M15–H1 BRENT SL distance: 10–40 pips (= 0.10–0.40 in price).
+- HARD CEILING: SL distance > 80 pips on BRENT — almost certainly wrong.
+
+Risk formula (memorise):
+  risk_usd = SL_distance_pips × $1 × volume_lots
+  Limit: risk_usd ≤ $25.
+  → SL_distance_pips × volume_lots ≤ 25.
+  Examples valid under limit:
+    – 0.50 lots × 50 pips = $25 (boundary)
+    – 0.20 lots × 30 pips = $6 (typical safe)
+    – 0.10 lots × 80 pips = $8 (wider SL, smaller size)
+  Examples REJECTED (you've tried these and they failed):
+    – 0.50 lots × 1050 pips = $525 ← SL way too wide, miscount
+    – 0.40 lots × 5228 pips = $2091 ← SL beyond 50 USD price move
+
+MANDATORY SANITY-CHECK before producing the JSON "open" decision:
+1. Compute SL distance in pips = round(|entry - SL| / 0.01).
+   If > 100 (XAUUSD) or > 80 (BRENT) — return "hold", don't open.
+2. Verify direction: BUY needs SL < price < TP.
+   SELL needs SL > price > TP.
+   Print these inequalities explicitly in commentary before JSON.
+3. Compute R:R = TP_distance_pips / SL_distance_pips.
+   If < 1.5 — return "hold".
+4. Compute risk_usd = SL_distance_pips × volume_lots.
+   If > 25 — REDUCE volume_lots (don't widen SL) and recompute.
+   If volume_lots would drop below 0.01 (broker min) — return "hold".
+
 CRITICAL CONSTRAINTS:
 - Only ONE action per response. If multiple opportunities exist, pick best.
 - For "open": stop_loss / take_profit MUST be in the correct direction:
@@ -234,11 +295,8 @@ CRITICAL CONSTRAINTS:
   will reject open anyway, save tokens).
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or conditions are unclear → return action="hold".
-- Risk = |entry - stop_loss| × pip_value × volume_lots MUST be ≤ $25
-  (with pip_value ~$1 per pip per std lot for XAUUSD/BRENT this means
-  SL distance in pips × lots × 1 ≤ 25; e.g. 10 lots × 2.5 pip SL = $25).
-  If your desired SL distance forces lots so small that broker rejects,
-  HOLD instead — don't widen SL to meet min order size.
+- HOLD is the safe default. A rejected entry costs 0; a wrong entry
+  costs up to $25. 0 trades for a day is fine. Never force a trade.
 
 Remember: this is paper-mode Phase 1 (≥14 days observation) with $500
 virtual capital. Bad trades compound; HOLD is always safe.

@@ -1,5 +1,92 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-12 — prompt v0.2 bug-fix: LLM pip-confusion для XAUUSD/BRENT
+
+`коммит при deploy`
+
+**Симптом.** За 3 часа paper-mode (07:51 → 10:56 UTC, 13 decisions) — **0
+executed**, 11 errors. Распределение:
+
+| Ошибка | Кол-во | Что произошло |
+|---|---|---|
+| `risk_usd > $25` | 4 | LLM ставит SL distance 1050–5228 pips (50× больше разумного) |
+| `R:R < 1.5` | 3 | LLM думает R:R=1.11–1.37 приемлемо |
+| `parse_error` | 3 | id 1+2 до max_tokens-fix (4096), id 7 после (рецидив на 8000) |
+| `SL direction` | 1 | BUY с SL=4690 выше price=4686.54 |
+| `hold` | 2 | LLM сам пропустил — корректно |
+
+Все 8 попыток открыться — **BUY XAUUSD**. Ни одной SELL, ни одного
+BRENT. Все 8 — заблокированы executor'ом.
+
+**Причина (root cause).** LLM путает **определение pip** для XAUUSD/BRENT
+spot CFD:
+
+- XAUUSD pip = **0.01 USD/oz** (corrected) — НЕ 0.0001 как для EUR/USD.
+- BRENT pip = **0.01 USD/barrel** — то же самое.
+
+При цене XAUUSD ~4690, LLM-генерируемые SL ~4670 → реальная distance в
+*price* = $20, в *pips* = 2000. LLM, видимо, calculcates distance в
+pips как `int(distance × 10000)` (привычка из EUR/USD), получая 2-3
+порядка отклонения. В коде `executor.py:_pip_size_for("XAUUSD")=0.01`
+правильный — executor рассчитывает risk_usd корректно (2000 pips ×
+0.5 lots × $1/pip = $1000). KillSwitch блокирует. Не баг кода — баг
+LLM understanding.
+
+**Решение (prompt v0.2).** Целевая правка `SYSTEM_PROMPT` без изменения
+стратегических порогов:
+
+1. **Новый блок «PIP CALCULATION — CRITICAL»** перед DECISION FORMAT:
+   - Явное «pip = 0.01 USD per ounce/barrel, NOT 0.0001»;
+   - Два numerical примера (правильный + неправильный) для XAUUSD;
+   - HARD CEILING: SL distance > 100 pips XAUUSD / > 80 pips BRENT —
+     return "hold" не задумываясь;
+   - Memorise-formula `risk_usd = SL_pips × $1 × lots`, ≤ 25;
+   - 3 примера допустимых (0.5×50, 0.2×30, 0.1×80) + 2 ранее
+     отвергнутых для контраста (cargo cult anti-pattern).
+
+2. **MANDATORY SANITY-CHECK** перед JSON: 4 шага explicit compute
+   (SL_distance_pips, direction inequalities, R:R, risk_usd) — LLM
+   должен напечатать их в commentary до DECISION, иначе hold.
+
+3. **Усилен HOLD-default**: «A rejected entry costs 0; a wrong entry
+   costs up to $25. 0 trades for a day is fine. Never force a trade.»
+
+**Что НЕ менялось (стратегические пороги под защитой `strategy-guard.mdc`):**
+
+- `R:R ≥ 1.5` (BBX Research «Classic 1-2-3 Scaling»).
+- `risk_per_trade_usd = $25` (1% от $500 виртуального капитала).
+- `aggregate_uncertainty > 0.7` → hold (arxiv 2603.11408 sentiment gate).
+- `max_lot_size = 0.50`.
+- `MAX_POSITIONS_PER_SYMBOL = 2`, `MAX_OPEN_POSITIONS = 3`.
+- `CORRELATION_HAIRCUT = 0.7` (finaur 2026 «correlations spike»).
+- Multi-dim sentiment структура (5 dimensions per news).
+- EXIT MANAGEMENT 4 trigger'а.
+
+**Compliance с правилами репо:**
+
+| Правило | Статус | Обоснование |
+|---|---|---|
+| `no-data-fitting.mdc` | OK | Это bug-fix LLM-понимания (pip definition), не curve-fitting под результаты бэктеста. Аналог Advisor `MIN_BARS=5→50` от 28.04 — clarification existing semantics, не optimization. |
+| `strategy-guard.mdc` | OK | Stratagic thresholds (R:R, risk, sentiment-gate, lot caps) не тронуты. Меняется только **clarification** definition'а pip и **explicit sanity-check** перед entry — это user-prompt engineering, не торговая логика. |
+| `sample-size.mdc` | OK | На момент правки n=0 executed trades. Решение не основано на P&L stats, а на 100% parse/validation error rate (8/8 attempts rejected на 1-уровневой semantic ошибке). |
+
+**Эксперимент НЕ перезапущен.** 14-day counter продолжает идти от
+исходного MVP deploy (12.05.2026). Если за 24-48 часов после prompt v0.2
+LLM продолжит давать 100% rejection rate — это уже системная проблема
+с LLM (или с симбиозом промпт+модель), потребуется другой подход
+(например, переход на pure pip-based JSON schema без price-units, или
+явная конвенция в executor'е принимать SL/TP в USD distance).
+
+**Тесты.** 34/34 fx-ai-trader pass; полный suite не запускался —
+изменение в одном файле prompts.py (string constant), не затрагивает
+executor / killswitch / parser. Логику парсера НЕ меняли.
+
+**Файлы:**
+- `src/fx_ai_trader/llm/prompts.py` (новый раздел + sanity-check + docstring v0.2)
+- `BUILDLOG_AI_FX_TRADER.md` (эта запись)
+
+---
+
 ## 2026-05-12 — token rotation hardening (изоляция OAuth-токенов)
 
 `коммит при deploy`
