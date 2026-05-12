@@ -173,6 +173,70 @@ services:
     volumes:
       - ai_trader_data:/data
 
+  fx-ai-trader:
+    build:
+      context: .
+      dockerfile: Dockerfile.fx-ai-trader
+    image: fx-ai-trader:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      AI_FX_TRADER_DATA_DIR: /data
+      AI_FX_TRADER_LOG_LEVEL: ${AI_FX_TRADER_LOG_LEVEL:-INFO}
+      # Phase 1: paper-mode минимум 14 дней. Trading_enabled=false по умолчанию
+      # (research: NexusTrade 2026 «30–90 days paper before live»; Kiploks
+      # «weeks not hours»). Включать LIVE только после подтверждённой
+      # стабильности парсера, sentiment-uncertainty calibration и ≥30 paper-trades.
+      AI_FX_TRADER_TRADING_ENABLED: ${AI_FX_TRADER_TRADING_ENABLED:-false}
+      AI_FX_TRADER_SYMBOLS: ${AI_FX_TRADER_SYMBOLS:-XAUUSD,BZ=F}
+      AI_FX_TRADER_ORDER_LABEL: ${AI_FX_TRADER_ORDER_LABEL:-ai-fx-trader}
+      AI_FX_TRADER_POLL_INTERVAL_SEC: ${AI_FX_TRADER_POLL_INTERVAL_SEC:-900}
+      AI_FX_TRADER_REVIEW_INTERVAL_SEC: ${AI_FX_TRADER_REVIEW_INTERVAL_SEC:-300}
+      AI_FX_TRADER_VIRTUAL_CAPITAL: ${AI_FX_TRADER_VIRTUAL_CAPITAL:-500}
+      # KillSwitch: $25 risk × 6 убыточных = $150 daily. Total $300 = halt.
+      AI_FX_TRADER_MAX_DAILY_LOSS: ${AI_FX_TRADER_MAX_DAILY_LOSS:-150}
+      AI_FX_TRADER_MAX_TOTAL_LOSS: ${AI_FX_TRADER_MAX_TOTAL_LOSS:-300}
+      AI_FX_TRADER_MAX_POSITIONS: ${AI_FX_TRADER_MAX_POSITIONS:-3}
+      AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL: ${AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL:-2}
+      AI_FX_TRADER_RISK_PER_TRADE_USD: ${AI_FX_TRADER_RISK_PER_TRADE_USD:-25}
+      AI_FX_TRADER_MAX_LOT_SIZE: ${AI_FX_TRADER_MAX_LOT_SIZE:-0.50}
+      AI_FX_TRADER_CORRELATION_HAIRCUT: ${AI_FX_TRADER_CORRELATION_HAIRCUT:-0.7}
+      # cTrader OAuth — те же creds что у Advisor (один demo-аккаунт).
+      # Token-store шарится через /data/ctrader_tokens.json. Concurrent refresh
+      # защищён через fcntl.flock (см. fx_ai_trader/trading/token_lock.py;
+      # research: Coder PR #22904, Nango OAuth-refresh, codex #10332).
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
+      CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
+      AI_FX_TRADER_CTRADER_TOKEN_PATH: ${AI_FX_TRADER_CTRADER_TOKEN_PATH:-/data/ctrader_tokens.json}
+      # DeepSeek-V4 (тот же ключ что у ai_trader — это аккаунт-level rate-limit).
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      AI_FX_TRADER_DEEPSEEK_MODEL: ${AI_FX_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}
+      AI_FX_TRADER_DEEPSEEK_BASE_URL: ${AI_FX_TRADER_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
+      AI_FX_TRADER_DEEPSEEK_THINKING: ${AI_FX_TRADER_DEEPSEEK_THINKING:-true}
+      AI_FX_TRADER_DEEPSEEK_MAX_TOKENS: ${AI_FX_TRADER_DEEPSEEK_MAX_TOKENS:-4096}
+      # News: RSS (ForexLive/Investing/OilPrice/Kitco) + EIA Open Data API.
+      # EIA API key опционален: пустой ключ → EIA-блок отключён, RSS остаётся.
+      AI_FX_TRADER_NEWS_ENABLED: ${AI_FX_TRADER_NEWS_ENABLED:-true}
+      AI_FX_TRADER_NEWS_MAX_AGE_HOURS: ${AI_FX_TRADER_NEWS_MAX_AGE_HOURS:-12}
+      AI_FX_TRADER_NEWS_MAX_ITEMS_PER_SYMBOL: ${AI_FX_TRADER_NEWS_MAX_ITEMS_PER_SYMBOL:-5}
+      AI_FX_TRADER_EIA_API_KEY: ${AI_FX_TRADER_EIA_API_KEY:-}
+      AI_FX_TRADER_EIA_CACHE_TTL_SEC: ${AI_FX_TRADER_EIA_CACHE_TTL_SEC:-21600}
+    volumes:
+      # Шарим тот же data-volume, что и Advisor — для общего
+      # /data/ctrader_tokens.json. fcntl.flock работает на bind-mount
+      # внутри одного хоста (Docker volumes на Linux = ext4, advisory lock
+      # поддерживается). Своя БД fx_ai_trader.sqlite живёт здесь же —
+      # не пересекается с stats.sqlite Advisor'а (разные filename).
+      - ./data:/data
+
 volumes:
   bybit_data:
   ai_trader_data:
