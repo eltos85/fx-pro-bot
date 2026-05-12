@@ -1088,21 +1088,196 @@ class TestPeakPnlRStats:
 
 
 class TestPeakDrawdownTriggerInPrompts:
-    """Промпты должны явно содержать описание триггера PEAK-DRAWDOWN."""
+    """Промпты должны явно содержать описание триггера PEAK-DRAWDOWN.
 
-    def test_full_system_prompt_has_trigger_5(self):
+    v0.12: после bug-fix prompts clean-up PEAK-DRAWDOWN стал trigger 4
+    (был 5), MACRO REGIME SHIFT (F&G) удалён целиком — F&G отсутствует
+    в контексте.
+    """
+
+    def test_full_system_prompt_has_peak_drawdown(self):
         from ai_trader.llm.prompts import SYSTEM_PROMPT
         assert "PEAK-DRAWDOWN" in SYSTEM_PROMPT
         assert "peak_pnl_r" in SYSTEM_PROMPT
         assert "current_pnl_r" in SYSTEM_PROMPT
         assert "0.8R" in SYSTEM_PROMPT
         assert "0.45R" in SYSTEM_PROMPT
-        # ANALYSIS COMMENTARY должен ссылаться на 5 триггеров (1/2/3/4/5)
-        assert "1/2/3/4/5" in SYSTEM_PROMPT
+        assert "1/2/3/4" in SYSTEM_PROMPT
 
-    def test_review_system_prompt_has_trigger_4(self):
+    def test_review_system_prompt_has_peak_drawdown(self):
         from ai_trader.llm.prompts import SYSTEM_PROMPT_REVIEW
         assert "PEAK-DRAWDOWN" in SYSTEM_PROMPT_REVIEW
         assert "peak_pnl_r" in SYSTEM_PROMPT_REVIEW
         assert "0.8R" in SYSTEM_PROMPT_REVIEW
         assert "0.45R" in SYSTEM_PROMPT_REVIEW
+
+
+class TestDropIncompleteBar:
+    """v0.12 bug-fix: `_drop_incomplete_bar` отбрасывает партиальный 1H/4H бар
+    перед compute_snapshot. Bybit get_klines возвращает все бары включая
+    текущий незакрытый — caнonical RSI/MACD/BB определены на closed candles.
+    """
+
+    def _bar(self, ts_ms: int, close: float = 100.0):
+        from ai_trader.trading.client import Bar
+        return Bar(ts=ts_ms, open=close, high=close, low=close, close=close, volume=1.0)
+
+    def test_empty_list_returns_empty(self):
+        from ai_trader.trading.context import _drop_incomplete_bar
+        assert _drop_incomplete_bar([], 60) == []
+
+    def test_last_bar_in_future_window_is_dropped(self):
+        """Бар начался в текущем интервале и ещё не закрыт → отбрасываем."""
+        from ai_trader.trading.context import _drop_incomplete_bar
+        import time
+        now_ms = int(time.time() * 1000)
+        # Бар начался 30 минут назад, interval=60 → закроется через 30 минут
+        partial = self._bar(now_ms - 30 * 60 * 1000)
+        closed = self._bar(now_ms - 90 * 60 * 1000)
+        out = _drop_incomplete_bar([closed, partial], 60)
+        assert out == [closed]
+
+    def test_last_bar_already_closed_is_kept(self):
+        """Бар начался >interval назад → уже закрыт, оставляем."""
+        from ai_trader.trading.context import _drop_incomplete_bar
+        import time
+        now_ms = int(time.time() * 1000)
+        # Бар начался 70 минут назад, interval=60 → закрылся 10 минут назад
+        closed = self._bar(now_ms - 70 * 60 * 1000)
+        out = _drop_incomplete_bar([closed], 60)
+        assert out == [closed]
+
+    def test_4h_interval_partial_bar_dropped(self):
+        """Аналогично для 4H (interval=240) баров."""
+        from ai_trader.trading.context import _drop_incomplete_bar
+        import time
+        now_ms = int(time.time() * 1000)
+        # Бар начался 2 часа назад, 4H бар → ещё 2 часа до закрытия
+        partial = self._bar(now_ms - 120 * 60 * 1000)
+        out = _drop_incomplete_bar([partial], 240)
+        assert out == []
+
+    def test_only_last_bar_checked(self):
+        """Промежуточные бары всегда закрыты — мы не их трогаем, только tail."""
+        from ai_trader.trading.context import _drop_incomplete_bar
+        import time
+        now_ms = int(time.time() * 1000)
+        bars = [
+            self._bar(now_ms - (k + 1) * 60 * 60 * 1000)
+            for k in reversed(range(3))
+        ]
+        # Добавляем partial в конец
+        partial = self._bar(now_ms - 5 * 60 * 1000)
+        bars.append(partial)
+        out = _drop_incomplete_bar(bars, 60)
+        assert len(out) == 3
+        assert out[-1].ts == bars[-2].ts
+
+
+class TestPromptsCleanupNoMissingSignals:
+    """v0.12 bug-fix: в промптах НЕ должно остаться упоминаний сигналов,
+    которые отсутствуют в v0.3-контексте (VWAP / F&G / L-S / OI / liquidation /
+    DVOL). Раньше LLM получал инструкции использовать эти данные и
+    галлюцинировал значения.
+    """
+
+    FORBIDDEN_FRAGMENTS = (
+        "VWAP", "vwap",
+        "Fear & Greed", "F&G",
+        "DVOL",
+        "liquidation cascade", "Liquidation cascade",
+        "OI extreme",
+        "OI delta",
+        "retail L/S",
+        "Long/Short ratio",
+        "buy_ratio",
+        "RV ",  # realized volatility
+    )
+
+    def test_full_system_prompt_no_missing_signals(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        for frag in self.FORBIDDEN_FRAGMENTS:
+            assert frag not in SYSTEM_PROMPT, (
+                f"SYSTEM_PROMPT still mentions {frag!r}, but this data is not "
+                "in v0.3 context — LLM may hallucinate."
+            )
+
+    def test_review_system_prompt_no_missing_signals(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT_REVIEW
+        for frag in self.FORBIDDEN_FRAGMENTS:
+            assert frag not in SYSTEM_PROMPT_REVIEW, (
+                f"SYSTEM_PROMPT_REVIEW still mentions {frag!r}, but this data "
+                "is not in v0.3 context — LLM may hallucinate."
+            )
+
+    def test_full_prompt_trigger_1_uses_bb_middle(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "BB middle" in SYSTEM_PROMPT
+        # MACRO REGIME SHIFT (бывший trigger 4) удалён целиком
+        assert "MACRO REGIME SHIFT" not in SYSTEM_PROMPT
+
+
+class TestRsiExtremeThreshold:
+    """v0.12 bug-fix: «RSI extreme» теперь имеет числовое определение —
+    ≤25 / ≥75. Это согласуется с 2026 best-practice (Tapbit, Apptrading)
+    для bear/bull capitulation в crypto-perp на 1H, и предотвращает
+    случай XRPUSDT id=58 где LLM трактовал RSI=32.8 как «oversold» и
+    зашёл counter-trend против явного 1H downtrend.
+    """
+
+    def _snap(self, rsi_val: float):
+        from ai_trader.analysis.indicators import IndicatorSnapshot
+        return IndicatorSnapshot(
+            last_close=100.0, rsi14=rsi_val,
+            macd_line=0.0, macd_signal=0.0, macd_hist=0.0,
+            atr14=1.0, atr14_pct=1.0,
+            ema20=100.0, ema50=100.0,
+            bb_upper=102.0, bb_middle=100.0, bb_lower=98.0,
+            bb_position=0.5,
+        )
+
+    def test_rsi_24_labelled_extreme_oversold(self):
+        from ai_trader.analysis.indicators import format_snapshot
+        s = format_snapshot(self._snap(24.0))
+        assert "[EXTREME OVERSOLD]" in s
+        assert "[OVERSOLD]" not in s.replace("[EXTREME OVERSOLD]", "")
+
+    def test_rsi_28_labelled_oversold_but_not_extreme(self):
+        from ai_trader.analysis.indicators import format_snapshot
+        s = format_snapshot(self._snap(28.0))
+        assert "[OVERSOLD]" in s
+        assert "EXTREME" not in s
+
+    def test_rsi_32_8_no_oversold_label(self):
+        """Прямой regression для XRPUSDT id=58: RSI=32.8 не должен
+        получать [OVERSOLD] лейбл."""
+        from ai_trader.analysis.indicators import format_snapshot
+        s = format_snapshot(self._snap(32.8))
+        assert "OVERSOLD" not in s
+        assert "EXTREME" not in s
+
+    def test_rsi_72_labelled_overbought_but_not_extreme(self):
+        from ai_trader.analysis.indicators import format_snapshot
+        s = format_snapshot(self._snap(72.0))
+        assert "[OVERBOUGHT]" in s
+        assert "EXTREME" not in s
+
+    def test_rsi_76_labelled_extreme_overbought(self):
+        from ai_trader.analysis.indicators import format_snapshot
+        s = format_snapshot(self._snap(76.0))
+        assert "[EXTREME OVERBOUGHT]" in s
+
+    def test_rsi_50_no_label(self):
+        from ai_trader.analysis.indicators import format_snapshot
+        s = format_snapshot(self._snap(50.0))
+        assert "OVERSOLD" not in s
+        assert "OVERBOUGHT" not in s
+
+    def test_full_prompt_counter_trend_rule_uses_25_and_75(self):
+        """Промпт должен явно требовать RSI ≤ 25 / ≥ 75 для counter-trend,
+        а не размытое «RSI extreme»."""
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "RSI <= 25" in SYSTEM_PROMPT
+        assert "RSI >= 75" in SYSTEM_PROMPT
+        assert "[EXTREME OVERSOLD]" in SYSTEM_PROMPT
+        assert "[EXTREME OVERBOUGHT]" in SYSTEM_PROMPT

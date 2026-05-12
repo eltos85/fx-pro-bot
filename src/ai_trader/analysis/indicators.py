@@ -217,8 +217,12 @@ def format_snapshot(s: IndicatorSnapshot) -> str:
 
     rsi_label = ""
     if s.rsi14 is not None:
-        if s.rsi14 >= 70:
+        if s.rsi14 >= 75:
+            rsi_label = " [EXTREME OVERBOUGHT]"
+        elif s.rsi14 >= 70:
             rsi_label = " [OVERBOUGHT]"
+        elif s.rsi14 <= 25:
+            rsi_label = " [EXTREME OVERSOLD]"
         elif s.rsi14 <= 30:
             rsi_label = " [OVERSOLD]"
 

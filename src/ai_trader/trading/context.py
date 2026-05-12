@@ -19,6 +19,7 @@ Wave 3: добавляется блок NEWS (последние 1-3 ч заго
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -28,6 +29,32 @@ from ai_trader.state.db import AiPosition, AiTraderStore
 from ai_trader.trading.client import AiBybitClient, Bar, Ticker
 
 log = logging.getLogger(__name__)
+
+
+def _drop_incomplete_bar(bars: list[Bar], interval_minutes: int) -> list[Bar]:
+    """Отбрасывает последний бар если он ещё не закрыт.
+
+    Bybit `get_klines` возвращает массив свечей **включая текущую формирующуюся**.
+    Каноничные индикаторы (RSI/MACD/BB по Wilder/Appel/Bollinger) определены на
+    closed candles; использование partial-бара даёт look-ahead bias и flickering
+    сигналы при tick-by-tick движении цены внутри текущего интервала.
+
+    Бар считается закрытым если `ts (start) + interval_ms` строго в прошлом.
+    Если массив пуст или последний бар уже закрыт — возвращаем без изменений.
+
+    Источники (2026 best practice):
+    - Freqtrade Look-Ahead Analysis docs.
+    - StratBase «Look-Ahead Bias: The Hidden Backtest Killer» 2026 —
+      «indicators like RSI/MACD should be calculated using only completed
+      (closed) candles ... Including the current bar creates look-ahead bias».
+    """
+    if not bars:
+        return bars
+    now_ms = int(time.time() * 1000)
+    interval_ms = max(1, interval_minutes) * 60 * 1000
+    if bars[-1].ts + interval_ms > now_ms:
+        return bars[:-1]
+    return bars
 
 
 @dataclass
@@ -59,8 +86,12 @@ def collect_market_context(
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
         ticker = client.get_ticker(sym)
-        bars_1h = client.get_klines(sym, interval="60", limit=100)
-        bars_4h = client.get_klines(sym, interval="240", limit=50)
+        bars_1h = _drop_incomplete_bar(
+            client.get_klines(sym, interval="60", limit=100), 60
+        )
+        bars_4h = _drop_incomplete_bar(
+            client.get_klines(sym, interval="240", limit=50), 240
+        )
         ind_1h = ind_4h = None
         if len(bars_1h) >= 50:
             ind_1h = compute_snapshot(
@@ -217,7 +248,9 @@ def collect_review_context(
     snapshots: list[SymbolSnapshot] = []
     for sym in review_symbols:
         ticker = client.get_ticker(sym)
-        bars_1h = client.get_klines(sym, interval="60", limit=50)
+        bars_1h = _drop_incomplete_bar(
+            client.get_klines(sym, interval="60", limit=50), 60
+        )
         ind_1h = None
         if len(bars_1h) >= 30:
             ind_1h = compute_snapshot(

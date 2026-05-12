@@ -1,5 +1,122 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-12 — v0.12 bug-fix: incomplete-bar bias + prompt clean-up + RSI extreme threshold
+
+**Запрос пользователя:** «нужно изучить нашего бота и всю его логику, у меня
+есть ощущение что где то есть противоречия которые вводят бота в заблуждения.
+все найденое должно быть подкреплено современными данными 2026 из крипто-
+валютных источников». После полного аудита подтверждены три бага (НЕ
+изменения стратегии, поэтому делаем без sample-size collection, см.
+`strategy-guard.mdc` секция «Допустимые быстрые правки»).
+
+### Bug 1: incomplete-bar look-ahead bias
+
+Bybit `get_klines` возвращает все бары **включая текущий незакрытый**.
+Эти бары шли напрямую в `compute_snapshot` → RSI/MACD/BB пересчитывались
+по open-бару каждый цикл, давая flickering signals и tick-by-tick drift.
+Подтверждено на XRPUSDT id=58: decision @ 14:31:48 UTC, в промпте
+`last close=1.432` — это open 14:00-бара, а не closed 13:00-бара
+(C=1.4336).
+
+- `src/ai_trader/trading/context.py`: новый helper
+  `_drop_incomplete_bar(bars, interval_minutes)`. Бар считается
+  незакрытым если `ts (start) + interval_ms > now_ms`. Применяется в
+  `collect_market_context` (1H и 4H) и `collect_review_context` (1H).
+  Ticker.last_price (live цена) остаётся как есть — она нужна для
+  current_pnl_r.
+- Источник 2026: Freqtrade Look-Ahead Analysis docs, StratBase
+  «Look-Ahead Bias: The Hidden Backtest Killer» 2026.
+
+### Bug 2: промпт ссылается на данные, которых нет в контексте
+
+Промпт говорил LLM использовать VWAP / Fear & Greed / retail L/S ratio /
+OI delta / liquidation cascade / DVOL — эти сигналы в
+`format_context_for_prompt` / `format_context_for_review` НЕ передаются
+(v0.3-база без i1–i6). Эффект: LLM либо игнорирует половину инструкций,
+либо галлюцинирует значения. Конкретный кейс из истории: «retail
+extreme» в reasoning при отсутствии данных о retail positioning.
+
+- `src/ai_trader/llm/prompts.py` SYSTEM_PROMPT:
+  - Trigger 1 mean-reversion exit: «return to VWAP region» → «return to
+    BB middle band (SMA20)». SMA20 = BB middle, реально передаётся в
+    `format_snapshot`, концептуально эквивалентен mean-rev target.
+  - Trigger 3 ADVERSE NEW EVIDENCE: удалены пункты про OI extreme
+    buildup и liquidation cascade. Funding-flip переписан на видимые
+    funding band labels ([NEUTRAL] / [mild lean] / [STRONG]).
+    Добавлен «1H RSI cross out of extreme zone» как замена liquidation.
+  - **Trigger 4 MACRO REGIME SHIFT (F&G) удалён целиком** — F&G нет в
+    контексте. PEAK-DRAWDOWN стал trigger 4 (был 5).
+- SYSTEM_PROMPT_REVIEW: переписан раздел WHAT YOU SEE под реальный
+  v0.3-контекст (RSI/MACD/ATR/EMA/BB, funding label, last 6 closes,
+  peak/current_r). Триггеры пересмотрены под доступные сигналы.
+  Добавлен disclaimer: «if a trigger references a signal you do NOT see
+  in your current context, that trigger is not actionable — fall
+  through or HOLD».
+- ANALYSIS COMMENTARY cite-list: 1/2/3/4/5 → 1/2/3/4.
+- `build_user_prompt_review`: hint обновлён под новые описания триггеров.
+
+### Bug 3: «RSI extreme» не имеет числового определения
+
+Промпт: «Counter-trend ONLY at strong reversal evidence (RSI extreme +
+BB band touch + news catalyst)». Формат-лейбл `[OVERSOLD]` ставился при
+RSI≤30, без отличия «extreme» от обычного «oversold». На XRPUSDT id=58
+LLM решил что RSI=32.8 — это «oversold» и зашёл counter-trend.
+
+- `src/ai_trader/analysis/indicators.py` `format_snapshot`: добавлены
+  лейблы `[EXTREME OVERSOLD]` (RSI≤25) и `[EXTREME OVERBOUGHT]` (RSI≥75)
+  поверх существующих `[OVERSOLD]` (26–30) и `[OVERBOUGHT]` (70–74).
+- `src/ai_trader/llm/prompts.py` SYSTEM_PROMPT trading rules:
+  переписаны counter-trend правила явно: counter-trend long требует
+  RSI≤25 (`[EXTREME OVERSOLD]`), counter-trend short — RSI≥75
+  (`[EXTREME OVERBOUGHT]`). Plain `[OVERSOLD]` (26–30) или
+  `[OVERBOUGHT]` (70–74) НЕ достаточно для counter-trend — это
+  нормальные значения в трендовом режиме. Для trend-aligned входов
+  пороги 30/70 остаются.
+- Источники 2026:
+  - Apptrading «How to Use RSI for Crypto Trading in 2026»: dynamic
+    thresholds, Bear regime 60/20–25.
+  - Tapbit «RSI Indicator Crypto Trading 2026»: «in bear markets,
+    20–25 often signals capitulation bottoms rather than 30».
+
+### Тесты
+
+`tests/test_ai_trader.py` (+24 теста):
+- `TestDropIncompleteBar` × 5: empty list / partial 1H / closed 1H /
+  partial 4H / только last bar проверяется.
+- `TestPromptsCleanupNoMissingSignals` × 3: regex-check что
+  SYSTEM_PROMPT и SYSTEM_PROMPT_REVIEW не содержат «VWAP», «F&G»,
+  «DVOL», «OI extreme/delta», «liquidation cascade», «buy_ratio»,
+  «Long/Short ratio»; что trigger 1 использует «BB middle» и
+  «MACRO REGIME SHIFT» удалён.
+- `TestRsiExtremeThreshold` × 7: RSI 24 → [EXTREME OVERSOLD]; 28 →
+  [OVERSOLD]; 32.8 → no label (regression for XRPUSDT id=58);
+  72 → [OVERBOUGHT]; 76 → [EXTREME OVERBOUGHT]; 50 → no label;
+  SYSTEM_PROMPT содержит «RSI <= 25» / «RSI >= 75».
+
+`tests/test_ai_trader_indicators.py`: обновлён один тест
+(RSI=100 теперь даёт `[EXTREME OVERBOUGHT]` вместо `[OVERBOUGHT]`).
+
+**Локально:** 540/540 passed (без regression в bybit_bot, fx_pro_bot,
+fx_ai_trader).
+
+**Что НЕ менялось** (намеренно, требует обсуждения с пользователем
+и/или sample-size collection):
+- Trigger 2 vs Trigger 4 порядковая аномалия (peak 1.5R требует
+  invalidation, peak 0.8R — mechanical) — внутреннее противоречие,
+  не bug в классическом смысле.
+- Regime-aware RSI thresholds (Bull 80/40, Bear 60/20–25, Range 70/30) —
+  это strategy change, требует согласования.
+- 200-SMA trend filter для mean-reversion entries — strategy change.
+- Funding rate bands пересмотр (Lambda 8h vs industry per-day) — discuss.
+- Orderflow / CVD / DOM heatmap — большой проект.
+
+**Файлы:** `src/ai_trader/trading/context.py`,
+`src/ai_trader/llm/prompts.py`, `src/ai_trader/analysis/indicators.py`,
+`tests/test_ai_trader.py`, `tests/test_ai_trader_indicators.py`,
+`BUILDLOG_AI_TRADER.md`.
+
+---
+
 ## 2026-05-12 — v0.11-backport: PEAK-DRAWDOWN trigger (lock-in of decayed peak profit)
 
 **Запрос пользователя:** «изучи последний лот по эфиру, ИИ опять не зафиксировал

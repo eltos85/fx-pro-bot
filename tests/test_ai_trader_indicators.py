@@ -181,4 +181,6 @@ class TestSnapshot:
         snap = compute_snapshot(highs, lows, closes)
         s = format_snapshot(snap)
         assert "[uptrend]" in s
-        assert "[OVERBOUGHT]" in s  # RSI=100 на чистом росте
+        # RSI=100 на чистом росте → [EXTREME OVERBOUGHT] (≥75) после
+        # v0.12 bug-fix RSI extreme thresholds; раньше был просто [OVERBOUGHT].
+        assert "[EXTREME OVERBOUGHT]" in s

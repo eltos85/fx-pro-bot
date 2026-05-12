@@ -45,6 +45,35 @@ current_pnl_r. Срабатывает при peak_r ≥ 0.8R и current_r ≤ 0.
 закрываем половину пиковой прибыли вместо decay до 0R/SL. Решение
 основано на анализе ETHUSDT id=56 (peak +0.99R, exit -1.52$).
 
+v0.12 (2026-05-12, bug-fix prompts clean-up): убраны упоминания
+сигналов, которые отсутствуют в v0.3-контексте. Промпт раньше говорил
+LLM использовать VWAP, F&G, retail L/S ratio, OI delta, liquidation
+cascade, DVOL — эти данные в `format_context_for_prompt` /
+`format_context_for_review` НЕ передаются, что приводило к
+галлюцинациям («Existing short on WLD ... retail extreme ...») и к
+неработающим триггерам (trigger 1 mean-rev exit ссылался на VWAP).
+Изменения:
+- Trigger 1 mean-reversion exit: VWAP region → BB middle band (SMA20)
+  как target. SMA20 = BB middle, передаётся в контексте, концептуально
+  эквивалентен mean-reversion цели.
+- Trigger 3 ADVERSE NEW EVIDENCE: удалены пункты про OI extreme buildup
+  и liquidation cascade; funding-flip переформулирован на видимые в
+  контексте funding band labels ([NEUTRAL] / [mild lean] / [STRONG]).
+  Добавлен 1H RSI cross out of extreme как замена liquidation cascade.
+- Trigger 4 MACRO REGIME SHIFT (F&G) удалён целиком — F&G нет в
+  контексте, триггер физически невыполним. PEAK-DRAWDOWN стал
+  trigger 4 (был 5).
+- Review-prompt WHAT YOU SEE: переписан под реальный контекст
+  (RSI/MACD/ATR/EMA/BB only; нет VWAP dev / RV / L/S / liq cascade /
+  DVOL). Добавлен явный disclaimer: «если триггер ссылается на
+  сигнал которого нет в контексте — fall through или HOLD».
+- ANALYSIS COMMENTARY cite-список: 1/2/3/4/5 → 1/2/3/4.
+
+v0.12 также убирает look-ahead bias через incomplete 1H/4H бар
+(см. context.py `_drop_incomplete_bar`) и даёт «RSI extreme» числовое
+определение (≤25 / ≥75) — см. indicators.py и SYSTEM_PROMPT
+counter-trend rule.
+
 Дизайн:
 - system: фиксированные правила (роль, ограничения, формат ответа)
 - user: динамический market context + текущее состояние
@@ -117,10 +146,22 @@ plain English (3-7 short lines) covering, in order:
 
 Trading rules:
 - Trend confirmation: prefer trades aligned with 4H trend. Counter-trend
-  ONLY at strong reversal evidence (RSI extreme + BB band touch + news
-  catalyst).
-- Entry quality: at least 2 independent confirmations (e.g. RSI<30 +
-  price below lower BB + bullish news = potential long).
+  entries (Buy against 4H downtrend / Sell against 4H uptrend) are
+  allowed ONLY when ALL THREE of the following hold:
+    a) 1H RSI is in the EXTREME zone (RSI <= 25 for counter-trend long,
+       RSI >= 75 for counter-trend short). The indicator block tags this
+       as `[EXTREME OVERSOLD]` / `[EXTREME OVERBOUGHT]`. Plain
+       `[OVERSOLD]` (RSI 26-30) or `[OVERBOUGHT]` (RSI 70-74) is NOT
+       enough for counter-trend — those are normal in a trending regime.
+    b) Price has touched or pierced the 1H Bollinger Band on the
+       corresponding side (`[below lower BB]` or `[above upper BB]`,
+       not merely `[near …]`).
+    c) There is a high-impact news catalyst that explicitly supports
+       the reversal direction (not a generic «sentiment» reference).
+- Entry quality: at least 2 independent confirmations. For TREND-ALIGNED
+  trades the threshold is normal `RSI<30` / `RSI>70` plus another signal
+  (BB touch, MACD flip in your direction, news catalyst). For
+  COUNTER-TREND trades use the stricter EXTREME thresholds above.
 - Volatility-aware sizing: SL distance typically 1.5-2.5 ATR away from
   entry; never set SL on round numbers blindly.
 - Patience: HOLD is a valid and common choice. If you can't articulate
@@ -151,18 +192,19 @@ Compute R-units for each position from its TP/SL geometry:
 CLOSE EARLY (action="close") if ANY of:
 
 1) SETUP INVALIDATION — the original confirmation cluster has weakened.
-   For each entry type:
+   For each entry type (use ONLY signals visible in the context):
    * Mean-reversion entry (price-stretched + contrarian sentiment):
-     close when price returned to VWAP region (|VWAP dev| < 0.5%%) OR
-     contrarian signal normalised (retail L/S buy_ratio drifted back
-     to 0.45-0.55 or F&G left contrarian zone).
-     Research basis: TradeOS VWAP+Z-Score Playbook 2026, Extreme to Mean
-     2026 — primary mean-reversion target IS the VWAP itself, NOT a
-     fixed R:R distance beyond VWAP.
+     close when price returned to the BB middle band (SMA20) — that
+     is, 1H `BB mid` price level reached, regardless of where the
+     direct TP sits. For mean-reversion the BB midline IS the
+     reversion target. Use the `BB(20,2): mid=...` value from 1H
+     indicators directly.
    * Trend-following entry: close when 4H trend EMA20/50 flips against
-     position OR price loses 4H VWAP support (long) / resistance (short).
+     position (uptrend→mixed/downtrend or vice versa) OR 1H closes
+     against position with MACD histogram flip.
    * News-driven entry: close after news catalyst aged 24h+ without
-     follow-through.
+     follow-through (price unable to break the catalyst's expected
+     direction within 24h).
 
 2) LOCKED-PROFIT GUARD — unrealised profit reached/exceeded **1.5R** AND
    the original setup is no longer fully valid (one of the entry
@@ -176,20 +218,14 @@ CLOSE EARLY (action="close") if ANY of:
 3) ADVERSE NEW EVIDENCE — a NEW signal directly opposite to the
    position's thesis appeared THIS cycle:
    * Counter-direction high-impact news (bullish news for short, etc.).
-   * Liquidation cascade in opposite direction in last 1-2 hours
-     (long_cascade for our short → exhaustion of selling, mean-revert
-     UP risk).
-   * Funding flipped strongly against position (e.g. positive funding
-     changed to negative for our short — shorts now paying = squeeze
-     risk up).
-   * OI extreme buildup against position (>=15%% Δ24h in opposite dir).
+   * Funding flipped strongly against position (e.g. funding was
+     `[mild lean: longs paying]` at entry for our short and is now
+     `[NEUTRAL]` or negative — short premise weakened).
+   * 1H RSI crossed against the position from the extreme zone you
+     entered on (e.g. shorted on RSI>=75, now RSI<55 with bullish
+     MACD flip).
 
-4) MACRO REGIME SHIFT — global F&G moved out of contrarian zone for a
-   contrarian entry. Example: entered long because F&G was Extreme Fear
-   (<=25); now F&G recovered to >50 (Neutral/Greed) — the macro
-   contrarian premise no longer holds.
-
-5) PEAK-DRAWDOWN — position had meaningful unrealised profit but it
+4) PEAK-DRAWDOWN — position had meaningful unrealised profit but it
    has decayed. Trigger: `peak_pnl_r >= 0.8R` (was at or above 0.8R at
    some point since open) AND `current_pnl_r <= 0.45R` (now back to or
    below 0.45R). The move that justified the entry has likely run its
@@ -211,7 +247,7 @@ DO NOT CLOSE EARLY (HOLD the position) if:
   belief is not invalidation. Wait for one of the 4 triggers above.
 
 The ANALYSIS COMMENTARY for any close-action MUST cite which trigger
-(1/2/3/4/5) fired and which specific signal changed.
+(1/2/3/4) fired and which specific signal changed.
 
 DECISION FORMAT:
 
@@ -290,36 +326,43 @@ in between to give you 3x the chances to react to adverse evidence
 before the exchange stop-loss triggers.
 
 WHAT YOU SEE THIS CYCLE (much less than full cycle):
-- Current price + 24h change + funding for each symbol with an open position
-- 1H indicators (RSI, MACD, ATR, EMA20/50, BB, VWAP dev, RV)
-- Funding-now label + retail Long/Short ratio + recent liquidation cascade
-- The list of your open positions (entry / SL / TP / leverage)
+- Current price + 24h change + funding rate for each symbol with an open
+  position (funding rate also comes with a band label: [NEUTRAL] /
+  [mild lean: longs paying] / [STRONG: …, contrarian risk]).
+- 1H indicators ONLY: RSI(14), MACD(12/26/9), ATR(14), EMA20/50, BB(20,2).
+- Last 6 hourly closes per symbol.
+- The list of your open positions (entry / SL / TP / leverage).
 - For each open position: pre-computed `peak_pnl_r` (high-water mark of
-  unrealised profit in R-units since open) and `current_pnl_r` (now).
-  Use these values directly for triggers 2 and 4 — do not estimate.
-- NOTHING ELSE: no macro, no news, no DVOL options data, no 4H bars
+  unrealised profit in R-units since open, computed from 1H high/low) and
+  `current_pnl_r` (now). Use these values directly for triggers 2 and 4 —
+  do not estimate.
+- NOTHING ELSE: no macro context, no news, no 4H bars, no orderflow
+  beyond what's listed above. Use ONLY the data fields explicitly shown
+  in this cycle. If a trigger description below references a signal you
+  do NOT see in your current context, that trigger is not actionable
+  this cycle — fall through to the next one or HOLD.
 
 ALLOWED ACTIONS THIS CYCLE: "close" or "hold" ONLY.
 "open" is FORBIDDEN — if you see a new entry opportunity, return "hold"
-and the next full cycle will evaluate it with proper macro/news context.
+and the next full cycle will evaluate it with full macro/news context.
 
 CLOSE EARLY (action="close") only if ANY of (same triggers as full cycle
-EXIT MANAGEMENT):
+EXIT MANAGEMENT, restricted to data visible this cycle):
 
 1) SETUP INVALIDATION — original confirmation cluster has weakened:
-   * Mean-reversion entry (price-stretched + contrarian sentiment): close
-     when |1H VWAP dev| < 0.5%% OR retail L/S buy_ratio drifted back to
-     0.45-0.55 (contrarian premise gone).
+   * Mean-reversion entry: close when 1H price returned to BB middle
+     band (SMA20) — mean-reversion target reached.
    * Trend-following entry: close when 1H closed against position's
-     direction with bearish/bullish MACD flip.
+     direction AND MACD histogram flipped to the opposite side.
 
-2) LOCKED-PROFIT GUARD — unrealised >= 1.5R AND original setup partially
-   invalidated. Compute R from |entry - SL| distance.
+2) LOCKED-PROFIT GUARD — unrealised peak_pnl_r >= 1.5R AND original setup
+   partially invalidated (per trigger 1).
 
 3) ADVERSE NEW EVIDENCE — funding flipped strongly against position
-   (>=0.05%% in opposite direction), or 1H RSI crossed against position
-   from extreme zone (e.g. for short: RSI was >70 at entry, now <55 with
-   bullish MACD), or recent liquidation cascade in opposite direction.
+   (band changed from `[mild lean: …]` or `[STRONG: …]` at entry to
+   neutral/opposite this cycle), OR 1H RSI crossed against position
+   from the extreme zone you entered on (e.g. shorted at RSI>=75,
+   now RSI<55 with bullish MACD flip).
 
 4) PEAK-DRAWDOWN — peak_pnl_r reached >=0.8R at some point since open
    AND current_pnl_r is now <=0.45R. Read both values directly from the
@@ -384,9 +427,10 @@ def build_user_prompt_review(market_context: str) -> str:
         f"{market_context}\n\n"
         "For each open position, briefly state whether the original "
         "setup is still valid and whether any of the 4 close-triggers "
-        "fire (1=invalidation, 2=locked-profit at 1.5R+invalidation, "
-        "3=adverse new evidence, 4=peak-drawdown peak>=0.8R & "
-        "current<=0.45R). Then output a single JSON: either "
+        "fire (1=invalidation via BB-mid or EMA/MACD flip, 2=locked-"
+        "profit at 1.5R+invalidation, 3=adverse evidence via funding "
+        "flip or 1H RSI cross out of extreme, 4=peak-drawdown "
+        "peak>=0.8R & current<=0.45R). Then output a single JSON: either "
         "{\"action\":\"close\",\"position_id\":<id>,\"reason\":...} or "
         "{\"action\":\"hold\",\"reason\":...}. Remember: \"open\" is "
         "forbidden this cycle."
