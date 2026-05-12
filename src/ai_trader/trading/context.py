@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from ai_trader.analysis.indicators import IndicatorSnapshot, compute_snapshot, format_snapshot
 from ai_trader.news.rss import NewsItem
@@ -119,6 +120,66 @@ def _funding_band_label(rate: float) -> str:
         return f" [mild lean: {side}]"
     side = "longs paying" if rate > 0 else "shorts paying"
     return f" [STRONG: {side}, contrarian risk]"
+
+
+def _compute_position_r_stats(
+    position: AiPosition,
+    bars_1h: list[Bar],
+    current_price: float | None,
+) -> tuple[float | None, float | None]:
+    """Считает (peak_pnl_r, current_pnl_r) для открытой позиции.
+
+    peak_pnl_r — high-water mark максимальной нереализованной прибыли в R-units
+    от момента открытия позиции до текущего бара. Считается по high/low 1H
+    свечей с opened_at:
+      - Buy:  peak_r = (max(high)   - entry) / risk_dist
+      - Sell: peak_r = (entry - min(low))   / risk_dist
+    current_pnl_r — текущий нереализованный PnL в R-units (от ticker.last_price).
+    risk_dist = |entry - sl|.
+
+    Возвращает (None, None) если sl_price/entry/risk_dist некорректны.
+    Если bars пусты (позиция открыта <1 часа назад) — peak ≈ current.
+
+    Используется для триггера PEAK-DRAWDOWN: peak_r ≥ 0.8 и current_r ≤ 0.45
+    означают что движение, оправдавшее вход, развернулось — лучше зафиксировать
+    остаток прибыли чем рисковать дальнейшим decay до SL.
+    """
+    if position.sl_price is None or position.entry_price is None:
+        return (None, None)
+    risk_dist = abs(position.entry_price - position.sl_price)
+    if risk_dist <= 0:
+        return (None, None)
+
+    try:
+        opened_dt = datetime.fromisoformat(position.opened_at.replace("Z", "+00:00"))
+        opened_ms = int(opened_dt.timestamp() * 1000)
+    except (ValueError, AttributeError):
+        opened_ms = 0
+
+    relevant = [b for b in bars_1h if b.ts >= opened_ms]
+
+    peak_r: float | None = None
+    if relevant:
+        if position.side == "Buy":
+            peak_price = max(b.high for b in relevant)
+            peak_r = (peak_price - position.entry_price) / risk_dist
+        else:
+            peak_price = min(b.low for b in relevant)
+            peak_r = (position.entry_price - peak_price) / risk_dist
+
+    current_r: float | None = None
+    if current_price is not None:
+        if position.side == "Buy":
+            current_r = (current_price - position.entry_price) / risk_dist
+        else:
+            current_r = (position.entry_price - current_price) / risk_dist
+
+    if peak_r is not None and current_r is not None:
+        peak_r = max(peak_r, current_r)
+    elif peak_r is None and current_r is not None:
+        peak_r = current_r
+
+    return (peak_r, current_r)
 
 
 def collect_review_context(
@@ -228,6 +289,14 @@ def format_context_for_review(ctx: MarketContext) -> str:
                 f"sl=${p.sl_price or 0:.6g} tp=${p.tp_price or 0:.6g} "
                 f"lev={p.leverage}x linkid={p.order_link_id}"
             )
+            sym_snap = next((s for s in ctx.snapshots if s.symbol == p.symbol), None)
+            bars = sym_snap.bars_1h if sym_snap else []
+            cur_price = sym_snap.ticker.last_price if sym_snap and sym_snap.ticker else None
+            peak_r, current_r = _compute_position_r_stats(p, bars, cur_price)
+            if peak_r is not None and current_r is not None:
+                parts.append(
+                    f"     peak_pnl_r={peak_r:+.2f}R current_pnl_r={current_r:+.2f}R"
+                )
 
     return "\n".join(parts)
 
@@ -324,5 +393,13 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
                 f"sl=${p.sl_price or 0:.6g} tp=${p.tp_price or 0:.6g} "
                 f"lev={p.leverage}x linkid={p.order_link_id}"
             )
+            sym_snap = next((s for s in ctx.snapshots if s.symbol == p.symbol), None)
+            bars = sym_snap.bars_1h if sym_snap else []
+            cur_price = sym_snap.ticker.last_price if sym_snap and sym_snap.ticker else None
+            peak_r, current_r = _compute_position_r_stats(p, bars, cur_price)
+            if peak_r is not None and current_r is not None:
+                parts.append(
+                    f"     peak_pnl_r={peak_r:+.2f}R current_pnl_r={current_r:+.2f}R"
+                )
 
     return "\n".join(parts)

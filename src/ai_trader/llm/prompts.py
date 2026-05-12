@@ -38,6 +38,13 @@ ANALYSIS APPROACH добавлен пункт OPEN POSITIONS REVIEW (без VWAP
 Триггеры с упоминанием VWAP/L-S/F&G/OI/liquidations модель проигнорирует,
 т.к. соответствующих полей нет в market context.
 
+v0.11-backport (2026-05-12, PEAK-DRAWDOWN trigger): добавлен 5-й триггер
+EXIT MANAGEMENT (full + review). Код считает high-water mark
+peak_pnl_r из 1H баров с момента open и передаёт его в контекст рядом с
+current_pnl_r. Срабатывает при peak_r ≥ 0.8R и current_r ≤ 0.45R —
+закрываем половину пиковой прибыли вместо decay до 0R/SL. Решение
+основано на анализе ETHUSDT id=56 (peak +0.99R, exit -1.52$).
+
 Дизайн:
 - system: фиксированные правила (роль, ограничения, формат ответа)
 - user: динамический market context + текущее состояние
@@ -135,6 +142,11 @@ Compute R-units for each position from its TP/SL geometry:
   / (TP - entry) * R_target, where R_target = (TP - entry)/(entry - SL).
   (For Sell: invert sign of price diffs.) You can read approximate
   unrealised PnL from price moves vs entry.
+- Each open position line now includes pre-computed values:
+  `peak_pnl_r=+X.YYR current_pnl_r=+Z.WWR` (peak is the high-water mark
+  of unrealised profit in R-units since the position opened, computed
+  from 1H high/low; current is from the latest price). Use these
+  directly — do NOT recompute by hand.
 
 CLOSE EARLY (action="close") if ANY of:
 
@@ -177,6 +189,17 @@ CLOSE EARLY (action="close") if ANY of:
    (<=25); now F&G recovered to >50 (Neutral/Greed) — the macro
    contrarian premise no longer holds.
 
+5) PEAK-DRAWDOWN — position had meaningful unrealised profit but it
+   has decayed. Trigger: `peak_pnl_r >= 0.8R` (was at or above 0.8R at
+   some point since open) AND `current_pnl_r <= 0.45R` (now back to or
+   below 0.45R). The move that justified the entry has likely run its
+   course; locking ~0.45R is better than letting it decay further to
+   0R or to stop-loss. The exact peak/current values are provided per
+   open position in the OPEN POSITIONS block — do not estimate, read
+   them directly. This trigger is MECHANICAL: if both conditions hold,
+   close even if the original setup is technically still intact —
+   peak→drawdown IS the new evidence.
+
 DO NOT CLOSE EARLY (HOLD the position) if:
 - Position is in profit AND original setup remains intact AND no new
   contrary evidence — let the exchange SL/TP do their job.
@@ -188,7 +211,7 @@ DO NOT CLOSE EARLY (HOLD the position) if:
   belief is not invalidation. Wait for one of the 4 triggers above.
 
 The ANALYSIS COMMENTARY for any close-action MUST cite which trigger
-(1/2/3/4) fired and which specific signal changed.
+(1/2/3/4/5) fired and which specific signal changed.
 
 DECISION FORMAT:
 
@@ -271,6 +294,9 @@ WHAT YOU SEE THIS CYCLE (much less than full cycle):
 - 1H indicators (RSI, MACD, ATR, EMA20/50, BB, VWAP dev, RV)
 - Funding-now label + retail Long/Short ratio + recent liquidation cascade
 - The list of your open positions (entry / SL / TP / leverage)
+- For each open position: pre-computed `peak_pnl_r` (high-water mark of
+  unrealised profit in R-units since open) and `current_pnl_r` (now).
+  Use these values directly for triggers 2 and 4 — do not estimate.
 - NOTHING ELSE: no macro, no news, no DVOL options data, no 4H bars
 
 ALLOWED ACTIONS THIS CYCLE: "close" or "hold" ONLY.
@@ -294,6 +320,13 @@ EXIT MANAGEMENT):
    (>=0.05%% in opposite direction), or 1H RSI crossed against position
    from extreme zone (e.g. for short: RSI was >70 at entry, now <55 with
    bullish MACD), or recent liquidation cascade in opposite direction.
+
+4) PEAK-DRAWDOWN — peak_pnl_r reached >=0.8R at some point since open
+   AND current_pnl_r is now <=0.45R. Read both values directly from the
+   OPEN POSITIONS lines. If both conditions hold, close — the move that
+   justified the entry has decayed, and locking ~0.45R is better than
+   risking decay to 0R or stop-loss. MECHANICAL trigger: it fires even
+   if the original setup looks technically intact.
 
 DO NOT CLOSE EARLY (HOLD) if:
 - Profit < 1R AND setup intact — let it run, exchange SL/TP will work.
@@ -350,9 +383,10 @@ def build_user_prompt_review(market_context: str) -> str:
         "Mid-cycle review of your open positions:\n\n"
         f"{market_context}\n\n"
         "For each open position, briefly state whether the original "
-        "setup is still valid and whether any of the 3 close-triggers "
+        "setup is still valid and whether any of the 4 close-triggers "
         "fire (1=invalidation, 2=locked-profit at 1.5R+invalidation, "
-        "3=adverse new evidence). Then output a single JSON: either "
+        "3=adverse new evidence, 4=peak-drawdown peak>=0.8R & "
+        "current<=0.45R). Then output a single JSON: either "
         "{\"action\":\"close\",\"position_id\":<id>,\"reason\":...} or "
         "{\"action\":\"hold\",\"reason\":...}. Remember: \"open\" is "
         "forbidden this cycle."

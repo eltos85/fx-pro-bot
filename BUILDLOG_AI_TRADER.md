@@ -1,5 +1,67 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-12 — v0.11-backport: PEAK-DRAWDOWN trigger (lock-in of decayed peak profit)
+
+**Запрос пользователя:** «изучи последний лот по эфиру, ИИ опять не зафиксировал
+прибыль, хотя она была». Анализ ETHUSDT id=56: позиция держалась 27 циклов,
+peak_pnl ≈ +0.99R (≈ +$8.96 в cycle 16), exit по SL = −$1.52. LOCKED-PROFIT
+GUARD (1.5R) — слишком высокий порог, не сработал. Нужен новый триггер для
+случая «была прибыль 0.8–1.0R, drawdown к 0–0.5R, движение выдохлось».
+
+**Дизайн (hybrid).** Код считает high-water mark; LLM применяет правило через
+prompt. Без миграции БД.
+
+- `src/ai_trader/trading/context.py`:
+  - Новая функция `_compute_position_r_stats(position, bars_1h, current_price)`
+    возвращает `(peak_pnl_r, current_pnl_r)`. peak считается из high/low 1H
+    свечей с момента `position.opened_at`; для Buy peak = (max(high) − entry)
+    / risk_dist, для Sell — (entry − min(low)) / risk_dist. risk_dist =
+    |entry − SL|. Edge-cases: SL/entry отсутствуют → (None, None);
+    бары пусты → peak fallback = current; safety-инвариант peak ≥ current.
+  - `format_context_for_prompt` и `format_context_for_review` теперь после
+    строки позиции выводят `     peak_pnl_r=+X.YYR current_pnl_r=+Z.WWR`.
+
+- `src/ai_trader/llm/prompts.py`:
+  - `SYSTEM_PROMPT` (full): добавлен **trigger 5 PEAK-DRAWDOWN** в блок
+    EXIT MANAGEMENT. Условие: `peak_pnl_r >= 0.8R` AND `current_pnl_r <= 0.45R`
+    → close. Mechanical: срабатывает даже если original setup технически
+    intact — peak→drawdown сам по себе является доказательством. В блок
+    «Compute R-units» добавлено явное указание читать peak/current прямо
+    из строки позиции, а не пересчитывать. ANALYSIS COMMENTARY cite
+    обновлён на «trigger (1/2/3/4/5)».
+  - `SYSTEM_PROMPT_REVIEW` (review): добавлен **trigger 4 PEAK-DRAWDOWN**
+    с теми же порогами. WHAT YOU SEE дополнен описанием peak/current.
+  - `build_user_prompt_review`: обновлён hint на 4 close-trigger'а.
+
+- `tests/test_ai_trader.py`: +11 тестов
+  (`TestPeakPnlRStats` × 9, `TestPeakDrawdownTriggerInPrompts` × 2):
+  buy/sell расчёт peak, SL=None → None, risk_dist=0 → None, no-bars fallback,
+  safety-инвариант peak≥current, фильтр баров до opened_at, format-output
+  содержит peak/current, system-prompts содержат «PEAK-DRAWDOWN», «0.8R»,
+  «0.45R», «peak_pnl_r», «current_pnl_r», «1/2/3/4/5».
+
+**Какие данные используются (v0.3-контекст):** только `bars_1h` (есть у нас
+в SymbolSnapshot и для full, и для review циклов) + ticker.last_price.
+Никаких новых API-вызовов, никаких миграций БД. peak пересчитывается на
+каждом цикле — это OK, потому что 1H high/low за окно открытой позиции
+монотонны: peak только растёт с временем.
+
+**Обоснование порогов 0.8R / 0.45R (из анализа ETHUSDT id=56):**
+peak был ≈ 0.99R в cycle 16, к cycle 27 откатился < 0R и закрылся по SL.
+- Триггер на peak ≥ 1.0R пропустил бы id=56 (peak = 0.99R, чуть ниже).
+- Триггер на peak ≥ 0.8R с current ≤ 0.45R — поймал бы id=56 примерно
+  на cycle 18–20 (peak зафиксирован 0.99R, current скатился ниже 0.45R),
+  фиксация ≈ +0.45R × $9.47 risk ≈ +$4.26 вместо текущего −$1.52.
+- Threshold 0.45R = «половина 0.9R bucket» — даёт буфер от шума 1H баров
+  и одновременно достаточно агрессивен чтобы не упустить decay.
+
+**Тесты:** локально 525/525 passed (49 ai_trader-specific + остальные).
+
+**Файлы:** `src/ai_trader/trading/context.py`, `src/ai_trader/llm/prompts.py`,
+`tests/test_ai_trader.py`, `BUILDLOG_AI_TRADER.md`.
+
+---
+
 ## 2026-05-12 — backport: dual-timer 15+5 мин (v0.10 → v0.3 база)
 
 **Запрос пользователя:** «надо вернуть функционал слежения за лотом

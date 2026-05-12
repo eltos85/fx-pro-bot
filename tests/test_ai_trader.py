@@ -945,3 +945,164 @@ class TestReviewIntervalSettings:
     def test_review_disabled_when_zero(self, monkeypatch):
         settings = self._make_settings(monkeypatch, AI_TRADER_REVIEW_INTERVAL_SEC="0")
         assert settings.review_interval_sec == 0
+
+
+class TestPeakPnlRStats:
+    """v0.11-backport: PEAK-DRAWDOWN — код считает peak_pnl_r из 1H баров
+    с момента open. Тесты проверяют корректность Buy/Sell и edge-cases.
+    """
+
+    @staticmethod
+    def _make_bars(highs_lows: list[tuple[float, float]], start_ms: int = 1_700_000_000_000):
+        from ai_trader.trading.client import Bar
+        bars = []
+        for i, (h, l) in enumerate(highs_lows):
+            bars.append(Bar(
+                ts=start_ms + i * 3_600_000,
+                open=(h + l) / 2, high=h, low=l, close=(h + l) / 2, volume=100.0,
+            ))
+        return bars
+
+    @staticmethod
+    def _make_pos(side: str, entry: float, sl: float, opened_at: str = "2023-11-14T00:00:00+00:00"):
+        from ai_trader.state.db import AiPosition
+        return AiPosition(
+            id=1, symbol="BTCUSDT", side=side, qty=0.01,
+            entry_price=entry, sl_price=sl, tp_price=entry + (entry - sl) * 2,
+            leverage=1, order_link_id="ai_test",
+            opened_at=opened_at,
+            closed_at=None, exit_price=None, realized_pnl_usd=None,
+            close_reason=None, llm_reason="test",
+        )
+
+    def test_buy_peak_from_high(self):
+        from ai_trader.trading.context import _compute_position_r_stats
+        pos = self._make_pos("Buy", entry=100.0, sl=95.0)  # risk_dist=5
+        bars = self._make_bars([(102, 99), (105, 101), (103, 100)])  # peak high=105
+        peak_r, current_r = _compute_position_r_stats(pos, bars, current_price=101.0)
+        assert peak_r == 1.0  # (105 - 100) / 5
+        assert current_r == 0.2  # (101 - 100) / 5
+
+    def test_sell_peak_from_low(self):
+        from ai_trader.trading.context import _compute_position_r_stats
+        pos = self._make_pos("Sell", entry=100.0, sl=105.0)  # risk_dist=5
+        bars = self._make_bars([(101, 98), (100, 95), (102, 99)])  # min low=95
+        peak_r, current_r = _compute_position_r_stats(pos, bars, current_price=99.0)
+        assert peak_r == 1.0  # (100 - 95) / 5
+        assert current_r == 0.2  # (100 - 99) / 5
+
+    def test_returns_none_when_sl_missing(self):
+        from ai_trader.trading.context import _compute_position_r_stats
+        pos = self._make_pos("Buy", entry=100.0, sl=95.0)
+        pos.sl_price = None
+        peak_r, current_r = _compute_position_r_stats(pos, [], current_price=101.0)
+        assert peak_r is None
+        assert current_r is None
+
+    def test_returns_none_when_risk_dist_zero(self):
+        from ai_trader.trading.context import _compute_position_r_stats
+        pos = self._make_pos("Buy", entry=100.0, sl=100.0)
+        peak_r, current_r = _compute_position_r_stats(pos, [], current_price=101.0)
+        assert peak_r is None
+        assert current_r is None
+
+    def test_no_bars_uses_current_only(self):
+        """Позиция только что открыта (нет ни одного завершённого 1H бара).
+        peak_r должен fallback на current_r."""
+        from ai_trader.trading.context import _compute_position_r_stats
+        pos = self._make_pos("Buy", entry=100.0, sl=95.0)
+        peak_r, current_r = _compute_position_r_stats(pos, [], current_price=102.0)
+        assert peak_r == 0.4  # falls back to current
+        assert current_r == 0.4
+
+    def test_peak_never_below_current(self):
+        """Safety-инвариант: peak_r всегда >= current_r."""
+        from ai_trader.trading.context import _compute_position_r_stats
+        pos = self._make_pos("Buy", entry=100.0, sl=95.0)
+        bars = self._make_bars([(101, 99)])  # peak high=101 → 0.2R
+        # Текущая цена ушла выше → current_r=0.6 (> peak from bars)
+        peak_r, current_r = _compute_position_r_stats(pos, bars, current_price=103.0)
+        assert peak_r == 0.6
+        assert current_r == 0.6
+
+    def test_bars_before_opened_at_ignored(self):
+        """Бары до opened_at не учитываются в peak."""
+        from ai_trader.trading.context import _compute_position_r_stats
+        # opened_at = 2023-11-14T00:00:00 UTC → ts = 1_699_920_000_000 ms
+        pos = self._make_pos("Buy", entry=100.0, sl=95.0,
+                              opened_at="2023-11-14T00:00:00+00:00")
+        # Первый бар сильно до open (high=150 не должен учитываться),
+        # второй сильно после (high=105)
+        from ai_trader.trading.client import Bar
+        bars = [
+            Bar(ts=1_690_000_000_000, open=140, high=150, low=130, close=140, volume=10),
+            Bar(ts=1_700_000_000_000, open=104, high=105, low=103, close=104, volume=10),
+        ]
+        peak_r, current_r = _compute_position_r_stats(pos, bars, current_price=101.0)
+        assert peak_r == 1.0  # (105 - 100) / 5, бар на 150 проигнорирован
+
+    def test_format_for_prompt_includes_peak_current(self):
+        """format_context_for_prompt выводит строку peak_pnl_r/current_pnl_r
+        для каждой открытой позиции."""
+        from ai_trader.trading.client import Ticker
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_prompt,
+        )
+        pos = self._make_pos("Sell", entry=100.0, sl=105.0)
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=99.0, bid=98.99, ask=99.01,
+            funding_rate=0.0, volume_24h=10000, price_change_pct_24h=0.0,
+        )
+        bars = self._make_bars([(102, 95)])  # min low=95 → peak_r=1.0
+        snap = SymbolSnapshot(symbol="BTCUSDT", ticker=ticker, bars_1h=bars, bars_4h=[])
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[pos],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+        )
+        s = format_context_for_prompt(ctx)
+        assert "peak_pnl_r=" in s
+        assert "current_pnl_r=" in s
+        assert "+1.00R" in s  # peak
+        assert "+0.20R" in s  # current
+
+    def test_format_for_review_includes_peak_current(self):
+        """format_context_for_review также выводит peak/current per position."""
+        from ai_trader.trading.client import Ticker
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_review,
+        )
+        pos = self._make_pos("Buy", entry=100.0, sl=95.0)
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=101.0, bid=100.99, ask=101.01,
+            funding_rate=0.0, volume_24h=10000, price_change_pct_24h=0.0,
+        )
+        bars = self._make_bars([(105, 99)])  # peak high=105 → 1.0R
+        snap = SymbolSnapshot(symbol="BTCUSDT", ticker=ticker, bars_1h=bars, bars_4h=[])
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[pos],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+        )
+        s = format_context_for_review(ctx)
+        assert "peak_pnl_r=" in s
+        assert "current_pnl_r=" in s
+
+
+class TestPeakDrawdownTriggerInPrompts:
+    """Промпты должны явно содержать описание триггера PEAK-DRAWDOWN."""
+
+    def test_full_system_prompt_has_trigger_5(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "PEAK-DRAWDOWN" in SYSTEM_PROMPT
+        assert "peak_pnl_r" in SYSTEM_PROMPT
+        assert "current_pnl_r" in SYSTEM_PROMPT
+        assert "0.8R" in SYSTEM_PROMPT
+        assert "0.45R" in SYSTEM_PROMPT
+        # ANALYSIS COMMENTARY должен ссылаться на 5 триггеров (1/2/3/4/5)
+        assert "1/2/3/4/5" in SYSTEM_PROMPT
+
+    def test_review_system_prompt_has_trigger_4(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT_REVIEW
+        assert "PEAK-DRAWDOWN" in SYSTEM_PROMPT_REVIEW
+        assert "peak_pnl_r" in SYSTEM_PROMPT_REVIEW
+        assert "0.8R" in SYSTEM_PROMPT_REVIEW
+        assert "0.45R" in SYSTEM_PROMPT_REVIEW
