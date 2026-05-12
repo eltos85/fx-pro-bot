@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Callable
 
 log = logging.getLogger(__name__)
@@ -113,7 +114,8 @@ class CTraderClient:
         account_id: int,
         host_type: str = "demo",
         refresh_token: str = "",
-        on_token_refreshed: Callable[[str, str], None] | None = None,
+        expires_at: float = 0.0,
+        on_token_refreshed: Callable[[str, str, float], None] | None = None,
     ) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
@@ -121,6 +123,12 @@ class CTraderClient:
         self._account_id = account_id
         self._host_type = host_type
         self._refresh_token = refresh_token
+        # In-memory expires_at нужен для defensive save: после _do_auth
+        # success передаём актуальное значение в callback, чтобы shared
+        # tokens-file всегда был синхронизирован с in-memory state клиента.
+        # Закрывает race "refresh прошёл, callback упал" → file со spent
+        # refresh_token остаётся на диске.
+        self._token_expires_at = expires_at
         self._on_token_refreshed = on_token_refreshed
 
         self._client: Any = None
@@ -323,6 +331,32 @@ class CTraderClient:
         )
         self._account_auth_done.set()
         log.info("cTrader: аккаунт %d авторизован, готов к торговле", self._account_id)
+        # Defensive token sync: после каждого успешного auth пишем
+        # in-memory токены в shared file. Если callback при refresh упал
+        # ранее (file остался со spent refresh_token) — этот вызов закроет
+        # дыру, как только клиент успешно подключится с in-memory свежим
+        # токеном. См. BUILDLOG.md 2026-05-12 «token rotation hardening».
+        self._save_current_tokens()
+
+    def _save_current_tokens(self) -> None:
+        """Sync in-memory OAuth-state в shared token-store через callback.
+
+        Идемпотентно: если file актуальный — overwrite того же содержимого
+        (no-op для is_expired check). Если file устарел — file обновится.
+        Не падает на исключениях callback (callback логирует сам).
+        """
+        if not self._on_token_refreshed:
+            return
+        if not self._access_token or not self._refresh_token:
+            return
+        try:
+            self._on_token_refreshed(
+                self._access_token,
+                self._refresh_token,
+                self._token_expires_at,
+            )
+        except Exception as cb_err:
+            log.warning("cTrader: defensive token save failed: %s", cb_err)
 
     def stop(self) -> None:
         """Отключиться от cTrader."""
@@ -846,12 +880,19 @@ class CTraderClient:
             )
             self._access_token = new_token.access_token
             self._refresh_token = new_token.refresh_token
-            log.info("cTrader: access token обновлён через refresh_token")
+            self._token_expires_at = new_token.expires_at
+            log.info(
+                "cTrader: access token обновлён через refresh_token "
+                "(expires through %.1f дней)",
+                (new_token.expires_at - time.time()) / 86400.0,
+            )
 
             if self._on_token_refreshed:
                 try:
                     self._on_token_refreshed(
-                        new_token.access_token, new_token.refresh_token,
+                        new_token.access_token,
+                        new_token.refresh_token,
+                        new_token.expires_at,
                     )
                 except Exception as cb_err:
                     log.warning("cTrader: on_token_refreshed callback error: %s", cb_err)

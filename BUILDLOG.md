@@ -4,6 +4,119 @@
 
 ---
 
+## 2026-05-12
+
+### fix(ctrader-client): defensive token sync + startup token-status log
+
+`коммит при deploy`
+
+**Симптом.** 12.05 07:00 UTC обнаружил что Advisor НЕ торгует с 09.05:
+
+```
+INFO     Access token истёк, обновляю через refresh token...
+WARNING  cTrader: токены недоступны (Access denied), торговля отключена
+```
+
+`expires_at` в `/data/ctrader_tokens.json` показывал `2026-05-09 09:19`
+(истёк 2.6 дня назад), `refresh_token` cTrader OAuth тоже признал
+недействительным. Advisor шёл без cTrader-торговли минимум 3 суток.
+
+**Причина (post-mortem).** cTrader OAuth2 использует
+[refresh_token rotation = single-use grant](https://datatracker.ietf.org/doc/html/rfc6749#section-6).
+Логи показывают: последняя успешная активность БД `advisor_stats.sqlite`
+была `09.05 14:43 UTC` — после этого Advisor подошёл к expiration своего
+in-memory токена и сделал refresh. **Но callback `_on_token_refreshed →
+token_store.save(...)` не записал новые токены на диск** (вероятная
+причина: между OAuth-call и `save()` процесс был убит restart'ом
+контейнера / OOM-killer'ом; новый refresh_token from-API уже стал
+single-use spent на стороне Spotware, а в файл записан не был).
+
+Старший grant в файле остался валиден `expires_at=2026-05-09` (1 месяц
+жизни до этого момента). Поэтому **симптомов раньше не было** — Advisor
+держал свежий токен в памяти и торговал. 12.05 при рестарте подгрузил
+из файла spent grant → cTrader сказал Access denied → KillSwitch отрубил
+торговлю «cTrader: торговля отключена».
+
+То же сломало `fx-ai-trader` при попытке его первого старта — обе
+проблемы оказались одной и той же.
+
+**Тактика на 12.05 (выполнено).** Полный re-auth через `fx-pro-auth`:
+сгенерировал URL, пользователь авторизовался в браузере, обменял code
+на токены через `exchange_code_for_tokens` внутри `fx-pro-bot:local`
+образа (см. BUILDLOG_AI_FX_TRADER.md «Phase 1 deploy + fix LLM
+max_tokens»). Новый grant `expires_at=2026-06-11 17:49 UTC`.
+
+**Code-fix (этот коммит) — три уровня защиты.**
+
+**A. Defensive token sync в `CTraderClient`.** После каждого успешного
+`_do_auth` (т.е. как при первом подключении, так и после refresh) вызываем
+`_save_current_tokens()` → callback `on_token_refreshed(access, refresh,
+expires_at)`. Закрывает race «refresh успешно обновил in-memory токен,
+но callback упал между OAuth-call и `token_store.save`»: при следующем
+успешном auth in-memory state будет переписан в файл идемпотентно.
+
+Side-effect: callback теперь принимает **3 аргумента** (`access`,
+`refresh`, `expires_at`), а не 2. Это позволяет передавать настоящий
+`expires_at` от cTrader (раньше callback в `app/main.py` приходил без
+expires и сам вычислял `time.time() + 2_628_000`, что искажало дату
+если cTrader выдавал короткий expiresIn).
+
+Все callers обновлены: `fx_pro_bot/app/main.py` (advisor),
+`fx_ai_trader/trading/client_adapter.py` (fx-ai-trader), тесты.
+
+**B. Startup token-status log** через новый helper
+`fx_pro_bot.trading.auth.log_token_status(token, label, logger)`:
+
+- INFO: `<label> OAuth: токен валиден до <date>, осталось X.X дней`;
+- WARNING если < 7 дней до expire — повод заранее запустить
+  `fx-pro-auth`, чтобы не торопиться;
+- ERROR если уже expired — bot скорее всего вылетит на ближайшем
+  cTrader-вызове.
+
+Используется в обоих ботах (Advisor + fx-ai-trader). Видимость в
+`docker logs` — это **единственная** наша система алертов сейчас.
+
+**C. Изоляция токенов для fx-ai-trader.** Дефолтный путь
+`AiFxTraderSettings.ctrader_token_path` поменян с
+`/data/ctrader_tokens.json` (shared с Advisor) на
+`/data/ctrader_tokens_ai_fx.json` (отдельный grant). У каждого бота
+свой OAuth grant — refresh одного не задевает другой. Перед деплоем
+этого изменения вручную провели второй OAuth-flow и создали новый
+файл (см. `BUILDLOG_AI_FX_TRADER.md`).
+
+**Что НЕ делалось.**
+
+- Никаких retry на стороне `refresh_access_token` (single-use grant
+  не retry'ится — повтор всегда даст Access denied).
+- Никаких изменений в стратегиях / KillSwitch / sizing.
+- `TOKEN_REFRESH_MARGIN_SEC` остался 86400 (1 день).
+
+**Тесты:**
+- `tests/test_ctrader_client_reconnect.py`:
+  - `test_try_refresh_token_invokes_callback` — расширен на 3 args
+    (access, refresh, expires_at).
+  - `test_save_current_tokens_idempotent_no_callback` — no-op без callback.
+  - `test_save_current_tokens_calls_callback_with_in_memory_state` —
+    callback вызывается с in-memory state.
+  - `test_save_current_tokens_skipped_without_refresh_token` —
+    защита от пустого refresh_token.
+
+Полный suite: 516/516 pass (было 513).
+
+**Файлы:**
+- `src/fx_pro_bot/trading/client.py` (3-arg callback, `_token_expires_at`,
+  `_save_current_tokens()`, вызов в `_do_auth` success)
+- `src/fx_pro_bot/trading/auth.py` (новый helper `log_token_status`)
+- `src/fx_pro_bot/app/main.py` (3-arg callback, `expires_at` в
+  CTraderClient, `log_token_status` после `ensure_valid_token`)
+- `src/fx_ai_trader/config/settings.py` (default path → `_ai_fx.json`)
+- `src/fx_ai_trader/trading/client_adapter.py` (3-arg lambda)
+- `src/fx_ai_trader/app/main.py` (`log_token_status` на старте)
+- `docker-compose.yml`, `.env.example` (новый default path)
+- `tests/test_ctrader_client_reconnect.py` (+3 кейса)
+
+---
+
 ## 2026-05-11
 
 ### feat(sizing): user-override RISK_PER_TRADE_USD=$50, MAX_LOT_SIZE=0.50

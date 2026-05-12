@@ -58,10 +58,12 @@ class AiFxTraderSettings(BaseSettings):
     )
 
     # ─── cTrader API (FxPro demo) ────────────────────────────────────────
-    # Шарим OAuth-токены с Advisor через тот же файл /data/ctrader_tokens.json.
-    # Concurrent refresh защищён через advisory file-lock в token_lock.py
-    # (research: Coder PR #22904 singleflight + re-check pattern, Nango
-    # blog «How to handle concurrency with OAuth token refreshes»).
+    # OAuth-токены **изолированы** от Advisor (с 2026-05-12 после
+    # инцидента с single-use refresh_token rotation, BUILDLOG.md
+    # «token rotation hardening»). У каждого бота свой OAuth grant +
+    # свой token-файл — refresh одного не задевает другого.
+    # Сам client_id / client_secret общие (это credentials cTrader
+    # приложения, не пары access/refresh).
     ctrader_client_id: str = Field(
         default="", validation_alias="CTRADER_CLIENT_ID"
     )
@@ -74,11 +76,13 @@ class AiFxTraderSettings(BaseSettings):
     ctrader_host_type: str = Field(
         default="demo", validation_alias="CTRADER_HOST_TYPE"
     )
-    # Путь к JSON с access/refresh токенами. Шарится с Advisor по
-    # умолчанию (тот же demo-аккаунт). Можно задать отдельный путь, если
-    # потребуется изолированная авторизация AI-агента в будущем.
+    # Путь к JSON с access/refresh токенами — отдельный от Advisor'а
+    # (/data/ctrader_tokens.json). Полная изоляция OAuth: refresh
+    # одного бота не задевает refresh другого. Перед первым стартом
+    # нужно пройти OAuth-flow и положить токены в этот файл (через
+    # отдельный fx-pro-auth -> exchange_code_for_tokens + atomic save).
     ctrader_token_path: str = Field(
-        default="/data/ctrader_tokens.json",
+        default="/data/ctrader_tokens_ai_fx.json",
         validation_alias="AI_FX_TRADER_CTRADER_TOKEN_PATH",
     )
 

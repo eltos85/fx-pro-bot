@@ -215,7 +215,7 @@ services:
       CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
       CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
       CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
-      AI_FX_TRADER_CTRADER_TOKEN_PATH: ${AI_FX_TRADER_CTRADER_TOKEN_PATH:-/data/ctrader_tokens.json}
+      AI_FX_TRADER_CTRADER_TOKEN_PATH: ${AI_FX_TRADER_CTRADER_TOKEN_PATH:-/data/ctrader_tokens_ai_fx.json}
       # DeepSeek-V4 (тот же ключ что у ai_trader — это аккаунт-level rate-limit).
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AI_FX_TRADER_DEEPSEEK_MODEL: ${AI_FX_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}

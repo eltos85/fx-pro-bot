@@ -151,3 +151,48 @@ def ensure_valid_token(
                  (token.expires_at - time.time()) / 86400)
 
     return token
+
+
+def log_token_status(
+    token: TokenData,
+    label: str = "cTrader",
+    warn_threshold_days: float = 7.0,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Залогировать состояние OAuth-токена при старте процесса.
+
+    Для каждого бота при `__init__` пишем:
+    - INFO: expires_at дата + сколько дней осталось;
+    - WARNING если осталось < `warn_threshold_days` (default 7) — повод
+      запустить `fx-pro-auth` заранее, чтобы не торопиться;
+    - ERROR если токен УЖЕ просрочен (osталось < 0) — bot скорее всего
+      вылетит на ближайшем cTrader-вызове, нужно reauth немедленно.
+
+    Это часть «защиты от просрочки токенов» (BUILDLOG.md 2026-05-12):
+    видимость в `docker logs` — это **единственная** наша система алертов
+    сейчас, ни Telegram, ни email не подключены. Просто посматривать
+    логи раз в неделю достаточно при `warn_threshold = 7d`.
+    """
+    log_ = logger or log
+    left_sec = token.expires_at - time.time()
+    left_days = left_sec / 86400.0
+    exp_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(token.expires_at))
+
+    if left_sec < 0:
+        log_.error(
+            "%s OAuth: TOKEN EXPIRED %.1f дней назад (expires_at=%s). "
+            "Срочно: запустите fx-pro-auth и обновите /data/ctrader_tokens.json.",
+            label, -left_days, exp_str,
+        )
+    elif left_days < warn_threshold_days:
+        log_.warning(
+            "%s OAuth: токен истекает через %.1f дней (%s). "
+            "Рекомендуется проактивно запустить fx-pro-auth, чтобы не "
+            "попасть на single-use rotation refresh_token'а.",
+            label, left_days, exp_str,
+        )
+    else:
+        log_.info(
+            "%s OAuth: токен валиден до %s (осталось %.1f дней)",
+            label, exp_str, left_days,
+        )

@@ -213,12 +213,13 @@ def test_try_refresh_token_returns_false_without_refresh_token():
 
 
 def test_try_refresh_token_invokes_callback():
-    """on_token_refreshed callback вызывается с новыми токенами."""
+    """on_token_refreshed callback вызывается с новыми токенами + expires_at."""
     captured: dict = {}
 
-    def on_refresh(access: str, refresh: str) -> None:
+    def on_refresh(access: str, refresh: str, expires_at: float) -> None:
         captured["access"] = access
         captured["refresh"] = refresh
+        captured["expires_at"] = expires_at
 
     c = CTraderClient(
         client_id="cid",
@@ -232,6 +233,7 @@ def test_try_refresh_token_invokes_callback():
     class _NewTok:
         access_token = "new_at"
         refresh_token = "new_rt"
+        expires_at = 1.7e9
 
     with patch(
         "fx_pro_bot.trading.auth.refresh_access_token",
@@ -241,4 +243,57 @@ def test_try_refresh_token_invokes_callback():
 
     assert c._access_token == "new_at"
     assert c._refresh_token == "new_rt"
-    assert captured == {"access": "new_at", "refresh": "new_rt"}
+    assert c._token_expires_at == 1.7e9
+    assert captured == {"access": "new_at", "refresh": "new_rt", "expires_at": 1.7e9}
+
+
+def test_save_current_tokens_idempotent_no_callback():
+    """_save_current_tokens — no-op если callback не задан."""
+    c = _make_client()
+    c._on_token_refreshed = None
+    c._save_current_tokens()  # should not raise
+
+
+def test_save_current_tokens_calls_callback_with_in_memory_state():
+    """defensive save: после _do_auth success callback вызывается с in-memory state."""
+    captured: dict = {}
+
+    def on_refresh(access: str, refresh: str, expires_at: float) -> None:
+        captured["access"] = access
+        captured["refresh"] = refresh
+        captured["expires_at"] = expires_at
+
+    c = CTraderClient(
+        client_id="cid",
+        client_secret="csec",
+        access_token="at",
+        account_id=1,
+        refresh_token="rt",
+        expires_at=1.6e9,
+        on_token_refreshed=on_refresh,
+    )
+
+    c._save_current_tokens()
+
+    assert captured == {"access": "at", "refresh": "rt", "expires_at": 1.6e9}
+
+
+def test_save_current_tokens_skipped_without_refresh_token():
+    """Без refresh_token — defensive save skip (нечего сохранять)."""
+    captured: dict = {}
+
+    def on_refresh(access: str, refresh: str, expires_at: float) -> None:
+        captured["called"] = True
+
+    c = CTraderClient(
+        client_id="cid",
+        client_secret="csec",
+        access_token="at",
+        account_id=1,
+        refresh_token="",
+        on_token_refreshed=on_refresh,
+    )
+
+    c._save_current_tokens()
+
+    assert captured == {}

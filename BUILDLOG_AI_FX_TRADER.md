@@ -1,5 +1,83 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-12 — token rotation hardening (изоляция OAuth-токенов)
+
+`коммит при deploy`
+
+**Контекст.** В тот же день что и MVP deploy случился инцидент с OAuth:
+`refresh_token` в shared `/data/ctrader_tokens.json` оказался spent
+после single-use rotation. Advisor с 09.05 не торговал, fx-ai-trader не
+смог стартануть. Детальный post-mortem — в `BUILDLOG.md` 12.05
+«defensive token sync + startup token-status log».
+
+После полного re-auth через `fx-pro-auth`-flow тот же риск остаётся
+для будущего: если callback `_on_token_refreshed → token_store.save`
+упадёт между OAuth-call и `save()` — refresh_token потеряется.
+
+**Защита на 3 уровнях (см. BUILDLOG.md детали):**
+
+**A. Defensive sync** в `CTraderClient._do_auth` — после каждого
+успешного auth in-memory токены пишутся в shared store через
+callback (идемпотентно). Закрывает race «refresh прошёл, callback
+упал».
+
+**B. Startup logging** через `auth.log_token_status` — INFO/WARN/ERROR
+в `docker logs` обоих ботов про сколько дней до expiration. Видимость.
+
+**C. Изоляция token-store** между Advisor и fx-ai-trader. Дефолтный
+`AiFxTraderSettings.ctrader_token_path` сменён с
+`/data/ctrader_tokens.json` (shared) на `/data/ctrader_tokens_ai_fx.json`
+(отдельный grant). После этого refresh одного бота **не задевает** refresh
+другого: они живут на двух независимых OAuth grant'ах одного приложения
+client_id.
+
+**Что НЕ изменилось.**
+
+- `client_id` / `client_secret` остаются общие (это credentials самого
+  приложения, не пары access/refresh).
+- `CTRADER_ACCOUNT_ID=46883073` (demo-аккаунт) общий — оба бота
+  торгуют на одном счёте, но с **разными labels** (`fx-pro-bot` для
+  Advisor, `ai-fx-trader` для AI). Reconcile-логика отделяет позиции
+  по label (см. `client_adapter.get_open_positions`).
+- `token_lock.py` (file-flock advisory lock) остаётся, но теперь
+  имеет academic смысл — два разных файла не конкурируют. Хранится
+  как defence-in-depth: если кто-то в `.env` пропишет тот же path —
+  flock спасёт от corrupted writes.
+
+**OAuth-flow для fx-ai-trader (выполнено вручную перед push'ем).**
+
+1. Сгенерирован тот же `grantingaccess/?client_id=...&redirect_uri=...`
+   URL как для Advisor (один client_id = одно приложение cTrader).
+2. Пользователь авторизовался в браузере **второй раз** — cTrader
+   выдал **новый** authorization code (тот же приложение, тот же
+   аккаунт, но второй независимый grant — refresh_token будет
+   собственный).
+3. На VPS внутри образа `fx-pro-bot:local` сделан
+   `exchange_code_for_tokens(...)` → атомарная запись в
+   `/data/ctrader_tokens_ai_fx.json`.
+4. После этого запушен код-change (default path) и сделан selective
+   rebuild fx-ai-trader.
+
+**Verification после деплоя:**
+- Логи fx-ai-trader при старте: `FX-AI-Trader cTrader OAuth: токен
+  валиден до 2026-06-11..., осталось 30.0 дней` (INFO).
+- Логи Advisor при старте: `Advisor cTrader OAuth: токен валиден до
+  2026-06-11..., осталось 30.0 дней` (INFO).
+- Файлы:
+  - `/data/ctrader_tokens.json` — Advisor (refresh_token = `Slyfr...`)
+  - `/data/ctrader_tokens_ai_fx.json` — fx-ai-trader (другой refresh_token)
+- Оба бота подключаются к cTrader через свои OAuth grant'ы.
+
+**Operational follow-up.** Раз в 2-3 недели смотреть `docker logs` обоих
+ботов на наличие `WARNING ... токен истекает через X дней` — если
+появилось, пробросить `fx-pro-auth` заранее на оба бота (отдельные
+OAuth-flow для каждого token-файла).
+
+**Файлы:** `BUILDLOG.md` 12.05 «defensive token sync + startup
+token-status log» содержит полный список.
+
+---
+
 ## 2026-05-12 — Phase 1 deploy + fix LLM max_tokens 4096→8000
 
 `коммит при deploy`

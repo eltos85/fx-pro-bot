@@ -266,14 +266,19 @@ def _init_trading(settings: Settings, store: StatsStore):
         log.warning("cTrader: токены недоступны (%s), торговля отключена", exc)
         return None, None
 
-    def _on_token_refreshed(new_access: str, new_refresh: str) -> None:
+    from fx_pro_bot.trading.auth import log_token_status
+    log_token_status(token_data, label="Advisor cTrader", logger=log)
+
+    def _on_token_refreshed(
+        new_access: str, new_refresh: str, expires_at: float,
+    ) -> None:
         from fx_pro_bot.trading.auth import TokenData
         import time as _time
 
         updated = TokenData(
             access_token=new_access,
             refresh_token=new_refresh,
-            expires_at=_time.time() + 2_628_000,
+            expires_at=expires_at if expires_at > 0 else _time.time() + 2_628_000,
         )
         try:
             token_store.save(updated)
@@ -288,6 +293,7 @@ def _init_trading(settings: Settings, store: StatsStore):
             account_id=settings.ctrader_account_id,
             host_type=settings.ctrader_host_type,
             refresh_token=token_data.refresh_token,
+            expires_at=token_data.expires_at,
             on_token_refreshed=_on_token_refreshed,
         )
         client.start(timeout=30)

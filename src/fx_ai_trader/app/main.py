@@ -101,13 +101,26 @@ def run() -> None:
     except Exception:
         log.exception(
             "CTraderFxAdapter.start() failed — exiting. Проверьте токены: "
-            "fx-pro-auth и наличие /data/ctrader_tokens.json"
+            "fx-pro-auth и наличие %s",
+            settings.ctrader_token_path,
         )
         return
     if not adapter.is_ready:
         log.error("Adapter не готов после start(), exit")
         adapter.stop()
         return
+
+    # Token-status log на старте: видимость в `docker logs` про сколько
+    # дней до expiration. WARNING при <7d, ERROR при expired (детали в
+    # auth.log_token_status). Часть «защиты от просрочки» 2026-05-12.
+    try:
+        from fx_pro_bot.trading.auth import log_token_status
+        from fx_ai_trader.trading.token_lock import _read_token  # noqa: PLC2701
+        from pathlib import Path as _Path
+        _tok = _read_token(_Path(settings.ctrader_token_path))
+        log_token_status(_tok, label="FX-AI-Trader cTrader", logger=log)
+    except Exception:
+        log.debug("Token status log skipped", exc_info=True)
 
     llm = DeepSeekClient(
         api_key=settings.deepseek_api_key,

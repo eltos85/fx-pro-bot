@@ -122,8 +122,9 @@ class CTraderFxAdapter:
             account_id=self._settings.ctrader_account_id,
             host_type=self._settings.ctrader_host_type,
             refresh_token=token.refresh_token,
-            on_token_refreshed=lambda a, r: save_refreshed_token(
-                self._settings.ctrader_token_path, a, r,
+            expires_at=token.expires_at,
+            on_token_refreshed=lambda a, r, exp: save_refreshed_token(
+                self._settings.ctrader_token_path, a, r, exp,
             ),
         )
         self._client.start(timeout=timeout)
