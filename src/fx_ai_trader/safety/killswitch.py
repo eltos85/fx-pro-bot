@@ -1,20 +1,30 @@
-"""KillSwitch для FX AI Trader — FX-параметры + correlation-aware.
+"""KillSwitch для FX AI Trader — broker-safety only (НЕ strategy tuning).
 
-Проверки перед каждым решением и перед каждым open:
-- max_daily_loss_usd: дневная просадка превышена → блокируем до завтра.
-- max_total_loss_usd: общий минус по эксперименту → полная остановка.
-- max_open_positions: больше N открытых → не открываем новые.
-- max_positions_per_symbol: защита от over-allocation на один инструмент
-  (research: Janus Henderson 2026 «position limits per asset type»).
-- same-direction concentration check: 3-я позиция в одну сторону
-  запрещена (research: finaur «correlations spike in crisis» — risk-off
-  заваливает все долгие/короткие сразу).
-- correlation_haircut: размер 2-й позиции в одну сторону через
-  коррелированные active'ы умножается на haircut (research: Janus
-  Henderson 2026, finaur 2026).
+Философия v1.0 (12-May-2026 после переработки промпта на discretionary
+commodity trader): LLM имеет свободу принимать решения по R:R, risk
+size, correlation как профессиональный трейдер. KillSwitch охраняет
+ТОЛЬКО три класса риска:
 
-Все срабатывания логируются в standard logger; verbose-причина
-возвращается caller'у для записи в decisions.error.
+1. Catastrophic loss caps — daily/total max loss как полный стоп
+   эксперимента. НЕ tuning-параметр, а защита от runaway baseline.
+
+2. Broker margin safety — max_open_positions cap (защита от runaway
+   open-loop) + max_positions_per_symbol (sanity).
+
+3. Position direction validation (в executor.py) — SL/TP в правильную
+   сторону, volume > 0, базовые броker-input проверки.
+
+Сняты в v1.0 (были в v0.x):
+- correlation_haircut — LLM сам решит, коррелировать ли gold+oil.
+- same-direction concentration block (3-rd same-side rejected) —
+  тоже LLM-решение, не наша эвристика.
+- R:R ≥ 1.5 hard в executor — LLM сам решит R:R по setup'у.
+- risk_per_trade $25 hard в executor — LLM сам решит position size
+  по Van Tharp R-multiple, ограничен max_lot_size как safety floor.
+
+Source: реальная discretionary methodology (Mark Douglas "Trading in
+the Zone", Van Tharp "Definitive Guide to Position Sizing") + KenMacro
+institutional framework по gold/oil. См. docstring в prompts.py.
 """
 from __future__ import annotations
 
@@ -32,33 +42,15 @@ class KillSwitchConfig:
     max_total_loss_usd: float
     max_open_positions: int
     max_positions_per_symbol: int
-    correlation_haircut: float  # ∈ (0, 1], 0.7 = haircut 30%
 
 
 @dataclass
 class CheckResult:
     allowed: bool
     reason: str = ""
-    # Доп. поля для open-checks: рекомендованный размер после haircut.
+    # Backwards-compat для executor.py: всегда 1.0 в v1.0 (correlation
+    # haircut снят). Поле оставлено чтобы не ломать caller-сторону.
     size_multiplier: float = 1.0
-
-
-# Группы коррелированных commodity-инструментов. Risk-off ралли часто
-# гонит и gold, и oil в одну сторону (например, oil вверх + gold вверх
-# при escalation Middle-East tensions). Внутри группы considered "correlated"
-# для same-direction concentration / haircut целей.
-# Сейчас одна группа на оба наших инструмента — упрощение Phase 1.
-_CORRELATED_GROUPS: tuple[set[str], ...] = (
-    {"XAUUSD", "BZ=F"},
-)
-
-
-def _correlated_with(symbol: str) -> set[str]:
-    """Возвращает множество correlated-инструментов (исключая сам symbol)."""
-    for group in _CORRELATED_GROUPS:
-        if symbol in group:
-            return group - {symbol}
-    return set()
 
 
 class KillSwitch:
@@ -94,11 +86,12 @@ class KillSwitch:
         self,
         *,
         symbol: str,
-        side: str,
+        side: str,  # noqa: ARG002  — kept for API stability, не используется в v1.0
     ) -> CheckResult:
-        """Проверка перед открытием конкретной позиции.
+        """Проверка перед открытием позиции — только broker safety.
 
-        side: ``"BUY"`` или ``"SELL"`` (cTrader uppercase нотация).
+        v1.0 убрала: correlation haircut, same-direction concentration
+        block. LLM сам решает аллокацию. Здесь — только max-cap'ы.
         """
         gen = self.check_can_trade()
         if not gen.allowed:
@@ -109,10 +102,13 @@ class KillSwitch:
         if open_count >= self.config.max_open_positions:
             return CheckResult(
                 allowed=False,
-                reason=f"max positions reached: {open_count}/{self.config.max_open_positions}",
+                reason=(
+                    f"max positions reached: "
+                    f"{open_count}/{self.config.max_open_positions} — "
+                    f"broker margin safety, не strategy tuning"
+                ),
             )
 
-        # Per-symbol cap.
         same_symbol = [p for p in open_positions if p.symbol == symbol]
         if len(same_symbol) >= self.config.max_positions_per_symbol:
             return CheckResult(
@@ -123,40 +119,10 @@ class KillSwitch:
                 ),
             )
 
-        # Same-direction concentration check.
-        # Если уже есть 2+ позиции в ту же сторону (по любому из
-        # correlated-инструментов), 3-ю в ту же сторону не открываем.
-        side_up = side.upper()
-        correlated = _correlated_with(symbol) | {symbol}
-        same_dir_count = sum(
-            1 for p in open_positions
-            if p.side.upper() == side_up and p.symbol in correlated
-        )
-        if same_dir_count >= 2:
-            return CheckResult(
-                allowed=False,
-                reason=(
-                    f"same-direction concentration: уже {same_dir_count} {side_up} позиций "
-                    f"по correlated assets {sorted(correlated)}, 3-я запрещена "
-                    f"(research: finaur 2026 «correlations spike in crisis»)"
-                ),
-            )
-
-        # Correlation haircut: если уже есть ≥1 позиция в ту же сторону
-        # по correlated active → размер новой умножаем на haircut.
-        haircut = 1.0
-        if same_dir_count >= 1:
-            haircut = self.config.correlation_haircut
-            log.info(
-                "KS: correlation-haircut applied: %.2f (already %d %s positions "
-                "in correlated set %s)",
-                haircut, same_dir_count, side_up, sorted(correlated),
-            )
-
-        return CheckResult(allowed=True, size_multiplier=haircut)
+        return CheckResult(allowed=True, size_multiplier=1.0)
 
     def position_count_by_symbol(self, positions: list[AiFxPosition]) -> dict[str, int]:
-        """Helper для дашборда / логирования: распределение позиций по символам."""
+        """Helper для дашборда / логирования."""
         out: dict[str, int] = {}
         for p in positions:
             out[p.symbol] = out.get(p.symbol, 0) + 1

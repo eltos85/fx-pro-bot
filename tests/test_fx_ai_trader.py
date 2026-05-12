@@ -2,7 +2,9 @@
 
 Покрытие:
 - parse_action: Pydantic-schema валидация (XAUUSD + BRENT, multi-dim sentiment)
-- killswitch: correlation-aware checks, daily/total loss limits, per-symbol cap
+- killswitch: broker-safety checks (max_open_positions, max per symbol,
+  daily/total loss). v1.0: correlation haircut + same-direction
+  concentration check сняты — LLM решает сам.
 - token_lock: race-safe refresh с re-check
 - paper reconcile: SL/TP touch detection
 - volume rounding per-symbol
@@ -19,11 +21,7 @@ from pathlib import Path
 import pytest
 
 from fx_ai_trader.config.settings import AiFxTraderSettings
-from fx_ai_trader.safety.killswitch import (
-    KillSwitch,
-    KillSwitchConfig,
-    _correlated_with,
-)
+from fx_ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from fx_ai_trader.state.db import AiFxTraderStore
 from fx_ai_trader.trading.client_adapter import Bar
 from fx_ai_trader.trading.executor import (
@@ -212,19 +210,13 @@ def killswitch(store: AiFxTraderStore) -> KillSwitch:
             max_daily_loss_usd=150.0,
             max_total_loss_usd=300.0,
             max_open_positions=3,
-            max_positions_per_symbol=2,
-            correlation_haircut=0.7,
+            max_positions_per_symbol=3,
         ),
         store,
     )
 
 
 class TestKillSwitch:
-    def test_correlated_set(self):
-        assert _correlated_with("XAUUSD") == {"BZ=F"}
-        assert _correlated_with("BZ=F") == {"XAUUSD"}
-        assert _correlated_with("EURUSD") == set()
-
     def test_empty_store_allows(self, killswitch: KillSwitch):
         res = killswitch.check_can_open_position(symbol="XAUUSD", side="BUY")
         assert res.allowed is True
@@ -245,7 +237,8 @@ class TestKillSwitch:
     def test_max_positions_per_symbol_blocks(
         self, killswitch: KillSwitch, store: AiFxTraderStore,
     ):
-        for i in range(2):
+        # Per-symbol cap = 3 (= общий max_open_positions, защита sanity).
+        for i in range(3):
             store.open_position(
                 symbol="XAUUSD", side="BUY", volume_lots=0.01,
                 entry_price=2390 + i, sl_price=2380, tp_price=2410,
@@ -254,11 +247,20 @@ class TestKillSwitch:
             )
         res = killswitch.check_can_open_position(symbol="XAUUSD", side="SELL")
         assert not res.allowed
-        assert "max positions per symbol" in res.reason
+        # Может быть либо "max positions reached" (глобальный лимит сработал
+        # первым), либо "max positions per symbol".
+        assert (
+            "max positions" in res.reason
+            or "per symbol" in res.reason
+        )
 
-    def test_correlation_haircut_on_second_same_dir(
+    def test_v1_no_correlation_haircut(
         self, killswitch: KillSwitch, store: AiFxTraderStore,
     ):
+        """v1.0: correlation haircut снят, size_multiplier всегда 1.0.
+
+        LLM сам решает, коррелировать ли gold+oil long в одну сторону.
+        """
         store.open_position(
             symbol="XAUUSD", side="BUY", volume_lots=0.05,
             entry_price=2390, sl_price=2380, tp_price=2410,
@@ -267,12 +269,14 @@ class TestKillSwitch:
         )
         res = killswitch.check_can_open_position(symbol="BZ=F", side="BUY")
         assert res.allowed
-        assert res.size_multiplier == pytest.approx(0.7)
+        assert res.size_multiplier == 1.0
 
-    def test_same_direction_concentration_blocks_third(
+    def test_v1_no_same_direction_block(
         self, killswitch: KillSwitch, store: AiFxTraderStore,
     ):
-        # 2 BUY на correlated assets (XAUUSD + BZ=F) → 3-я BUY на любом из них блок.
+        """v1.0: same-direction concentration block снят. 3 same-direction
+        позиции разрешены, ограничены только max_open_positions=3.
+        """
         store.open_position(
             symbol="XAUUSD", side="BUY", volume_lots=0.05,
             entry_price=2390, sl_price=2380, tp_price=2410,
@@ -285,27 +289,8 @@ class TestKillSwitch:
             broker_position_id=None, broker_order_label="ai-fx-trader",
             llm_reason="t", is_paper=True,
         )
+        # 3-я BUY ещё проходит (max_open_positions=3 ещё не заполнен).
         res = killswitch.check_can_open_position(symbol="XAUUSD", side="BUY")
-        assert not res.allowed
-        assert "same-direction concentration" in res.reason
-
-    def test_opposite_direction_after_two_same_allowed(
-        self, killswitch: KillSwitch, store: AiFxTraderStore,
-    ):
-        # 2 BUY открыты → SELL ещё можно (заполнили 3-ю позицию слот).
-        store.open_position(
-            symbol="XAUUSD", side="BUY", volume_lots=0.05,
-            entry_price=2390, sl_price=2380, tp_price=2410,
-            broker_position_id=None, broker_order_label="ai-fx-trader",
-            llm_reason="t", is_paper=True,
-        )
-        store.open_position(
-            symbol="BZ=F", side="BUY", volume_lots=0.10,
-            entry_price=85, sl_price=84, tp_price=87,
-            broker_position_id=None, broker_order_label="ai-fx-trader",
-            llm_reason="t", is_paper=True,
-        )
-        res = killswitch.check_can_open_position(symbol="XAUUSD", side="SELL")
         assert res.allowed
 
     def test_daily_loss_blocks(self, killswitch: KillSwitch, store: AiFxTraderStore):
@@ -473,9 +458,13 @@ class TestSettings:
         assert s.poll_interval_sec == 900
         assert s.review_interval_sec == 300
         assert s.max_open_positions == 3
-        assert s.max_positions_per_symbol == 2
-        assert s.risk_per_trade_usd == 25.0
-        assert s.correlation_haircut == 0.7
+        # v1.0: per-symbol = общий лимит (защита от runaway, не tuning).
+        assert s.max_positions_per_symbol == 3
+        assert s.max_lot_size == 0.50
+        # v1.0: risk_per_trade_usd и correlation_haircut удалены из
+        # settings (LLM решает сам).
+        assert not hasattr(s, "risk_per_trade_usd")
+        assert not hasattr(s, "correlation_haircut")
 
     def test_db_path(self):
         s = AiFxTraderSettings()

@@ -1,5 +1,129 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-12 (вечер) — prompt v1.0 «discretionary commodity trader» + KillSwitch redesign + experiment **n=0 reset**
+
+`коммит при deploy`
+
+**Контекст.** Пользователь явно указал: «из нашего кода по решениям и
+стратегиям ничего брать не надо было... цель ии агента не повторять
+нашего бота, а принимать решения самому». v0.1 / v0.2 промптов копировали
+нашу advisor-математику (R:R ≥ 1.5, risk $25 hard, correlation haircut
+0.7, same-direction concentration block) — LLM упирался в эти микро-
+ограничения и за 13 decisions не выполнил ни одной сделки. Подход
+был концептуально неправильным.
+
+**Что переделано.** Полная переработка промпта и safety layer:
+
+1. **Промпт v1.0 — discretionary commodity trader.** Содержание построено
+   на реальных тематических ресурсах для gold/oil-трейдеров:
+
+   - **KenMacro «How to Trade Gold (XAUUSD) 2026: Macro Trader's
+     Institutional Guide»** (Ken Chigbo, 18+ years London FX, upd
+     06-May-2026, https://kenmacro.com/how-to-trade-gold-xauusd-2026/):
+     5-driver hierarchy (real yields → DXY → central banks → geopol →
+     ETF/COT), noise-band sizing ($15–25 normal / $30–50 FOMC-NFP /
+     $100–200 macro shocks), trading windows (London open / NY open /
+     COMEX close), top-5 retail failure modes, Macro-Flow Confluence
+     Pullback (MFP) setup.
+   - **KenMacro «How to Trade Oil: The Macro Trader's Guide»**
+     (https://kenmacro.com/how-to-trade-oil/): 4-channel framework
+     (supply / demand / dollar / geopol), DXY correlation **flips**
+     по режиму (supply-led = positive, demand-led = inverse), OPEC+
+     quota-compliance-spare-capacity.
+   - **FXMacroData «Gold vs. Real Yields»**: real-yields объясняют
+     45–55% квартальной gold-return variance.
+   - **Sprott Money / GetARC «Gold COT Report Analysis» May 2026**:
+     managed money net long +94 254 contracts (down from +302 508 в
+     Feb despite higher price — short-covering rally, exhaustion).
+   - **Middle East Insider «OPEC+ Spare Capacity April 2026»** (22-Apr-
+     2026): spare capacity ~5M b/d, highest since 2009, compresses
+     risk premium / caps rallies.
+   - **Middle East Insider «Brent Crude Q2 2026 Forecast»**: $72–88
+     institutional band.
+   - **East Daley / Investing.com «Brent-WTI Spread»**: May 2026 spread
+     ~$8–12 vs historical $3.85 avg (Hormuz disruption + light/heavy
+     mismatch).
+   - **GlobalMarketRaiders «EIA Edge: WTI Crude Counter-Trend»**:
+     EIA Wed 10:30 ET = single biggest scheduled vol event, fade-the-
+     spike setup, API Tue evening preliminary.
+   - **Mark Douglas «Trading in the Zone»** (2000, Penguin/Prentice
+     Hall): probabilistic mindset, 5 fundamental truths, accept-risk-
+     emotionally framework, casino-operator vs gambler distinction.
+   - **Van K. Tharp «Definitive Guide to Position Sizing Strategies»**
+     (2008, IITM Press) + R-multiple framework: P = C/R, position
+     sizing accounts for ~91% of performance variation среди profi-
+     managers.
+
+   Промпт не содержит больше «v0.x» формул из нашего executor'а.
+   LLM сам решает entry-confirmations, R:R, position size по Tharp
+   R-multiple, когда close, когда hold. Hold — default; «patience is
+   the edge».
+
+2. **KillSwitch v1.0 — broker-safety only.** Сняты:
+   - `correlation_haircut=0.7` (gold↔oil 2-я same-side → 0.7×).
+   - `same-direction concentration block` (3-я same-side в correlated
+     set отвергалась).
+   - `R:R ≥ 1.5` hard cap в `executor.py`.
+   - `risk_per_trade_usd ≤ $25` hard cap в `executor.py`.
+
+   Оставлены ТРИ класса защиты:
+   - **Catastrophic loss caps**: `max_daily_loss_usd=$150`,
+     `max_total_loss_usd=$300` — полная остановка эксперимента, НЕ
+     tuning-параметр.
+   - **Broker margin safety**: `max_open_positions=3` (runaway-loop
+     protection), `max_positions_per_symbol=3` (= общий, sanity),
+     `max_lot_size=0.50` (clamp; на demo $1500 и XAUUSD margin
+     ~$3000/lot = 0.5 лот ≈ весь капитал).
+   - **Anti-hallucination gate**: `aggregate_uncertainty > 0.7` →
+     reject open (LLM сам должен был вернуть hold; backstop в
+     `parse_action`).
+
+3. **Эксперимент перезапущен n=0** от **12-May-2026 ~11:30 UTC**
+   (deploy v1.0). 13 предыдущих decisions с 0 executed не дают
+   статистических данных — терять нечего. 14-day forward-test
+   стартует заново. Эта правка эквивалентна **смене стратегии**, не
+   bug-fix (правило `no-data-fitting.mdc`: «Если хотя бы одно условие
+   не выполнено — не отключаем»; здесь же отключаем всю торговую
+   логику, поэтому n=0 reset обязателен).
+
+**Файлы:**
+- `src/fx_ai_trader/llm/prompts.py` — полностью переписан SYSTEM_PROMPT
+  + SYSTEM_PROMPT_REVIEW, docstring с реальными источниками.
+- `src/fx_ai_trader/safety/killswitch.py` — убраны `_correlated_with`,
+  same-direction block, correlation haircut. `KillSwitchConfig` без
+  `correlation_haircut`.
+- `src/fx_ai_trader/trading/executor.py` — убран R:R ≥ 1.5 hard check,
+  убран `risk_usd > settings.risk_per_trade_usd` hard check;
+  `risk_usd`/`r_r` остались для audit-логов.
+- `src/fx_ai_trader/config/settings.py` — удалены `risk_per_trade_usd`,
+  `correlation_haircut`; `max_positions_per_symbol` 2 → 3.
+- `src/fx_ai_trader/app/main.py` — log строка адаптирована.
+- `tests/test_fx_ai_trader.py` — переписаны KillSwitch и Settings
+  тесты под v1.0 API; добавлены `test_v1_no_correlation_haircut` и
+  `test_v1_no_same_direction_block`.
+- `.env.example` — секция FX AI Trader обновлена с заметкой о
+  снятых env vars.
+
+**Тесты:** 32/32 в `test_fx_ai_trader.py` зелёные. Полный прогон
+`tests/` — 514/514 проходят.
+
+**Что ожидаем после deploy.** LLM прочитает promt v1.0 с 5 драйверами
+gold и 4 каналами oil. Будут ли реальные open'ы или продолжение hold'ов
+— решит сам LLM по реальным данным feed'а (price + DXY + EIA когда
+есть + RSS news). Метрика успеха Phase 1: НЕ количество сделок (hold
+ok), а **качество reasoning** (макро-driver упоминается? noise-band
+sizing? real-yields/DXY check?) + отсутствие тех. ошибок parser/
+направления SL.
+
+---
+
+## 2026-05-12 (утро) — prompt v0.2 bug-fix: LLM pip-confusion для XAUUSD/BRENT (ОТМЕНЁН)
+
+> **Status:** эта версия отменена в тот же день вечером (см. v1.0 выше).
+> Причина: подход «уточняем pip-math в промпте через формулы из нашего
+> executor'а» — это копирование advisor-логики, чего пользователь явно
+> просил не делать. Запись сохранена для исторического контекста.
+
 ## 2026-05-12 — prompt v0.2 bug-fix: LLM pip-confusion для XAUUSD/BRENT
 
 `коммит при deploy`

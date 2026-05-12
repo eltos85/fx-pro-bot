@@ -1,12 +1,23 @@
 """Парсинг ответа LLM (Pydantic-schema) + исполнение действий.
 
 Цикл:
-1. ``parse_action(text)`` → Pydantic-валидация JSON-блока (research:
-   TauricResearch/TradingAgents PR #458 «schema at agent boundaries»,
-   Medium «hallucination prevention out of prompt into schema» 2026).
-2. ``apply_action(...)`` → KillSwitch check → клиент cTrader (или
-   paper-mode) → запись в БД.
+1. ``parse_action(text)`` → Pydantic-валидация JSON-блока. Pydantic
+   schemas защищают от структурных hallucination'ов на agent boundary
+   (стандартная практика для LLM-agents, см. TauricResearch
+   TradingAgents).
+2. ``apply_action(...)`` → KillSwitch broker-safety check → клиент
+   cTrader (или paper-mode) → запись в БД.
 3. Все ошибки → возврат ApplyResult с error, никаких exception наружу.
+
+v1.0 (12-May-2026): сняты hard caps R:R ≥ 1.5 и risk_per_trade ≤ $25.
+LLM получает свободу профессионального discretionary trader. Остались
+только broker-input validations:
+- SL/TP в правильную сторону (broker отвергнет иначе).
+- volume > 0 после rounding к step.
+- max_lot_size clamp (catastrophic broker margin safety).
+- aggregate_uncertainty > 0.7 → reject (anti-hallucination gate).
+- KillSwitch: max_open_positions, daily/total loss cap.
+См. docstring в prompts.py для полного research-basis.
 """
 from __future__ import annotations
 
@@ -161,8 +172,9 @@ def parse_action(
     инструкцию).
 
     max_uncertainty: если open-decision имеет aggregate_uncertainty выше
-    порога → reject (research arxiv 2603.11408 — high uncertainty signals
-    poor commodity forecasting confidence).
+    порога → reject. Это anti-hallucination gate: LLM сам должен был
+    вернуть "hold" при высокой uncertainty (так указано в промпте),
+    но если он этого не сделал — режем здесь.
     """
     obj = _extract_last_json_object(text)
     if isinstance(obj, str):
@@ -180,7 +192,9 @@ def parse_action(
             model = OpenAction.model_validate(obj)
             if model.symbol not in allowed_symbols:
                 return f"symbol {model.symbol!r} not in allowed list {list(allowed_symbols)}"
-            # Sentiment uncertainty gate (Risk 1 mitigation).
+            # Anti-hallucination gate: LLM сам должен был вернуть hold
+            # при высокой uncertainty (так указано в SYSTEM_PROMPT),
+            # но если попытался open — режем.
             if (
                 model.sentiment is not None
                 and model.sentiment.aggregate_uncertainty > max_uncertainty
@@ -188,8 +202,8 @@ def parse_action(
                 return (
                     f"high aggregate_uncertainty "
                     f"({model.sentiment.aggregate_uncertainty:.2f} > "
-                    f"{max_uncertainty}) — open blocked by uncertainty gate "
-                    f"(research arxiv 2603.11408)"
+                    f"{max_uncertainty}) — open blocked by anti-hallucination "
+                    f"gate; LLM должен был вернуть hold"
                 )
         elif action_type == "close":
             model = CloseAction.model_validate(obj)
@@ -336,19 +350,16 @@ def _apply_open(
                 ),
             )
 
-    # R:R check (≥ 1.5 enforced).
+    # R:R больше НЕ hard-cap'нут (v1.0). LLM сам решает R:R по setup'у:
+    # scalp может 1.2, swing 3.0+. Считаем для лога/учёта.
     risk_distance = abs(current_price - m.stop_loss)
     reward_distance = abs(m.take_profit - current_price)
     if risk_distance <= 0:
         return ApplyResult(executed=False, summary="", error="risk distance == 0")
     r_r = reward_distance / risk_distance
-    if r_r < 1.5:
-        return ApplyResult(
-            executed=False, summary="",
-            error=f"R:R={r_r:.2f} < 1.5 — open blocked",
-        )
 
-    # Apply correlation-haircut on volume.
+    # size_multiplier в v1.0 всегда 1.0 (correlation haircut снят); поле
+    # сохранено для API stability.
     volume_lots = m.volume_lots * ks.size_multiplier
 
     info = adapter.get_symbol_info(m.symbol)
@@ -371,20 +382,13 @@ def _apply_open(
     if volume_lots <= 0:
         return ApplyResult(executed=False, summary="", error="volume_lots <= 0 после rounding")
 
-    # Risk-USD check: при pip_value ≈ $1 per std lot для XAUUSD/BRENT
-    # на FxPro USD-account: risk = SL_distance_pips × lots × 1.
+    # v1.0: hard cap по risk-per-trade USD снят. LLM сам решает risk
+    # size по Van Tharp R-multiple (см. SYSTEM_PROMPT, "Position size"
+    # секция). Catastrophic floor — max_lot_size clamp выше + KillSwitch
+    # daily/total loss caps снизу. Считаем risk_usd для audit-логов.
     pip_size = _pip_size_for(m.symbol)
     sl_pips = risk_distance / pip_size if pip_size > 0 else 0
     risk_usd = sl_pips * volume_lots * _pip_value_per_std_lot(m.symbol)
-    if risk_usd > settings.risk_per_trade_usd:
-        return ApplyResult(
-            executed=False, summary="",
-            error=(
-                f"risk_usd ${risk_usd:.2f} > limit ${settings.risk_per_trade_usd:.2f} "
-                f"(SL distance {sl_pips:.2f} pips × {volume_lots} lots) — "
-                f"уменьшайте lots или SL distance"
-            ),
-        )
 
     # ─── PAPER MODE ──────────────────────────────────────────────────────
     if not settings.trading_enabled:

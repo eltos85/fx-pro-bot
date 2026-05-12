@@ -120,41 +120,42 @@ class AiFxTraderSettings(BaseSettings):
         default=500.0, validation_alias="AI_FX_TRADER_VIRTUAL_CAPITAL"
     )
 
-    # ─── KillSwitch (FX-параметры) ───────────────────────────────────────
-    # Под 2 инструмента + LLM ошибки → более либеральный daily, но
-    # ограниченный risk-per-trade. При $25 риска и 6 убыточных сделок
-    # подряд = $150 daily limit.
+    # ─── Broker safety (катастрофические лимиты, НЕ micro-management) ───
+    # Философия v1.0 (12-May-2026): LLM получает свободу профессионального
+    # discretionary trader (Mark Douglas / Van Tharp). R:R / risk-per-trade
+    # / correlation haircut — это его собственное решение по setup'у,
+    # НЕ наши hard caps.
+    # Здесь оставлены ТОЛЬКО три класса защиты:
+    #   1. catastrophic daily/total loss (stop-experiment, не tuning).
+    #   2. broker margin safety (max_lot_size, max_open_positions).
+    #   3. anti-hallucination gate (sentiment uncertainty > 0.7 в executor).
     max_daily_loss_usd: float = Field(
         default=150.0, validation_alias="AI_FX_TRADER_MAX_DAILY_LOSS"
     )
     max_total_loss_usd: float = Field(
         default=300.0, validation_alias="AI_FX_TRADER_MAX_TOTAL_LOSS"
     )
+    # Общий cap на количество одновременно открытых позиций (broker
+    # margin sanity). LLM может разместить максимум 3 позиции в любой
+    # комбинации gold/oil. Это НЕ ограничение стратегии (LLM сам решит
+    # коррелировать ли gold-long с oil-long), а защита от runaway
+    # open-loop, когда LLM из-за бага начнёт открывать каждый цикл.
     max_open_positions: int = Field(
         default=3, validation_alias="AI_FX_TRADER_MAX_POSITIONS"
     )
-    # На один инструмент максимум 2 позиции (защита от over-allocation,
-    # research: Janus Henderson 2026 «position limits per asset type»).
+    # На один инструмент максимум 3 позиции (= общий лимит). Снято
+    # ограничение «=2 для защиты от over-allocation»: LLM сам решит
+    # сколько накопить на gold vs oil. Hard cap идёт через
+    # max_open_positions.
     max_positions_per_symbol: int = Field(
-        default=2, validation_alias="AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL"
+        default=3, validation_alias="AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL"
     )
-    # Risk per trade в USD (как у Advisor: $50 после увеличения 11.05.2026).
-    # AI стартует с $25 (консервативнее, LLM экспериментальный).
-    risk_per_trade_usd: float = Field(
-        default=25.0, validation_alias="AI_FX_TRADER_RISK_PER_TRADE_USD"
-    )
-    # Hard cap на lot size (как MAX_LOT_SIZE в Advisor). Защита от
-    # extreme-волатильных дней когда ATR-scaled sizing пытается открыть
-    # большой лот.
+    # Hard cap на lot size — broker margin safety. На demo $1500 и
+    # типичной XAUUSD margin requirement ~$3000/lot (5% margin), 0.5 лот
+    # = ~$1500 margin = весь капитал. Это catastrophic limit: даже если
+    # LLM попросит 5 лотов, executor режет до 0.5.
     max_lot_size: float = Field(
         default=0.50, validation_alias="AI_FX_TRADER_MAX_LOT_SIZE"
-    )
-    # Correlation-haircut: gold↔oil умеренно коррелированы при risk-off
-    # (research: finaur «correlations spike in crisis»). Если уже есть
-    # открытая позиция на коррелированном asset той же direction —
-    # размер новой умножаем на 0.7.
-    correlation_haircut: float = Field(
-        default=0.7, validation_alias="AI_FX_TRADER_CORRELATION_HAIRCUT"
     )
 
     # ─── Storage ─────────────────────────────────────────────────────────

@@ -73,11 +73,11 @@ def run() -> None:
     log.info("Full poll: %ds | Review poll: %ds",
              settings.poll_interval_sec, settings.review_interval_sec)
     log.info(
-        "Killswitch: daily=$%.0f total=$%.0f maxpos=%d maxpos/sym=%d "
-        "risk/trade=$%.0f corr_haircut=%.2f max_lot=%.2f",
+        "Killswitch v1.0 (broker-safety only): daily=$%.0f total=$%.0f "
+        "maxpos=%d maxpos/sym=%d max_lot=%.2f "
+        "[R:R/risk/correlation сняты — LLM решает сам]",
         settings.max_daily_loss_usd, settings.max_total_loss_usd,
         settings.max_open_positions, settings.max_positions_per_symbol,
-        settings.risk_per_trade_usd, settings.correlation_haircut,
         settings.max_lot_size,
     )
     log.info("Order label: %s", settings.order_label)
@@ -136,7 +136,6 @@ def run() -> None:
             max_total_loss_usd=settings.max_total_loss_usd,
             max_open_positions=settings.max_open_positions,
             max_positions_per_symbol=settings.max_positions_per_symbol,
-            correlation_haircut=settings.correlation_haircut,
         ),
         store,
     )
