@@ -1,5 +1,106 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-13 (день) — bug-fix: pip-value для BRENT занижен в 10×
+
+`коммит при deploy`
+
+**Симптом.** Пользователь видел в FxPro cTrader-приложении floating PnL
+по позиции id=2 (BUY 0.13 lot BRENT @ 104.824) **$39**, в то время как
+бот в reviews писал «profit ~0.2R» и не срабатывал locked-profit guard
+(≥1.5R). При profit-per-pip $10 на 1 lot и 0.13 lot = $1.30/pip, move
+30 pip = $39 floating. По старой формуле бот считал $1/pip/lot =
+$0.13/pip × 30 = $3.9 — **в 10× меньше**.
+
+**Root cause.** В `executor.py` функция `_pip_value_per_std_lot()`
+возвращала hardcoded `$1.0` для всех символов, включая BRENT. Это
+было сделано как «Phase 1 baseline» (паттерн docstring так и говорил
+«уточняется при paper-observation»). Реальное значение для FxPro
+BRENT — **$10/pip/lot**, потому что 1 std lot BRENT = 1000 barrels
+(canonical ICE/RoboForex/FxPro spec), а pip = $0.01/barrel.
+
+**Источники** (правило `no-data-fitting.mdc` — ≥2 confirmation):
+
+1. **ICE Brent Crude Futures** (canonical worldwide):
+   theice.com/products/219 — contract size **1000 barrels**, minimum
+   fluctuation **$0.01/barrel = $10/contract**.
+2. **RoboForex Spot Brent Pro spec page**:
+   https://roboforex.com/forex-trading/trading/specifications/card/pro-stan/BRENT/
+   — «1 Pip Size = 0.01, Size of 1 lot = 1000 barrels, term currency
+   = USD». Подтверждает что retail-broker'ы тоже следуют ICE-стандарту.
+3. **Эмпирическое подтверждение** на FxPro demo (ctid=46883073,
+   2026-05-13): позиция id=2 BUY 0.13 lot @ 104.824, move ≈30 pip до
+   ≈105.12. Floating PnL в cTrader-приложении = **$39**. Расчёт:
+   30 × 0.13 × $10 = $39.0 ✓ (со старой формулой было бы $3.9).
+
+**Влияние bug'а на торговую логику.**
+
+LLM получал в context'е заниженные `risk_usd` / `R-multiple` / paper-PnL:
+
+| Метрика | Что видел LLM (×$1) | Реально на FxPro (×$10) |
+|---|---|---|
+| risk на текущую позицию | $17 | $172 |
+| profit floating при move 30 pip | $4 | $39 |
+| R-multiple при +$39 floating | 0.23R | 0.23R (только знаменатель другой) |
+| TP-hit profit | $26 | $258 |
+
+R-multiple сам по себе **верный** (числитель и знаменатель множатся
+на одинаковый фактор и сокращаются). Поэтому locked-profit guard
+(≥1.5R) **формально** работал. Но:
+
+- **Sizing был неправильный**. LLM думал что 0.13 lot = $17 risk
+  (2.8% от $500 virtual_capital), реально — $172 risk (34%).
+- **KillSwitch daily/total cap не учитывал реальный risk**. При
+  daily_loss=$150 одна потеря по реальной формуле ($172) превышает
+  cap одной сделкой.
+- **Прогнозируемый TP-profit в логах** искажён в 10×.
+
+**Что делает фикс.**
+
+- `_pip_value_per_std_lot()` теперь словарь per-symbol:
+  - `XAUUSD` = $1.0/pip/lot (canonical 100 oz × $0.01).
+  - `BZ=F`   = $10.0/pip/lot (canonical 1000 barrels × $0.01).
+  - fallback $1.0 для незнакомых символов (поведение pre-fix).
+- В промпт добавлены явные worked sizing examples — LLM теперь видит
+  что для BRENT pip-value в 10× больше, и подгоняет lots-formula.
+- При старте бот логирует фактический pip-value по каждому символу
+  (`pip_size=0.0100, pip_value=$10.00/pip/lot`) — для будущей
+  верификации.
+
+**Влияние на текущую открытую позицию id=2.**
+
+- SL/TP в cTrader — абсолютные цены, **остаются на брокере как есть**.
+- В нашей БД `volume_lots / entry_price` остаются как есть.
+- Только пересчёт R-multiple для LLM-reviews изменится (теперь будет
+  правильный). Текущие +$39 floating ≈ +0.23R — всё ещё ниже 1.5R
+  trigger, бот продолжит держать.
+
+**Категория.** Bug-fix критичный (не curve-fitting): корректируем
+расчёт под реальную работу брокера, основано на canonical spec + 2
+дополнительных confirmation source'ов. По правилу `no-data-fitting.mdc`
+— допустимая правка, эксперимент n=0 не сбрасывается.
+
+**Открытый вопрос для пользователя.** При новой формуле KillSwitch
+caps (daily=$150, total=$300) становятся слишком тесными:
+- 1 потеря на 0.13 lot BRENT с SL distance 132 pip = -$172 → выходит
+  за daily-cap одной сделкой.
+- Нужно поднять daily_loss / total_loss пропорционально новому
+  пониманию реального риска (обсуждается отдельно).
+
+**Файлы:**
+- `src/fx_ai_trader/trading/executor.py` — словарь
+  `_PIP_VALUE_USD_PER_STD_LOT` с per-symbol значениями + 3-source citation.
+- `src/fx_ai_trader/trading/client_adapter.py` — логирование
+  pip-value при resolve symbols.
+- `src/fx_ai_trader/llm/prompts.py` — обновлены worked sizing examples
+  с правильным $10/pip/lot для BRENT.
+- `tests/test_fx_ai_trader.py` — новый `TestPipValueTable` (5 тестов,
+  включая эмпирический $39).
+- `scripts/fx_ai_inspect_symbols.py` — diag-script для опроса cTrader
+  ProtoOASymbol (read-only). Не используется при работе бота, только
+  для ручной верификации.
+
+---
+
 ## 2026-05-13 (утро) — bug-fix: clamp out-of-range sentiment vs hard-reject
 
 `коммит при deploy`

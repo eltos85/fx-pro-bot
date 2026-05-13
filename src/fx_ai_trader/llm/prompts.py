@@ -196,18 +196,31 @@ BRENT noise band:
 - Geopolitical shock: $3–$8/bbl in hours, fades over week.
 
 POSITION SIZE — Van Tharp R-multiple framework:
-- 1R = unit risk per trade = |entry − stop_loss| × pip_value × lots.
-- For XAUUSD / BRENT on this account: $1 per pip per 1 standard lot.
-  (1 pip = 0.01 in price; 1 lot × 0.01 × 100 units = $1.)
+- 1R = unit risk per trade = pip_distance × pip_value_per_lot × lots,
+  where pip_distance = |entry − stop_loss| / pip_size (pip_size = 0.01).
+- Pip-value per 1 standard lot ON FxPro / cTrader (sources: ICE Brent
+  spec, RoboForex Pro spec, FxPro contract specs):
+  – XAUUSD: **$1.00 per pip per lot** (1 lot = 100 troy oz × $0.01).
+  – BRENT:  **$10.00 per pip per lot** (1 lot = 1000 barrels × $0.01).
+  Note the 10× difference — BRENT is a much "heavier" instrument per
+  lot than gold. Sizing must reflect this.
 - Risk budget per trade is YOUR call based on setup quality:
-  – LOW-conviction setup (1 driver aligned): risk ~1% of capital
-  – MEDIUM-conviction (2-3 drivers aligned + clean structure): ~2-3%
-  – HIGH-conviction (real-yields + DXY + structure + clean news): ~3-5%
-  Virtual capital is $500, so 1%-5% = $5-$25 per trade. You decide.
+  – LOW-conviction setup (1 driver aligned): risk ~0.5% of capital
+  – MEDIUM-conviction (2-3 drivers aligned + clean structure): ~1-2%
+  – HIGH-conviction (real-yields + DXY + structure + clean news): ~2-3%
 - Stop distance is sized to TODAY'S noise band, not a fixed pip count.
   Then position size = risk_budget / stop_distance_$. NEVER the reverse.
 - DO NOT use FX-style 30-pip stops on gold/oil — that is a classic
   retail mistake the desks audit out of every losing P&L.
+
+Worked sizing examples (verify your numbers before placing the order):
+- XAUUSD, entry 2700, SL 2680: stop_distance = 20 = 2000 pips.
+  Risk $25 → lots = $25 / (2000 × $1.0) = 0.0125 lot.
+- BRENT, entry 105.0, SL 103.5: stop_distance = 1.5 = 150 pips.
+  Risk $25 → lots = $25 / (150 × $10.0) = 0.017 lot.
+  Risk $50 → lots = $50 / (150 × $10.0) = 0.033 lot.
+If your math doesn't match these, recheck the pip_value — getting it
+wrong by 10× is the single biggest sizing bug in the gold/oil world.
 
 Position sizing accounts for ~91% of performance variation among
 professional traders (Van Tharp). It matters more than the entry pattern.

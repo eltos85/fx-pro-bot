@@ -342,6 +342,54 @@ class TestKillSwitch:
         assert "daily" in res.reason.lower()
 
 
+# ─── pip-value table (FxPro contract specs bug-fix 2026-05-13) ─────────
+
+
+class TestPipValueTable:
+    """Bug-fix 2026-05-13: BRENT pip-value был занижен в 10×.
+
+    Источники (правило ``no-data-fitting.mdc``, ≥2 confirmation):
+    1. ICE Brent Crude Futures: 1 contract = 1000 barrels, $0.01/barrel.
+    2. RoboForex Pro spec: 1 lot = 1000 barrels, pip = 0.01, USD.
+    3. Эмпирика на FxPro demo 46883073: 0.13 lot, 30 pip = $39 floating.
+    """
+
+    def test_xauusd_pip_value_is_1usd_per_lot(self):
+        from fx_ai_trader.trading.executor import _pip_value_per_std_lot
+
+        assert _pip_value_per_std_lot("XAUUSD") == 1.0
+
+    def test_brent_pip_value_is_10usd_per_lot(self):
+        from fx_ai_trader.trading.executor import _pip_value_per_std_lot
+
+        assert _pip_value_per_std_lot("BZ=F") == 10.0
+
+    def test_brent_pnl_matches_empirical_observation(self):
+        """0.13 lot BRENT, move от 104.824 до 105.124 (30 pips) = $39."""
+        from fx_ai_trader.trading.executor import _calc_pnl_usd
+
+        pnl = _calc_pnl_usd(
+            side="BUY", entry=104.824, exit_price=105.124,
+            volume_lots=0.13, symbol="BZ=F",
+        )
+        assert abs(pnl - 39.0) < 0.5, f"BRENT PnL {pnl} should be ~$39"
+
+    def test_xauusd_pnl_canonical(self):
+        """0.10 lot XAUUSD, move от 2700 до 2710 (1000 pips) = $100."""
+        from fx_ai_trader.trading.executor import _calc_pnl_usd
+
+        pnl = _calc_pnl_usd(
+            side="BUY", entry=2700.0, exit_price=2710.0,
+            volume_lots=0.10, symbol="XAUUSD",
+        )
+        assert abs(pnl - 100.0) < 0.01
+
+    def test_unknown_symbol_falls_back_safe(self):
+        from fx_ai_trader.trading.executor import _pip_value_per_std_lot
+
+        assert _pip_value_per_std_lot("UNKNOWN") == 1.0
+
+
 # ─── paper reconcile: SL/TP touch ────────────────────────────────────────
 
 

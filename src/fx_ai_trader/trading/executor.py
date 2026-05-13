@@ -528,15 +528,50 @@ def _pip_size_for(symbol: str) -> float:
     return 0.0001
 
 
-def _pip_value_per_std_lot(symbol: str) -> float:
-    """USD-стоимость 1 pip за 1 standard lot.
+_PIP_VALUE_USD_PER_STD_LOT: dict[str, float] = {
+    # XAUUSD: spot gold CFD. 1 std lot = 100 troy oz, pip = $0.01 →
+    # pip-value = 100 × $0.01 = $1.0 / pip / lot. Canonical spec gold
+    # spot CFD (LBMA), используется FxPro / RoboForex и большинством
+    # retail-брокеров. Источник: RoboForex Pro spec для XAUUSD —
+    # https://roboforex.com/forex-trading/trading/specifications/card/pro-stan/XAUUSD/
+    "XAUUSD": 1.0,
+    # BRENT (internal "BZ=F", cTrader name "BRENT"). 1 std lot = **1000
+    # barrels**, pip = $0.01 per barrel → pip-value = 1000 × $0.01 =
+    # **$10.0 / pip / lot**.
+    #
+    # ИСТОЧНИКИ (правило ``no-data-fitting.mdc`` — нужно ≥2 confirmation):
+    # 1. ICE Brent Crude Futures (canonical spec): theice.com/products/219 —
+    #    contract size 1000 barrels, min fluctuation $0.01/barrel = $10.
+    # 2. RoboForex Spot Brent Pro spec: 1 Pip Size = 0.01, Size of 1 lot
+    #    = 1000 barrels, term currency = USD. URL:
+    #    https://roboforex.com/forex-trading/trading/specifications/card/pro-stan/BRENT/
+    # 3. Эмпирическое подтверждение на FxPro demo (ctid=46883073,
+    #    2026-05-13): позиция id=2 BUY 0.13 lot @ 104.824, move ~30 pip
+    #    до ~105.12 → floating PnL у cTrader $39. Сходится с формулой
+    #    30 × 0.13 × $10 = $39. Со старой формулой ($1) было бы $3.9.
+    #
+    # Bug-fix 2026-05-13: ранее всё возвращало hardcoded $1.0, что
+    # недооценивало risk/PnL для BRENT в **10 раз**. LLM получал
+    # R-multiple = 0.2R при фактическом +2R+ floating — это маскировало
+    # locked-profit guard (≥1.5R), бот не фиксировал прибыль вовремя.
+    "BZ=F": 10.0,
+}
 
-    Для XAUUSD: 1 std lot = 100 oz × $0.01 = $1.0 per pip.
-    Для BRENT (1 lot = 100 barrels на FxPro): 100 × $0.01 = $1.0 per pip.
-    На demo может отличаться (FxPro contract specs), уточняется при
-    paper-observation. На Phase 1 принимаем $1.0/pip/lot как baseline.
+
+def _pip_value_per_std_lot(symbol: str) -> float:
+    """USD-стоимость 1 pip за 1 standard lot на FxPro / cTrader.
+
+    Используется для расчёта ``risk_usd`` / R-multiple / paper-PnL.
+    Live-PnL приходит от брокера и НЕ зависит от этой функции — там
+    подсчёт корректный broker-side. Эта функция влияет только на:
+    - что LLM видит в context.summary['risk_usd', 'r_r']
+    - что считает ``paper_reconcile`` для is_paper=True позиций
+    - что записано в ``decisions.pnl`` для аудита paper-сделок
+
+    Returns 1.0 как safe-fallback для незнакомых символов (поведение
+    pre-fix). Известные символы — см. ``_PIP_VALUE_USD_PER_STD_LOT``.
     """
-    return 1.0
+    return _PIP_VALUE_USD_PER_STD_LOT.get(symbol, 1.0)
 
 
 def _calc_pnl_usd(

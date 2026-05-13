@@ -190,14 +190,23 @@ class CTraderFxAdapter:
         self._symbols.populate(infos)
         self._symbols_loaded = True
 
+        # late import to avoid cycle при import executor → adapter
+        from fx_ai_trader.trading.executor import (
+            _pip_size_for,
+            _pip_value_per_std_lot,
+        )
         for internal in self._settings.symbols:
             info = self.get_symbol_info(internal)
             if info:
+                pip_size = _pip_size_for(internal)
+                pip_value = _pip_value_per_std_lot(internal)
                 log.info(
                     "FX-AI symbol resolved: %s → %s (id=%d, digits=%d, "
-                    "min_vol=%d, step_vol=%d, lot=%d)",
+                    "min_vol=%d, step_vol=%d, lot=%d) | "
+                    "pip_size=%.4f, pip_value=$%.2f/pip/lot",
                     internal, info.name, info.symbol_id, info.digits,
                     info.min_volume, info.step_volume, info.contract_size,
+                    pip_size, pip_value,
                 )
             else:
                 log.warning("FX-AI symbol %s НЕ найден в cTrader catalog", internal)
