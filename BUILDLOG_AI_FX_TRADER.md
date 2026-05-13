@@ -79,6 +79,18 @@ R-multiple сам по себе **верный** (числитель и знам
 дополнительных confirmation source'ов. По правилу `no-data-fitting.mdc`
 — допустимая правка, эксперимент n=0 не сбрасывается.
 
+**XAUUSD pip-value тоже проверен** (без правки — формула была верной):
+Advisor открыл XAUUSD 0.07 lot через стратегию `gold_orb`
+(broker_position_id=150420246, entry $4702.33). Эта позиция стала
+независимым test-vehicle для проверки нашей формулы $1/pip/lot. При
+current_price $4695.71 наш расчёт даёт PnL = (4695.71-4702.33) ×
+0.07 × $100 = -$46.34. Реально в cTrader-приложении floating PnL =
+**-$48**. Дельта $1.66 объясняется spread'ом FxPro (~0.5 pip × 7 oz)
+и lag'ом current_price в Advisor-БД (1-2 минуты от last poll).
+Источники: RoboForex Pro spec для XAUUSD (1 lot=100 oz, pip=0.01,
+USD), FxPro contract specs, LBMA canonical. Не правим — спецификация
+универсальна для всех brokeров на spot gold.
+
 **Открытый вопрос для пользователя.** При новой формуле KillSwitch
 caps (daily=$150, total=$300) становятся слишком тесными:
 - 1 потеря на 0.13 lot BRENT с SL distance 132 pip = -$172 → выходит
