@@ -1,5 +1,49 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## BACKLOG (отложено до релиза)
+
+### Использовать broker-reported PnL / fill_price из ProtoOAExecutionEvent
+
+**Проблема (обнаружено 2026-05-13).** На LIVE-close бот пишет в БД
+**idealized** PnL: использует `current_price` из last M1 close как
+exit_price и считает PnL формулой. Реальный fill на брокере хуже на
+slippage (≈5-10 pip на BRENT для market sell). Пример:
+позиция id=2 BRENT — наш расчёт `+$101.53` (exit $105.605), реально
+у брокера `+$92.82` (fill ~$105.538). Дельта $8.71 = slippage 6.7 pip +
+commission.
+
+**Почему важно перед релизом.**
+- Статистика бота врёт в нашу пользу (overestimate winners, underestimate
+  losers). Forward-test метрики (Sharpe, max DD, expectancy) искажены.
+- **KillSwitch daily/total_loss считает по нашему PnL, не broker's**.
+  При накапливании потерь бот может не остановиться вовремя.
+- На demo это косметика, на live — реальные деньги.
+
+**Что нужно сделать.**
+1. `adapter.close_position()` → ждать `ProtoOAExecutionEvent` с
+   `executionType=ORDER_FILLED` для close, вернуть `OrderResult` с
+   реальным `fill_price` и `realized_pnl_usd` от broker.
+   В cTrader execution event есть `closePositionDetail.grossProfit`
+   и `closePositionDetail.commission` — оба нужны.
+2. `executor._apply_close()` → использовать broker-данные вместо
+   `current_price` / `_calc_pnl_usd()`.
+3. На paper-mode — оставить локальный расчёт (там нет broker'a).
+4. Аналогично для open — сохранять реальный `fill_price` от execution
+   event, не quote (сейчас уже частично делается, но нужно сверить).
+
+**Источники / docs.**
+- cTrader Open API ProtoOAExecutionEvent:
+  https://help.ctrader.com/open-api/model-messages/#protooaexecutionevent
+- ClosePositionDetail fields: grossProfit, commission, swap, balance.
+
+**Эффорт.** ~2-3 часа: модификация adapter, тесты на mock execution
+event, документация в коде.
+
+**Категория.** Не блокирует Phase 1 (paper observation + demo live),
+блокирует Phase 2 (production live).
+
+---
+
 ## 2026-05-13 (день) — bug-fix: pip-value для BRENT занижен в 10×
 
 `коммит при deploy`
