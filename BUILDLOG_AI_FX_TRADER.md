@@ -1,5 +1,123 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-13 (утро) — bug-fix: clamp out-of-range sentiment vs hard-reject
+
+`коммит при deploy`
+
+**Симптом.** Cycle 03:50 UTC:
+```
+[ERROR] fx_ai_trader: Parse error: schema validation error:
+  [{'type': 'greater_than_equal',
+    'loc': ('sentiment', 'items', 2, 'forwardness'),
+    'msg': 'Input should be greater than or equal to 0',
+    'input': -0.3, 'ctx': {'ge': 0.0}}]
+```
+
+LLM прислал `forwardness=-0.3` для 3-й новости. Pydantic `Field(ge=0.0,
+le=1.0)` отвергнул **всё** решение целиком — потеряли decision (включая
+core: open / close / hold).
+
+**Root cause.** LLM путает `forwardness` (∈ [0, 1], где 0 = backward-
+looking) с `polarity` (∈ [-1, 1], единственное signed-измерение). Это
+известный failure-mode structured outputs от LLM: out-of-range numeric
+values при отсутствии provider-level grammar-constrained sampling.
+DeepSeek через Anthropic-compat прокси такой gen-time enforcement не
+гарантирует (в отличие от Claude `strict: true` или OpenAI strict).
+
+**Решение (исследовано по тематическим ресурсам).** Многоуровневая
+защита по best-practices (см. ниже). Применили L2 + усиление L0 (промпт):
+
+- **L0 (prompt)** — уточнение в SYSTEM_PROMPT: явные ranges с inequality
+  notation, специальная строка «DO NOT use negative values for
+  relevance / intensity / uncertainty / forwardness — that is a
+  frequent slip from polarity confusion».
+- **L1 (provider strict)** — НЕ применимо: DeepSeek-V4 через Anthropic-
+  compat прокси не поддерживает Claude `strict: true` reliably (по
+  Anthropic docs strict даётся только в их собственных моделях с
+  grammar-constrained sampling).
+- **L2 (Pydantic coerce)** — **выбран**. Annotated pattern с
+  `BeforeValidator` + `Field(ge/le)` constraint. Clamp out-of-range
+  ДО валидации; Field constraint остаётся как формальная спецификация
+  схемы. Безопасно к `None` / `NaN` / `inf` / нечисловым типам (всё →
+  0.0 как neutral default).
+- **L3 (retry-with-feedback)** — не применили (это бо́льший рефакторинг,
+  Instructor-style auto-retry с error feedback в prompt). Отложено на
+  потом если clamp недостаточен.
+- **L4 (graceful degradation)** — частично уже было (parse_action
+  возвращает string-error → log_decision записывает error, цикл не
+  крашится).
+
+**Источники.**
+
+- [Pydantic ofic docs «Validators»](https://docs.pydantic.dev/latest/concepts/validators)
+  — 4 типа валидаторов (After/Before/Plain/Wrap), annotated pattern,
+  пример с `truncate` через `WrapValidator` (длинная строка обрезается,
+  не реджектится).
+- [Pydantic blog «Minimize LLM Hallucinations with Pydantic Validators»](https://blog.pydantic.dev/blog/2024/01/18/llm-validation/)
+  — «Pydantic validators minimize LLM hallucinations by enforcing
+  constraints on model outputs». Подтверждение что **defensive coerce
+  vs hard reject** — это рекомендованный паттерн для LLM-payloads.
+- [Instructor «Validation & Retry»](https://python.useinstructor.com/learning/validation/retry_mechanisms/)
+  — auto-retry pattern: validation error feeds back to LLM как
+  context, modelл регенерирует. Configuration: `max_retries`,
+  `retry_if_parsing_fails`.
+- [Anthropic «Strict tool use»](https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use)
+  — grammar-constrained sampling (`strict: true`) на provider-side.
+  Идеальный L1, но доступен только в Anthropic native, не через
+  DeepSeek-compat прокси.
+- [tianpan.co «Structured Outputs Not a Solved Problem», 2026](https://tianpan.co/blog/2026-04-18-structured-output-json-mode-failure-modes)
+  — three-tier recovery strategy: detect → log → retry/fallback/surface.
+- [callsphere.ai «Handling Structured Output Failures»](https://callsphere.ai/blog/handling-structured-output-failures-retries-fallbacks-partial-parsing.md)
+  — graceful degradation pattern (safe default vs crash).
+- [The Neural Base «Validator functions»](https://theneuralbase.com/structured-outputs/learn/beginner/validator-functions/)
+  — `@field_validator` баг-гарды для LLM JSON.
+
+**Имплементация.**
+
+```python
+def _coerce_unit(value: Any) -> float:
+    """Clamp к [0, 1]; defensive к None/NaN/inf/strings → 0.0."""
+    if value is None: return 0.0
+    try: v = float(value)
+    except (TypeError, ValueError): return 0.0
+    if math.isnan(v) or math.isinf(v): return 0.0
+    return max(0.0, min(1.0, v))
+
+UnitFloat = Annotated[float, BeforeValidator(_coerce_unit), Field(ge=0.0, le=1.0)]
+SignedUnitFloat = Annotated[float, BeforeValidator(_coerce_signed_unit), Field(ge=-1.0, le=1.0)]
+
+class SentimentItem(BaseModel):
+    title_snippet: str = Field(default="", max_length=200)
+    relevance: UnitFloat
+    polarity: SignedUnitFloat
+    intensity: UnitFloat
+    uncertainty: UnitFloat
+    forwardness: UnitFloat
+```
+
+**Тесты.** Добавлен `test_open_sentiment_out_of_range_clamped` — кейс
+с тремя видами ошибок одной partition:
+- `forwardness=-0.3` → 0.0 (исходный реальный bug)
+- `polarity=-2`, `relevance=1.5`, `forwardness=2.0` → clamp к границам
+- `intensity="N/A"` (string), `uncertainty=null` → 0.0 как safe default
+
+33/33 в `test_fx_ai_trader.py`, 515/515 в полной панели зелёные.
+
+**Категория.** **Bug-fix схемы**, не curve-fitting стратегии (правило
+`no-data-fitting.mdc`): торговая логика, R:R, sentiment-uncertainty
+gate, threshold'ы — НЕ менялись. Эксперимент n=0 НЕ перезапускается.
+Аналог fix'у бага в коде, не tuning'у стратегии.
+
+**Файлы:**
+- `src/fx_ai_trader/trading/executor.py` — annotated pattern с
+  BeforeValidator, type aliases `UnitFloat`/`SignedUnitFloat`,
+  defensive coerce для None/NaN/inf/non-numeric.
+- `src/fx_ai_trader/llm/prompts.py` — уточнение в sentiment-блоке:
+  явные inequality ranges + строка про anti-polarity confusion.
+- `tests/test_fx_ai_trader.py` — новый позитивный тест на clamp.
+
+---
+
 ## 2026-05-12 (вечер) — prompt v1.0 «discretionary commodity trader» + KillSwitch redesign + experiment **n=0 reset**
 
 `коммит при deploy`

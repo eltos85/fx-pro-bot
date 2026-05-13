@@ -92,8 +92,40 @@ class TestParseActionSchema:
         assert result.model.symbol == "BZ=F"
         assert result.model.side == "SELL"
 
+    def test_open_sentiment_out_of_range_clamped(self):
+        """LLM иногда даёт forwardness=-0.3 (путает с polarity).
+        Pydantic BeforeValidator делает clamp, не отвергает решение.
+
+        Bug-fix 13-May-2026. Research: Pydantic ofic «Validators»,
+        Instructor «Validation & Retry», pydantic blog LLM-validation.
+        """
+        text = (
+            '{"action":"open","symbol":"XAUUSD","side":"BUY",'
+            '"volume_lots":0.05,"stop_loss":2380,"take_profit":2410,'
+            '"reason":"clean DXY+yield",'
+            '"sentiment":{"aggregate_uncertainty":0.4,"items":['
+            '{"title_snippet":"Fed dovish","relevance":0.8,"polarity":0.6,'
+            '"intensity":0.7,"uncertainty":0.3,"forwardness":-0.3},'
+            '{"title_snippet":"China data","relevance":1.5,"polarity":-2,'
+            '"intensity":"N/A","uncertainty":null,"forwardness":2.0}'
+            ']}}'
+        )
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, ParsedAction)
+        assert isinstance(result.model, OpenAction)
+        s = result.model.sentiment
+        assert s is not None
+        item0 = s.items[0]
+        assert item0.forwardness == 0.0  # был -0.3 → clamp к 0
+        item1 = s.items[1]
+        assert item1.relevance == 1.0    # был 1.5 → clamp к 1
+        assert item1.polarity == -1.0    # был -2 → clamp к -1
+        assert item1.intensity == 0.0    # был "N/A" → 0 (safe default)
+        assert item1.uncertainty == 0.0  # был null → 0
+        assert item1.forwardness == 1.0  # был 2.0 → 1
+
     def test_open_high_uncertainty_blocked(self):
-        """Sentiment uncertainty gate (Risk 1 mitigation, arxiv 2603.11408)."""
+        """Anti-hallucination gate — aggregate_uncertainty > 0.7 → reject open."""
         text = (
             '{"action":"open","symbol":"XAUUSD","side":"BUY",'
             '"volume_lots":0.05,"stop_loss":2380,"take_profit":2410,'

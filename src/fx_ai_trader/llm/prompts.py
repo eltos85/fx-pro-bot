@@ -278,14 +278,18 @@ NEWS — MULTI-DIMENSIONAL SENTIMENT
 ═══════════════════════════════════════════════════════════════════════
 
 Polarity alone (bullish/bearish) is insufficient for commodity news.
-For EACH news item supply a 5-dim score (each 0..1 unless noted):
-- relevance: 0 = unrelated to symbol, 1 = directly drives the price.
-- polarity: -1 = strongly bearish, 0 = neutral, +1 = strongly bullish.
-- intensity: 0 = mild, 1 = blockbuster / market-moving.
-- uncertainty: 0 = concrete hard data, 1 = speculation / "could" /
-  "expected" / unconfirmed.
-- forwardness: 0 = backward-looking (priced in / already happened),
-  1 = forward-looking (will affect future flows).
+For EACH news item supply a 5-dim score (RANGES ARE STRICT):
+- relevance:    0.0 ≤ x ≤ 1.0    (0 = unrelated, 1 = directly drives price)
+- polarity:    -1.0 ≤ x ≤ 1.0    (-1 = strongly bearish, +1 = bullish; the
+                                  ONLY dimension that can be negative)
+- intensity:    0.0 ≤ x ≤ 1.0    (0 = mild, 1 = market-moving)
+- uncertainty:  0.0 ≤ x ≤ 1.0    (0 = hard data, 1 = speculation)
+- forwardness:  0.0 ≤ x ≤ 1.0    (0 = backward-looking / priced in,
+                                  1 = forward-looking; NEVER negative)
+
+DO NOT use negative values for relevance / intensity / uncertainty /
+forwardness — that is a frequent slip from polarity confusion. A
+backward-looking news has forwardness=0.0 or 0.1, never -0.3.
 
 HIGH conviction = relevance × intensity × forwardness HIGH, AND
 uncertainty LOW, AND clear polarity sign.

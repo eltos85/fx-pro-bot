@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import uuid
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 
 from fx_ai_trader.config.settings import AiFxTraderSettings
 from fx_ai_trader.safety.killswitch import KillSwitch
@@ -41,21 +42,87 @@ log = logging.getLogger(__name__)
 # ─── Pydantic schemas ────────────────────────────────────────────────────
 
 
+# ─── Defensive coercion helpers (research-backed) ────────────────────────
+#
+# Подход — Pydantic annotated pattern с BeforeValidator + Field constraint.
+# Это **рекомендованный** способ для борьбы с LLM out-of-range / hallucination
+# по официальным источникам:
+#   - Pydantic ofic docs «Validators»
+#     (https://docs.pydantic.dev/latest/concepts/validators)
+#   - Pydantic blog «Minimize LLM Hallucinations with Pydantic Validators»
+#     (https://blog.pydantic.dev/blog/2024/01/18/llm-validation/)
+#   - Instructor «Validation & Retry» best-practices
+#     (https://python.useinstructor.com/learning/validation/)
+#   - tianpan.co «Structured Outputs Not Solved Problem», 2026
+#     (https://tianpan.co/blog/2026-04-18-structured-output-json-mode-failure-modes)
+#
+# Bug-fix 13-May-2026: LLM прислал forwardness=-0.3 (путает с polarity ∈ [-1, 1]).
+# Раньше parse_action отвергал _всё_ решение из-за одного кривого значения в
+# audit-блоке. Теперь clamp вместо reject — sentiment остаётся информативным
+# для aggregate_uncertainty gate, но не блокирует core decision (open/close/hold).
+
+
+def _coerce_unit(value: Any) -> float:
+    """Clamp произвольного input'а к [0.0, 1.0].
+
+    Терпим к None / NaN / inf / нечисловым типам (defensive):
+    LLM может пропустить поле или прислать строку «N/A». Возвращаем 0.0
+    как safe default — это самое нейтральное значение для sentiment
+    (низкая relevance / intensity = «новость не важна»).
+    """
+    if value is None:
+        return 0.0
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(v) or math.isinf(v):
+        return 0.0
+    return max(0.0, min(1.0, v))
+
+
+def _coerce_signed_unit(value: Any) -> float:
+    """Clamp к [-1.0, 1.0] — для polarity (единственное signed-измерение)."""
+    if value is None:
+        return 0.0
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(v) or math.isinf(v):
+        return 0.0
+    return max(-1.0, min(1.0, v))
+
+
+# Annotated type aliases — переиспользуемые «strict + safe» типы.
+# Field(ge/le) остаётся как формальная схема (для документации, OpenAPI
+# export, IDE-hint), а BeforeValidator делает clamp ДО проверки constraint,
+# так что constraint фактически всегда проходит.
+UnitFloat = Annotated[float, BeforeValidator(_coerce_unit), Field(ge=0.0, le=1.0)]
+SignedUnitFloat = Annotated[
+    float, BeforeValidator(_coerce_signed_unit), Field(ge=-1.0, le=1.0)
+]
+
+
 class SentimentItem(BaseModel):
-    """Multi-dim sentiment per news (arxiv 2603.11408)."""
+    """Multi-dim sentiment per news. Все dimensions clamp'ятся защитно
+    (см. блок _coerce_* выше). Out-of-range от LLM (например forwardness=-0.3)
+    не отвергает решение, а заменяется ближайшей границей."""
+
     title_snippet: str = Field(default="", max_length=200)
-    relevance: float = Field(ge=0.0, le=1.0)
-    polarity: float = Field(ge=-1.0, le=1.0)
-    intensity: float = Field(ge=0.0, le=1.0)
-    uncertainty: float = Field(ge=0.0, le=1.0)
-    forwardness: float = Field(ge=0.0, le=1.0)
+    relevance: UnitFloat
+    polarity: SignedUnitFloat
+    intensity: UnitFloat
+    uncertainty: UnitFloat
+    forwardness: UnitFloat
 
 
 class SentimentBlock(BaseModel):
-    """Sentiment audit-block. Aggregate uncertainty используется в killswitch
-    как gate против low-confidence LLM-decisions.
+    """Sentiment audit-block. ``aggregate_uncertainty`` используется в
+    parse_action как anti-hallucination gate (>0.7 → reject open).
     """
-    aggregate_uncertainty: float = Field(ge=0.0, le=1.0)
+
+    aggregate_uncertainty: UnitFloat
     items: list[SentimentItem] = Field(default_factory=list)
 
 
