@@ -427,6 +427,80 @@ class CTraderFxAdapter:
             volume=volume,
         )
 
+    # ─── broker-side reconcile (sync DB ↔ cTrader) ───────────────────────
+
+    def get_active_broker_position_ids(self) -> set[int] | None:
+        """Set of cTrader positionIds, открытых под нашим label.
+
+        Используется для broker-side reconcile: позиции в нашей БД, не
+        присутствующие в этом set'е, закрыты broker'ом сам (SL/TP).
+
+        Returns ``None`` при ошибке (caller отличает от пустого set'а — не
+        делает destructive close: правило ``None != []`` из Bybit-агента
+        2026-05-07, документация ``client_adapter.get_open_positions``).
+        """
+        if self._client is None:
+            return None
+        try:
+            resp = self._client.reconcile()
+        except Exception:
+            log.exception("get_active_broker_position_ids: reconcile failed")
+            return None
+        out: set[int] = set()
+        for p in resp.position:
+            label = getattr(p, "label", "") or ""
+            if label != self._settings.order_label:
+                continue
+            out.add(int(p.positionId))
+        return out
+
+    def get_closing_deal_for_position(
+        self,
+        broker_position_id: int,
+        lookback_hours: int = 24,
+    ) -> dict | None:
+        """Закрывающий deal для позиции, через ProtoOADealListReq.
+
+        Returns dict с broker-side точными числами:
+        ``{exit_price, gross_pnl_usd, swap_usd, commission_usd, ts_ms,
+        deal_id}`` или None если deal не найден.
+
+        Источник: cTrader Open API ``ProtoOAClosePositionDetail`` с
+        ``moneyDigits`` scaling. Документация поля:
+        https://help.ctrader.com/open-api/model-messages/#protooaclosepositiondetail
+        """
+        if self._client is None:
+            return None
+        now_ms = int(time.time() * 1000)
+        from_ms = now_ms - max(1, lookback_hours) * 3600 * 1000
+        try:
+            resp = self._client.get_deal_list(
+                from_ts=from_ms, to_ts=now_ms, max_rows=1000,
+            )
+        except Exception:
+            log.exception(
+                "get_closing_deal_for_position(%d): get_deal_list failed",
+                broker_position_id,
+            )
+            return None
+        for d in resp.deal:
+            if int(getattr(d, "positionId", 0)) != broker_position_id:
+                continue
+            if not d.HasField("closePositionDetail"):
+                continue
+            cpd = d.closePositionDetail
+            md = int(cpd.moneyDigits) if cpd.moneyDigits else 2
+            divisor = 10 ** md
+            return {
+                "deal_id": int(d.dealId),
+                "ts_ms": int(getattr(d, "executionTimestamp", 0)),
+                "exit_price": float(getattr(d, "executionPrice", 0) or 0),
+                "gross_pnl_usd": float(cpd.grossProfit) / divisor,
+                "swap_usd": float(cpd.swap) / divisor,
+                "commission_usd": float(cpd.commission) / divisor,
+            }
+        return None
+
     # ─── helpers ─────────────────────────────────────────────────────────
 
     @staticmethod

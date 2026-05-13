@@ -1,5 +1,156 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-13 (вечер) — bug-fix: broker-side reconcile (stale live-позиции)
+
+`коммит при deploy`
+
+**Симптом.** Позиция id=3 (BRENT BUY 0.01 lot @ 105.031, opened 15:20 UTC)
+в нашей БД до сих пор `closed_at=None, exit_price=None,
+realized_pnl_usd=None`, при том что **cTrader давно её закрыл по
+SL=104.7** (deal_id=331875628, exit $104.721, broker gross −$3.32,
+balance после $423.12).
+
+В период 16:02 → 16:44 UTC (9 циклов подряд) LLM правильно решал CLOSE
+(setup invalidated: цена ниже SL, MACD bearish flip, EMA20 пробит),
+но получал от cTrader:
+```
+err=broker close_failed: cTrader error POSITION_NOT_FOUND: Position
+not found with id 150428404
+```
+→ бот не записывал close в БД → следующий цикл LLM снова видел
+"открытую" позицию → опять CLOSE → опять 404. Бесконечный фантом.
+
+**Root cause.** `_apply_close()` опирался **только на локальную БД**
+(`store.get_open_positions()`), без проверки broker-side активности.
+Когда cTrader сам закрывал позицию по SL/TP (нормальный механизм
+broker-side execution для серверных SL/TP), бот не дёргал ни
+`client.reconcile()`, ни `client.get_deal_list()` для синхронизации.
+
+**Финансовое последствие.** `realized_pnl_usd` broker-закрытых позиций
+(в т.ч. убыточных по SL) **НЕ попадал в `daily_pnl`** → KillSwitch
+`max_daily_loss_usd` видел $0 вместо реальных потерь. На demo —
+косметика, на live — финансовая дыра.
+
+**Fix.** Two-pronged sync на ровне с paper-reconcile:
+
+1. **`adapter.get_active_broker_position_ids()`** — обёртка над
+   `client.reconcile()`, возвращает set активных broker-pid с нашим
+   `label='ai-fx-trader'`. Returns `None` при API-error (не пустой
+   set! правило `None != []` из Bybit-агента 2026-05-07).
+2. **`adapter.get_closing_deal_for_position(broker_pid, lookback_h)`**
+   — обёртка над `ProtoOADealListReq`, возвращает dict с broker-true
+   `exit_price`, `gross_pnl_usd`, `swap_usd`, `commission_usd`
+   из `ProtoOAClosePositionDetail`.
+3. **Новый модуль `broker_reconcile.py`**: `reconcile_broker_positions()`.
+   Для каждой live-позиции в БД, отсутствующей в active broker set →
+   подтягивает closing deal → пишет в БД `closed_at, exit_price,
+   realized_pnl_usd = gross + swap + commission, close_reason='broker_auto'`.
+   Вызывается в начале каждого full + review цикла, **сразу после**
+   `reconcile_paper_positions()`.
+4. **POSITION_NOT_FOUND recovery в `_apply_close`**: если LLM
+   решила CLOSE и broker вернул POSITION_NOT_FOUND — executor пытается
+   достать closing deal и записать broker-true PnL вместо ошибки.
+   Это страховка на случай если main-loop reconcile ещё не успел
+   отработать между SL-fire и LLM-CLOSE-decision.
+
+**Источники / docs.**
+- cTrader Open API `ProtoOAReconcileReq` / `Res` — list open positions:
+  https://help.ctrader.com/open-api/messages/#protooareconcilereq
+- `ProtoOADealListReq` / `ProtoOAClosePositionDetail` —
+  `grossProfit`, `swap`, `commission` per `moneyDigits` divisor:
+  https://help.ctrader.com/open-api/model-messages/#protooaclosepositiondetail
+- Reuse Advisor pattern: `src/fx_pro_bot/trading/client.py:494,505` —
+  готовые методы `get_unrealized_pnl()` и `get_deal_list()`.
+- Polling-based reconcile pattern (не realtime event-stream) —
+  стандарт для async OCO/SL/TP cleanup в retail trading bots
+  (см. Bybit Two-Phase Commit аналог в `BUILDLOG_BYBIT.md`).
+
+**Файлы:**
+- `src/fx_ai_trader/trading/client_adapter.py` — +2 метода.
+- `src/fx_ai_trader/trading/broker_reconcile.py` — новый модуль.
+- `src/fx_ai_trader/trading/executor.py` — POSITION_NOT_FOUND recovery.
+- `src/fx_ai_trader/app/main.py` — `reconcile_broker_positions()` в
+  full и review циклах.
+- `tests/test_fx_ai_trader.py` — `TestBrokerReconcile` (6 кейсов:
+  closes broker-closed pos, skips active, no-op on API down, no-op
+  if deal not found, broker-net != our_calc, apply_close recovers
+  from POSITION_NOT_FOUND).
+- `scripts/fx_ai_inspect_position_3.py` — read-only diag.
+
+**Тесты.** 44/44 fx_ai зелёные, 552/552 общих pass. Особенно важные:
+- `test_no_op_when_broker_api_unreachable` — гарантирует что при
+  сетевом сбое мы **НЕ закрываем все позиции как фантомные**.
+- `test_uses_broker_net_pnl_not_local_calc` — broker gross +$92.82
+  пишется в БД, не our_formula +$101.53 (см. предыдущий BACKLOG
+  item «idealized PnL»).
+
+**Эффект после deploy.**
+- Текущая stale id=3 закроется автоматически в первом full-cycle
+  после рестарта контейнера (broker reconcile → deal 331875628 →
+  exit $104.721, PnL −$3.32, close_reason='broker_auto').
+- `daily_pnl` обновится с реальным убытком.
+- LLM перестанет видеть фантомную позицию в context → review-циклы
+  перестанут спамить POSITION_NOT_FOUND.
+
+---
+
+## 2026-05-13 (день) — broker-side verification PnL формулы (XAUUSD + BRENT)
+
+`коммит при deploy`
+
+**Контекст.** После bug-fix BRENT pip-value (10×) пользователь попросил
+прямое подтверждение что **обе** формулы (XAUUSD $1/pip/lot, BRENT
+$10/pip/lot) совпадают с тем что считает сам брокер, а не косвенное
+через сравнение с Advisor / RoboForex spec.
+
+**Что сделано.** Создан read-only скрипт
+`scripts/fx_ai_verify_pnl_from_history.py`, который:
+
+1. Дёргает `ProtoOADealListReq` через `CTraderFxAdapter` за последние
+   48 часов (read-only, побочных эффектов нет).
+2. Для каждого закрытого XAUUSD / BRENT deal берёт `grossProfit` из
+   `ProtoOAClosePositionDetail` — это **ground truth от cTrader-бэкенда**
+   (целое × 10^moneyDigits, точный расчёт их движка).
+3. Параллельно считает наш PnL через `_calc_pnl_usd(side, entry, exit,
+   volume_lots, symbol)` с теми же entry/exit/volume что у брокера.
+4. Сравнивает.
+
+**Результат (5 реальных сделок за 48h, ctid 46883073, ALL deltas $0.0000):**
+
+| Deal ID | Symbol | Side | Lots | Entry → Exit | Broker gross | Наш расчёт | Δ |
+|---|---|---|---|---|---|---|---|
+| 331862418 | XAUUSD | BUY | 0.07 | 4701.19→4696.34 | −$33.95 | −$33.95 | $0.0000 |
+| 331862269 | BRENT | BUY | 0.13 | 104.864→105.578 | +$92.82 | +$92.82 | $0.0000 |
+| 331861259 | XAUUSD | BUY | 0.07 | 4703.81→4703.96 | +$1.05 | +$1.05 | $0.0000 |
+| 331797394 | XAUUSD | SELL | 0.06 | 4692.60→4701.52 | −$53.52 | −$53.52 | $0.0000 |
+| 331796613 | XAUUSD | SELL | 0.06 | 4693.41→4690.80 | +$15.66 | +$15.66 | $0.0000 |
+
+**Σ |Δ| = $0.0000** на 4 XAUUSD сделках (BUY и SELL) и 1 BRENT сделке.
+Формула fx-ai-trader **бит-в-бит** воспроизводит то что считает cTrader
+backend. pip_value математика верна для обоих инструментов.
+
+**Бонус.** Помнишь "discrepancy" $101.53 vs $92.82 по BRENT
+(BACKLOG-item ниже)? Бот в логах писал idealized PnL с `current_price`
+($105.605), broker реально закрыл по `executionPrice` $105.578. На
+broker'ской exit-цене ($105.578) наша формула даёт **точно** $92.82.
+Это подтверждает что разница — чисто архитектурная (current_price ≠
+fill_price), а не баг в pip_value.
+
+**Файлы:**
+- `scripts/fx_ai_verify_pnl_from_history.py` — read-only verification.
+
+**Источники.** cTrader Open API:
+- `ProtoOADealListReq` — официальный endpoint для истории deals.
+- `ProtoOAClosePositionDetail.grossProfit` — broker-side точный PnL.
+- `compare_stats.py` (Advisor) — эталонный pattern декодирования
+  `grossProfit / 10^moneyDigits`.
+
+**Категория.** Documentation / verification. Никаких изменений в торговую
+логику — формула уже была корректной (bug-fix BRENT pip-value 13-May
+закрыл единственный известный дефект).
+
+---
+
 ## BACKLOG (отложено до релиза)
 
 ### Использовать broker-reported PnL / fill_price из ProtoOAExecutionEvent

@@ -352,6 +352,38 @@ def _apply_close(
         volume_int = int(round(pos.volume_lots * contract_size))
         res = adapter.close_position(pos.broker_position_id, volume_int)
         if not res.success:
+            # Если broker уже закрыл позицию (SL/TP сработал на их стороне)
+            # — ошибка приходит как POSITION_NOT_FOUND. Не отбрасываем
+            # decision: подтягиваем broker-true closing deal и пишем в БД.
+            # Без этого позиция остаётся stale в БД, KillSwitch не учитывает
+            # реальный PnL, LLM в следующих циклах продолжает её "видеть".
+            err_text = res.error or ""
+            if "POSITION_NOT_FOUND" in err_text:
+                deal = adapter.get_closing_deal_for_position(
+                    pos.broker_position_id, lookback_hours=48,
+                )
+                if deal is not None:
+                    broker_net = (
+                        deal["gross_pnl_usd"]
+                        + deal["swap_usd"]
+                        + deal["commission_usd"]
+                    )
+                    store.close_position(
+                        pos.id,
+                        exit_price=deal["exit_price"],
+                        realized_pnl_usd=broker_net,
+                        close_reason="broker_auto",
+                    )
+                    return ApplyResult(
+                        executed=True,
+                        summary=(
+                            f"[LIVE] CLOSE id={pos.id} {pos.side} {pos.symbol} "
+                            f"lots={pos.volume_lots} entry=${pos.entry_price:.6g} "
+                            f"exit=${deal['exit_price']:.6g} "
+                            f"pnl=${broker_net:+.2f} (broker_auto SL/TP, "
+                            f"recovered from POSITION_NOT_FOUND)"
+                        ),
+                    )
             return ApplyResult(
                 executed=False, summary="",
                 error=f"broker close_failed: {res.error}",

@@ -35,6 +35,7 @@ from fx_ai_trader.trading.context import (
     format_context_for_prompt,
     format_context_for_review,
 )
+from fx_ai_trader.trading.broker_reconcile import reconcile_broker_positions
 from fx_ai_trader.trading.executor import apply_action, parse_action
 from fx_ai_trader.trading.paper_reconcile import reconcile_paper_positions
 
@@ -202,10 +203,15 @@ def _run_full_cycle(
 ) -> None:
     log.info("─── Full cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
 
-    # 1. Paper-reconcile (SL/TP hit detection через M1).
+    # 1a. Paper-reconcile (SL/TP hit detection через M1) — для paper-позиций.
     closed = reconcile_paper_positions(adapter, store)
     if closed:
         log.info("Paper reconcile: закрыто %d позиций", closed)
+
+    # 1b. Broker-reconcile (SL/TP сработавшие на cTrader стороне) — для live.
+    closed_live = reconcile_broker_positions(adapter, store)
+    if closed_live:
+        log.info("Broker reconcile: закрыто %d live-позиций", closed_live)
 
     if store.is_paused():
         log.info("PAUSED — пропускаю цикл")
@@ -294,6 +300,10 @@ def _run_review_cycle(
     closed = reconcile_paper_positions(adapter, store)
     if closed:
         log.info("Paper reconcile (review): закрыто %d позиций", closed)
+
+    closed_live = reconcile_broker_positions(adapter, store)
+    if closed_live:
+        log.info("Broker reconcile (review): закрыто %d live-позиций", closed_live)
 
     if store.is_paused():
         log.info("PAUSED — пропускаю review")

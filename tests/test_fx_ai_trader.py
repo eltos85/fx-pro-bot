@@ -549,3 +549,271 @@ class TestSettings:
     def test_db_path(self):
         s = AiFxTraderSettings()
         assert s.db_path.endswith("fx_ai_trader.sqlite")
+
+
+# ─── broker reconcile (sync DB ↔ cTrader, 2026-05-13 bug-fix) ──────────
+
+
+class _FakeAdapter:
+    """Минимальный fake-adapter для тестирования reconcile-логики.
+
+    Реализует только методы, которые трогают broker_reconcile +
+    _apply_close handler. Никакого сетевого I/O.
+    """
+
+    def __init__(
+        self,
+        *,
+        active_pids: set[int] | None,
+        deals: dict[int, dict] | None = None,
+        close_results: dict[int, "object"] | None = None,
+        current_prices: dict[str, float] | None = None,
+    ) -> None:
+        self._active_pids = active_pids
+        self._deals = deals or {}
+        self._close_results = close_results or {}
+        self._current_prices = current_prices or {}
+        self.close_calls: list[tuple[int, int]] = []
+
+    def get_active_broker_position_ids(self) -> set[int] | None:
+        return self._active_pids
+
+    def get_closing_deal_for_position(
+        self, broker_position_id: int, lookback_hours: int = 24,
+    ) -> dict | None:
+        return self._deals.get(broker_position_id)
+
+    def close_position(self, broker_position_id: int, volume: int):
+        from fx_ai_trader.trading.client_adapter import OrderResult
+
+        self.close_calls.append((broker_position_id, volume))
+        return self._close_results.get(
+            broker_position_id,
+            OrderResult(success=True, broker_position_id=broker_position_id),
+        )
+
+    def get_current_price(self, internal_symbol: str) -> float | None:
+        return self._current_prices.get(internal_symbol)
+
+    def get_symbol_info(self, internal_symbol: str):
+        from fx_pro_bot.trading.symbols import SymbolInfo
+
+        return SymbolInfo(
+            symbol_id=1, name=internal_symbol,
+            min_volume=1000, max_volume=10_000_000, step_volume=1000,
+            digits=2, contract_size=10_000,
+        )
+
+
+class TestBrokerReconcile:
+    """Bug-fix 2026-05-13: live-позиции, закрытые broker'ом (SL/TP),
+    оставались stale в БД. KillSwitch не учитывал реальные потери.
+
+    Эти тесты гарантируют что:
+    1. Позиция отсутствующая у broker'а → закрывается по broker-net PnL.
+    2. Позиция активная → не трогается.
+    3. broker API недоступно (None) → no-op, не закрываем фантомно.
+    4. Closing deal не найден → оставляем open, manual review.
+    5. PnL = gross + swap + commission (broker net), не наш _calc_pnl_usd.
+    """
+
+    def test_closes_broker_closed_position(self, store: AiFxTraderStore):
+        from fx_ai_trader.trading.broker_reconcile import (
+            reconcile_broker_positions,
+        )
+
+        pid = store.open_position(
+            symbol="BZ=F", side="BUY", volume_lots=0.01,
+            entry_price=105.031, sl_price=104.7, tp_price=106.3,
+            broker_position_id=150428404,
+            broker_order_label="ai-fx-trader",
+            llm_reason="setup", is_paper=False,
+        )
+        adapter = _FakeAdapter(
+            active_pids=set(),  # broker'a больше не имеет
+            deals={150428404: {
+                "deal_id": 331875628,
+                "ts_ms": 1778686157455,
+                "exit_price": 104.721,
+                "gross_pnl_usd": -3.32,
+                "swap_usd": 0.0,
+                "commission_usd": 0.0,
+            }},
+        )
+        closed = reconcile_broker_positions(adapter, store)
+        assert closed == 1
+        rows = store.get_open_positions()
+        assert rows == []  # позиция закрыта в БД
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT exit_price, realized_pnl_usd, close_reason "
+                "FROM positions WHERE id = ?", (pid,),
+            ).fetchone()
+        assert row[0] == pytest.approx(104.721)
+        assert row[1] == pytest.approx(-3.32)
+        assert row[2] == "broker_auto"
+
+    def test_skips_position_still_active_on_broker(
+        self, store: AiFxTraderStore,
+    ):
+        from fx_ai_trader.trading.broker_reconcile import (
+            reconcile_broker_positions,
+        )
+
+        store.open_position(
+            symbol="XAUUSD", side="BUY", volume_lots=0.07,
+            entry_price=4700, sl_price=4690, tp_price=4720,
+            broker_position_id=200,
+            broker_order_label="ai-fx-trader",
+            llm_reason="setup", is_paper=False,
+        )
+        adapter = _FakeAdapter(active_pids={200})  # ещё открыта
+        closed = reconcile_broker_positions(adapter, store)
+        assert closed == 0
+        assert len(store.get_open_positions()) == 1
+
+    def test_no_op_when_broker_api_unreachable(
+        self, store: AiFxTraderStore,
+    ):
+        """``None`` от get_active_broker_position_ids ≠ пустой set.
+
+        КРИТИЧНО: при сетевой проблеме НЕ закрываем все позиции как
+        broker-closed (правило ``None != []`` — Bybit-агент 2026-05-07).
+        """
+        from fx_ai_trader.trading.broker_reconcile import (
+            reconcile_broker_positions,
+        )
+
+        store.open_position(
+            symbol="BZ=F", side="BUY", volume_lots=0.01,
+            entry_price=105, sl_price=104, tp_price=106,
+            broker_position_id=300,
+            broker_order_label="ai-fx-trader",
+            llm_reason="setup", is_paper=False,
+        )
+        adapter = _FakeAdapter(active_pids=None)
+        closed = reconcile_broker_positions(adapter, store)
+        assert closed == 0
+        assert len(store.get_open_positions()) == 1
+
+    def test_keeps_open_when_closing_deal_not_found(
+        self, store: AiFxTraderStore,
+    ):
+        from fx_ai_trader.trading.broker_reconcile import (
+            reconcile_broker_positions,
+        )
+
+        store.open_position(
+            symbol="BZ=F", side="BUY", volume_lots=0.01,
+            entry_price=105, sl_price=104, tp_price=106,
+            broker_position_id=400,
+            broker_order_label="ai-fx-trader",
+            llm_reason="setup", is_paper=False,
+        )
+        adapter = _FakeAdapter(active_pids=set(), deals={})
+        closed = reconcile_broker_positions(adapter, store)
+        assert closed == 0
+        assert len(store.get_open_positions()) == 1
+
+    def test_uses_broker_net_pnl_not_local_calc(
+        self, store: AiFxTraderStore,
+    ):
+        """Симулируем 2026-05-13 BRENT id=2 close: broker gross=+92.82,
+        our_formula at current_price would give +101.53. После reconcile
+        в БД должна быть broker'ская цифра."""
+        from fx_ai_trader.trading.broker_reconcile import (
+            reconcile_broker_positions,
+        )
+
+        pid = store.open_position(
+            symbol="BZ=F", side="BUY", volume_lots=0.13,
+            entry_price=104.824, sl_price=104.0, tp_price=106.0,
+            broker_position_id=500,
+            broker_order_label="ai-fx-trader",
+            llm_reason="setup", is_paper=False,
+        )
+        adapter = _FakeAdapter(
+            active_pids=set(),
+            deals={500: {
+                "deal_id": 331862269, "ts_ms": 0,
+                "exit_price": 105.578,
+                "gross_pnl_usd": 92.82,
+                "swap_usd": 0.0,
+                "commission_usd": 0.0,
+            }},
+        )
+        reconcile_broker_positions(adapter, store)
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd FROM positions WHERE id = ?", (pid,),
+            ).fetchone()
+        assert row[0] == pytest.approx(92.82)
+
+    def test_position_not_found_in_apply_close_recovers(
+        self, store: AiFxTraderStore,
+    ):
+        """Если LLM сама CLOSE-ит, а broker отвечает POSITION_NOT_FOUND,
+        executor должен подтянуть deal и закрыть позицию (а не вернуть
+        error → потеря PnL для daily_loss)."""
+        from fx_ai_trader.config.settings import AiFxTraderSettings
+        from fx_ai_trader.safety.killswitch import (
+            KillSwitch,
+            KillSwitchConfig,
+        )
+        from fx_ai_trader.trading.client_adapter import OrderResult
+        from fx_ai_trader.trading.executor import (
+            CloseAction,
+            ParsedAction,
+            apply_action,
+        )
+
+        pid = store.open_position(
+            symbol="BZ=F", side="BUY", volume_lots=0.01,
+            entry_price=105.031, sl_price=104.7, tp_price=106.3,
+            broker_position_id=150428404,
+            broker_order_label="ai-fx-trader",
+            llm_reason="setup", is_paper=False,
+        )
+        adapter = _FakeAdapter(
+            active_pids=set(),
+            deals={150428404: {
+                "deal_id": 331875628, "ts_ms": 0,
+                "exit_price": 104.721,
+                "gross_pnl_usd": -3.32,
+                "swap_usd": 0.0,
+                "commission_usd": 0.0,
+            }},
+            close_results={150428404: OrderResult(
+                success=False,
+                broker_position_id=150428404,
+                error="close_position: cTrader error POSITION_NOT_FOUND: not found",
+            )},
+            current_prices={"BZ=F": 104.368},
+        )
+        action = ParsedAction(
+            action_type="close",
+            model=CloseAction(action="close", position_id=pid, reason="sl breach"),
+            raw={"action": "close", "position_id": pid, "reason": "sl breach"},
+        )
+        settings = AiFxTraderSettings()
+        object.__setattr__(settings, "trading_enabled", True)
+        ks = KillSwitch(KillSwitchConfig(
+            max_daily_loss_usd=150, max_total_loss_usd=300,
+            max_open_positions=3, max_positions_per_symbol=3,
+        ), store)
+
+        result = apply_action(
+            action, adapter=adapter, store=store,
+            settings=settings, killswitch=ks,
+        )
+        assert result.executed is True
+        assert "broker_auto" in result.summary
+        # PnL в БД — broker'ская net-цифра, не our_calc на current_price.
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, exit_price, close_reason "
+                "FROM positions WHERE id = ?", (pid,),
+            ).fetchone()
+        assert row[0] == pytest.approx(-3.32)
+        assert row[1] == pytest.approx(104.721)
+        assert row[2] == "broker_auto"
