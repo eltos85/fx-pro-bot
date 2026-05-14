@@ -18,6 +18,95 @@
 
 ## 2026-05-14
 
+### refactor: full alignment with Nof1 source (KillSwitch + hard-checks REMOVED)
+`(коммит ниже)`
+
+**Контекст:** При первом ревью пользователь зафиксировал нарушение
+правила `.cursor/rules/ai-arena-sources.mdc`: я добавил server-side
+`KillSwitch`, hard-cap'ы (`max_risk_per_trade=$10`, `max_open_positions=3`,
+`max_leverage=5x`, `min_RR=1.5`, `max_daily_loss=$50`,
+`max_total_loss=$200`) и переписал conviction → leverage mapping
+(1-2x/2-3x/3-5x вместо source 1-3x/3-8x/8-20x). Source Nof1 (gist §
+RISK MANAGEMENT PROTOCOL + nof1.ai/blog/TechPost1) НЕ имеет ни одной из
+этих server-side hard-checks — risk management полностью на стороне LLM.
+
+**Что удалено (отсебятина):**
+- `src/ai_arena/safety/killswitch.py` — весь файл (включая папку `safety/`).
+- `executor.py`: убраны hard-checks `max_risk_per_trade`, `max_open_positions`,
+  `min_RR`, `max_leverage`, `notional_cap_base_usd`. Оставлены только
+  sanity-парсинг (типы, диапазоны, signal ∈ allowed, coin ∈ whitelist),
+  direction sanity (LONG/SHORT formal requirement из source) и Bybit-rounding
+  (`qty_step`/`tick_size` — Bybit API требование, не Nof1).
+- `settings.py`: убраны `max_daily_loss_usd`, `max_total_loss_usd`,
+  `max_open_positions`, `max_risk_per_trade_usd`, `min_risk_reward_ratio`.
+  `max_leverage` (5x) → `leverage_max` (default 20x как в source).
+- `app/main.py`: убраны KillSwitch init, killswitch.check_can_trade(),
+  killswitch.check_can_open_position(), pause-логика (store.is_paused()).
+- `telegram/bot.py`: убраны `notify_killswitch`, `/pause`, `/resume`
+  команды. Telegram теперь read-only мониторинг.
+- `docker-compose.yml` + `.env.example` + VPS `.env`: убраны env vars
+  `AI_ARENA_MAX_DAILY_LOSS`, `AI_ARENA_MAX_TOTAL_LOSS`,
+  `AI_ARENA_MAX_POSITIONS`, `AI_ARENA_MAX_LEVERAGE`,
+  `AI_ARENA_MAX_RISK_PER_TRADE`, `AI_ARENA_MIN_RR`. Добавлен
+  `AI_ARENA_LEVERAGE_MAX=20`.
+
+**Что переписано 1-в-1 по source:**
+- `src/ai_arena/llm/prompts.py`: SYSTEM_PROMPT полностью переписан в
+  12 секций gist'а (ROLE, ENVIRONMENT, ACTION SPACE, POSITION SIZING
+  FRAMEWORK, RISK MANAGEMENT PROTOCOL, OUTPUT FORMAT, PERFORMANCE
+  METRICS, DATA INTERPRETATION, OPERATIONAL CONSTRAINTS, TRADING
+  PHILOSOPHY, CONTEXT WINDOW MANAGEMENT, FINAL INSTRUCTIONS).
+- Conviction → leverage mapping: 0.3-0.5 → 1-3x, 0.5-0.7 → 3-8x,
+  0.7-1.0 → 8-20x (gist § POSITION SIZING).
+- Risk management в prompt'е: stop_loss «1-3% of account value per
+  trade», profit_target «minimum 2:1 R:R», invalidation_condition
+  «objective and observable» (gist § RISK MANAGEMENT PROTOCOL).
+- Position sizing формула: `Position Size (USD) = Available Cash ×
+  Leverage × Allocation %` (gist § POSITION SIZING FRAMEWORK).
+- Common Pitfalls: Overtrading, Revenge Trading, Analysis Paralysis,
+  Ignoring Correlation, Overleveraging (gist § TRADING PHILOSOPHY).
+- Liquidation Risk «>15% away from entry», Diversification «<40% in
+  single position», Fee Impact «<$500 erodes profits» — все
+  включены как guidance в SYSTEM_PROMPT (gist § POSITION SIZING).
+
+**Что оставлено как обоснованная Bybit-адаптация:**
+- `equity_scale_divisor=50` (Bybit demo $50k / 50 → LLM видит $1000) —
+  обсуждено и согласовано с пользователем. У Hyperliquid Nof1 даёт
+  модели $10k бюджет, у нас аналогичная семантика через scaling.
+- 5 пар без SOL (правило `strategy-guard.mdc` — изоляция от bybit_bot).
+- Bybit V5 API технические правки (set_leverage per-symbol,
+  qty_step/tick_size rounding, lastPrice вместо mid-price, funding 8h).
+- SQLite БД (`state/db.py`) — нужна для rolling 14d Sharpe из source
+  требований и для reconcile позиций между cycles.
+- Telegram (`telegram/bot.py`) — read-only мониторинг (status / pnl /
+  last_decision / history). На будущее, сейчас env пустой.
+
+**Обновлено правило `.cursor/rules/ai-arena-sources.mdc`:**
+- Секция «Что разрешено брать ИЗ ЭТИХ ИСТОЧНИКОВ» расширена ссылками
+  на конкретные source-фразы.
+- Секция «Что ЗАПРЕЩЕНО» дополнена прямым списком всех server-side
+  hard-cap'ов, которые НЕЛЬЗЯ возвращать.
+- Секция «Что МОЖНО менять» переименована в «вынужденные
+  инфраструктурные адаптации» и сужена до 6 конкретных пунктов.
+
+**Тесты:** 75/75 ai_arena тестов проходят. В `test_ai_arena_executor.py`
+добавлены тесты `test_high_leverage_15x_accepted` и `test_low_rr_accepted`
+— гарантия что parser больше НЕ блокирует high-leverage / low-R:R
+(они теперь решение LLM). В `test_ai_arena_prompts.py` добавлены тесты
+`TestSystemPromptSourceCompliance` (15+ checks что все source-параметры
+буквально в prompt'е) и `TestSystemPromptNoOversteppingSource` (3
+теста-щита что KillSwitch / max_positions / daily_loss НЕ просочились
+обратно в prompt).
+
+**Файлы:** удалена `src/ai_arena/safety/`; изменены
+`src/ai_arena/config/settings.py`, `src/ai_arena/trading/executor.py`,
+`src/ai_arena/llm/prompts.py`, `src/ai_arena/app/main.py`,
+`src/ai_arena/telegram/bot.py`, `docker-compose.yml`, `.env.example`,
+VPS `.env`, `.cursor/rules/ai-arena-sources.mdc`,
+`tests/test_ai_arena_executor.py`, `tests/test_ai_arena_prompts.py`.
+
+---
+
 ### fix: scaled equity для prompt + notional cap (compounding)
 `(коммит ниже)`
 

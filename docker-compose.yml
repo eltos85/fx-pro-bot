@@ -266,16 +266,11 @@ services:
       # совпадали (косметика, на логику не влияет).
       AI_ARENA_EQUITY_SCALE_DIVISOR: ${AI_ARENA_EQUITY_SCALE_DIVISOR:-50}
       AI_ARENA_SYMBOLS: ${AI_ARENA_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
-      # Capital Safety hard-limits (наша инфраструктура, не часть Nof1):
-      # max_risk $10/trade × 5 trades/day = $50 daily limit.
-      # max_total $200 = 40% от virtual_capital — ранняя остановка
-      # эксперимента до «доедания депо».
-      AI_ARENA_MAX_DAILY_LOSS: ${AI_ARENA_MAX_DAILY_LOSS:-50}
-      AI_ARENA_MAX_TOTAL_LOSS: ${AI_ARENA_MAX_TOTAL_LOSS:-200}
-      AI_ARENA_MAX_POSITIONS: ${AI_ARENA_MAX_POSITIONS:-3}
-      AI_ARENA_MAX_LEVERAGE: ${AI_ARENA_MAX_LEVERAGE:-5}
-      AI_ARENA_MAX_RISK_PER_TRADE: ${AI_ARENA_MAX_RISK_PER_TRADE:-10}
-      AI_ARENA_MIN_RR: ${AI_ARENA_MIN_RR:-1.5}
+      # Leverage cap (1-{max}x) — source Nof1 указывает 1-20x.
+      # Используется только для подстановки в SYSTEM_PROMPT, серверных
+      # hard-checks нет (risk management на стороне LLM, см. правило
+      # .cursor/rules/ai-arena-sources.mdc).
+      AI_ARENA_LEVERAGE_MAX: ${AI_ARENA_LEVERAGE_MAX:-20}
       # Bybit — ОТДЕЛЬНЫЙ аккаунт (другой UID). Ключи задаются в .env
       # как AI_ARENA_BYBIT_API_KEY/SECRET. Если пустые — бот выходит
       # с ошибкой при старте (не торгует и не падает в loop).

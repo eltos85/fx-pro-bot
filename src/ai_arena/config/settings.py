@@ -87,46 +87,28 @@ class AiArenaSettings(BaseSettings):
         default=180, validation_alias="AI_ARENA_POLL_INTERVAL_SEC"
     )
 
-    # Виртуальный капитал — sandbox-граница (Nof1 = $10k, у нас $500-$1000).
-    # Используется ТОЛЬКО как номинальная метка в SYSTEM_PROMPT
-    # ("Starting virtual capital: $X"). Для notional-cap'а в executor.py
-    # используется реальный scaled_equity = real_equity / equity_scale_divisor
-    # (см. ниже), чтобы compounding-логика работала на реальном Bybit-балансе.
+    # Виртуальный капитал — номинальная метка для SYSTEM_PROMPT
+    # ("Starting Capital: $X"). Nof1 канон $10k, у нас sandbox-обманка
+    # $1000 через scaling Bybit demo equity (см. equity_scale_divisor).
     virtual_capital_usd: float = Field(
-        default=500.0, validation_alias="AI_ARENA_VIRTUAL_CAPITAL"
+        default=1000.0, validation_alias="AI_ARENA_VIRTUAL_CAPITAL"
     )
 
     # Делитель реального Bybit equity для масштабирования вниз перед
     # передачей в LLM-промпт. На demo-аккаунте Bybit стартовый баланс
     # ≈ $50k, делитель 50 → LLM видит $1000 (наш sandbox).
-    # Затрагивает: cash/equity в USER_PROMPT и notional-cap в executor.
-    # НЕ затрагивает: max_risk_per_trade, killswitch limits, indicators,
-    # signal validation — они остаются на инфраструктурных $-значениях.
+    # Это единственное обоснованное отклонение от source: у Hyperliquid
+    # (родная биржа Nof1) можно дать модели $10k бюджет; на Bybit demo
+    # фиксированный $50k — масштабируем вниз чтобы LLM работал в $1000
+    # окне (соответствует virtual_capital_usd).
     equity_scale_divisor: float = Field(
         default=50.0, validation_alias="AI_ARENA_EQUITY_SCALE_DIVISOR"
     )
 
-    # ─── Capital Safety (hard infrastructure — не часть Nof1-стратегии) ──
-    # Cap leverage 5x вместо Nof1 20x — наш sandbox safety. Conviction →
-    # leverage mapping в SYSTEM_PROMPT адаптирован под этот cap.
-    max_daily_loss_usd: float = Field(
-        default=50.0, validation_alias="AI_ARENA_MAX_DAILY_LOSS"
-    )
-    max_total_loss_usd: float = Field(
-        default=200.0, validation_alias="AI_ARENA_MAX_TOTAL_LOSS"
-    )
-    max_open_positions: int = Field(
-        default=3, validation_alias="AI_ARENA_MAX_POSITIONS"
-    )
-    max_leverage: int = Field(default=5, validation_alias="AI_ARENA_MAX_LEVERAGE")
-    max_risk_per_trade_usd: float = Field(
-        default=10.0, validation_alias="AI_ARENA_MAX_RISK_PER_TRADE"
-    )
-    # R:R ≥ 1.5 hard-check на parser-уровне. В SYSTEM_PROMPT тоже
-    # явно сказано "if your idea has R:R < 1.5, bot will reject; return HOLD".
-    min_risk_reward_ratio: float = Field(
-        default=1.5, validation_alias="AI_ARENA_MIN_RR"
-    )
+    # Leverage cap — source говорит 1-20x (gist:
+    # "Leverage Range: 1x to 20x"). Используется только для подстановки
+    # в SYSTEM_PROMPT (текстом "1-20x"), серверного hard-checking нет.
+    leverage_max: int = Field(default=20, validation_alias="AI_ARENA_LEVERAGE_MAX")
 
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_ARENA_DATA_DIR")

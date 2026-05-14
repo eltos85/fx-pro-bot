@@ -6,32 +6,31 @@ Output schema (см. правило `ai-arena-sources.mdc`, gist nof1-prompt.md)
       "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
       "coin":   "BTCUSDT" | "ETHUSDT" | …,
       "quantity": <float>,
-      "leverage": <integer 1-5>,
+      "leverage": <integer 1-20>,
       "stop_loss":     <float>,
       "profit_target": <float>,
       "invalidation_condition": "<string>",
       "confidence": <float 0-1>,
-      "risk_usd":   <float ≤ 10>,
+      "risk_usd":   <float>,
       "justification": "<string ≤ 500 chars>"
     }
 
-Валидация:
-1. signal ∈ allowed
-2. coin ∈ whitelist
-3. signal=hold: остальные поля игнорируются
-4. signal=close: нужен match по open position (по coin)
-5. signal=buy/sell:
-   - quantity > 0 и кратна qty_step
-   - leverage ∈ [1, max_leverage]
-   - LONG:  stop_loss < current_price < profit_target
-     SHORT: profit_target < current_price < stop_loss
-   - R:R = |profit_target - current_price| / |current_price - stop_loss| ≥ 1.5
-   - risk_usd = |current_price - stop_loss| * quantity ≤ max_risk_per_trade_usd
-   - confidence ∈ [0, 1]
-6. Killswitch: max_open_positions, max_leverage, daily/total loss
+ВАЖНО — никаких server-side capital safety hard-checks (нет в источнике
+Nof1). Bot выполняет только:
 
-При нарушении любого пункта — `signal` интерпретируется как **HOLD**
-с записью error в БД.
+1. Sanity-парсинг: signal ∈ allowed, coin ∈ whitelist, типы полей,
+   confidence ∈ [0,1], leverage ≥ 1, quantity > 0 (для entries).
+2. Direction sanity: LONG  → SL < price < TP;  SHORT → TP < price < SL
+   (gist: "stop_loss must be below entry price for longs, above for
+   shorts"; "profit_target must be above entry price for longs, below
+   for shorts"). Это формальное требование source, не риск-фильтр.
+3. Bybit-rounding: qty под `lotSizeFilter.qtyStep`, SL/TP под
+   `priceFilter.tickSize` (Bybit V5 требование, не Nof1).
+
+Risk management полностью на стороне LLM (формула risk_usd, Sharpe
+feedback, invalidation_condition, conviction-mapping leverage). См.
+gist § "RISK MANAGEMENT PROTOCOL (MANDATORY)" — это инструкции LLM,
+не серверный код.
 """
 from __future__ import annotations
 
@@ -44,7 +43,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ai_arena.config.settings import AiArenaSettings
-from ai_arena.safety.killswitch import KillSwitch
 from ai_arena.state.db import AiArenaStore
 from ai_arena.trading.client import AiArenaBybitClient
 
@@ -158,7 +156,9 @@ def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | 
     if signal == "close":
         return ParsedAction(signal="close", raw=obj)
 
-    # buy_to_enter / sell_to_enter — полная валидация
+    # buy_to_enter / sell_to_enter — sanity-валидация типов и диапазонов.
+    # Никаких "капитальных" cap'ов (max_risk, max_lev, min_RR) — они не
+    # описаны в Nof1 источниках. Risk management на стороне LLM.
     qty = obj.get("quantity")
     leverage = obj.get("leverage")
     sl = obj.get("stop_loss")
@@ -195,16 +195,17 @@ def apply_action(
     client: AiArenaBybitClient,
     store: AiArenaStore,
     settings: AiArenaSettings,
-    killswitch: KillSwitch,
-    notional_cap_base_usd: float | None = None,
 ) -> ApplyResult:
     """Применяет распарсенное LLM-решение.
 
-    notional_cap_base_usd: база для notional-cap'а (max_notional = base × leverage).
-    Если None — fallback на settings.virtual_capital_usd (для unit-тестов и
-    обратной совместимости). В live-цикле передаётся scaled_equity =
-    real_bybit_equity / equity_scale_divisor, чтобы лимит рос/падал вместе
-    с реальным P&L (compounding).
+    Никаких killswitch / capital-safety hard-checks. Source Nof1 их не
+    имеет — risk management на стороне LLM (через required JSON-поля
+    confidence / invalidation_condition / risk_usd / stop_loss /
+    profit_target и Sharpe feedback). См. gist § "RISK MANAGEMENT
+    PROTOCOL (MANDATORY)".
+
+    Серверная валидация ограничена sanity-парсингом и Bybit-rounding'ом
+    (qty_step, tick_size — это требования Bybit API, не Nof1).
     """
     if action.signal == "hold":
         just = action.raw.get("justification", "")
@@ -215,12 +216,7 @@ def apply_action(
 
     if action.signal in {"buy_to_enter", "sell_to_enter"}:
         return _apply_open(
-            action,
-            client=client,
-            store=store,
-            settings=settings,
-            killswitch=killswitch,
-            notional_cap_base_usd=notional_cap_base_usd,
+            action, client=client, store=store, settings=settings,
         )
 
     return ApplyResult(
@@ -272,8 +268,6 @@ def _apply_open(
     client: AiArenaBybitClient,
     store: AiArenaStore,
     settings: AiArenaSettings,
-    killswitch: KillSwitch,
-    notional_cap_base_usd: float | None = None,
 ) -> ApplyResult:
     raw = action.raw
     coin = raw["coin"]
@@ -287,19 +281,15 @@ def _apply_open(
     invalidation = str(raw.get("invalidation_condition", ""))[:500]
     justification = str(raw.get("justification", ""))[:500]
 
-    # 1) Killswitch (positions count + leverage cap)
-    check = killswitch.check_can_open_position(leverage)
-    if not check.allowed:
-        return ApplyResult(executed=False, summary="", error=f"killswitch: {check.reason}")
-
-    # 2) Уже есть открытая по этой coin? Nof1: «one position per coin»
+    # 1) Уже есть открытая по этой coin? Source: «one position per coin
+    # maximum» (gist: "NO pyramiding"). Это формальное правило source.
     if any(p.symbol == coin for p in store.get_open_positions()):
         return ApplyResult(
             executed=False, summary="",
             error=f"already have open position for {coin} (no pyramiding)",
         )
 
-    # 3) Текущая цена + instrument-info
+    # 2) Текущая цена + instrument-info (Bybit требует qty_step / tick_size)
     ticker = client.get_ticker(coin)
     if ticker is None or ticker.last_price <= 0:
         return ApplyResult(executed=False, summary="", error=f"ticker unavailable for {coin}")
@@ -312,7 +302,10 @@ def _apply_open(
     sl_price = _round_to_step(sl_price, info.tick_size)
     tp_price = _round_to_step(tp_price, info.tick_size)
 
-    # 4) Direction sanity (LONG/SHORT)
+    # 3) Direction sanity (формальное требование source: gist § OUTPUT
+    # VALIDATION RULES — "stop_loss must be below entry price for longs,
+    # above for shorts; profit_target must be above entry price for
+    # longs, below for shorts").
     if side == "Buy":
         if not (sl_price < price < tp_price):
             return ApplyResult(
@@ -326,19 +319,7 @@ def _apply_open(
                 error=f"SHORT: need TP<price<SL, got TP={tp_price} price={price} SL={sl_price}",
             )
 
-    # 5) R:R hard-check
-    risk_dist = abs(price - sl_price)
-    reward_dist = abs(tp_price - price)
-    if risk_dist <= 0:
-        return ApplyResult(executed=False, summary="", error="risk_dist == 0 (SL==price)")
-    rr = reward_dist / risk_dist
-    if rr < settings.min_risk_reward_ratio:
-        return ApplyResult(
-            executed=False, summary="",
-            error=f"R:R {rr:.2f} < min {settings.min_risk_reward_ratio} — return HOLD",
-        )
-
-    # 6) Округляем qty под qty_step
+    # 4) Округляем qty под qty_step (Bybit lotSizeFilter)
     qty = _floor_to_step(qty_req, info.qty_step)
     if qty < info.min_order_qty:
         return ApplyResult(
@@ -353,35 +334,14 @@ def _apply_open(
     if qty <= 0:
         return ApplyResult(executed=False, summary="", error="qty<=0 after rounding")
 
-    # 7) risk_usd hard-check (КАНОНИЧНАЯ Nof1 формула: БЕЗ leverage)
+    # risk_usd_actual — для логирования и записи в БД (для аналитики).
+    # Никакого hard-cap'а: source формула `|entry - stop_loss| × quantity`
+    # инструктирует LLM, не серверный код.
+    risk_dist = abs(price - sl_price)
+    reward_dist = abs(tp_price - price)
     risk_usd_actual = risk_dist * qty
-    if risk_usd_actual > settings.max_risk_per_trade_usd:
-        return ApplyResult(
-            executed=False, summary="",
-            error=(
-                f"risk_usd {risk_usd_actual:.2f} > max {settings.max_risk_per_trade_usd:.2f} "
-                f"(claimed {risk_usd_claimed:.2f})"
-            ),
-        )
-
-    # 8) Notional cap: base × leverage. base = scaled_equity (real Bybit
-    # equity / divisor) если передан notional_cap_base_usd, иначе fallback на
-    # virtual_capital_usd. Compounding-логика: cap растёт вместе с равити.
+    rr = (reward_dist / risk_dist) if risk_dist > 0 else 0.0
     notional = qty * price
-    cap_base = (
-        notional_cap_base_usd
-        if notional_cap_base_usd is not None and notional_cap_base_usd > 0
-        else settings.virtual_capital_usd
-    )
-    max_notional = cap_base * leverage
-    if notional > max_notional:
-        return ApplyResult(
-            executed=False, summary="",
-            error=(
-                f"notional ${notional:.2f} > cap ${max_notional:.2f} "
-                f"(virtual_cap×leverage)"
-            ),
-        )
 
     if not settings.trading_enabled:
         return ApplyResult(
@@ -389,11 +349,12 @@ def _apply_open(
             summary=(
                 f"[PAPER] {action.signal.upper()} {coin} qty={qty} @ ${price:.6g} "
                 f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x conf={confidence:.2f} "
-                f"R:R={rr:.2f} risk=${risk_usd_actual:.2f} — {justification[:150]}"
+                f"R:R={rr:.2f} risk=${risk_usd_actual:.2f} (claimed ${risk_usd_claimed:.2f}) "
+                f"notional=${notional:.2f} — {justification[:150]}"
             ),
         )
 
-    # 9) Live: set_leverage → place_order
+    # 5) Live: set_leverage → place_order
     if not client.set_leverage(coin, leverage):
         log.warning(
             "set_leverage %s %dx failed before place_order — продолжаем",
@@ -437,6 +398,7 @@ def _apply_open(
         summary=(
             f"OPEN {action.signal.upper()} {coin} qty={qty} @ ${price:.6g} "
             f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
-            f"conf={confidence:.2f} R:R={rr:.2f} risk=${risk_usd_actual:.2f}"
+            f"conf={confidence:.2f} R:R={rr:.2f} risk=${risk_usd_actual:.2f} "
+            f"notional=${notional:.2f}"
         ),
     )

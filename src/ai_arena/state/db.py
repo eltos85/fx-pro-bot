@@ -8,8 +8,10 @@
                        confidence / invalidation / risk_usd / sharpe_at_decision /
                        minutes_elapsed.
 - ``equity_snapshots`` — equity на каждый цикл, для расчёта rolling Sharpe.
-- ``daily_pnl``      — дневная агрегация realized_pnl (для killswitch).
-- ``kv_state``       — telegram_chat_id, paused-флаг, started_at и пр.
+- ``daily_pnl``      — дневная агрегация realized_pnl (для аналитики
+                       и Telegram /pnl команды; не используется как
+                       capital-safety blocker — Nof1 source их не имеет).
+- ``kv_state``       — telegram_chat_id, started_at и пр.
 
 Полностью изолирован от ai_trader (та БД — ai_trader.sqlite, эта —
 ai_arena.sqlite). См. правило ``strategy-guard.mdc`` (изоляция кодовых баз).
@@ -332,7 +334,7 @@ class AiArenaStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
-    # ─── PnL для killswitch ──────────────────────────────────────────────
+    # ─── PnL аналитика (для Telegram /pnl, /status — не для blocker'ов) ─
 
     def get_today_pnl(self) -> float:
         today = date.today().isoformat()

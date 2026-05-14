@@ -1,13 +1,16 @@
-"""Telegram-бот для AI Arena.
+"""Telegram-бот для AI Arena (read-only UX, не часть Nof1-стратегии).
 
 Отдельный токен от ai_trader — env var ``AI_ARENA_TELEGRAM_BOT_TOKEN``.
 Если токен пустой — TG-модуль молчит, всё остальное работает как обычно.
 
-Команды: /start, /help, /status, /pnl, /last_decision, /history,
-/pause, /resume.
+Команды: /start, /help, /status, /pnl, /last_decision, /history.
 
 Auto-detect chat_id: при первой команде запоминается в БД (kv_state).
-Push-нотификации при open / close / killswitch / error.
+Push-нотификации при open / close / error.
+
+ВАЖНО: никаких /pause /resume / killswitch команд — Nof1 source не
+имеет server-side capital safety hard-limits. Telegram только для
+read-only мониторинга и push'ей о значимых событиях.
 """
 from __future__ import annotations
 
@@ -87,9 +90,6 @@ class TelegramArenaBot:
 
     def notify_close(self, summary: str) -> None:
         self.send(f"🔴 *POSITION CLOSED*\n```\n{summary}\n```")
-
-    def notify_killswitch(self, reason: str) -> None:
-        self.send(f"⚠️ *KILLSWITCH*\n{reason}")
 
     def notify_error(self, where: str, err: str) -> None:
         self.send(f"❌ *ERROR* in {where}\n```\n{err[:500]}\n```")
@@ -194,20 +194,18 @@ def _split_message(text: str, max_len: int) -> list[str]:
     return out
 
 
-def build_command_handlers(store, settings, killswitch) -> dict[str, Callable[[str], str]]:
-    """Команды для AI Arena. Аналог ai_trader, но с Nof1-полями."""
+def build_command_handlers(store, settings) -> dict[str, Callable[[str], str]]:
+    """Команды для AI Arena (read-only мониторинг)."""
 
     def cmd_start(_: str) -> str:
         return (
             "👋 *AI Arena online*\n\n"
-            "Я — клон Nof1.ai Alpha Arena на DeepSeek V4-Pro + Bybit demo.\n\n"
+            "Я — клон Nof1.ai Alpha Arena на DeepSeek + Bybit demo.\n\n"
             "Команды:\n"
             "/status — текущее состояние\n"
-            "/pnl — PnL за сегодня и total\n"
+            "/pnl — реализованный PnL\n"
             "/last\\_decision — последнее решение LLM\n"
             "/history — последние 5 решений\n"
-            "/pause — приостановить торговлю\n"
-            "/resume — возобновить\n"
             "/help — эта справка"
         )
 
@@ -220,18 +218,15 @@ def build_command_handlers(store, settings, killswitch) -> dict[str, Callable[[s
         total_pnl = store.get_total_pnl()
         n_closed, n_wins = store.get_closed_positions_count()
         wr = (n_wins / n_closed * 100) if n_closed else 0
-        paused = store.is_paused()
-        ks = killswitch.check_can_trade()
 
         lines = [
             "📊 *AI Arena status*",
-            f"Mode: `{'PAUSED' if paused else ('LIVE' if settings.trading_enabled else 'PAPER')}`",
+            f"Mode: `{'LIVE' if settings.trading_enabled else 'PAPER'}`",
             f"Symbols: {', '.join(settings.symbols)}",
-            f"Virtual capital: ${settings.virtual_capital_usd:.2f}",
-            f"Open positions: {len(positions)} / {settings.max_open_positions}",
-            f"Today PnL: ${today_pnl:+.2f}  Total: ${total_pnl:+.2f}",
+            f"Virtual capital: ${settings.virtual_capital_usd:.2f} (leverage cap 1-{settings.leverage_max}x)",
+            f"Open positions: {len(positions)}",
+            f"Today realized PnL: ${today_pnl:+.2f}  Total: ${total_pnl:+.2f}",
             f"Closed trades: {n_closed} (WR {wr:.0f}%)",
-            f"Killswitch: {'OK' if ks.allowed else 'BLOCKED — ' + ks.reason}",
         ]
         if positions:
             lines.append("\n*Open positions:*")
@@ -249,9 +244,9 @@ def build_command_handlers(store, settings, killswitch) -> dict[str, Callable[[s
         n_closed, n_wins = store.get_closed_positions_count()
         wr = (n_wins / n_closed * 100) if n_closed else 0
         return (
-            "💰 *PnL*\n"
-            f"Today: `${today:+.2f}`  (limit -${settings.max_daily_loss_usd:.0f})\n"
-            f"Total: `${total:+.2f}`  (limit -${settings.max_total_loss_usd:.0f})\n"
+            "💰 *Realized PnL* (closed positions only)\n"
+            f"Today: `${today:+.2f}`\n"
+            f"Total: `${total:+.2f}`\n"
             f"Trades: {n_closed} closed, {n_wins} wins, WR {wr:.0f}%"
         )
 
@@ -292,14 +287,6 @@ def build_command_handlers(store, settings, killswitch) -> dict[str, Callable[[s
             lines.append(f"`{ts_short}` {mark} *{signal}* — {short_just}")
         return "\n".join(lines)
 
-    def cmd_pause(_: str) -> str:
-        store.set_paused(True)
-        return "⏸ *Торговля приостановлена*. /resume — продолжить."
-
-    def cmd_resume(_: str) -> str:
-        store.set_paused(False)
-        return "▶️ *Торговля возобновлена*."
-
     return {
         "/start": cmd_start,
         "/help": cmd_help,
@@ -308,6 +295,4 @@ def build_command_handlers(store, settings, killswitch) -> dict[str, Callable[[s
         "/last_decision": cmd_last_decision,
         "/last": cmd_last_decision,
         "/history": cmd_history,
-        "/pause": cmd_pause,
-        "/resume": cmd_resume,
     }

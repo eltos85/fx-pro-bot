@@ -1,15 +1,12 @@
 """Тесты parser'а Nof1 schema для AI Arena.
 
-Проверяем 20+ JSON-кейсов согласно AI_TRADER_PROPOSAL_ALPHA_ARENA.md §10:
-valid buy/sell/hold/close, malformed JSON, missing fields, signal out
-of enum, quantity ≤ 0, leverage > 5, R:R < 1.5, risk_usd > $10,
-SL/TP в неправильную сторону.
+Source: gist § OUTPUT FORMAT SPECIFICATION + Output Validation Rules.
+Только sanity-валидация — никаких capital safety hard-checks (их нет
+в source, см. .cursor/rules/ai-arena-sources.mdc).
 """
 from __future__ import annotations
 
 import json
-
-import pytest
 
 from ai_arena.trading.executor import (
     ALLOWED_SIGNALS,
@@ -82,6 +79,42 @@ class TestValidActions:
         assert isinstance(result, ParsedAction)
         assert result.signal == "close"
 
+    def test_high_leverage_15x_accepted(self):
+        """Source Nof1 разрешает 1-20x — серверного cap'а нет.
+
+        Раньше у нас был max_leverage=5 hard-cap (отсебятина), теперь
+        убран. LLM решает сам по своей conviction.
+        """
+        text = _wrap_json({
+            "signal": "buy_to_enter", "coin": "BTCUSDT",
+            "quantity": 0.001, "leverage": 15,
+            "stop_loss": 60000.0, "profit_target": 65000.0,
+            "invalidation_condition": "BTC below 59000",
+            "confidence": 0.85, "risk_usd": 5.0,
+            "justification": "high conviction breakout",
+        })
+        result = parse_action(text, SYMBOLS)
+        assert isinstance(result, ParsedAction)
+        assert result.raw["leverage"] == 15
+
+    def test_low_rr_accepted(self):
+        """R:R < 2:1 теперь не отбраковывается parser'ом.
+
+        Source Nof1 говорит «minimum 2:1 reward-to-risk» как guidance в
+        prompt'е, но не как server-side cap. LLM решает сам.
+        """
+        text = _wrap_json({
+            "signal": "buy_to_enter", "coin": "ETHUSDT",
+            "quantity": 0.05, "leverage": 2,
+            "stop_loss": 3290.0, "profit_target": 3310.0,  # R:R = 1:1
+            "invalidation_condition": "ETH below 3290",
+            "confidence": 0.5, "risk_usd": 0.5,
+            "justification": "scalp mean-reversion",
+        })
+        result = parse_action(text, SYMBOLS)
+        assert isinstance(result, ParsedAction)
+        assert result.signal == "buy_to_enter"
+
 
 # ─── Edge cases / robustness ─────────────────────────────────────────────
 
@@ -116,7 +149,7 @@ class TestParserRobustness:
         assert result.signal == "hold"
 
 
-# ─── Validation errors ───────────────────────────────────────────────────
+# ─── Validation errors (sanity-only) ─────────────────────────────────────
 
 
 class TestValidationErrors:

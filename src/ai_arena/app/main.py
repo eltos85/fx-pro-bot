@@ -10,10 +10,9 @@ AI_TRADER_PROPOSAL_ALPHA_ARENA.md §4.1):
 5. Market data acquire  — per-symbol: 3m × 50, 4h × 60, OI 20×5min
 6. Build user prompt    — Nof1 layout (per-symbol blocks + account state)
 7. LLM call             — DeepSeek V4-Pro, reasoning_effort=off
-8. Parse JSON action    — валидация Nof1 schema
-9. KillSwitch + R:R     — hard-checks
-10. Execute on Bybit    — set_leverage → place_order (или PAPER)
-11. Persist decision    — БД с confidence/invalidation/risk_usd/sharpe
+8. Parse JSON action    — sanity-валидация Nof1 schema (типы + диапазоны)
+9. Execute on Bybit    — set_leverage → place_order (или PAPER)
+10. Persist decision    — БД с confidence/invalidation/risk_usd/sharpe
 12. Telegram notify     — на open/close
 13. Equity snapshot     — для следующего Sharpe
 
@@ -34,7 +33,6 @@ from ai_arena.analysis.sharpe import (
 from ai_arena.config.settings import AiArenaSettings
 from ai_arena.llm.client import DeepSeekArenaClient
 from ai_arena.llm.prompts import build_system_prompt, build_user_prompt
-from ai_arena.safety.killswitch import KillSwitch, KillSwitchConfig
 from ai_arena.state.db import AiArenaStore
 from ai_arena.telegram.bot import (
     TelegramArenaBot,
@@ -135,17 +133,16 @@ def run() -> None:
     log.info("=" * 60)
     log.info("AI Arena v0.1 (Nof1 Alpha Arena clone) — DeepSeek %s", settings.deepseek_model)
     log.info(
-        "Demo: %s | Symbols: %s | Cycle: %ds | Virtual cap: $%.2f",
+        "Demo: %s | Symbols: %s | Cycle: %ds | Virtual cap: $%.2f | leverage cap: 1-%dx",
         settings.bybit_demo,
         ", ".join(settings.symbols),
         settings.poll_interval_sec,
         settings.virtual_capital_usd,
+        settings.leverage_max,
     )
     log.info(
-        "KillSwitch: daily=$%.0f total=$%.0f maxpos=%d maxlev=%dx max_risk_per_trade=$%.0f",
-        settings.max_daily_loss_usd, settings.max_total_loss_usd,
-        settings.max_open_positions, settings.max_leverage,
-        settings.max_risk_per_trade_usd,
+        "Equity scale divisor: %.1f (Bybit demo equity → LLM-видимый equity)",
+        settings.equity_scale_divisor,
     )
     log.info("Mode: %s", "LIVE" if settings.trading_enabled else "PAPER (decisions only)")
     log.info(
@@ -177,15 +174,6 @@ def run() -> None:
         max_tokens=settings.deepseek_max_tokens,
         reasoning_effort=settings.deepseek_reasoning_effort,
     )
-    killswitch = KillSwitch(
-        KillSwitchConfig(
-            max_daily_loss_usd=settings.max_daily_loss_usd,
-            max_total_loss_usd=settings.max_total_loss_usd,
-            max_open_positions=settings.max_open_positions,
-            max_leverage=settings.max_leverage,
-        ),
-        store,
-    )
 
     tg: TelegramArenaBot | None = None
     if settings.telegram_enabled and settings.telegram_bot_token:
@@ -195,7 +183,7 @@ def run() -> None:
             enabled=True,
         )
         tg = TelegramArenaBot(
-            tg_cfg, store, build_command_handlers(store, settings, killswitch)
+            tg_cfg, store, build_command_handlers(store, settings)
         )
         tg.start()
         tg.send(
@@ -217,7 +205,7 @@ def run() -> None:
         if last_cycle_ts == 0.0 or (now_mono - last_cycle_ts) >= settings.poll_interval_sec:
             cycle += 1
             try:
-                _run_cycle(cycle, settings, store, bybit, llm, killswitch, tg)
+                _run_cycle(cycle, settings, store, bybit, llm, tg)
             except Exception as e:
                 log.exception("Cycle %d crashed (продолжаю)", cycle)
                 if tg:
@@ -236,7 +224,6 @@ def _run_cycle(
     store: AiArenaStore,
     bybit: AiArenaBybitClient,
     llm: DeepSeekArenaClient,
-    killswitch: KillSwitch,
     tg: TelegramArenaBot | None,
 ) -> None:
     log.info("─── Cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
@@ -247,17 +234,6 @@ def _run_cycle(
     )
 
     _reconcile_closed_positions(bybit, store, tg)
-
-    if store.is_paused():
-        log.info("PAUSED (через /pause из Telegram) — пропускаю цикл")
-        return
-
-    gen = killswitch.check_can_trade()
-    if not gen.allowed:
-        log.warning("KILLSWITCH: %s — пропускаю цикл", gen.reason)
-        if tg:
-            tg.notify_killswitch(gen.reason)
-        return
 
     # Sharpe rolling 14d (nullable если истории < 3 точек)
     snapshots = store.get_equity_snapshots_since(cutoff_ts_14d_ago())
@@ -293,8 +269,9 @@ def _run_cycle(
 
     # Scaling Bybit equity вниз для LLM (demo $50k → /50 → $1000 sandbox).
     # Делитель — `equity_scale_divisor` из settings (см. settings.py).
-    # Влияет ТОЛЬКО на: cash/equity в USER_PROMPT и notional-cap в executor.
-    # НЕ влияет на: max_risk_per_trade, killswitch, indicators, signal validation.
+    # Это единственное обоснованное отклонение от source: Hyperliquid
+    # позволяет дать модели $10k бюджет, Bybit demo выдаёт фиксированный
+    # $50k — масштабируем чтобы LLM работал в $1000 окне.
     divisor = max(1.0, settings.equity_scale_divisor)
     scaled_equity = ctx.real_equity_usd / divisor
     scaled_cash = ctx.available_cash_usd / divisor
@@ -391,8 +368,6 @@ def _run_cycle(
         client=bybit,
         store=store,
         settings=settings,
-        killswitch=killswitch,
-        notional_cap_base_usd=scaled_equity,
     )
     store.log_decision(
         cycle=cycle,
