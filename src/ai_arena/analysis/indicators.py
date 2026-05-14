@@ -234,25 +234,6 @@ def volume_avg(volumes: list[float], period: int = 20) -> float | None:
     return sum(volumes[-period:]) / period
 
 
-# ─── Funding band labels (Nof1 / Lambda Finance 2026) ────────────────────
-
-
-def funding_band_label(rate: float) -> str:
-    """Возвращает 'neutral' / 'mild' / 'strong'.
-
-    Значения берутся прямо из gist:
-    - |fr| < 0.05%   → neutral
-    - 0.05–0.20%     → mild
-    - > 0.20%        → strong (potential reversal)
-    """
-    abs_rate = abs(rate)
-    if abs_rate < 0.0005:
-        return "neutral"
-    if abs_rate < 0.0020:
-        return "mild"
-    return "strong"
-
-
 # ─── Snapshot helpers (для prompt-сборщика) ──────────────────────────────
 
 

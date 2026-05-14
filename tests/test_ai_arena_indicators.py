@@ -12,7 +12,6 @@ from ai_arena.analysis.indicators import (
     build_intraday_snapshot,
     build_longer_term_snapshot,
     ema,
-    funding_band_label,
     macd,
     macd_series,
     rsi,
@@ -130,22 +129,6 @@ class TestVolumeAvg:
     def test_volume_avg_known(self):
         vols = [10.0, 20.0, 30.0, 40.0, 50.0]
         assert volume_avg(vols, 5) == pytest.approx(30.0)
-
-
-class TestFundingBands:
-    def test_neutral(self):
-        assert funding_band_label(0.0001) == "neutral"
-        assert funding_band_label(-0.0001) == "neutral"
-        # Граница 0.05% (0.0005) — должна быть mild
-        assert funding_band_label(0.0005) == "mild"
-
-    def test_mild(self):
-        assert funding_band_label(0.001) == "mild"
-        assert funding_band_label(-0.0015) == "mild"
-
-    def test_strong(self):
-        assert funding_band_label(0.003) == "strong"
-        assert funding_band_label(-0.005) == "strong"
 
 
 class TestSnapshotBuilders:

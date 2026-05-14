@@ -143,7 +143,6 @@ For EVERY trade decision, you MUST specify:
 
 5. **risk_usd** (float): Dollar amount at risk (distance from entry to stop loss)
    - Calculate as: |Entry Price - Stop Loss| × Position Size
-   - Do NOT multiply by leverage
 
 ---
 
@@ -323,8 +322,11 @@ def build_user_prompt(
 ) -> str:
     """USER_PROMPT 1-в-1 по gist § User Prompt 完整逆向.
 
-    Содержит ≥4 повторений «OLDEST → NEWEST» (gist § "数据顺序的反复强调"
-    — design-decision Nof1, защита от LLM-confusion с time-series).
+    Содержит «OLDEST → NEWEST» (uppercase) **1 раз** — в начале USER_PROMPT,
+    как в source. Финального reminder'а перед "Based on the above..." нет
+    (source line 474, никаких повторений в финале). Кроме этого, label
+    `oldest → latest` (lowercase) встречается в каждом per-symbol блоке
+    в строке "Intraday Series (3-minute intervals, oldest → latest):".
     """
     sharpe_str = f"{sharpe:.3f}" if sharpe is not None else "n/a (insufficient history)"
     return f"""It has been {minutes_elapsed} minutes since you started trading.
@@ -356,8 +358,6 @@ Below, we are providing you with a variety of state data, price data, and predic
 **Current Live Positions & Performance:**
 
 {open_positions_block}
-
-⚠️ **DATA ORDER REMINDER: OLDEST → NEWEST** ⚠️
 
 Based on the above data, provide your trading decision in the required JSON format.
 """

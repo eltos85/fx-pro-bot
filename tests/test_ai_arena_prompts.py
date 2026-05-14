@@ -9,7 +9,8 @@
 3. Source-параметры (leverage 1-20x, R:R 2:1, conviction-mapping
    1-3x/3-8x/8-20x, stop loss 1-3%, liquidation >15%, diversification 40%)
    все цитированы.
-4. Warning'и «OLDEST → NEWEST» встречаются ≥2 раза в user prompt.
+4. Warning «OLDEST → NEWEST» встречается в user prompt (1 раз в начале —
+   1-в-1 с source; повторений в финале prompt'а в source НЕТ).
 """
 from __future__ import annotations
 
@@ -138,7 +139,13 @@ class TestSystemPromptNoOversteppingSource:
 
 
 class TestUserPrompt:
-    def test_oldest_newest_warning_repeated(self):
+    def test_oldest_newest_warning_in_user_prompt(self):
+        """Source: 1 раз в начале USER_PROMPT (CRITICAL warning).
+
+        Финальный reminder перед "Based on the above..." — отсутствует
+        в source, добавлять ЗАПРЕЩЕНО (см. правило ai-arena-sources.mdc
+        «Что НЕЛЬЗЯ добавлять в prompt'ы»).
+        """
         up = build_user_prompt(
             minutes_elapsed=42,
             per_symbol_blocks="(test data)",
@@ -148,7 +155,10 @@ class TestUserPrompt:
             equity=500.0,
             open_positions_block="[]",
         )
-        assert up.count("OLDEST → NEWEST") >= 2
+        # ровно 1 раз — как в source
+        assert up.count("OLDEST → NEWEST") == 1
+        # И обязательно присутствует CRITICAL warning в начале
+        assert "CRITICAL: ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST" in up
 
     def test_contains_minutes_elapsed(self):
         up = build_user_prompt(

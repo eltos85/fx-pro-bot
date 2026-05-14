@@ -5,11 +5,10 @@
 `strategy-guard.mdc`: «ЗАПРЕЩЕНО импортировать fx_pro_bot.* из bybit_bot.*
 и наоборот» — то же касается остальных ботов).
 
-Минимальный набор операций для Nof1-style цикла:
+Минимальный набор операций для Nof1-style цикла (1-в-1 с gist):
 - ``get_klines``                  — исторические свечи (3m / 4h)
-- ``get_ticker``                  — last price + funding
-- ``get_open_interest``           — Nof1: OI latest + 20×5min avg
-- ``get_funding_rate_history``    — Nof1: funding rate history
+- ``get_ticker``                  — last price + funding rate (current)
+- ``get_open_interest``           — Nof1: OI latest + average
 - ``get_instrument_info``         — qty_step / tick_size фильтры
 - ``get_wallet_balance``          — equity для cash/margin
 - ``get_positions``               — открытые позиции с unrealised PnL
@@ -20,7 +19,6 @@
 Ссылки на API-доку (правило `api-docs.mdc`):
 - https://bybit-exchange.github.io/docs/v5/intro
 - https://bybit-exchange.github.io/docs/v5/market/open-interest
-- https://bybit-exchange.github.io/docs/v5/market/history-fund-rate
 """
 from __future__ import annotations
 
@@ -203,40 +201,6 @@ class AiArenaBybitClient:
                 continue
         out.sort(key=lambda p: p.ts)
         return out
-
-    def get_funding_rate_history(self, symbol: str, limit: int = 8) -> list[float]:
-        """История funding rate (последние N значений).
-
-        Bybit V5 endpoint: `/v5/market/funding/history`.
-        Bybit funding schedule: 00:00 / 08:00 / 16:00 UTC (3 раза в сутки),
-        поэтому limit=8 ≈ ~2.5 дня funding-снапшотов.
-
-        Возвращает список fundingRate как float (oldest → newest).
-        """
-        try:
-            resp = self._session.get_funding_rate_history(
-                category=self._category,
-                symbol=symbol,
-                limit=limit,
-            )
-        except Exception:
-            log.exception("get_funding_rate_history %s failed", symbol)
-            return []
-        items = resp.get("result", {}).get("list", []) or []
-        # Bybit возвращает newest → oldest; нормализуем oldest → newest.
-        rates: list[tuple[int, float]] = []
-        for row in items:
-            try:
-                rates.append(
-                    (
-                        int(row.get("fundingRateTimestamp", 0) or 0),
-                        float(row.get("fundingRate", 0) or 0),
-                    )
-                )
-            except (ValueError, TypeError):
-                continue
-        rates.sort(key=lambda x: x[0])
-        return [r for _, r in rates]
 
     def get_instrument_info(self, symbol: str) -> InstrumentInfo | None:
         if symbol in self._instr_cache:

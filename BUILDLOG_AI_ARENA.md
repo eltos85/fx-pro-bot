@@ -18,6 +18,71 @@
 
 ## 2026-05-14
 
+### chore: strict 1-в-1 ревью source vs код (9 расхождений в prompt'ах + dead code)
+`(коммит ниже)`
+
+**Контекст:** Пользователь зафиксировал требование «полный клон» Nof1 —
+никаких отклонений от gist'а кроме физически вынужденных Bybit-адаптаций.
+Полный построчный аудит SYSTEM_PROMPT / USER_PROMPT / open positions
+block / индикаторов / источников данных vs gist line-by-line обнаружил
+9 расхождений (8 в USER_PROMPT, 1 в SYSTEM_PROMPT) и 1 dead-code метод.
+
+**Удалённые отклонения (исправлено в этом коммите):**
+
+| # | Где | Source (gist) | Было у нас | Категория |
+|---|---|---|---|---|
+| 1 | per-symbol headers | `**Current Snapshot:**` | `Current Snapshot:` | косметика markdown |
+| 2 | OI annotation | `Average: Y` | `Average (20×5min): Y` | лишняя аннотация |
+| 3 | funding rate | `Funding Rate: 0.0123%` | `Funding Rate: 0.0123%  (band: mild)` | **наша интерпретация** |
+| 4 | volume label | `Average Volume: Y` | `Average Volume (20): Y` | лишняя аннотация |
+| 5 | RSI 3m label | `(7-Period)`, `(14-Period)` | `(7-period)`, `(14-period)` | капитализация |
+| 6 | RSI 4h label | `(14-Period, 4h)` | `(14, 4h)` | сжатие |
+| 7 | open positions | без поля `side`, signed quantity | `'side': 'long'/'short'` + positive qty | **наше добавление** |
+| 8 | SYSTEM_PROMPT risk_usd | `Calculate as: \|Entry - SL\| × Position Size` | + строка `Do NOT multiply by leverage` | **наше усиление** |
+| 9 | spacing per-symbol block | пустые строки между блоками индикаторов | сжатый layout без пустых строк | косметика |
+
+**Дополнительно удалено:**
+- ✂️ `funding_band_label()` функция в `analysis/indicators.py` (теперь
+ unused, source не использует band-категоризацию).
+- ✂️ Тесты `TestFundingBands` в `tests/test_ai_arena_indicators.py` (3 шт.).
+- ✂️ `get_funding_rate_history()` метод в `trading/client.py` (dead code:
+ source требует только current funding из ticker, история не нужна).
+- ✂️ Соответствующие docstring и упоминания.
+
+**Изменённые файлы:**
+
+| Файл | Что |
+|---|---|
+| `src/ai_arena/trading/context.py` | переписан `format_symbol_block` 1-в-1 c gist; `format_open_positions_block` использует signed quantity |
+| `src/ai_arena/llm/prompts.py` | удалена строка `Do NOT multiply by leverage` из SYSTEM_PROMPT § risk_usd |
+| `src/ai_arena/analysis/indicators.py` | удалена `funding_band_label` |
+| `src/ai_arena/trading/client.py` | удалён `get_funding_rate_history` + связанные docstring |
+| `tests/test_ai_arena_indicators.py` | удалены 3 теста `TestFundingBands` |
+| `.cursor/rules/ai-arena-sources.mdc` | добавлен раздел «Что НЕЛЬЗЯ добавлять в prompt'ы» с историческим списком отклонённых правок (защита от регресса) |
+
+**Что осталось как обоснованная Bybit-адаптация (документировано в правиле):**
+
+- `lastPrice` вместо mid-price (Bybit V5 ticker не отдаёт mid одним полем).
+- Funding schedule 8h (Bybit) vs 1h (Hyperliquid) — одна строка в § Trading Mechanics.
+- Asset universe с USDT-suffix (Bybit perp formal naming).
+- `equity_scale_divisor=50` (Bybit demo $50k → LLM видит $1000).
+- `set_leverage` per-position перед `place_order` (Bybit V5 требование).
+- signed quantity конверсия для open positions (Bybit `size+side` → Hyperliquid `signed qty`).
+
+**Верификация:**
+- `python3 -m pytest tests/` → **624 passed** (-3 funding_band тестов = баланс).
+- `ReadLints` чистый.
+- Цикл бота на VPS подхватит после selective rebuild.
+
+**Принципиальное правило (зафиксировано в `ai-arena-sources.mdc`):**
+> Если адаптация **не вынуждена API биржи или sandbox-окружением** —
+> её быть не должно. «Полезные подсказки», аннотации к числам,
+> дополнительные поля, переформулировки текста source = ЗАПРЕЩЕНО.
+
+**Файлы:** см. таблицу выше + `BUILDLOG_AI_ARENA.md`.
+
+---
+
 ### feat: подключён Telegram-бот @winline_notify_bot (переиспользован от sport_bet)
 `(только VPS .env, без коммита кода)`
 

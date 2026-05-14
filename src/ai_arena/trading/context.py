@@ -1,15 +1,14 @@
 """Сборщик market context для AI Arena (Nof1 layout).
 
-Per-symbol layout (см. gist nof1-prompt.md):
-- Current snapshot: price, EMA20, MACD, RSI(7)
-- Perp metrics: OI latest + avg(20×5min), Funding rate + band label
-- Intraday (3m × 10, oldest→newest): prices, EMA20, MACD, RSI(7), RSI(14)
-- Longer-term (4h):
-  - 20-EMA vs 50-EMA
-  - 3-ATR vs 14-ATR
-  - Volume current vs Volume avg(20)
-  - MACD ×10
-  - RSI(14) ×10
+Per-symbol layout 1-в-1 c gist nof1-prompt.md (User Prompt § per-coin):
+- Current Snapshot: current_price, current_ema20, current_macd,
+  current_rsi (7 period)
+- Perpetual Futures Metrics: Open Interest (Latest + Average), Funding Rate
+- Intraday Series (3-minute, oldest → latest): Mid prices, EMA(20),
+  MACD, RSI(7-Period), RSI(14-Period)
+- Longer-term Context (4-hour timeframe): 20-Period EMA vs 50-Period
+  EMA, 3-Period ATR vs 14-Period ATR, Current Volume vs Average Volume,
+  MACD indicators (4h), RSI indicators (14-Period, 4h)
 
 Никаких новостей / sentiment / orderflow — Nof1 явно пишет «no news,
 no social media, no narratives». См. правило `ai-arena-sources.mdc`.
@@ -26,7 +25,6 @@ from ai_arena.analysis.indicators import (
     LongerTermSnapshot,
     build_intraday_snapshot,
     build_longer_term_snapshot,
-    funding_band_label,
 )
 from ai_arena.state.db import ArenaPosition, AiArenaStore
 from ai_arena.trading.client import (
@@ -153,13 +151,17 @@ def _fmt_arr(arr: list[float | None] | list[float], pat: str = "{:.6g}") -> str:
 
 
 def format_symbol_block(block: SymbolBlock) -> str:
-    """Per-symbol блок в стиле gist'а Nof1 («### ALL BTC DATA …»)."""
+    """Per-symbol блок 1-в-1 c gist nof1-prompt.md («### ALL BTC DATA …»).
+
+    Все labels, markdown-bold (`**...:**`), formatting — буквальная копия
+    из gist'а. Любая правка должна сохранять byte-level совместимость с
+    source layout (см. правило `ai-arena-sources.mdc`).
+    """
     sym = block.symbol
     if block.ticker is None:
         return f"### ALL {sym} DATA\n(ticker unavailable, skipping)\n"
 
     t = block.ticker
-    fr_band = funding_band_label(t.funding_rate)
     cur_ema20 = (
         block.intraday.ema20[-1] if block.intraday and block.intraday.ema20 else None
     )
@@ -172,50 +174,59 @@ def format_symbol_block(block: SymbolBlock) -> str:
 
     parts: list[str] = []
     parts.append(f"### ALL {sym} DATA\n")
-    parts.append("Current Snapshot:")
+    parts.append("**Current Snapshot:**")
     parts.append(f"- current_price = {_fmt_n(t.last_price)}")
     parts.append(f"- current_ema20 = {_fmt_n(cur_ema20)}")
-    parts.append(f"- current_macd  = {_fmt_n(cur_macd)}")
+    parts.append(f"- current_macd = {_fmt_n(cur_macd)}")
     parts.append(f"- current_rsi (7 period) = {_fmt_n(cur_rsi7)}")
     parts.append("")
 
-    parts.append("Perpetual Futures Metrics:")
+    parts.append("**Perpetual Futures Metrics:**")
     parts.append(
         f"- Open Interest: Latest: {_fmt_n(block.oi_latest)} | "
-        f"Average (20×5min): {_fmt_n(block.oi_avg)}"
+        f"Average: {_fmt_n(block.oi_avg)}"
     )
-    parts.append(
-        f"- Funding Rate: {t.funding_rate * 100:+.4f}%  (band: {fr_band})"
-    )
+    parts.append(f"- Funding Rate: {t.funding_rate * 100:+.4f}%")
     parts.append("")
 
     if block.intraday is not None:
-        parts.append("Intraday Series (3-minute intervals, oldest → latest):")
-        parts.append(f"  Mid prices:                {_fmt_arr(block.intraday.prices)}")
-        parts.append(f"  EMA indicators (20-period): {_fmt_arr(block.intraday.ema20)}")
-        parts.append(f"  MACD indicators:            {_fmt_arr(block.intraday.macd)}")
-        parts.append(f"  RSI indicators (7-period):  {_fmt_arr(block.intraday.rsi7, '{:.2f}')}")
-        parts.append(f"  RSI indicators (14-period): {_fmt_arr(block.intraday.rsi14, '{:.2f}')}")
+        parts.append("**Intraday Series (3-minute intervals, oldest → latest):**")
+        parts.append("")
+        parts.append(f"Mid prices: {_fmt_arr(block.intraday.prices)}")
+        parts.append("")
+        parts.append(f"EMA indicators (20-period): {_fmt_arr(block.intraday.ema20)}")
+        parts.append("")
+        parts.append(f"MACD indicators: {_fmt_arr(block.intraday.macd)}")
+        parts.append("")
+        parts.append(f"RSI indicators (7-Period): {_fmt_arr(block.intraday.rsi7, '{:.2f}')}")
+        parts.append("")
+        parts.append(f"RSI indicators (14-Period): {_fmt_arr(block.intraday.rsi14, '{:.2f}')}")
         parts.append("")
     else:
         parts.append("Intraday Series: insufficient data for this cycle\n")
 
     if block.longer_term is not None:
         lt = block.longer_term
-        parts.append("Longer-term Context (4-hour timeframe):")
+        parts.append("**Longer-term Context (4-hour timeframe):**")
+        parts.append("")
         parts.append(
-            f"  20-Period EMA: {_fmt_n(lt.ema20)}  vs.  50-Period EMA: {_fmt_n(lt.ema50)}"
+            f"20-Period EMA: {_fmt_n(lt.ema20)} vs. 50-Period EMA: {_fmt_n(lt.ema50)}"
         )
+        parts.append("")
         parts.append(
-            f"   3-Period ATR: {_fmt_n(lt.atr3)}  vs.  14-Period ATR: {_fmt_n(lt.atr14)}"
+            f"3-Period ATR: {_fmt_n(lt.atr3)} vs. 14-Period ATR: {_fmt_n(lt.atr14)}"
         )
+        parts.append("")
         parts.append(
-            f"  Current Volume: {_fmt_n(lt.volume_current, '{:.2f}')}  vs.  Average Volume (20): {_fmt_n(lt.volume_avg, '{:.2f}')}"
+            f"Current Volume: {_fmt_n(lt.volume_current, '{:.2f}')} vs. "
+            f"Average Volume: {_fmt_n(lt.volume_avg, '{:.2f}')}"
         )
-        parts.append(f"  MACD indicators (4h):       {_fmt_arr(lt.macd)}")
-        parts.append(f"  RSI indicators (14, 4h):    {_fmt_arr(lt.rsi14, '{:.2f}')}")
+        parts.append("")
+        parts.append(f"MACD indicators (4h): {_fmt_arr(lt.macd)}")
+        parts.append("")
+        parts.append(f"RSI indicators (14-Period, 4h): {_fmt_arr(lt.rsi14, '{:.2f}')}")
     else:
-        parts.append("Longer-term Context (4-hour timeframe): insufficient data")
+        parts.append("**Longer-term Context (4-hour timeframe):** insufficient data")
 
     return "\n".join(parts) + "\n"
 
@@ -228,7 +239,16 @@ def format_open_positions_block(
     notional_by_symbol: dict[str, float],
     unrealized_by_symbol: dict[str, float],
 ) -> str:
-    """Компактный JSON-блок открытых позиций (формат из gist'а)."""
+    """Открытые позиции 1-в-1 c gist nof1-prompt.md (Python list-of-dicts).
+
+    Поля идентичны source: symbol, quantity, entry_price, current_price,
+    liquidation_price, unrealized_pnl, leverage, exit_plan, confidence,
+    risk_usd, notional_usd. Поле ``'side'`` отсутствует — направление
+    кодируется **знаком** ``quantity`` (positive = long, negative =
+    short), как в Hyperliquid (родная биржа Nof1). Bybit отдаёт
+    `size>0 + side`, поэтому конвертируем в signed quantity при
+    форматировании.
+    """
     if not positions:
         return "[]"
     arr = []
@@ -237,11 +257,11 @@ def format_open_positions_block(
         liq = liquidation_prices.get(p.symbol, 0.0)
         unrl = unrealized_by_symbol.get(p.symbol, 0.0)
         notional = notional_by_symbol.get(p.symbol, p.qty * cur)
+        signed_qty = p.qty if p.side == "Buy" else -p.qty
         arr.append(
             {
                 "symbol": p.symbol,
-                "side": "long" if p.side == "Buy" else "short",
-                "quantity": p.qty,
+                "quantity": signed_qty,
                 "entry_price": p.entry_price,
                 "current_price": cur,
                 "liquidation_price": liq,
