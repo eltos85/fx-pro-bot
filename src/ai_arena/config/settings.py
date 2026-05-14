@@ -87,10 +87,23 @@ class AiArenaSettings(BaseSettings):
         default=180, validation_alias="AI_ARENA_POLL_INTERVAL_SEC"
     )
 
-    # Виртуальный капитал — наша sandbox-граница (Nof1 = $10k, у нас $500).
-    # Используется для: notional cap = virtual_capital × leverage.
+    # Виртуальный капитал — sandbox-граница (Nof1 = $10k, у нас $500-$1000).
+    # Используется ТОЛЬКО как номинальная метка в SYSTEM_PROMPT
+    # ("Starting virtual capital: $X"). Для notional-cap'а в executor.py
+    # используется реальный scaled_equity = real_equity / equity_scale_divisor
+    # (см. ниже), чтобы compounding-логика работала на реальном Bybit-балансе.
     virtual_capital_usd: float = Field(
         default=500.0, validation_alias="AI_ARENA_VIRTUAL_CAPITAL"
+    )
+
+    # Делитель реального Bybit equity для масштабирования вниз перед
+    # передачей в LLM-промпт. На demo-аккаунте Bybit стартовый баланс
+    # ≈ $50k, делитель 50 → LLM видит $1000 (наш sandbox).
+    # Затрагивает: cash/equity в USER_PROMPT и notional-cap в executor.
+    # НЕ затрагивает: max_risk_per_trade, killswitch limits, indicators,
+    # signal validation — они остаются на инфраструктурных $-значениях.
+    equity_scale_divisor: float = Field(
+        default=50.0, validation_alias="AI_ARENA_EQUITY_SCALE_DIVISOR"
     )
 
     # ─── Capital Safety (hard infrastructure — не часть Nof1-стратегии) ──

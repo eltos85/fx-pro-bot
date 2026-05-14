@@ -18,6 +18,61 @@
 
 ## 2026-05-14
 
+### fix: scaled equity для prompt + notional cap (compounding)
+`(коммит ниже)`
+
+**Проблема (наблюдение в Cycle 1 на VPS):**
+LLM получил `Available Cash: $50000.00, Current Account Value: $50000.00`
+от реального Bybit demo-баланса и посчитал `quantity=2.183 ETH` (notional
+~$4946 при leverage=2). Наш executor cap-нул это: `notional $4946.05 >
+cap $1000.00 (virtual_capital × leverage)` — защита сработала, но LLM
+оперировал не теми числами, что предполагает sandbox.
+
+Дополнительно нашёлся баг: `total_return_pct = (real_equity -
+virtual_capital) / virtual_capital × 100` давал 9900% при $50k Bybit и
+$500 virtual — мусор в prompt.
+
+**Решение — масштабирование Bybit equity:**
+Вводим `AI_ARENA_EQUITY_SCALE_DIVISOR` (default 50). Bybit demo
+$50k / 50 → LLM видит $1000.
+
+- `settings.py`: новое поле `equity_scale_divisor: float = 50.0`.
+- `app/main.py`: `scaled_equity = real_equity / divisor`,
+  `scaled_cash = available_cash / divisor` — передаются в `build_user_prompt`.
+- `app/main.py`: `total_return_pct` пересчитан корректно — берётся
+  baseline из самого раннего `equity_snapshot`, формула
+  `(current - baseline) / baseline × 100` (инвариантна к scale).
+- `executor.py`: `apply_action` принимает опциональный
+  `notional_cap_base_usd`; если задан — `max_notional = base × leverage`
+  (compounding по реальному equity), иначе fallback на
+  `settings.virtual_capital_usd × leverage` (для unit-тестов).
+- `app/main.py`: передаёт `notional_cap_base_usd=scaled_equity` при
+  вызове `apply_action`.
+- `AI_ARENA_VIRTUAL_CAPITAL` поднят с $500 до $1000 в env (`docker-compose.yml`,
+  `.env.example`, VPS `.env`) — это номинальная метка для SYSTEM_PROMPT
+  («Starting virtual capital: $1000»), синхронна со scaled-equity.
+
+**Что НЕ затронуто (по принципу минимального вмешательства):**
+- `max_risk_per_trade_usd=$10` — остаётся на инфраструктурных $-значениях.
+- `max_daily_loss=$50`, `max_total_loss=$200`, `max_open_positions=3`,
+  `max_leverage=5x`, `min_RR=1.5` — все killswitch-лимиты в долларах.
+- Indicators (RSI/MACD/EMA/ATR), signal validation, Sharpe — без изменений.
+
+**Соответствие источникам (правило `ai-arena-sources.mdc`):**
+Nof1 у себя $10k виртуального капитала на каждый бота, не реальный
+exchange-баланс — gist § «Account Status: Total Equity / Cash» подаётся
+как virtual capital. Наш scaling — ровно эта семантика, адаптированная
+под Bybit demo (фиксированные $50k стартового баланса).
+
+**Тесты:** 61/61 ai_arena тестов проходят (executor работает с обоими
+вариантами — с `notional_cap_base_usd` и без).
+
+**Файлы:** `src/ai_arena/config/settings.py`, `src/ai_arena/app/main.py`,
+`src/ai_arena/trading/executor.py`, `docker-compose.yml`, `.env.example`,
+VPS `.env`.
+
+---
+
 ### v0.1 — skeleton (NOT yet committed, NOT yet deployed)
 
 Создан отдельный бот `src/ai_arena/`, изолированный от существующего

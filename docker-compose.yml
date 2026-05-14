@@ -259,7 +259,12 @@ services:
       # + gist nof1-prompt.md). Любые правки — только из этих двух
       # источников + лог в BUILDLOG_AI_ARENA.md.
       AI_ARENA_POLL_INTERVAL_SEC: ${AI_ARENA_POLL_INTERVAL_SEC:-180}
-      AI_ARENA_VIRTUAL_CAPITAL: ${AI_ARENA_VIRTUAL_CAPITAL:-500}
+      AI_ARENA_VIRTUAL_CAPITAL: ${AI_ARENA_VIRTUAL_CAPITAL:-1000}
+      # Bybit demo стартует с ≈$50k. Делим на divisor → LLM видит
+      # virtual_capital. Default 50 → LLM видит $1000. Меняй вместе с
+      # virtual_capital, чтобы цифры в SYSTEM_PROMPT и USER_PROMPT
+      # совпадали (косметика, на логику не влияет).
+      AI_ARENA_EQUITY_SCALE_DIVISOR: ${AI_ARENA_EQUITY_SCALE_DIVISOR:-50}
       AI_ARENA_SYMBOLS: ${AI_ARENA_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
       # Capital Safety hard-limits (наша инфраструктура, не часть Nof1):
       # max_risk $10/trade × 5 trades/day = $50 daily limit.

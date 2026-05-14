@@ -291,13 +291,23 @@ def _run_cycle(
         unrealized_by_symbol=unrealized,
     )
 
+    # Scaling Bybit equity вниз для LLM (demo $50k → /50 → $1000 sandbox).
+    # Делитель — `equity_scale_divisor` из settings (см. settings.py).
+    # Влияет ТОЛЬКО на: cash/equity в USER_PROMPT и notional-cap в executor.
+    # НЕ влияет на: max_risk_per_trade, killswitch, indicators, signal validation.
+    divisor = max(1.0, settings.equity_scale_divisor)
+    scaled_equity = ctx.real_equity_usd / divisor
+    scaled_cash = ctx.available_cash_usd / divisor
+
+    # total_return_pct — % изменения equity от первого equity_snapshot
+    # (формула инвариантна к scale: real %, не зависит от divisor).
     total_return_pct = 0.0
-    if settings.virtual_capital_usd > 0:
-        total_return_pct = (
-            (ctx.real_equity_usd - settings.virtual_capital_usd)
-            / settings.virtual_capital_usd
-            * 100
-        )
+    if snapshots:
+        baseline = float(snapshots[0]["total_equity_usd"])
+        if baseline > 0:
+            total_return_pct = (
+                (ctx.real_equity_usd - baseline) / baseline * 100
+            )
 
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(
@@ -305,15 +315,16 @@ def _run_cycle(
         per_symbol_blocks=format_per_symbol_blocks(ctx),
         total_return_pct=total_return_pct,
         sharpe=sharpe,
-        cash=ctx.available_cash_usd,
-        equity=ctx.real_equity_usd,
+        cash=scaled_cash,
+        equity=scaled_equity,
         open_positions_block=open_pos_block,
     )
 
     log.info(
-        "LLM call: positions=%d real_equity=$%.2f sharpe=%s minutes=%d",
+        "LLM call: positions=%d real_equity=$%.2f scaled=$%.2f sharpe=%s minutes=%d",
         len(ctx.open_positions),
         ctx.real_equity_usd,
+        scaled_equity,
         f"{sharpe:.3f}" if sharpe is not None else "n/a",
         minutes_elapsed,
     )
@@ -376,7 +387,12 @@ def _run_cycle(
         return
 
     apply = apply_action(
-        parsed, client=bybit, store=store, settings=settings, killswitch=killswitch
+        parsed,
+        client=bybit,
+        store=store,
+        settings=settings,
+        killswitch=killswitch,
+        notional_cap_base_usd=scaled_equity,
     )
     store.log_decision(
         cycle=cycle,

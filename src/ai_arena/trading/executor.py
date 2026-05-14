@@ -196,7 +196,16 @@ def apply_action(
     store: AiArenaStore,
     settings: AiArenaSettings,
     killswitch: KillSwitch,
+    notional_cap_base_usd: float | None = None,
 ) -> ApplyResult:
+    """Применяет распарсенное LLM-решение.
+
+    notional_cap_base_usd: база для notional-cap'а (max_notional = base × leverage).
+    Если None — fallback на settings.virtual_capital_usd (для unit-тестов и
+    обратной совместимости). В live-цикле передаётся scaled_equity =
+    real_bybit_equity / equity_scale_divisor, чтобы лимит рос/падал вместе
+    с реальным P&L (compounding).
+    """
     if action.signal == "hold":
         just = action.raw.get("justification", "")
         return ApplyResult(executed=False, summary=f"HOLD: {just[:200]}")
@@ -206,7 +215,12 @@ def apply_action(
 
     if action.signal in {"buy_to_enter", "sell_to_enter"}:
         return _apply_open(
-            action, client=client, store=store, settings=settings, killswitch=killswitch
+            action,
+            client=client,
+            store=store,
+            settings=settings,
+            killswitch=killswitch,
+            notional_cap_base_usd=notional_cap_base_usd,
         )
 
     return ApplyResult(
@@ -259,6 +273,7 @@ def _apply_open(
     store: AiArenaStore,
     settings: AiArenaSettings,
     killswitch: KillSwitch,
+    notional_cap_base_usd: float | None = None,
 ) -> ApplyResult:
     raw = action.raw
     coin = raw["coin"]
@@ -349,9 +364,16 @@ def _apply_open(
             ),
         )
 
-    # 8) Notional cap: virtual_capital × leverage
+    # 8) Notional cap: base × leverage. base = scaled_equity (real Bybit
+    # equity / divisor) если передан notional_cap_base_usd, иначе fallback на
+    # virtual_capital_usd. Compounding-логика: cap растёт вместе с равити.
     notional = qty * price
-    max_notional = settings.virtual_capital_usd * leverage
+    cap_base = (
+        notional_cap_base_usd
+        if notional_cap_base_usd is not None and notional_cap_base_usd > 0
+        else settings.virtual_capital_usd
+    )
+    max_notional = cap_base * leverage
     if notional > max_notional:
         return ApplyResult(
             executed=False, summary="",
