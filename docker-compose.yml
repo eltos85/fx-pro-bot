@@ -265,7 +265,9 @@ services:
       # virtual_capital, чтобы цифры в SYSTEM_PROMPT и USER_PROMPT
       # совпадали (косметика, на логику не влияет).
       AI_ARENA_EQUITY_SCALE_DIVISOR: ${AI_ARENA_EQUITY_SCALE_DIVISOR:-50}
-      AI_ARENA_SYMBOLS: ${AI_ARENA_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
+      # Asset Universe 1-в-1 c Nof1 (gist line 62): BTC, ETH, SOL, BNB, DOGE, XRP.
+      # Тикеры с суффиксом USDT — Bybit perp formal naming.
+      AI_ARENA_SYMBOLS: ${AI_ARENA_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
       # Leverage cap (1-{max}x) — source Nof1 указывает 1-20x.
       # Используется только для подстановки в SYSTEM_PROMPT, серверных
       # hard-checks нет (risk management на стороне LLM, см. правило

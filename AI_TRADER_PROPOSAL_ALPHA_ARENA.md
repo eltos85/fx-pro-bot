@@ -99,13 +99,15 @@ LOCKED-PROFIT / ADVERSE NEW EVIDENCE) на **архитектуру Nof1 Alpha A
 
 ### 3.3 По умолчанию остаётся
 
-- Список пар: BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, DOGEUSDT (5 шт., наша
-  изоляция от bybit_bot). Nof1 берёт 6 (+ SOL) — у нас SOL занят bybit_bot,
-  оставляем 5.
-- Виртуальный капитал: $500 (не $10k как у Nof1 — наша песочница).
-- KillSwitch: max 3 одновременных, max 5x leverage, $50/day loss,
-  $200 total loss, $10 per-trade risk. Это **наша infrastructure-граница**,
-  не часть стратегии; Nof1 её не имеет, мы оставляем.
+- Список пар: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT
+  (1-в-1 Nof1, 6 шт.). ai_arena работает на отдельном demo-аккаунте
+  Bybit, конфликта с bybit_bot (mainnet) нет.
+- Виртуальный капитал: $1000 (не $10k как у Nof1 — наша песочница через
+  `equity_scale_divisor=50`, см. `settings.py`).
+- Никаких server-side capital safety / KillSwitch. Nof1 их не имеет —
+  risk management полностью на стороне LLM (см. § "RISK MANAGEMENT
+  PROTOCOL (MANDATORY)" в SYSTEM_PROMPT и правило
+  `.cursor/rules/ai-arena-sources.mdc`).
 
 ---
 
@@ -169,13 +171,18 @@ src/ai_trader/
 
 ## 5. Промпты и output schema
 
-### 5.1 SYSTEM_PROMPT (адаптация Nof1 под Bybit + наши лимиты)
+### 5.1 SYSTEM_PROMPT (адаптация Nof1 под Bybit)
 
-> Полный текст — Приложение A. Здесь — структура.
+> ⚠️ **ИСТОРИЧЕСКИЙ DRAFT** — реальный SYSTEM_PROMPT см. в
+> `src/ai_arena/llm/prompts.py` (12 секций 1-в-1 с gist'ом). Никаких
+> server-side capital safety / KillSwitch там НЕТ — risk management
+> на стороне LLM (см. правило `.cursor/rules/ai-arena-sources.mdc`).
+> Иллюстративный текст ниже сохранён для контекста принятия решений.
 
 Адаптировано из [gist nof1-prompt.md](https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83)
-с правками: Hyperliquid → Bybit, 20x leverage → 5x, $10k capital → $500,
-allowed coins → наши 5, действие `close` без partial exits.
+с правками: Hyperliquid → Bybit, $10k capital → $1000 (через
+`equity_scale_divisor`), USDT-suffix у тикеров (Bybit perp naming),
+действие `close` без partial exits.
 
 Структура (8 секций):
 
@@ -186,7 +193,7 @@ Mission: maximize risk-adjusted return (PnL) through systematic, disciplined tra
 
 # TRADING ENVIRONMENT
 - Exchange: Bybit USDT-perp
-- Asset universe: BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, DOGEUSDT
+- Asset universe: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT
 - Virtual capital: $500
 - Decision cycle: every 3 minutes
 - Leverage: 1x-5x (hard cap; bot rejects above)
@@ -217,7 +224,7 @@ Conviction → leverage:
 # OUTPUT FORMAT (single JSON, last in response)
 {
   "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
-  "coin":   "BTCUSDT" | "ETHUSDT" | "BNBUSDT" | "XRPUSDT" | "DOGEUSDT",
+  "coin":   "BTCUSDT" | "ETHUSDT" | "SOLUSDT" | "BNBUSDT" | "XRPUSDT" | "DOGEUSDT",
   "quantity": <float>,
   "leverage": <integer 1-5>,
   "stop_loss":   <float>,
@@ -588,7 +595,7 @@ across a stateless 3-minute decision cycle.
 
 # TRADING ENVIRONMENT
 - Exchange: Bybit, category=linear (USDT-perp)
-- Asset universe: BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, DOGEUSDT
+- Asset universe: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT
 - Starting virtual capital: $500
 - Cycle: every 3 minutes (mid-to-low frequency trading)
 - Leverage: 1x-5x (bot rejects above 5x)

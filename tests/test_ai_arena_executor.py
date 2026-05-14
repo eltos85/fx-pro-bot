@@ -15,7 +15,7 @@ from ai_arena.trading.executor import (
 )
 
 
-SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT")
+SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT")
 
 
 def _wrap_json(d: dict) -> str:
@@ -161,7 +161,7 @@ class TestValidationErrors:
 
     def test_coin_not_in_whitelist(self):
         text = _wrap_json({
-            "signal": "buy_to_enter", "coin": "SOLUSDT",
+            "signal": "buy_to_enter", "coin": "LTCUSDT",
             "quantity": 1, "leverage": 1,
             "stop_loss": 100, "profit_target": 200,
             "confidence": 0.5, "risk_usd": 1.0,

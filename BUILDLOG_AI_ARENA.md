@@ -18,6 +18,66 @@
 
 ## 2026-05-14
 
+### feat: switch to LIVE on Bybit demo + add SOLUSDT (Asset Universe 1-в-1 с Nof1)
+`(коммит ниже)`
+
+**Контекст:** После refactor'а под Nof1 (см. запись ниже) бот стартовал
+в `PAPER`. Пользователь указал, что счёт уже demo — место для бумаги
+неоправданно, пора в LIVE. Параллельно вылез старый кост: я раньше
+держал 5 пар (без SOLUSDT) с обоснованием «SOL занят bybit_bot». Это
+противоречит правилу `.cursor/rules/ai-arena-sources.mdc` — Nof1 gist
+**жёстко** прописывает 6 монет в Asset Universe и в JSON output schema:
+
+> `Asset Universe: BTC, ETH, SOL, BNB, DOGE, XRP (perpetual contracts)`
+> *gist line 62*
+
+> `"coin": "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP"`
+> *gist line 157 (output schema)*
+
+Состав монет — часть архитектуры Nof1, а не наш произвольный выбор.
+Мы должны быть 1-в-1, иначе SYSTEM_PROMPT (где LLM видит «6 монет
+доступно») сам себе противоречит. Аргумент про «bybit_bot» неактуален:
+`bybit_bot` живёт на mainnet, `ai_arena` — на отдельном demo-аккаунте,
+конфликта по позициям нет.
+
+**Изменения:**
+
+| Файл | Что |
+|---|---|
+| `src/ai_arena/config/settings.py` | `DEFAULT_ARENA_SYMBOLS` → 6 пар (добавлен `SOLUSDT`); комментарий с цитатой gist |
+| `docker-compose.yml` | `AI_ARENA_SYMBOLS` default → 6 пар |
+| `.env.example` | пример `AI_ARENA_SYMBOLS` → 6 пар + комментарий про источник |
+| `.cursor/rules/ai-arena-sources.mdc` | удалён пункт "5 пар вместо 6"; теперь "1-в-1 с Nof1, USDT-suffix — Bybit naming" |
+| `src/ai_arena/llm/prompts.py` | docstring: убрано "6 → 5", оставлено только USDT-suffix как адаптация |
+| `AI_TRADER_PROPOSAL_ALPHA_ARENA.md` | § 3.3 "По умолчанию остаётся" + иллюстрации SYSTEM_PROMPT — обновлены до 6 пар; § 5.1 помечен как «исторический draft» |
+| `tests/test_ai_arena_executor.py` | `SYMBOLS` фикстура → 6 пар; `test_coin_not_in_whitelist` теперь использует `LTCUSDT` (не входящую в новый whitelist) |
+| **VPS** `.env` | `AI_ARENA_TRADING_ENABLED=true` — переключение в LIVE на demo-аккаунте Bybit (`AI_ARENA_BYBIT_DEMO=true` оставлен) |
+
+**LIVE-проверка (cycle 1, 08:25 UTC):**
+DeepSeek V4-Pro отдал решение `buy_to_enter BNBUSDT qty=2.99 @ $670.10
+SL=$668.5 TP=$673 lev=5x conf=0.50 R:R=1.81 risk=$4.78 notional=$2003.60`.
+Парсер принял (никаких server-side reject — Nof1-философия), `place_order`
+ушёл на Bybit demo. Latency LLM ~2 минуты (4036 output токенов на CoT
+через required JSON-поля). На 3-мин цикл укладываемся, но с запасом ~1
+минута — если латентность вырастет, придётся либо `AI_ARENA_POLL_INTERVAL_SEC=300`,
+либо урезать `AI_ARENA_DEEPSEEK_MAX_TOKENS` (сейчас 8192).
+
+**Верификация:**
+- `python3 -m pytest tests/` → **627 passed** (включая 75 ai_arena).
+- `docker compose ps` после селективного rebuild ai-arena: остальные
+ 4 контейнера (advisor, ai-trader, fx-ai-trader, bybit-bot) — Up,
+ не задеты.
+- VPS `.env`: `grep AI_ARENA_SYMBOLS` → not set, бот подхватит default
+ из docker-compose.yml (6 пар).
+
+**Файлы:** `src/ai_arena/config/settings.py`,
+`src/ai_arena/llm/prompts.py`, `tests/test_ai_arena_executor.py`,
+`docker-compose.yml`, `.env.example`,
+`.cursor/rules/ai-arena-sources.mdc`,
+`AI_TRADER_PROPOSAL_ALPHA_ARENA.md`, `BUILDLOG_AI_ARENA.md`.
+
+---
+
 ### refactor: full alignment with Nof1 source (KillSwitch + hard-checks REMOVED)
 `(коммит ниже)`
 

@@ -21,10 +21,10 @@ SYSTEM_PROMPT повторяет структуру 12 секций из gist §
 
 Адаптации vs канон Nof1 (только то, что физически вынужденно):
 - Hyperliquid → Bybit (lastPrice вместо mid-price; funding 8h vs 1h)
-- 6 монет → 5 (SOL занят bybit_bot, см. правило strategy-guard.mdc)
+- Asset universe: 1-в-1 (BTC, ETH, SOL, BNB, DOGE, XRP), но с суффиксом
+  USDT — это Bybit perp formal naming (BTCUSDT и т.д.)
 - $10k капитал → $1000 (scaling Bybit demo $50k / 50, обоснованная
   адаптация — см. equity_scale_divisor в settings.py)
-- Coin тикеры с суффиксом USDT (Bybit perp formal naming)
 
 ВСЁ ОСТАЛЬНОЕ — буквальная цитата из gist'а. НИКАКИХ server-side
 capital safety hard-limits, KillSwitch, R:R cap, max_positions cap —

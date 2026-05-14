@@ -16,12 +16,18 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# Asset universe Nof1 Season 1: BTC, ETH, SOL, BNB, DOGE, XRP (6 пар).
-# У нас SOLUSDT занят bybit_bot scan_symbols (правило strategy-guard.mdc:
-# изоляция экосистем). Поэтому в ai_arena 5 пар — без SOL.
+# Asset universe 1-в-1 с Nof1 Alpha Arena Season 1 (gist line 62):
+#   "Asset Universe: BTC, ETH, SOL, BNB, DOGE, XRP (perpetual contracts)"
+# и в JSON output schema (gist line 157):
+#   "coin": "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP"
+# 6 фиксированных монет — часть архитектуры Nof1, не наш выбор.
+# bybit_bot работает на mainnet, ai_arena — на отдельном demo-аккаунте,
+# конфликта по позициям/SOL нет; правило изоляции экосистем
+# (strategy-guard.mdc) не нарушается.
 DEFAULT_ARENA_SYMBOLS: tuple[str, ...] = (
     "BTCUSDT",
     "ETHUSDT",
+    "SOLUSDT",
     "BNBUSDT",
     "XRPUSDT",
     "DOGEUSDT",
