@@ -18,6 +18,43 @@
 
 ## 2026-05-14
 
+### feat: подключён Telegram-бот @winline_notify_bot (переиспользован от sport_bet)
+`(только VPS .env, без коммита кода)`
+
+**Контекст:** В прошлой записи (см. ниже) Telegram оставался выключенным —
+не было креденшалов. Sport-бот (`/root/sport_bet/.env` на
+`178.253.38.121`) больше не разрабатывается, контейнеры остановлены,
+конфликта polling одного и того же токена не будет. Переиспользуем
+готовый `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` под наш ai_arena.
+
+**Действия (только VPS, кода не трогали):**
+- На `178.253.38.121`: `grep ^TELEGRAM /root/sport_bet/.env` → токен +
+ chat_id (group `-5232948719`).
+- На `204.168.149.140`: `cp .env .env.bak.tg.<ts>`, прописали
+ `AI_ARENA_TELEGRAM_BOT_TOKEN`, `AI_ARENA_TELEGRAM_CHAT_ID`,
+ `AI_ARENA_TELEGRAM_ENABLED=true`.
+- Селективный rebuild: `docker compose up -d --no-deps --build ai-arena`.
+ Остальные 4 контейнера (advisor, ai-trader, fx-ai-trader, bybit-bot)
+ не задеты (`--no-deps` + явный сервис).
+
+**Верификация (cycle 1 после рестарта, 08:37:32 UTC):**
+```
+Telegram: ON
+ai_arena.telegram.bot: telegram: подключён как @winline_notify_bot
+LLM call: positions=1 real_equity=$50006.97 scaled=$1000.14 sharpe=0.326
+```
+- TG handshake прошёл (`getMe` принят).
+- В тот же цикл подхватилась позиция BNBUSDT с предыдущего рестарта
+ (LIVE state восстановлен из БД + reconcile с Bybit).
+- Sharpe уже считается (≥3 equity-snapshots накопилось).
+
+**Безопасность:** Токены ТОЛЬКО в `.env` на VPS (никогда не в git).
+В случае утечки — пересоздать бота через @BotFather и обновить .env.
+
+**Файлы:** только VPS `/root/fx-pro-bot/.env` (не в репозитории).
+
+---
+
 ### feat: switch to LIVE on Bybit demo + add SOLUSDT (Asset Universe 1-в-1 с Nof1)
 `(коммит ниже)`
 
