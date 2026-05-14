@@ -1,0 +1,121 @@
+---
+description: Источники правды архитектуры для ai_arena (Alpha Arena clone)
+globs: src/ai_arena/**/*.py,Dockerfile.ai-arena,BUILDLOG_AI_ARENA.md
+alwaysApply: false
+---
+
+# AI Arena — источники правды (Nof1 Alpha Arena)
+
+Бот `src/ai_arena/` — клон публичной архитектуры **Nof1.ai Alpha Arena**.
+Любая правка архитектуры, промптов, схемы output, набора индикаторов,
+структуры цикла, action-space, position-sizing-формулы, output-validation,
+decision-фидбэка (Sharpe) **должна** опираться **исключительно** на эти
+два первоисточника:
+
+1. **Tech Post Nof1** — <https://nof1.ai/blog/TechPost1>  
+   harness, action space, output schema, выводы Season 1, реальные
+   фрагменты промптов.
+2. **Gist `nof1-prompt.md` by @wquguru** —
+   <https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83>  
+   полный реверс System+User prompt, model-specific advice, формула
+   `risk_usd = |entry - stop_loss| × quantity` (без leverage —
+   подтверждено автором в комментариях к gist'у).
+
+## Что разрешено брать ИЗ ЭТИХ ИСТОЧНИКОВ
+
+- Структура SYSTEM_PROMPT (8 секций: ROLE, ENVIRONMENT, ACTION SPACE,
+  CAPITAL SAFETY, POSITION SIZING, OUTPUT FORMAT, DATA INTERPRETATION,
+  PHILOSOPHY, SHARPE FEEDBACK).
+- Структура USER_PROMPT (per-symbol layout: 3m × 10 + 4h × 10 + OI/funding,
+  account state, open positions, "OLDEST → NEWEST" warnings ×4).
+- Action space: `buy_to_enter / sell_to_enter / hold / close`.
+- Output JSON schema: `signal/coin/quantity/leverage/stop_loss/profit_target/
+  invalidation_condition/confidence/risk_usd/justification`.
+- Набор индикаторов: RSI(7), RSI(14), MACD(12,26,9), EMA20, EMA50,
+  ATR(3), ATR(14), Volume avg, Open Interest, Funding Rate.
+- Funding bands (`<0.05% neutral`, `0.05–0.20% mild`, `>0.20% strong`).
+- 2–3 минутный цикл (мы стартуем с 3 мин = 180 сек).
+- Stateless: каждый цикл независим, никакой conversation history в LLM.
+- `confidence → leverage` mapping (мы адаптируем диапазоны под наш
+  cap 5x, но сама идея — из Nof1).
+- Sharpe rolling как self-calibration signal в каждом prompt.
+- DeepSeek V3.1 standard-mode → у нас V4-Pro c `reasoning_effort=off`
+  (V4-Pro — преемник V3.1, на `off` это direct upgrade).
+
+## Что ЗАПРЕЩЕНО без обновления этого правила
+
+**ЗАПРЕЩЕНО** добавлять в стратегию `ai_arena` элементы, которых нет в
+двух источниках выше:
+
+- Новости / RSS / sentiment feeds (Nof1 Season 1 явно не использует).
+- Conversation memory / multi-turn / few-shot history (stateless by design).
+- Дополнительные индикаторы (VWAP, Bollinger Bands, Stochastic, ADX,
+  L-S ratio, Fear&Greed, orderflow). Если очень нужно — сначала найди
+  это в одном из двух источников и обнови правило ссылкой.
+- Custom exit-triggers (PEAK-DRAWDOWN, LOCKED-PROFIT, ADVERSE-NEW-EVIDENCE,
+  MACRO-REGIME-SHIFT). У Nof1 единственный механизм exit —
+  `invalidation_condition`, который LLM регистрирует при open и
+  переподтверждает каждый цикл.
+- Pyramiding, hedging, partial exits, limit orders. Nof1 явно
+  ограничивает action space до 4 действий + market-only.
+- Multi-agent (Analyst → Trader → Risk). Nof1 single-agent.
+- Reasoning-mode / thinking blocks. Nof1 принуждает CoT через
+  обязательные JSON-поля (`justification`, `confidence`,
+  `invalidation_condition`), а не через native reasoning.
+- Изменение формулы `risk_usd`. Каноничная формула из gist'а
+  (после правки автором по фидбэку @eatgrass / @xu4wang):  
+  `risk_usd = |entry - stop_loss| × quantity` — БЕЗ умножения на leverage.
+
+## Что МОЖНО менять (наши инфраструктурные адаптации)
+
+Эти правки не требуют обновления правила, потому что они инфраструктурные
+(не часть Nof1-стратегии) — но обязаны логироваться в `BUILDLOG_AI_ARENA.md`:
+
+- Bybit ↔ Hyperliquid маппинг (наш exchange):
+  - `lastPrice` вместо mid-price (Bybit V5 ticker структура);
+  - funding schedule 8h (Bybit) вместо 1h (Hyperliquid);
+  - `set_leverage` per-position перед `place_order`;
+  - `qty_step` rounding под `lotSizeFilter` (Bybit V5);
+  - `tick_size` rounding для SL/TP под `priceFilter`.
+- Capital safety hard-limits (наша инфраструктурная защита, **не часть
+  стратегии Nof1**):
+  - max 3 одновременных позиций;
+  - max 5x leverage (vs Nof1 20x — наш сэйфти-кап);
+  - max $10 риска на сделку;
+  - daily loss $50, total loss $200;
+  - R:R ≥ 1.5 hard-check.
+- Asset universe: 5 пар (BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, DOGEUSDT)
+  вместо 6 у Nof1 — у нас SOLUSDT занят `bybit_bot` (правило
+  изоляции экосистем `strategy-guard.mdc`).
+- Виртуальный капитал $500 (vs $10k у Nof1 — наша песочница).
+- KillSwitch (Nof1 не имеет — мы сохраняем как hard infrastructure).
+- Telegram уведомления (Nof1 не описывает — наш UX).
+- SQLite audit-trail (Nof1 не описывает — наш analytics).
+- DeepSeek V4-Pro (vs V3.1 у Nof1) — direct upgrade на `reasoning_effort=off`.
+
+## Процедура при противоречии источников
+
+Если `nof1.ai/blog/TechPost1` и gist расходятся — приоритет у
+**официального tech-post Nof1** (gist — реверс-инжиниринг, может
+содержать домыслы автора).
+
+## Логирование
+
+Любое изменение в `src/ai_arena/llm/prompts.py`,
+`src/ai_arena/trading/executor.py` (output schema), `analysis/indicators.py`
+(набор индикаторов) или `app/main.py` (структура цикла) обязано:
+
+1. Цитировать конкретный фрагмент из одного из двух источников.
+2. Указать ссылку на источник в commit message и в `BUILDLOG_AI_ARENA.md`.
+3. Не противоречить ни одному запрету из секции «ЗАПРЕЩЕНО» выше.
+
+Без выполнения всех трёх пунктов правка считается curve-fitting и
+подлежит обсуждению перед мерджем (см. также `no-data-fitting.mdc`).
+
+## Связанные правила
+
+- `no-data-fitting.mdc` — общий запрет подгонки под желаемый результат.
+- `sample-size.mdc` — пороги для решений по результатам торговли.
+- `strategy-guard.mdc` — изоляция кодовых баз ботов друг от друга.
+- `api-docs.mdc` — Bybit V5 параметры коннекта (rate limits, recv_window
+  и т.п.) тоже только из официальной доки.

@@ -34,9 +34,10 @@ fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
 bybit-bot = "bybit_bot.app.main:main"
 ai-trader = "ai_trader.app.main:run"
 fx-ai-trader = "fx_ai_trader.app.main:run"
+ai-arena = "ai_arena.app.main:run"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fx_pro_bot", "src/bybit_bot", "src/ai_trader", "src/fx_ai_trader"]
+packages = ["src/fx_pro_bot", "src/bybit_bot", "src/ai_trader", "src/fx_ai_trader", "src/ai_arena"]
 
 [tool.ruff]
 line-length = 100

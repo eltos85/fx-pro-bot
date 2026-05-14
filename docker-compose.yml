@@ -237,6 +237,69 @@ services:
       # не пересекается с stats.sqlite Advisor'а (разные filename).
       - ./data:/data
 
+  ai-arena:
+    build:
+      context: .
+      dockerfile: Dockerfile.ai-arena
+    image: ai-arena:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      AI_ARENA_DATA_DIR: /data
+      AI_ARENA_LOG_LEVEL: ${AI_ARENA_LOG_LEVEL:-INFO}
+      # Nof1 Alpha Arena clone — DeepSeek V4-Pro + Bybit demo, отдельный
+      # аккаунт от ai_trader. Архитектура зафиксирована правилом
+      # .cursor/rules/ai-arena-sources.mdc (источники: nof1.ai TechPost1
+      # + gist nof1-prompt.md). Любые правки — только из этих двух
+      # источников + лог в BUILDLOG_AI_ARENA.md.
+      AI_ARENA_POLL_INTERVAL_SEC: ${AI_ARENA_POLL_INTERVAL_SEC:-180}
+      AI_ARENA_VIRTUAL_CAPITAL: ${AI_ARENA_VIRTUAL_CAPITAL:-500}
+      AI_ARENA_SYMBOLS: ${AI_ARENA_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
+      # Capital Safety hard-limits (наша инфраструктура, не часть Nof1):
+      # max_risk $10/trade × 5 trades/day = $50 daily limit.
+      # max_total $200 = 40% от virtual_capital — ранняя остановка
+      # эксперимента до «доедания депо».
+      AI_ARENA_MAX_DAILY_LOSS: ${AI_ARENA_MAX_DAILY_LOSS:-50}
+      AI_ARENA_MAX_TOTAL_LOSS: ${AI_ARENA_MAX_TOTAL_LOSS:-200}
+      AI_ARENA_MAX_POSITIONS: ${AI_ARENA_MAX_POSITIONS:-3}
+      AI_ARENA_MAX_LEVERAGE: ${AI_ARENA_MAX_LEVERAGE:-5}
+      AI_ARENA_MAX_RISK_PER_TRADE: ${AI_ARENA_MAX_RISK_PER_TRADE:-10}
+      AI_ARENA_MIN_RR: ${AI_ARENA_MIN_RR:-1.5}
+      # Bybit — ОТДЕЛЬНЫЙ аккаунт (другой UID). Ключи задаются в .env
+      # как AI_ARENA_BYBIT_API_KEY/SECRET. Если пустые — бот выходит
+      # с ошибкой при старте (не торгует и не падает в loop).
+      AI_ARENA_BYBIT_DEMO: ${AI_ARENA_BYBIT_DEMO:-true}
+      AI_ARENA_BYBIT_CATEGORY: ${AI_ARENA_BYBIT_CATEGORY:-linear}
+      # DeepSeek V4-Pro через Anthropic-compat. reasoning_effort=off —
+      # direct аналог V3.1 standard (Nof1 не использует reasoning, см.
+      # gist комментарий @wquguru). Менять на high/max ТОЛЬКО после
+      # 14-дневного OOS на off (см. AI_TRADER_PROPOSAL_ALPHA_ARENA.md §15).
+      # ОТДЕЛЬНЫЙ ключ от ai_trader (rate-limit pool на account-level
+      # на DeepSeek; отдельный billing/audit). Без ключа бот выходит.
+      AI_ARENA_DEEPSEEK_API_KEY: ${AI_ARENA_DEEPSEEK_API_KEY:-}
+      AI_ARENA_DEEPSEEK_MODEL: ${AI_ARENA_DEEPSEEK_MODEL:-deepseek-v4-pro}
+      AI_ARENA_DEEPSEEK_BASE_URL: ${AI_ARENA_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
+      AI_ARENA_DEEPSEEK_REASONING: ${AI_ARENA_DEEPSEEK_REASONING:-off}
+      AI_ARENA_DEEPSEEK_MAX_TOKENS: ${AI_ARENA_DEEPSEEK_MAX_TOKENS:-8192}
+      # PAPER mode по умолчанию. В LIVE — только после: проверки
+      # промпта валидным, парсера на 20+ JSON-кейсах, latency приемлемой
+      # (см. AI_TRADER_PROPOSAL_ALPHA_ARENA.md §9 D12 «Dry-run»).
+      AI_ARENA_TRADING_ENABLED: ${AI_ARENA_TRADING_ENABLED:-false}
+      # Telegram — ОТДЕЛЬНЫЙ токен от ai_trader (UX-изоляция).
+      # Если AI_ARENA_TELEGRAM_BOT_TOKEN пустой — TG-модуль молчит.
+      AI_ARENA_TELEGRAM_BOT_TOKEN: ${AI_ARENA_TELEGRAM_BOT_TOKEN:-}
+      AI_ARENA_TELEGRAM_CHAT_ID: ${AI_ARENA_TELEGRAM_CHAT_ID:-}
+      AI_ARENA_TELEGRAM_ENABLED: ${AI_ARENA_TELEGRAM_ENABLED:-true}
+    volumes:
+      - ai_arena_data:/data
+
 volumes:
   bybit_data:
   ai_trader_data:
+  ai_arena_data:
