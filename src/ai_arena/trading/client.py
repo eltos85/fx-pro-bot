@@ -12,6 +12,9 @@
 - ``get_instrument_info``         — qty_step / tick_size фильтры
 - ``get_wallet_balance``          — equity для cash/margin
 - ``get_positions``               — открытые позиции с unrealised PnL
+- ``get_closed_pnl``              — net realized PnL (после fees + funding),
+                                    источник правды вместо локального
+                                    расчёта `(exit-entry)*qty`
 - ``set_leverage``                — перед place_order
 - ``place_order``                 — market + опц. SL/TP
 - ``close_position``              — reduce-only ордер
@@ -19,6 +22,7 @@
 Ссылки на API-доку (правило `api-docs.mdc`):
 - https://bybit-exchange.github.io/docs/v5/intro
 - https://bybit-exchange.github.io/docs/v5/market/open-interest
+- https://bybit-exchange.github.io/docs/v5/position/close-pnl
 """
 from __future__ import annotations
 
@@ -84,6 +88,33 @@ class OpenInterestPoint:
 
     ts: int
     open_interest: float
+
+
+@dataclass
+class ClosedPnlRecord:
+    """Одна закрытая позиция из `/v5/position/closed-pnl`.
+
+    Все денежные поля — **net** (после maker/taker fees + funding).
+    Используется как источник правды для realized PnL вместо нашего
+    локального расчёта `(exit-entry)*qty` (gross), который игнорировал
+    fees и расходился с биржей.
+
+    Bybit docs: https://bybit-exchange.github.io/docs/v5/position/close-pnl
+    """
+
+    symbol: str
+    side: str  # "Buy" / "Sell" — сторона ЗАКРЫВАЮЩЕГО ордера
+    qty: float
+    avg_entry_price: float
+    avg_exit_price: float
+    closed_pnl: float
+    open_fee: float
+    close_fee: float
+    leverage: float
+    exec_type: str
+    order_id: str
+    created_time_ms: int
+    updated_time_ms: int
 
 
 class AiArenaBybitClient:
@@ -394,3 +425,75 @@ class AiArenaBybitClient:
             order_link_id=link_id,
             reduce_only=True,
         )
+
+    # ─── Closed PnL (для net realized PnL — 1-в-1 с биржей) ─────────────
+
+    def get_closed_pnl(
+        self,
+        *,
+        symbol: str | None = None,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int = 100,
+    ) -> list[ClosedPnlRecord] | None:
+        """Закрытые позиции с **net** PnL (после fees + funding).
+
+        Bybit V5 endpoint `/v5/position/closed-pnl`. Окно ≤ 7 дней, по
+        дефолту последние 7 дней. Limit per page 1..100, при большем
+        объёме — пагинация через nextPageCursor (не реализована;
+        для нашего use-case 100 за один call достаточно — мы дёргаем
+        либо после каждого закрытия (1 запись), либо в backfill-скрипте
+        с явным symbol-фильтром).
+
+        Возвращает:
+        - ``list[ClosedPnlRecord]`` — даже если пусто (`[]`).
+        - ``None`` — если запрос упал (network/non-zero retCode).
+          Caller должен различать (как в `get_positions`).
+
+        Bybit docs: https://bybit-exchange.github.io/docs/v5/position/close-pnl
+        """
+        params: dict = {"category": self._category, "limit": int(limit)}
+        if symbol:
+            params["symbol"] = symbol
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        try:
+            resp = self._session.get_closed_pnl(**params)
+        except Exception:
+            log.exception("get_closed_pnl failed (params=%s)", params)
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_closed_pnl non-zero retCode: code=%s msg=%s params=%s",
+                ret_code, resp.get("retMsg", ""), params,
+            )
+            return None
+        items = resp.get("result", {}).get("list", []) or []
+        out: list[ClosedPnlRecord] = []
+        for r in items:
+            try:
+                out.append(
+                    ClosedPnlRecord(
+                        symbol=r.get("symbol", ""),
+                        side=r.get("side", ""),
+                        qty=float(r.get("qty", 0) or 0),
+                        avg_entry_price=float(r.get("avgEntryPrice", 0) or 0),
+                        avg_exit_price=float(r.get("avgExitPrice", 0) or 0),
+                        closed_pnl=float(r.get("closedPnl", 0) or 0),
+                        open_fee=float(r.get("openFee", 0) or 0),
+                        close_fee=float(r.get("closeFee", 0) or 0),
+                        leverage=float(r.get("leverage", 1) or 1),
+                        exec_type=r.get("execType", ""),
+                        order_id=r.get("orderId", ""),
+                        created_time_ms=int(r.get("createdTime", 0) or 0),
+                        updated_time_ms=int(r.get("updatedTime", 0) or 0),
+                    )
+                )
+            except (ValueError, TypeError):
+                log.exception("closed_pnl parse failed: %s", r)
+                continue
+        out.sort(key=lambda x: x.updated_time_ms)
+        return out

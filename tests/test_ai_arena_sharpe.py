@@ -1,17 +1,19 @@
-"""Тесты rolling Sharpe для AI Arena.
+"""Тесты cumulative Sharpe для AI Arena.
 
 Берём известные ряды equity → вычисляем returns аналитически →
 сверяем формулу.
+
+Source (gist nof1-prompt.md, секция PERFORMANCE METRICS): окно
+не указано — Nof1 использует cumulative с момента старта эксперимента,
+не rolling 14d. См. BUILDLOG 2026-05-15 «net PnL alignment».
 """
 from __future__ import annotations
-
-import math
 
 import pytest
 
 from ai_arena.analysis.sharpe import (
     compute_returns,
-    rolling_sharpe_14d,
+    cumulative_sharpe,
 )
 
 
@@ -37,13 +39,13 @@ class TestComputeReturns:
         assert rs == pytest.approx([-1.0])
 
 
-class TestRollingSharpe14d:
+class TestCumulativeSharpe:
     def test_insufficient_data(self):
         snaps = [
             {"ts": 0, "total_equity_usd": 100.0},
             {"ts": 1, "total_equity_usd": 101.0},
         ]
-        assert rolling_sharpe_14d(snaps) is None
+        assert cumulative_sharpe(snaps) is None
 
     def test_constant_equity_returns_none(self):
         # std(returns)=0 → Sharpe не определён
@@ -51,7 +53,7 @@ class TestRollingSharpe14d:
             {"ts": i, "total_equity_usd": 500.0}
             for i in range(10)
         ]
-        assert rolling_sharpe_14d(snaps) is None
+        assert cumulative_sharpe(snaps) is None
 
     def test_literally_identical_returns_returns_none(self):
         # Жёстко одинаковые returns (через равные шаги +5) → std=0 → None.
@@ -64,7 +66,7 @@ class TestRollingSharpe14d:
         # returns здесь не идентичны (5/500 ≠ 5/505 ≠ …), но проверим
         # что при действительно одинаковых returns Sharpe = None.
         # Берём константу — это уже есть в test_constant_equity_returns_none.
-        s = rolling_sharpe_14d(snaps)
+        s = cumulative_sharpe(snaps)
         # Ряд монотонно растёт с убывающим returns → Sharpe положительный
         assert s is not None and s > 0
 
@@ -79,7 +81,7 @@ class TestRollingSharpe14d:
             {"ts": 5, "total_equity_usd": 508.0},  # -0.39%
             {"ts": 6, "total_equity_usd": 515.0},
         ]
-        s = rolling_sharpe_14d(snaps)
+        s = cumulative_sharpe(snaps)
         assert s is not None
         assert isinstance(s, float)
         # Mean returns > 0 → Sharpe > 0
@@ -94,7 +96,7 @@ class TestRollingSharpe14d:
             {"ts": 4, "total_equity_usd": 485.0},
             {"ts": 5, "total_equity_usd": 482.0},
         ]
-        s = rolling_sharpe_14d(snaps)
+        s = cumulative_sharpe(snaps)
         assert s is not None and s < 0
 
     def test_annualization_scales(self):
@@ -105,7 +107,7 @@ class TestRollingSharpe14d:
             {"ts": 3, "total_equity_usd": 506.0},
             {"ts": 4, "total_equity_usd": 510.0},
         ]
-        base = rolling_sharpe_14d(snaps)
-        annualized = rolling_sharpe_14d(snaps, annualization_factor=10.0)
+        base = cumulative_sharpe(snaps)
+        annualized = cumulative_sharpe(snaps, annualization_factor=10.0)
         assert base is not None and annualized is not None
         assert annualized == pytest.approx(base * 10.0)

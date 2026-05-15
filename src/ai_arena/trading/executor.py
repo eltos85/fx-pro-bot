@@ -1,10 +1,11 @@
 """Парсер Nof1-style ответа LLM и исполнение действий.
 
-Output schema (см. правило `ai-arena-sources.mdc`, gist nof1-prompt.md):
+Output schema (см. правило `ai-arena-sources.mdc`, gist nof1-prompt.md
+line 165-178):
 
     {
       "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
-      "coin":   "BTCUSDT" | "ETHUSDT" | …,
+      "coin":   "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP",
       "quantity": <float>,
       "leverage": <integer 1-20>,
       "stop_loss":     <float>,
@@ -15,17 +16,26 @@ Output schema (см. правило `ai-arena-sources.mdc`, gist nof1-prompt.md)
       "justification": "<string ≤ 500 chars>"
     }
 
+`coin` — голые тикеры **без USDT-суффикса** (1-в-1 с source). При
+исполнении на Bybit маппятся через `arena_to_bybit` (`BTC` → `BTCUSDT`).
+В БД храним Bybit-формат (`BTCUSDT`), для prompt'а конвертируем
+обратно. См. `trading/symbols.py`.
+
 ВАЖНО — никаких server-side capital safety hard-checks (нет в источнике
 Nof1). Bot выполняет только:
 
-1. Sanity-парсинг: signal ∈ allowed, coin ∈ whitelist, типы полей,
-   confidence ∈ [0,1], leverage ≥ 1, quantity > 0 (для entries).
+1. Sanity-парсинг: signal ∈ allowed, coin ∈ whitelist (Nof1-format),
+   типы полей, confidence ∈ [0,1], leverage ≥ 1, quantity > 0
+   (для entries).
 2. Direction sanity: LONG  → SL < price < TP;  SHORT → TP < price < SL
-   (gist: "stop_loss must be below entry price for longs, above for
-   shorts"; "profit_target must be above entry price for longs, below
-   for shorts"). Это формальное требование source, не риск-фильтр.
+   (gist § OUTPUT VALIDATION RULES line 183-184). Формальное требование
+   source, не риск-фильтр.
 3. Bybit-rounding: qty под `lotSizeFilter.qtyStep`, SL/TP под
    `priceFilter.tickSize` (Bybit V5 требование, не Nof1).
+4. Реальный fill price: после `place_order` читаем `position.avgPrice`
+   из Bybit и сохраняем в БД (вместо нашего ticker.last_price ДО
+   ордера, который игнорировал slippage). Реальный exit и net PnL —
+   из `get_closed_pnl` (Bybit `closedPnl` уже после fees + funding).
 
 Risk management полностью на стороне LLM (формула risk_usd, Sharpe
 feedback, invalidation_condition, conviction-mapping leverage). См.
@@ -38,6 +48,7 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -45,6 +56,7 @@ from typing import Any
 from ai_arena.config.settings import AiArenaSettings
 from ai_arena.state.db import AiArenaStore
 from ai_arena.trading.client import AiArenaBybitClient
+from ai_arena.trading.symbols import arena_to_bybit, arena_symbols
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +102,12 @@ def _round_to_step(value: float, step: float) -> float:
 
 def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | str:
     """Возвращает ``ParsedAction`` или строку с описанием ошибки.
+
+    ``allowed_symbols`` — кортеж Bybit-формата (``BTCUSDT``, ``ETHUSDT``,
+    …). Внутри parser whitelist получается через ``arena_symbols(...)``
+    → проверяем coin LLM-ответа против Nof1-формата (``BTC``, ``ETH``,
+    …). Это даёт LLM source-faithful enum, а Bybit-вызовы остаются
+    с USDT-суффиксом.
 
     Ищет последний balanced JSON-блок в тексте — это устойчиво к фигурным
     скобкам в commentary (LLM часто сначала пишет анализ текстом, потом
@@ -149,9 +167,10 @@ def parse_action(text: str, allowed_symbols: tuple[str, ...]) -> ParsedAction | 
     if signal == "hold":
         return ParsedAction(signal="hold", raw=obj)
 
+    nof1_whitelist = arena_symbols(allowed_symbols)
     coin = obj.get("coin")
-    if coin not in allowed_symbols:
-        return f"coin {coin!r} not in allowed list {allowed_symbols}"
+    if coin not in nof1_whitelist:
+        return f"coin {coin!r} not in allowed list {nof1_whitelist}"
 
     if signal == "close":
         return ParsedAction(signal="close", raw=obj)
@@ -228,11 +247,15 @@ def _apply_close(
     action: ParsedAction, *, client: AiArenaBybitClient, store: AiArenaStore
 ) -> ApplyResult:
     coin = action.raw["coin"]
-    pos = next((p for p in store.get_open_positions() if p.symbol == coin), None)
+    bybit_symbol = arena_to_bybit(coin)
+    pos = next(
+        (p for p in store.get_open_positions() if p.symbol == bybit_symbol),
+        None,
+    )
     if pos is None:
         return ApplyResult(
             executed=False, summary="",
-            error=f"close: no open position for {coin}",
+            error=f"close: no open position for {coin} ({bybit_symbol})",
         )
 
     link_id = f"arena_close_{uuid.uuid4().hex[:10]}"
@@ -241,12 +264,19 @@ def _apply_close(
         err_msg = (resp or {}).get("error", "close_position returned empty")
         return ApplyResult(executed=False, summary="", error=f"close_failed: {err_msg}")
 
-    ticker = client.get_ticker(pos.symbol)
-    exit_price = ticker.last_price if ticker else pos.entry_price
-    if pos.side == "Buy":
-        pnl = (exit_price - pos.entry_price) * pos.qty
-    else:
-        pnl = (pos.entry_price - exit_price) * pos.qty
+    # Берём net PnL и реальный avgExitPrice из Bybit `get_closed_pnl`.
+    # Локальный `(exit-entry)*qty` запрещён — игнорирует maker/taker
+    # fees и расходится с биржей (см. BUILDLOG 2026-05-15 «net PnL
+    # alignment»). Bybit endpoint `/v5/position/closed-pnl` отдаёт
+    # `closedPnl` — уже **после** fees + funding, 1-в-1 с UI Bybit.
+    exit_price, pnl = _resolve_net_close(
+        client=client,
+        symbol=pos.symbol,
+        opened_at_iso=pos.opened_at,
+        opened_side=pos.side,
+        qty=pos.qty,
+        fallback_entry=pos.entry_price,
+    )
     store.close_position(
         pos.id,
         exit_price=exit_price,
@@ -257,9 +287,80 @@ def _apply_close(
         executed=True,
         summary=(
             f"CLOSE id={pos.id} {pos.side} {pos.symbol} "
-            f"exit=${exit_price:.6g} pnl=${pnl:+.2f}"
+            f"exit=${exit_price:.6g} pnl=${pnl:+.2f} (net of fees)"
         ),
     )
+
+
+def _resolve_net_close(
+    *,
+    client: AiArenaBybitClient,
+    symbol: str,
+    opened_at_iso: str,
+    opened_side: str,
+    qty: float,
+    fallback_entry: float,
+) -> tuple[float, float]:
+    """Возвращает ``(avg_exit_price, net_pnl)`` из Bybit `get_closed_pnl`.
+
+    Параметры матчинга — symbol + сторона ЗАКРЫВАЮЩЕГО ордера
+    (`opposite(opened_side)`) + qty + временное окно от ``opened_at_iso``
+    до сейчас. Bybit окно ≤ 7 дней — наши позиции живут много
+    меньше, поэтому матч однозначен.
+
+    Если запрос упал (None) или ничего не нашлось — fallback на
+    `ticker.last_price` для exit и **0** для PnL (явно сигнализируем
+    что считать без биржи мы не имеем права; реконсиляция подтянет
+    PnL на следующем цикле). Это лучше чем gross-расчёт, который
+    считал «прибыль» из price-разницы и ломал /status.
+    """
+    closing_side = "Sell" if opened_side == "Buy" else "Buy"
+    try:
+        opened_ts_ms = _iso_to_ms(opened_at_iso)
+    except ValueError:
+        opened_ts_ms = int(time.time() * 1000) - 7 * 24 * 60 * 60 * 1000
+    end_ms = int(time.time() * 1000) + 60 * 1000
+
+    records = client.get_closed_pnl(
+        symbol=symbol,
+        start_time_ms=opened_ts_ms,
+        end_time_ms=end_ms,
+    )
+    if records is None:
+        log.warning(
+            "get_closed_pnl=None for %s — defer net PnL to next reconcile",
+            symbol,
+        )
+        return _ticker_fallback_exit(client, symbol, fallback_entry), 0.0
+    candidates = [
+        r for r in records
+        if r.symbol == symbol
+        and r.side == closing_side
+        and abs(r.qty - qty) <= max(qty * 1e-4, 1e-8)
+    ]
+    if not candidates:
+        log.warning(
+            "no closed_pnl match for %s side=%s qty=%s — defer to reconcile",
+            symbol, closing_side, qty,
+        )
+        return _ticker_fallback_exit(client, symbol, fallback_entry), 0.0
+    rec = candidates[-1]  # самая последняя — ближе к моменту нашего close
+    return rec.avg_exit_price, rec.closed_pnl
+
+
+def _ticker_fallback_exit(
+    client: AiArenaBybitClient, symbol: str, fallback_entry: float,
+) -> float:
+    t = client.get_ticker(symbol)
+    return t.last_price if t and t.last_price > 0 else fallback_entry
+
+
+def _iso_to_ms(iso: str) -> int:
+    """ISO-8601 (UTC) → unix ms. Допускает суффиксы `Z` и `+00:00`."""
+    from datetime import datetime as _dt
+
+    s = iso.replace("Z", "+00:00")
+    return int(_dt.fromisoformat(s).timestamp() * 1000)
 
 
 def _apply_open(
@@ -271,6 +372,7 @@ def _apply_open(
 ) -> ApplyResult:
     raw = action.raw
     coin = raw["coin"]
+    bybit_symbol = arena_to_bybit(coin)  # `BTC` → `BTCUSDT` для Bybit V5
     side = "Buy" if action.signal == "buy_to_enter" else "Sell"
     qty_req = float(raw["quantity"])
     leverage = int(raw["leverage"])
@@ -283,19 +385,19 @@ def _apply_open(
 
     # 1) Уже есть открытая по этой coin? Source: «one position per coin
     # maximum» (gist: "NO pyramiding"). Это формальное правило source.
-    if any(p.symbol == coin for p in store.get_open_positions()):
+    if any(p.symbol == bybit_symbol for p in store.get_open_positions()):
         return ApplyResult(
             executed=False, summary="",
             error=f"already have open position for {coin} (no pyramiding)",
         )
 
     # 2) Текущая цена + instrument-info (Bybit требует qty_step / tick_size)
-    ticker = client.get_ticker(coin)
+    ticker = client.get_ticker(bybit_symbol)
     if ticker is None or ticker.last_price <= 0:
         return ApplyResult(executed=False, summary="", error=f"ticker unavailable for {coin}")
     price = ticker.last_price
 
-    info = client.get_instrument_info(coin)
+    info = client.get_instrument_info(bybit_symbol)
     if info is None:
         return ApplyResult(executed=False, summary="", error=f"instrument-info unavailable for {coin}")
 
@@ -355,14 +457,14 @@ def _apply_open(
         )
 
     # 5) Live: set_leverage → place_order
-    if not client.set_leverage(coin, leverage):
+    if not client.set_leverage(bybit_symbol, leverage):
         log.warning(
             "set_leverage %s %dx failed before place_order — продолжаем",
-            coin, leverage,
+            bybit_symbol, leverage,
         )
     link_id = f"arena_{uuid.uuid4().hex[:12]}"
     resp = client.place_order(
-        symbol=coin,
+        symbol=bybit_symbol,
         side=side,
         qty=qty,
         order_link_id=link_id,
@@ -375,15 +477,33 @@ def _apply_open(
             executed=False, summary="",
             error=(
                 f"open_failed: {err_msg} "
-                f"(symbol={coin} side={side} qty={qty} lev={leverage}x)"
+                f"(symbol={bybit_symbol} side={side} qty={qty} lev={leverage}x)"
             ),
         )
 
+    # 6) Реальный entry_price из Bybit (после fill, с учётом slippage).
+    # Source предполагает actual fill price; локальный `ticker.last_price`
+    # ДО ордера — это slippage-смещённый эстимат, который ломал
+    # PnL-расчёты (см. BUILDLOG 2026-05-15 «net PnL alignment»).
+    # Если получить avgPrice не удалось (API outage / latency) — fallback
+    # на ticker price (с warning в лог).
+    real_entry, real_qty = _resolve_real_open(client, bybit_symbol, side, qty)
+    if real_entry is None:
+        log.warning(
+            "could not fetch position.avgPrice for %s after open — "
+            "falling back to ticker.last_price (entry will be slightly off)",
+            bybit_symbol,
+        )
+        real_entry = price
+    final_qty = real_qty if real_qty is not None else qty
+    real_risk_usd = abs(real_entry - sl_price) * final_qty
+    real_notional = final_qty * real_entry
+
     store.open_position(
-        symbol=coin,
+        symbol=bybit_symbol,
         side=side,
-        qty=qty,
-        entry_price=price,
+        qty=final_qty,
+        entry_price=real_entry,
         sl_price=sl_price,
         tp_price=tp_price,
         leverage=leverage,
@@ -391,14 +511,51 @@ def _apply_open(
         llm_justification=justification,
         confidence=confidence,
         invalidation_condition=invalidation,
-        risk_usd=risk_usd_actual,
+        risk_usd=real_risk_usd,
+    )
+    real_rr = (
+        abs(tp_price - real_entry) / abs(real_entry - sl_price)
+        if abs(real_entry - sl_price) > 0
+        else 0.0
     )
     return ApplyResult(
         executed=True,
         summary=(
-            f"OPEN {action.signal.upper()} {coin} qty={qty} @ ${price:.6g} "
+            f"OPEN {action.signal.upper()} {coin} qty={final_qty} @ ${real_entry:.6g} "
             f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
-            f"conf={confidence:.2f} R:R={rr:.2f} risk=${risk_usd_actual:.2f} "
-            f"notional=${notional:.2f}"
+            f"conf={confidence:.2f} R:R={real_rr:.2f} risk=${real_risk_usd:.2f} "
+            f"notional=${real_notional:.2f}"
         ),
     )
+
+
+def _resolve_real_open(
+    client: AiArenaBybitClient,
+    bybit_symbol: str,
+    side: str,
+    requested_qty: float,
+    *,
+    attempts: int = 3,
+    delay_sec: float = 0.4,
+) -> tuple[float | None, float | None]:
+    """Запрашивает Bybit `get_positions(symbol)` и возвращает
+    ``(avg_entry_price, real_qty)`` для только что открытой позиции.
+
+    Bybit V5 fill пишется в `position.avgPrice` асинхронно (обычно
+    в течение 100-300 мс после market order). Делаем 3 попытки с
+    400 мс паузой; если за ~1.2 сек не появилось — возвращаем
+    ``(None, None)`` (caller fallback'ится на ticker).
+    """
+    for _ in range(max(1, attempts)):
+        positions = client.get_positions(symbol=bybit_symbol)
+        if positions:
+            for p in positions:
+                if (
+                    p.side == side
+                    and p.size > 0
+                    and abs(p.size - requested_qty) <= max(requested_qty * 1e-3, 1e-8)
+                    and p.entry_price > 0
+                ):
+                    return p.entry_price, p.size
+        time.sleep(delay_sec)
+    return None, None

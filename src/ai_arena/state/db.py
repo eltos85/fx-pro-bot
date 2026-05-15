@@ -7,10 +7,14 @@
 - ``decisions``      — полный audit-trail каждого решения LLM, включая
                        confidence / invalidation / risk_usd / sharpe_at_decision /
                        minutes_elapsed.
-- ``equity_snapshots`` — equity на каждый цикл, для расчёта rolling Sharpe.
-- ``daily_pnl``      — дневная агрегация realized_pnl (для аналитики
-                       и Telegram /pnl команды; не используется как
-                       capital-safety blocker — Nof1 source их не имеет).
+- ``equity_snapshots`` — equity на каждый цикл, для расчёта cumulative
+                       Sharpe (с момента старта эксперимента — 1-в-1
+                       с Nof1, см. правило ai-arena-sources.mdc).
+- ``daily_pnl``      — дневная агрегация **net** realized_pnl (после
+                       fees + funding, как у Bybit `closedPnl`). Для
+                       аналитики и Telegram /pnl команды; не
+                       используется как capital-safety blocker —
+                       Nof1 source их не имеет.
 - ``kv_state``       — telegram_chat_id, started_at и пр.
 
 Полностью изолирован от ai_trader (та БД — ai_trader.sqlite, эта —
@@ -252,6 +256,13 @@ class AiArenaStore:
         realized_pnl_usd: float,
         close_reason: str,
     ) -> None:
+        """Закрывает позицию + обновляет daily_pnl агрегат.
+
+        ВАЖНО: ``realized_pnl_usd`` должен быть **net** (после fees +
+        funding), идентичный Bybit `closedPnl`. Локальный gross-расчёт
+        `(exit-entry)*qty` запрещён — расходится с биржей и ломает
+        Sharpe + /status (см. BUILDLOG 2026-05-15 «net PnL alignment»).
+        """
         with self._conn() as c:
             c.execute(
                 """
@@ -281,6 +292,59 @@ class AiArenaStore:
                 """,
                 (today, realized_pnl_usd, won),
             )
+
+    def update_position_realized(
+        self,
+        position_id: int,
+        *,
+        exit_price: float,
+        realized_pnl_usd: float,
+    ) -> float:
+        """Перезаписывает ``exit_price`` и ``realized_pnl_usd`` уже закрытой
+        позиции и пересчитывает daily_pnl агрегат на разницу.
+
+        Используется в backfill-скрипте (`scripts/ai_arena_backfill_pnl.py`)
+        для замены ранее сохранённого gross PnL на net PnL из
+        `get_closed_pnl`. Возвращает ``delta`` = новый PnL − старый PnL
+        (для логирования).
+
+        Если позиция ещё открыта (closed_at IS NULL) — выбрасывает
+        ``ValueError``: backfill применим только к закрытым.
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT closed_at, realized_pnl_usd FROM positions WHERE id = ?",
+                (position_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"position id={position_id} not found")
+            if row["closed_at"] is None:
+                raise ValueError(f"position id={position_id} is still open")
+            old_pnl = float(row["realized_pnl_usd"] or 0.0)
+            delta = realized_pnl_usd - old_pnl
+            old_won = 1 if old_pnl > 0 else 0
+            new_won = 1 if realized_pnl_usd > 0 else 0
+            won_delta = new_won - old_won
+            c.execute(
+                """
+                UPDATE positions
+                SET exit_price = ?, realized_pnl_usd = ?
+                WHERE id = ?
+                """,
+                (exit_price, realized_pnl_usd, position_id),
+            )
+            day = (row["closed_at"] or "")[:10]
+            if day:
+                c.execute(
+                    """
+                    UPDATE daily_pnl
+                    SET realized_pnl_usd = realized_pnl_usd + ?,
+                        n_wins = MAX(0, n_wins + ?)
+                    WHERE day = ?
+                    """,
+                    (delta, won_delta, day),
+                )
+            return delta
 
     def get_open_positions(self) -> list[ArenaPosition]:
         with self._conn() as c:
@@ -333,6 +397,29 @@ class AiArenaStore:
                 (since_ts,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_all_equity_snapshots(self) -> list[dict[str, Any]]:
+        """Все snapshot'ы с момента старта эксперимента (для cumulative
+        Sharpe и `total_return_pct` — 1-в-1 с Nof1 Season 1, который
+        идёт cumulative с 17 окт 2025).
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM equity_snapshots ORDER BY ts"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_first_equity_snapshot(self) -> dict[str, Any] | None:
+        """Самый ранний snapshot — baseline для `Current Total Return`.
+
+        Возвращает None если snapshot'ов ещё нет (бот только запущен и
+        ещё не сохранил первый snapshot после первого цикла).
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM equity_snapshots ORDER BY ts ASC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
 
     # ─── PnL аналитика (для Telegram /pnl, /status — не для blocker'ов) ─
 

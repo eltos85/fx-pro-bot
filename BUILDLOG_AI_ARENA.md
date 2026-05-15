@@ -16,6 +16,78 @@
 
 ---
 
+## 2026-05-15
+
+### feat(ai-arena): 1-в-1 alignment с Nof1 — net PnL, real entry/exit, cumulative metrics, Python repr (10 фиксов + 147 тестов)
+`(коммит ниже)`
+
+**Контекст:** Пользователь запросил статистику с Bybit API и обнаружил
+расхождение PnL: бот показал +$74.71 (gross), Bybit — −$29.62 (net
+после fees + funding). Заявил: «у нас должна быть вся логика 1 в 1,
+почему это ни как у первоисточника?». Провели полный аудит логики
+ai_arena против gist'а — нашли 4 critical, 2 medium, 4 low фикса.
+
+**10 расхождений с source — все исправлены:**
+
+| # | Категория | Severity | Где было | Стало |
+|---|---|---|---|---|
+| 1 | Gross vs net PnL | **CRITICAL** | `(exit-entry)*qty` локально | `closedPnl` из Bybit `/v5/position/closed-pnl` (после fees + funding) |
+| 2 | Entry price slippage | **CRITICAL** | `ticker.last_price` ДО ордера | `avgPrice` из `get_positions` ПОСЛЕ market-fill |
+| 3 | Exit price slippage | **CRITICAL** | `ticker.last_price` после close + fallback на `entry_price` (давал PnL=0) | `avgExitPrice` из `get_closed_pnl` |
+| 4 | Total return baseline drift | **CRITICAL** | Rolling 14d window | Cumulative с первого equity_snapshot ever |
+| 5 | Open positions block | **MEDIUM** | `json.dumps(...)` (double quotes, `null`) | Python literal repr (single quotes, `None`) |
+| 6 | Sharpe rolling vs cumulative | **MEDIUM** | `rolling_sharpe_14d` + `cutoff_ts_14d_ago` | `cumulative_sharpe` на всех snapshot'ах |
+| 7 | Coin naming в prompt | **LOW** | `BTCUSDT` в headers и JSON enum | `BTC` (gist L73, L168), маппинг через `arena_to_bybit` только на границе Bybit-API |
+| 8 | Funding rate `+` модификатор | **LOW** | `Funding Rate: +0.0123%` | `Funding Rate: 0.0123%` (нейтральный, как source) |
+| 9 | Total return `+` модификатор | **LOW** | `+1.50%` | `1.50%` (нейтральный) |
+| 10 | Лишний артикль в SYSTEM_PROMPT | **LOW** | `>40% of capital in **a** single position` | `>40% of capital in single position` (gist L128) |
+
+**Файлы (производственный код):**
+
+| Файл | Изменения |
+|---|---|
+| `src/ai_arena/trading/symbols.py` | **NEW**: `arena_to_bybit("BTC")="BTCUSDT"`, `bybit_to_arena("BTCUSDT")="BTC"`. Маппинг между Nof1-форматом (голые тикеры) и Bybit V5 (USDT-суффикс). |
+| `src/ai_arena/trading/client.py` | +`ClosedPnlRecord` dataclass, +`get_closed_pnl(symbol, start_time_ms, end_time_ms)` — endpoint `/v5/position/closed-pnl` (net PnL + avgExitPrice). |
+| `src/ai_arena/trading/executor.py` | `_apply_close` → `_resolve_net_close` (берёт net PnL + avg_exit_price из Bybit, fallback на ticker + PnL=0 при API outage). `_apply_open` → `_resolve_real_open` (poll `get_positions` после ордера, реальный `avgPrice` + `size`). `parse_action` валидирует coin против `arena_symbols` (без USDT-суффикса). |
+| `src/ai_arena/trading/context.py` | `format_symbol_block` использует `bybit_to_arena` для headers (`### ALL BTC DATA`). Funding rate без `+`. `format_open_positions_block` → Python repr через новые `_python_repr_list` / `_repr_value` / `_py_str_literal`. Symbol в open positions конвертируется в arena-формат. |
+| `src/ai_arena/llm/prompts.py` | `symbols_csv` через `arena_symbols` (голые тикеры). `total_return_pct` без `+` модификатора. Удалён артикль `a` в diversification rule. |
+| `src/ai_arena/state/db.py` | +`update_position_realized(position_id, exit_price, realized_pnl_usd)` — backfill API: перезаписывает PnL+exit, пересчитывает `daily_pnl` агрегат на дельту. +`get_all_equity_snapshots()` для cumulative Sharpe. +`get_first_equity_snapshot()` для cumulative total_return baseline. |
+| `src/ai_arena/analysis/sharpe.py` | `rolling_sharpe_14d` → `cumulative_sharpe`. Удалён `cutoff_ts_14d_ago`. |
+| `src/ai_arena/app/main.py` | `_reconcile_closed_positions` использует `_resolve_net_close`. Sharpe + total_return через cumulative API. |
+| `src/ai_arena/telegram/bot.py` | `requests.Session` + retry с exponential backoff (1→30s) для `ConnectionResetError(104)`/`Timeout` — гасит spam stack-trace'ов от idle TCP RST на long-poll getUpdates. Не влияет на торговую логику. |
+
+**Файлы (поддержка):**
+
+| Файл | Назначение |
+|---|---|
+| `scripts/ai_arena_backfill_pnl.py` | **NEW**: разовый backfill для существующих закрытых позиций — заменяет gross PnL на net из Bybit `get_closed_pnl`. Поддерживает `--dry-run`. |
+
+**Тесты — 147 новых, все валидируют 1-в-1 с source:**
+
+| Файл | Тестов | Что проверяет |
+|---|---|---|
+| `tests/test_ai_arena_source_compliance.py` | **78** (NEW) | Построчное совпадение SYSTEM_PROMPT/USER_PROMPT/per-symbol block/open positions block с gist'ом. Каждый тест дословно цитирует source (с указанием line number) и assert'ит точную фразу. Регресс-страховки на удалённые отклонения (`(band:`, `(20×5min)`, `Average Volume (20)`, JSON dumps, USDT в headers, `+` для positive чисел, `Do NOT multiply by leverage` строка). |
+| `tests/test_ai_arena_executor_logic.py` | **20** (NEW) | Бизнес-логика executor с фейковым `AiArenaBybitClient` (in-memory, запись всех вызовов): coin mapping (BTC→BTCUSDT для всех Bybit-вызовов), real entry price из `get_positions`, net PnL из `get_closed_pnl` (+ negative-net-when-positive-gross, short позиция, fallback при API outage), no-pyramiding, direction sanity (4 кейса), no-server-side-caps (parser принимает leverage=20/50, R:R 1:5). |
+| `tests/test_ai_arena_baseline.py` | **12** (NEW) | `get_first_equity_snapshot`/`get_all_equity_snapshots` API, baseline = первый snapshot ever (не rolling), регресс-страховки на удалённые `cutoff_ts_14d_ago` и `rolling_sharpe_14d`, `update_position_realized` (delta, daily_pnl агрегат, n_wins flip, raises для open/unknown). |
+| `tests/test_ai_arena_context.py` | **17** (NEW) | Per-symbol headers с arena-форматом, формат funding rate без `+`, open positions Python literal style. |
+| `tests/test_ai_arena_symbols.py` | **6** (NEW) | `arena_to_bybit` / `bybit_to_arena` / `arena_symbols` — корректность и идемпотентность. |
+| `tests/test_ai_arena_executor.py` | **5** обновлены | Coin mapping в parse_action: BTCUSDT теперь reject'ится. |
+| `tests/test_ai_arena_prompts.py` | **3** обновлены | `total_return_pct` без `+`, diversification без `a`, нет USDT в JSON enum. |
+| `tests/test_ai_arena_sharpe.py` | **5** переименованы | `rolling_sharpe_14d` → `cumulative_sharpe`. |
+
+**Прогон:** 241 ai_arena теста (было 94, +147 новых), 793 теста весь
+suite — все проходят.
+
+**Источник правды для каждого фикса** — gist nof1-prompt.md. Конкретные
+line numbers зафиксированы в комментариях каждого теста compliance-набора.
+
+**Деплой:** селективный rebuild ai-arena (через SSH `--no-deps --build`),
+не задевая `advisor` / `bybit-bot` / `ai-trader`. После rebuild —
+запуск backfill-скрипта на VPS для замены gross PnL на net в
+существующих 37 закрытых позициях.
+
+---
+
 ## 2026-05-14
 
 ### chore: strict 1-в-1 ревью source vs код (9 расхождений в prompt'ах + dead code)

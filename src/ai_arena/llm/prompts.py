@@ -21,8 +21,9 @@ SYSTEM_PROMPT повторяет структуру 12 секций из gist §
 
 Адаптации vs канон Nof1 (только то, что физически вынужденно):
 - Hyperliquid → Bybit (lastPrice вместо mid-price; funding 8h vs 1h)
-- Asset universe: 1-в-1 (BTC, ETH, SOL, BNB, DOGE, XRP), но с суффиксом
-  USDT — это Bybit perp formal naming (BTCUSDT и т.д.)
+- Asset universe: 1-в-1 (BTC, ETH, SOL, BNB, DOGE, XRP) — голые тикеры
+  и в prompt'е, и в JSON output schema (как у source). Bybit-вызовы
+  идут через USDT-суффикс (`BTCUSDT`), маппинг в `trading/symbols.py`.
 - $10k капитал → $1000 (scaling Bybit demo $50k / 50, обоснованная
   адаптация — см. equity_scale_divisor в settings.py)
 
@@ -37,11 +38,14 @@ capital safety hard-limits, KillSwitch, R:R cap, max_positions cap —
 from __future__ import annotations
 
 from ai_arena.config.settings import AiArenaSettings
+from ai_arena.trading.symbols import arena_symbols
 
 
 def build_system_prompt(settings: AiArenaSettings) -> str:
     """Полный SYSTEM_PROMPT 1-в-1 по gist § System Prompt 完整逆向."""
-    symbols_csv = ", ".join(settings.symbols)
+    # Coin enum в prompt'е — Nof1-формат (без USDT), как в gist L73 и
+    # L168. Bybit-symbol появляется только при API-вызовах (executor).
+    symbols_csv = ", ".join(arena_symbols(settings.symbols))
     cycle_min = settings.poll_interval_sec // 60
     return f"""# ROLE & IDENTITY
 
@@ -113,7 +117,7 @@ Calculate position size using this formula:
    - Low conviction (0.3-0.5): Use 1-3x leverage
    - Medium conviction (0.5-0.7): Use 3-8x leverage
    - High conviction (0.7-1.0): Use 8-{settings.leverage_max}x leverage
-3. **Diversification**: Avoid concentrating >40% of capital in a single position
+3. **Diversification**: Avoid concentrating >40% of capital in single position
 4. **Fee Impact**: On positions <$500, fees will materially erode profits
 5. **Liquidation Risk**: Ensure liquidation price is >15% away from entry
 
@@ -348,7 +352,7 @@ Below, we are providing you with a variety of state data, price data, and predic
 ## HERE IS YOUR ACCOUNT INFORMATION & PERFORMANCE
 
 **Performance Metrics:**
-- Current Total Return (percent): {total_return_pct:+.2f}%
+- Current Total Return (percent): {total_return_pct:.2f}%
 - Sharpe Ratio: {sharpe_str}
 
 **Account Status:**

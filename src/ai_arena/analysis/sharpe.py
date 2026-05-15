@@ -1,24 +1,29 @@
-"""Rolling Sharpe для AI Arena (Nof1 self-calibration signal).
+"""Cumulative Sharpe для AI Arena (Nof1 self-calibration signal).
 
-Nof1 включает Sharpe Ratio в каждый user prompt как fidelity-feedback:
-- Sharpe < 0   → reduce size, tighten stops
-- Sharpe 0–1   → positive but volatile
-- Sharpe > 1   → strategy working, maintain discipline
-- Sharpe > 2   → excellent (но beware overconfidence)
+Source (gist nof1-prompt.md, секция PERFORMANCE METRICS & FEEDBACK):
 
-Окно — 14 дней с скользящим шагом: rebalance каждый цикл (3 мин).
-Возвращаем (mean - rf) / std для returns между последовательными
-equity-snapshot'ами.
+    Sharpe Ratio = (Average Return - Risk-Free Rate) / Standard Deviation of Returns
 
-Формула канонична (Sharpe 1966):
-    Sharpe = (avg_return - rf) / std(returns)
+    Interpretation:
+    - < 0: Losing money on average
+    - 0-1: Positive returns but high volatility
+    - 1-2: Good risk-adjusted performance
+    - > 2: Excellent risk-adjusted performance
 
-Risk-free rate = 0 (Nof1 phrasing «assuming risk-free rate of 0»).
+Source НЕ указывает rolling-окно. Nof1 Season 1 идёт cumulative с
+17 окт 2025 (~7 месяцев на момент аудита 2026-05-15) и сообщает
+Sharpe вместе с `Current Total Return (percent)` — оба идут с момента
+старта эксперимента. Раньше у нас стоял rolling 14d (наша
+интерпретация) — это расходилось с source. Теперь — **cumulative**
+с момента старта бота (`get_started_at_ts`).
+
+Risk-free rate = 0 (gist подтверждает по умолчанию).
+
+Формула канонична (Sharpe 1966).
 """
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime, timedelta
 
 
 def compute_returns(equities: list[float]) -> list[float]:
@@ -36,18 +41,17 @@ def compute_returns(equities: list[float]) -> list[float]:
     return out
 
 
-def rolling_sharpe_14d(
+def cumulative_sharpe(
     snapshots: list[dict],
     *,
     risk_free_rate: float = 0.0,
     annualization_factor: float | None = None,
 ) -> float | None:
-    """Считает Sharpe из equity-snapshot'ов за последние 14 дней.
+    """Считает Sharpe из всех equity-snapshot'ов с момента старта.
 
     Nof1 сообщает Sharpe «as is» (без annualization) — это per-cycle
-    Sharpe. Мы тоже не аннуализируем по дефолту: каждый snapshot — это
-    точка от 3-мин цикла, и сравнение с >0 / >1 / >2 не зависит от
-    шкалы (сравнивается с порогами в одних и тех же единицах).
+    Sharpe от per-cycle returns. Сравнение с порогами `>0 / >1 / >2`
+    не зависит от шкалы.
 
     Если хочется annualize — передать ``annualization_factor``:
     sqrt(N), где N = ожидаемое число snapshots в год (3-мин цикл →
@@ -73,7 +77,3 @@ def rolling_sharpe_14d(
     if annualization_factor is not None:
         sharpe *= annualization_factor
     return sharpe
-
-
-def cutoff_ts_14d_ago() -> int:
-    return int((datetime.now(tz=UTC) - timedelta(days=14)).timestamp())

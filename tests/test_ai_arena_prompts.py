@@ -78,10 +78,26 @@ class TestSystemPromptSourceCompliance:
         assert ">15%" in sp or "15% away" in sp
 
     def test_diversification_40_percent_rule(self):
-        # gist § POSITION SIZING: "Diversification: Avoid concentrating
-        # >40% of capital in single position"
+        # gist § POSITION SIZING line 128: "Diversification: Avoid concentrating
+        # >40% of capital in single position" — БЕЗ артикля `a single`.
         sp = build_system_prompt(_make_settings())
-        assert ">40%" in sp
+        assert ">40% of capital in single position" in sp
+        # Регресс-страховка от лишнего `a` (наша опечатка-расхождение,
+        # исправленная в audit 2026-05-15)
+        assert ">40% of capital in a single position" not in sp
+
+    def test_coin_enum_no_usdt_suffix(self):
+        # gist L168: «"coin": "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP"»
+        # — голые тикеры без USDT (Hyperliquid). Bybit-symbol появляется
+        # только при API-вызовах через arena_to_bybit, см. trading/symbols.py
+        sp = build_system_prompt(_make_settings())
+        # Должны присутствовать голые тикеры
+        for arena in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"):
+            assert arena in sp, f"missing arena symbol: {arena}"
+        # И НЕ должно быть USDT-суффикса в Asset Universe / coin enum
+        assert "BTCUSDT" not in sp
+        assert "ETHUSDT" not in sp
+        assert "SOLUSDT" not in sp
 
     def test_fee_impact_500_warning(self):
         # gist § POSITION SIZING: "On positions <$500, fees will materially
@@ -182,7 +198,20 @@ class TestUserPrompt:
         )
         assert "Sharpe Ratio" in up
         assert "0.420" in up
-        assert "+1.50%" in up
+        # Без `+` модификатора (gist L448: «{return_pct}%», нейтральный формат)
+        assert "1.50%" in up
+        assert "+1.50%" not in up
+
+    def test_negative_total_return_displayed(self):
+        up = build_user_prompt(
+            minutes_elapsed=10,
+            per_symbol_blocks="x",
+            total_return_pct=-2.34,
+            sharpe=None,
+            cash=500.0, equity=487.5,
+            open_positions_block="[]",
+        )
+        assert "-2.34%" in up
 
     def test_sharpe_na_when_none(self):
         up = build_user_prompt(

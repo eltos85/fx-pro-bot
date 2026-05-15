@@ -26,10 +26,7 @@ import signal
 import time
 from datetime import UTC, datetime
 
-from ai_arena.analysis.sharpe import (
-    cutoff_ts_14d_ago,
-    rolling_sharpe_14d,
-)
+from ai_arena.analysis.sharpe import cumulative_sharpe
 from ai_arena.config.settings import AiArenaSettings
 from ai_arena.llm.client import DeepSeekArenaClient
 from ai_arena.llm.prompts import build_system_prompt, build_user_prompt
@@ -45,7 +42,11 @@ from ai_arena.trading.context import (
     format_open_positions_block,
     format_per_symbol_blocks,
 )
-from ai_arena.trading.executor import apply_action, parse_action
+from ai_arena.trading.executor import (
+    _resolve_net_close,
+    apply_action,
+    parse_action,
+)
 
 log = logging.getLogger("ai_arena")
 
@@ -68,6 +69,10 @@ def _reconcile_closed_positions(
     Защита от false-close при transient outage биржи: если
     `get_positions(symbol)` возвращает None — пропускаем символ
     целиком (не помечаем closed).
+
+    PnL и exit_price берутся из Bybit `get_closed_pnl` (net после
+    fees + funding) через ``_resolve_net_close`` — 1-в-1 с биржей.
+    Локальный `(exit-entry)*qty` запрещён (см. BUILDLOG 2026-05-15).
     """
     open_db = store.get_open_positions()
     if not open_db:
@@ -94,18 +99,20 @@ def _reconcile_closed_positions(
         )
         if still_open:
             continue
-        ticker = client.get_ticker(db_pos.symbol)
-        if ticker is None or ticker.last_price <= 0:
+        exit_price, pnl = _resolve_net_close(
+            client=client,
+            symbol=db_pos.symbol,
+            opened_at_iso=db_pos.opened_at,
+            opened_side=db_pos.side,
+            qty=db_pos.qty,
+            fallback_entry=db_pos.entry_price,
+        )
+        if pnl == 0.0 and exit_price == db_pos.entry_price:
             log.warning(
-                "RECONCILE deferred for id=%d %s %s: ticker unavailable",
+                "RECONCILE deferred for id=%d %s %s: closed_pnl unavailable",
                 db_pos.id, db_pos.side, db_pos.symbol,
             )
             continue
-        exit_price = ticker.last_price
-        if db_pos.side == "Buy":
-            pnl = (exit_price - db_pos.entry_price) * db_pos.qty
-        else:
-            pnl = (db_pos.entry_price - exit_price) * db_pos.qty
         store.close_position(
             db_pos.id,
             exit_price=exit_price,
@@ -115,7 +122,7 @@ def _reconcile_closed_positions(
         msg = (
             f"id={db_pos.id} {db_pos.side} {db_pos.symbol} qty={db_pos.qty}\n"
             f"entry=${db_pos.entry_price:.6g} exit=${exit_price:.6g}\n"
-            f"PnL: ${pnl:+.2f}\nReason: exchange_closed"
+            f"PnL: ${pnl:+.2f} (net of fees)\nReason: exchange_closed"
         )
         log.info("RECONCILE closed: %s", msg.replace("\n", " | "))
         if tg:
@@ -235,9 +242,11 @@ def _run_cycle(
 
     _reconcile_closed_positions(bybit, store, tg)
 
-    # Sharpe rolling 14d (nullable если истории < 3 точек)
-    snapshots = store.get_equity_snapshots_since(cutoff_ts_14d_ago())
-    sharpe = rolling_sharpe_14d(snapshots)
+    # Cumulative Sharpe с момента старта эксперимента (1-в-1 с Nof1
+    # Season 1, который идёт cumulative с 17 окт 2025). nullable если
+    # истории < 3 snapshot'ов.
+    snapshots = store.get_all_equity_snapshots()
+    sharpe = cumulative_sharpe(snapshots)
 
     # Market context
     ctx = collect_market_context(
@@ -276,11 +285,16 @@ def _run_cycle(
     scaled_equity = ctx.real_equity_usd / divisor
     scaled_cash = ctx.available_cash_usd / divisor
 
-    # total_return_pct — % изменения equity от первого equity_snapshot
-    # (формула инвариантна к scale: real %, не зависит от divisor).
+    # total_return_pct — % изменения equity от **самого первого**
+    # snapshot'а (с момента старта эксперимента), как `Current Total
+    # Return` у Nof1 Season 1. Раньше брали первый snapshot за 14 дней
+    # (rolling baseline) — это давало корректный return только первые
+    # 14 дней работы, после baseline начинал «скользить». Cumulative
+    # baseline — 1-в-1 с source. Формула инвариантна к equity scaling.
     total_return_pct = 0.0
-    if snapshots:
-        baseline = float(snapshots[0]["total_equity_usd"])
+    first_snapshot = store.get_first_equity_snapshot()
+    if first_snapshot:
+        baseline = float(first_snapshot["total_equity_usd"])
         if baseline > 0:
             total_return_pct = (
                 (ctx.real_equity_usd - baseline) / baseline * 100

@@ -35,6 +35,18 @@ class TelegramConfig:
     enabled: bool = True
 
 
+# Network errors которые ожидаемы для long-polling getUpdates: peer
+# (api.telegram.org) ритмично закрывает idle TCP-соединение, особенно
+# когда нет updates в течение polling timeout (30s). Это НЕ ошибка бота
+# и не должна спамить stack-trace'ами в лог. Логируем как warning без
+# трассировки и продолжаем polling.
+_TG_NETWORK_EXC = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
 class TelegramArenaBot:
     def __init__(
         self,
@@ -48,15 +60,23 @@ class TelegramArenaBot:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_update_id: int = 0
+        # requests.Session переиспользует TCP/TLS соединение к
+        # api.telegram.org — меньше handshake'ов, меньше шанс RST от peer'а.
+        self._session = requests.Session()
 
     def _api(self, method: str, params: dict | None = None, timeout: float = 35.0):
         url = TELEGRAM_API.format(token=self.config.bot_token, method=method)
         try:
-            r = requests.get(url, params=params or {}, timeout=timeout)
+            r = self._session.get(url, params=params or {}, timeout=timeout)
             data = r.json()
             if not data.get("ok"):
                 log.warning("telegram %s NOK: %s", method, data)
             return data
+        except _TG_NETWORK_EXC as e:
+            # Ожидаемый network glitch — не фатально, retry на следующей
+            # итерации polling. Без stack-trace.
+            log.warning("telegram %s network glitch (%s)", method, type(e).__name__)
+            return None
         except Exception:
             log.exception("telegram %s failed", method)
             return None
@@ -110,8 +130,15 @@ class TelegramArenaBot:
 
     def stop(self) -> None:
         self._stop.set()
+        try:
+            self._session.close()
+        except Exception:
+            pass
 
     def _run_loop(self) -> None:
+        # Простой backoff: 1s после network glitch'а, удваиваем до 30s.
+        # На успешном poll сбрасываем обратно к 1s.
+        backoff = 1.0
         while not self._stop.is_set():
             try:
                 resp = self._api(
@@ -120,16 +147,27 @@ class TelegramArenaBot:
                     timeout=35,
                 )
                 if not resp or not resp.get("ok"):
-                    time.sleep(5)
+                    if self._stop.wait(backoff):
+                        break
+                    backoff = min(backoff * 2, 30.0)
                     continue
+                backoff = 1.0
                 for upd in resp.get("result", []):
                     self._last_update_id = max(
                         self._last_update_id, upd.get("update_id", 0)
                     )
                     self._handle_update(upd)
+            except _TG_NETWORK_EXC as e:
+                # Сюда обычно не попадаем — _api сам глотает network exc;
+                # double-safety на случай если упадёт за пределами _api.
+                log.warning("telegram poll network glitch (%s)", type(e).__name__)
+                if self._stop.wait(backoff):
+                    break
+                backoff = min(backoff * 2, 30.0)
             except Exception:
                 log.exception("telegram poll error")
-                time.sleep(5)
+                if self._stop.wait(5):
+                    break
 
     def _handle_update(self, upd: dict) -> None:
         msg = upd.get("message") or upd.get("edited_message")

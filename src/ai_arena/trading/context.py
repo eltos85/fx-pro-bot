@@ -1,6 +1,9 @@
 """Сборщик market context для AI Arena (Nof1 layout).
 
 Per-symbol layout 1-в-1 c gist nof1-prompt.md (User Prompt § per-coin):
+- Header `### ALL <COIN> DATA` — голый тикер без USDT-суффикса
+  (gist line 345, 383, 421, …). Конвертация Bybit `BTCUSDT`→`BTC`
+  через `bybit_to_arena` (см. `trading/symbols.py`).
 - Current Snapshot: current_price, current_ema20, current_macd,
   current_rsi (7 period)
 - Perpetual Futures Metrics: Open Interest (Latest + Average), Funding Rate
@@ -10,12 +13,15 @@ Per-symbol layout 1-в-1 c gist nof1-prompt.md (User Prompt § per-coin):
   EMA, 3-Period ATR vs 14-Period ATR, Current Volume vs Average Volume,
   MACD indicators (4h), RSI indicators (14-Period, 4h)
 
+Open positions block — Python repr-style list-of-dicts (gist line
+457-478): single quotes, без double-quotes как в JSON. Source
+форматирует как Python literal, не как JSON.
+
 Никаких новостей / sentiment / orderflow — Nof1 явно пишет «no news,
 no social media, no narratives». См. правило `ai-arena-sources.mdc`.
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -33,6 +39,7 @@ from ai_arena.trading.client import (
     OpenInterestPoint,
     Ticker,
 )
+from ai_arena.trading.symbols import bybit_to_arena
 
 log = logging.getLogger(__name__)
 
@@ -157,9 +164,9 @@ def format_symbol_block(block: SymbolBlock) -> str:
     из gist'а. Любая правка должна сохранять byte-level совместимость с
     source layout (см. правило `ai-arena-sources.mdc`).
     """
-    sym = block.symbol
+    sym_arena = bybit_to_arena(block.symbol)  # `BTCUSDT` → `BTC` (gist L345)
     if block.ticker is None:
-        return f"### ALL {sym} DATA\n(ticker unavailable, skipping)\n"
+        return f"### ALL {sym_arena} DATA\n(ticker unavailable, skipping)\n"
 
     t = block.ticker
     cur_ema20 = (
@@ -173,7 +180,7 @@ def format_symbol_block(block: SymbolBlock) -> str:
     )
 
     parts: list[str] = []
-    parts.append(f"### ALL {sym} DATA\n")
+    parts.append(f"### ALL {sym_arena} DATA\n")
     parts.append("**Current Snapshot:**")
     parts.append(f"- current_price = {_fmt_n(t.last_price)}")
     parts.append(f"- current_ema20 = {_fmt_n(cur_ema20)}")
@@ -186,7 +193,10 @@ def format_symbol_block(block: SymbolBlock) -> str:
         f"- Open Interest: Latest: {_fmt_n(block.oi_latest)} | "
         f"Average: {_fmt_n(block.oi_avg)}"
     )
-    parts.append(f"- Funding Rate: {t.funding_rate * 100:+.4f}%")
+    # Funding rate — сырое число с %-форматом (gist L355: «Funding Rate: 0.0123%»).
+    # Без `+` модификатора — source даёт нейтральный формат, знак показывается
+    # сам через минус для negative.
+    parts.append(f"- Funding Rate: {t.funding_rate * 100:.4f}%")
     parts.append("")
 
     if block.intraday is not None:
@@ -239,28 +249,48 @@ def format_open_positions_block(
     notional_by_symbol: dict[str, float],
     unrealized_by_symbol: dict[str, float],
 ) -> str:
-    """Открытые позиции 1-в-1 c gist nof1-prompt.md (Python list-of-dicts).
+    """Открытые позиции 1-в-1 c gist nof1-prompt.md line 457-478 — Python
+    list-of-dicts repr (single quotes, не JSON).
+
+    Source форматирует как Python literal, не как JSON:
+
+        [
+          {
+            'symbol': 'BTC',
+            'quantity': 0.5,
+            ...
+            'exit_plan': {
+              'profit_target': 105000,
+              ...
+            },
+            ...
+          },
+        ]
+
+    Раньше у нас был ``json.dumps(...)`` — двойные кавычки и `null`,
+    что отступление от source. Теперь — Python ``repr(arr)``-style.
 
     Поля идентичны source: symbol, quantity, entry_price, current_price,
     liquidation_price, unrealized_pnl, leverage, exit_plan, confidence,
-    risk_usd, notional_usd. Поле ``'side'`` отсутствует — направление
-    кодируется **знаком** ``quantity`` (positive = long, negative =
-    short), как в Hyperliquid (родная биржа Nof1). Bybit отдаёт
-    `size>0 + side`, поэтому конвертируем в signed quantity при
-    форматировании.
+    risk_usd, notional_usd.
+
+    - ``symbol`` — Nof1-формат (`BTC`, не `BTCUSDT`); Bybit-формат
+      конвертируется через ``bybit_to_arena``.
+    - ``quantity`` — **signed** (positive=long, negative=short), как
+      в Hyperliquid. Поле ``'side'`` отсутствует (gist).
     """
     if not positions:
         return "[]"
-    arr = []
+    items: list[dict] = []
     for p in positions:
         cur = current_prices.get(p.symbol, p.entry_price)
         liq = liquidation_prices.get(p.symbol, 0.0)
         unrl = unrealized_by_symbol.get(p.symbol, 0.0)
         notional = notional_by_symbol.get(p.symbol, p.qty * cur)
         signed_qty = p.qty if p.side == "Buy" else -p.qty
-        arr.append(
+        items.append(
             {
-                "symbol": p.symbol,
+                "symbol": bybit_to_arena(p.symbol),
                 "quantity": signed_qty,
                 "entry_price": p.entry_price,
                 "current_price": cur,
@@ -277,7 +307,60 @@ def format_open_positions_block(
                 "notional_usd": round(notional, 4),
             }
         )
-    return json.dumps(arr, indent=2, default=str)
+    return _python_repr_list(items)
+
+
+def _python_repr_list(items: list[dict]) -> str:
+    """Format list[dict] as Python literal (single quotes, indent=2).
+
+    Используется для open positions block — source (gist L457-478)
+    показывает блок как Python repr, не как JSON. Стандартный
+    ``repr()`` даёт всё в одну строку без переносов; нам нужен
+    indent=2 для читаемости (как в gist'е). Поэтому ручной writer.
+
+    Поведение для типов:
+    - str  → одинарные кавычки с экранированием `'` и `\\`
+    - None → `None`
+    - bool → `True`/`False`
+    - int/float → стандартный repr
+    - dict → рекурсивно с indent
+    """
+    return _repr_value(items, indent=0)
+
+
+def _repr_value(v, *, indent: int) -> str:
+    pad = "  " * indent
+    pad_inner = "  " * (indent + 1)
+    if v is None:
+        return "None"
+    if isinstance(v, bool):
+        return "True" if v else "False"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return _py_str_literal(v)
+    if isinstance(v, list):
+        if not v:
+            return "[]"
+        body = ",\n".join(pad_inner + _repr_value(it, indent=indent + 1) for it in v)
+        return "[\n" + body + "\n" + pad + "]"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        lines = []
+        for k, val in v.items():
+            lines.append(
+                f"{pad_inner}{_py_str_literal(str(k))}: "
+                + _repr_value(val, indent=indent + 1)
+            )
+        return "{\n" + ",\n".join(lines) + "\n" + pad + "}"
+    return _py_str_literal(str(v))
+
+
+def _py_str_literal(s: str) -> str:
+    """Python single-quoted string literal с экранированием `'` и `\\`."""
+    escaped = s.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
 
 
 def format_per_symbol_blocks(ctx: MarketContext) -> str:
