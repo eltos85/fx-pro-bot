@@ -29,8 +29,8 @@ DEFAULT_ARENA_SYMBOLS: tuple[str, ...] = (
     "ETHUSDT",
     "SOLUSDT",
     "BNBUSDT",
-    "XRPUSDT",
     "DOGEUSDT",
+    "XRPUSDT",
 )
 
 
@@ -94,21 +94,23 @@ class AiArenaSettings(BaseSettings):
     )
 
     # Виртуальный капитал — номинальная метка для SYSTEM_PROMPT
-    # ("Starting Capital: $X"). Nof1 канон $10k, у нас sandbox-обманка
-    # $1000 через scaling Bybit demo equity (см. equity_scale_divisor).
+    # ("Starting Capital: $X"). 1-в-1 с Nof1 каноном $10,000 USD.
+    # См. правило ai-arena-sources.mdc § «Что МОЖНО менять» — virtual
+    # capital должен совпадать с scaled equity (иначе LLM решит что
+    # просел в 5-10× и будет в панике).
     virtual_capital_usd: float = Field(
-        default=1000.0, validation_alias="AI_ARENA_VIRTUAL_CAPITAL"
+        default=10000.0, validation_alias="AI_ARENA_VIRTUAL_CAPITAL"
     )
 
     # Делитель реального Bybit equity для масштабирования вниз перед
     # передачей в LLM-промпт. На demo-аккаунте Bybit стартовый баланс
-    # ≈ $50k, делитель 50 → LLM видит $1000 (наш sandbox).
-    # Это единственное обоснованное отклонение от source: у Hyperliquid
-    # (родная биржа Nof1) можно дать модели $10k бюджет; на Bybit demo
-    # фиксированный $50k — масштабируем вниз чтобы LLM работал в $1000
-    # окне (соответствует virtual_capital_usd).
+    # ≈ $50k, делитель 5 → LLM видит ≈$10k (1-в-1 с Nof1 budget на
+    # Hyperliquid, см. gist L62: «Starting Capital: $10,000 USD»).
+    # Это единственное обоснованное отклонение от source — у Bybit
+    # demo фиксированный $50k, на Hyperliquid Nof1 даёт ровно $10k.
+    # Через scaling 1:5 LLM работает в $10k окне (= virtual_capital_usd).
     equity_scale_divisor: float = Field(
-        default=50.0, validation_alias="AI_ARENA_EQUITY_SCALE_DIVISOR"
+        default=5.0, validation_alias="AI_ARENA_EQUITY_SCALE_DIVISOR"
     )
 
     # Leverage cap — source говорит 1-20x (gist:

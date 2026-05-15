@@ -81,10 +81,26 @@ class TestTradingEnvironmentSource:
 
     def test_decision_frequency_exact(self):
         # gist L76: `**Decision Frequency**: Every 2-3 minutes (mid-to-low frequency trading)`
-        # Мы подставляем cycle_min=3 → "Every 3 minutes". Структура и
-        # хвост `(mid-to-low frequency trading)` обязательны буквально.
+        # Дословно «2-3» — описание характера mid-to-low frequency, не
+        # точная конфигурация (наш poll_interval=180s попадает в диапазон).
         sp = _sp()
-        assert "**Decision Frequency**: Every 3 minutes (mid-to-low frequency trading)" in sp
+        assert "**Decision Frequency**: Every 2-3 minutes (mid-to-low frequency trading)" in sp
+
+    def test_starting_capital_format_exact(self):
+        # gist L62: `**Starting Capital**: $10,000 USD`
+        # Точный формат с разделителем тысяч `$10,000`, не `$10000`.
+        sp = _sp()
+        assert "**Starting Capital**: $10,000 USD" in sp
+
+    def test_asset_universe_format_exact(self):
+        # gist L62: `**Asset Universe**: BTC, ETH, SOL, BNB, DOGE, XRP (perpetual contracts)`
+        # Порядок DOGE, XRP (не XRP, DOGE) и хвост `(perpetual contracts)`
+        # обязательны буквально.
+        sp = _sp()
+        assert (
+            "**Asset Universe**: BTC, ETH, SOL, BNB, DOGE, XRP (perpetual contracts)"
+            in sp
+        )
 
     def test_market_hours_exact(self):
         # gist L75
@@ -339,15 +355,42 @@ class TestOutputFormatSource:
         assert '"buy_to_enter" | "sell_to_enter" | "hold" | "close"' in sp
 
     def test_coin_enum_exact_arena_format(self):
-        # gist L168: `"coin": "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP"`
-        # Порядок: BTC, ETH, SOL, BNB, XRP, DOGE (наш default; source имеет
-        # тот же набор, порядок DOGE/XRP не критичен, но универсум — 6 монет).
+        # gist L168 — БУКВАЛЬНО pipe-separated с кавычками для каждого
+        # значения (1-в-1, не «<one of X, Y, Z>»-форма!):
+        #   "coin": "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP",
         sp = _sp()
-        for arena in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"):
-            assert f'"{arena}"' in sp or arena in sp, f"missing coin: {arena}"
+        assert (
+            '"coin": "BTC" | "ETH" | "SOL" | "BNB" | "DOGE" | "XRP"' in sp
+        ), "coin enum должен быть буквально pipe-separated, не <one of X, Y>"
+        # Регрессы — старая форма не должна возвращаться
+        assert "<one of " not in sp, (
+            "<one of X, Y> — наша «удобная» форма, source использует pipe"
+        )
         # USDT-суффикс быть НЕ должен (Bybit-mapping происходит позже)
         for usdt in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
             assert usdt not in sp
+
+    def test_position_size_formula_no_indent(self):
+        # gist L65-66 — формула БЕЗ 4-пробельного отступа (не code-block,
+        # просто строки с переносом). Иначе модель воспринимает как
+        # отдельный синтаксический блок.
+        sp = _sp()
+        assert (
+            "\nPosition Size (USD) = Available Cash × Leverage × Allocation %\n"
+            in sp
+        ), "Position Size формула должна быть БЕЗ 4-пробельного отступа"
+        assert "    Position Size (USD)" not in sp, (
+            "Регресс: 4-пробельный отступ возвращён"
+        )
+
+    def test_sharpe_formula_no_indent(self):
+        # gist L194 — Sharpe формула тоже БЕЗ отступа (как Position Size).
+        sp = _sp()
+        assert (
+            "\nSharpe Ratio = (Average Return - Risk-Free Rate) / "
+            "Standard Deviation of Returns\n"
+        ) in sp, "Sharpe формула должна быть БЕЗ 4-пробельного отступа"
+        assert "    Sharpe Ratio = " not in sp
 
     def test_leverage_integer_1_to_20_exact(self):
         # gist L170: `"leverage": <integer 1-20>`

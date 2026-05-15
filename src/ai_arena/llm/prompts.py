@@ -46,7 +46,11 @@ def build_system_prompt(settings: AiArenaSettings) -> str:
     # Coin enum в prompt'е — Nof1-формат (без USDT), как в gist L73 и
     # L168. Bybit-symbol появляется только при API-вызовах (executor).
     symbols_csv = ", ".join(arena_symbols(settings.symbols))
-    cycle_min = settings.poll_interval_sec // 60
+    # JSON output schema — pipe-separated с кавычками вокруг каждого
+    # значения, 1-в-1 как в gist L168 (не "<one of X, Y>"-форма!).
+    coin_enum = " | ".join(f'"{c}"' for c in arena_symbols(settings.symbols))
+    # Starting Capital с разделителем тысяч ($1,000 как в source $10,000).
+    cap_str = f"{settings.virtual_capital_usd:,.0f}"
     return f"""# ROLE & IDENTITY
 
 You are an autonomous cryptocurrency trading agent operating in live markets on the Bybit USDT-perp exchange (demo account).
@@ -61,10 +65,10 @@ Your mission: Maximize risk-adjusted returns (PnL) through systematic, disciplin
 ## Market Parameters
 
 - **Exchange**: Bybit (USDT-perpetual futures, category=linear)
-- **Asset Universe**: {symbols_csv}
-- **Starting Capital**: ${settings.virtual_capital_usd:.0f} USD
+- **Asset Universe**: {symbols_csv} (perpetual contracts)
+- **Starting Capital**: ${cap_str} USD
 - **Market Hours**: 24/7 continuous trading
-- **Decision Frequency**: Every {cycle_min} minutes (mid-to-low frequency trading)
+- **Decision Frequency**: Every 2-3 minutes (mid-to-low frequency trading)
 - **Leverage Range**: 1x to {settings.leverage_max}x (use judiciously based on conviction)
 
 ## Trading Mechanics
@@ -107,8 +111,8 @@ You have exactly FOUR possible actions per decision cycle:
 
 Calculate position size using this formula:
 
-    Position Size (USD)   = Available Cash × Leverage × Allocation %
-    Position Size (Coins) = Position Size (USD) / Current Price
+Position Size (USD) = Available Cash × Leverage × Allocation %
+Position Size (Coins) = Position Size (USD) / Current Price
 
 ## Sizing Considerations
 
@@ -157,7 +161,7 @@ Return your decision as a **valid JSON object** with these exact fields:
 ```json
 {{
   "signal": "buy_to_enter" | "sell_to_enter" | "hold" | "close",
-  "coin": "<one of {symbols_csv}>",
+  "coin": {coin_enum},
   "quantity": <float>,
   "leverage": <integer 1-{settings.leverage_max}>,
   "profit_target": <float>,
@@ -183,7 +187,7 @@ Return your decision as a **valid JSON object** with these exact fields:
 
 You will receive your Sharpe Ratio at each invocation:
 
-    Sharpe Ratio = (Average Return - Risk-Free Rate) / Standard Deviation of Returns
+Sharpe Ratio = (Average Return - Risk-Free Rate) / Standard Deviation of Returns
 
 Interpretation:
 - < 0: Losing money on average

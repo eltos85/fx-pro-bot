@@ -16,6 +16,60 @@
 
 ---
 
+## 2026-05-15 (вторая итерация)
+
+### fix(ai-arena): 5 пропущенных отклонений в SYSTEM_PROMPT — финальный 1-в-1
+`(коммит ниже)`
+
+**Контекст:** После первой итерации фиксов (10 расхождений) запросили
+программный аудит — выгрузили **живой** SYSTEM_PROMPT с VPS из последнего
+decision и сделали построчный diff с canonical SYSTEM_PROMPT из gist'а
+(с применёнными разрешёнными Bybit-адаптациями). Compliance-тесты
+проверяли подстроки, а не буквальные литералы — пропустили 5 отклонений.
+
+**5 расхождений найдены и исправлены:**
+
+| # | Где | Source (gist L62-L194) | Было у нас | Fix |
+|---|---|---|---|---|
+| 1 | Asset Universe | `BTC, ETH, SOL, BNB, DOGE, XRP (perpetual contracts)` | `BTC, ETH, SOL, BNB, XRP, DOGE` (порядок DOGE↔XRP, нет хвоста) | Поменян `DEFAULT_ARENA_SYMBOLS` (DOGE перед XRP) + добавлен ` (perpetual contracts)` |
+| 2 | Starting Capital format | `$10,000 USD` | `$1000 USD` | `virtual_capital_usd=10000.0`, `equity_scale_divisor=5.0` (50k Bybit demo / 5 = 10k = virtual_capital) |
+| 3 | Decision Frequency | `Every 2-3 minutes` | `Every 3 minutes` (динамически из cycle_min) | Захардкожено `2-3` буквально (это описание характера mid-to-low frequency, не точная конфигурация) |
+| 4 | **coin enum в JSON schema** | `"coin": "BTC" \| "ETH" \| "SOL" \| "BNB" \| "DOGE" \| "XRP"` | `"coin": "<one of BTC, ETH, ...>"` | Pipe-separated с кавычками для каждого значения 1-в-1 |
+| 5 | Position Size + Sharpe formulas | без отступа (плоские строки) | с 4-пробельным отступом (как code-block) | Убран отступ — модель видит формулу как часть текста, не как отдельный синтаксический блок |
+
+**ВАЖНО про #2 (Starting Capital):** изменение `virtual_capital_usd` с
+$1000 на $10,000 требует одновременной правки `equity_scale_divisor`
+с 50 на 5, чтобы Bybit demo $50k → scaled $10k = virtual_capital.
+Иначе модель увидела бы противоречие «start $10k, current $1k» и решила
+что просела на 90% (паника-режим). Теперь оба значения консистентны
+и совпадают с Nof1 budget на Hyperliquid ($10k).
+
+**Файлы:**
+- `src/ai_arena/llm/prompts.py` — coin_enum через pipe-join, Starting
+  Capital с разделителем тысяч, Asset Universe с `(perpetual contracts)`,
+  убраны отступы у Position Size и Sharpe формул.
+- `src/ai_arena/config/settings.py` — `virtual_capital_usd=10000.0`,
+  `equity_scale_divisor=5.0`, порядок `DEFAULT_ARENA_SYMBOLS` (DOGE, XRP).
+- `tests/test_ai_arena_source_compliance.py` — +4 новых compliance-теста:
+  `test_starting_capital_format_exact` (проверяет `$10,000 USD` буквально),
+  `test_asset_universe_format_exact` (проверяет хвост и порядок),
+  `test_position_size_formula_no_indent` / `test_sharpe_formula_no_indent`
+  (регресс-страховки на возврат отступа), усилен
+  `test_coin_enum_exact_arena_format` (теперь проверяет буквальный
+  pipe-formatted литерал, а не подстроки + регресс на `<one of `).
+
+**Метод аудита:** `/tmp/verify_1to1.py` — извлекает canonical SYSTEM/USER
+prompt из gist'а (между ` ```markdown ... ``` ` блоками), применяет
+только разрешённые Bybit-адаптации (Hyperliquid→Bybit, MODEL_NAME,
+funding schedule), делает unified-diff с live-prompt'ами с VPS. Будет
+переиспользован при будущих audit'ах.
+
+**Прогон:** 245 ai_arena тестов (+4 новых), 797 тестов весь suite — все проходят.
+
+**Деплой:** селективный rebuild ai-arena (как обычно через SSH `--no-deps --build`).
+
+---
+
 ## 2026-05-15
 
 ### feat(ai-arena): 1-в-1 alignment с Nof1 — net PnL, real entry/exit, cumulative metrics, Python repr (10 фиксов + 147 тестов)
