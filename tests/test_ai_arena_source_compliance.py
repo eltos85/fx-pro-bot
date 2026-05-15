@@ -87,10 +87,12 @@ class TestTradingEnvironmentSource:
         assert "**Decision Frequency**: Every 2-3 minutes (mid-to-low frequency trading)" in sp
 
     def test_starting_capital_format_exact(self):
-        # gist L62: `**Starting Capital**: $10,000 USD`
-        # Точный формат с разделителем тысяч `$10,000`, не `$10000`.
+        # gist L62: `**Starting Capital**: $10,000 USD`. У нас sandbox
+        # $1,000 (единственное обоснованное отклонение от source — см.
+        # правило ai-arena-sources.mdc § Equity scaling). Формат с
+        # разделителем тысяч обязателен.
         sp = _sp()
-        assert "**Starting Capital**: $10,000 USD" in sp
+        assert "**Starting Capital**: $1,000 USD" in sp
 
     def test_asset_universe_format_exact(self):
         # gist L62: `**Asset Universe**: BTC, ETH, SOL, BNB, DOGE, XRP (perpetual contracts)`

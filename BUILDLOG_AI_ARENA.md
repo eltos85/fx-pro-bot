@@ -16,6 +16,119 @@
 
 ---
 
+## 2026-05-15 (третья итерация)
+
+### fix(ai-arena): net PnL теперь не «врёт нулём» при Bybit-latency + retry/pending
+`(коммит ниже)`
+
+**Симптом (репорт пользователя):**
+
+```
+🔴 POSITION CLOSED
+CLOSE id=40 Buy BTCUSDT exit=$80799.5 pnl=$+0.00 (net of fees)
+```
+
+«бот думал что закрыл в нольно, но он не учитывает комиссии при своих
+расчётах» — на Bybit реальная разница цен была ~$3.18, плюс комиссия,
+итого net PnL должен быть отрицательный, а не `$+0.00`.
+
+**Причина:** В `_resolve_net_close` (executor.py) делали ОДИН запрос
+к `client.get_closed_pnl(...)` сразу после executed close-ордера.
+Bybit `/v5/position/closed-pnl` имеет наблюдаемую latency 1-10 секунд
+(биржа не успевает агрегировать запись на момент нашего read'а).
+При промахе fallback возвращал `(ticker.last_price, 0.0)` — и в БД +
+Telegram уезжал лживый `pnl=$+0.00 (net of fees)`. Это нарушало
+fundamental contract правила `ai-arena-sources.mdc`: «PnL и
+exit_price — net через `closedPnl`, никогда не gross-заглушка».
+
+**Fix (4 файла):**
+
+1. **`src/ai_arena/trading/executor.py` — `_resolve_net_close`:**
+ - Добавлен retry-loop: 4 попытки с backoff `(1s, 2s, 3s, 5s)` —
+   итого ≤ 11 секунд ожидания. При отсутствии матча — `time.sleep(backoff)`,
+   следующая попытка с обновлённым `end_time_ms`.
+ - Возвращаемый тип сменился с `tuple[float, float]` на
+   `tuple[float, float | None]`. **`None` сигнализирует «PnL ещё
+   не знаем»** — caller сохранит NULL, reconcile добьёт.
+ - В match-фильтр добавлен `r.updated_time_ms >= opened_ts_ms` —
+   защита от старых записей при race с другими символами.
+
+2. **`src/ai_arena/state/db.py`:**
+ - `close_position(realized_pnl_usd: float | None)` теперь принимает
+   `None` и пропускает обновление `daily_pnl` (агрегат добьётся
+   позже).
+ - Новый метод `get_pending_pnl_positions()` — закрытые позиции
+   с `realized_pnl_usd IS NULL`.
+ - Новый метод `finalize_pending_pnl(position_id, exit_price, pnl)` —
+   проставляет PnL + **впервые** обновляет `daily_pnl` (с защитой от
+   двойного учёта: `ValueError` если PnL уже не NULL).
+
+3. **`src/ai_arena/trading/reconcile.py` (НОВЫЙ модуль):**
+ - Логика `reconcile_closed_positions` (SL/TP/manual закрытия на
+   бирже) и `reconcile_pending_pnl` (добивание PnL=NULL) вынесена
+   из `app/main.py`.
+ - Цель выноса: unit-тесты reconcile-логики не должны тащить
+   `llm.client` (anthropic SDK), который не нужен в test env.
+ - `reconcile_pending_pnl` использует укороченный retry
+   (`max_retries=2`, backoff `(1s, 2s)`) — на этом цикле от закрытия
+   уже прошло ≥`poll_interval_sec` (180s по умолчанию), запись
+   гарантированно зарегистрирована.
+
+4. **`src/ai_arena/app/main.py`:**
+ - Старые `_reconcile_closed_positions` + `_reconcile_pending_pnl`
+   удалены, импорт из нового `trading.reconcile`.
+ - Цикл вызывает обе reconcile-функции подряд (closed → pending).
+
+**UX-фикс (Telegram):** при `pnl=None` сообщение теперь:
+
+```
+CLOSE id=40 Buy BTCUSDT exit=$80799.5 pnl=pending… (биржа ещё не зарегистрировала, добьём на след. цикле)
+```
+
+И через ≤ 3 минуты (следующий цикл):
+
+```
+PnL добит для id=40 Buy BTCUSDT: $-3.42 (net of fees)
+```
+
+Пользователь больше не получает враньё `$+0.00`.
+
+**Тесты (4 новых, всего 249 ai_arena, 801 в репо):**
+
+- `test_close_defers_when_closed_pnl_unavailable` — обновлён под новую
+  семантику (PnL=NULL вместо 0, summary содержит «pending»).
+  `time.sleep` замокан → 4 retry проходят мгновенно.
+- `test_close_resolves_on_retry_when_bybit_lags` (НОВЫЙ) — 1я попытка
+  возвращает `[]`, 2я — содержит запись. Проверяется: PnL подтянут,
+  `result.summary` содержит реальное число, `time.sleep(1.0)` вызван
+  ровно один раз, не «pending».
+- `TestReconcilePendingPnl.test_pending_position_resolved_on_next_cycle`
+  (НОВЫЙ) — `reconcile_pending_pnl` подбирает PnL и обновляет
+  `daily_pnl` (sum=2.45, n_trades=1, n_wins=1).
+- `TestReconcilePendingPnl.test_finalize_pending_pnl_does_not_double_count`
+  (НОВЫЙ) — попытка вызвать `finalize_pending_pnl` для уже
+  закрытой с PnL!=NULL позиции → `ValueError`, `daily_pnl` не
+  задвоился.
+- `TestReconcilePendingPnl.test_pending_position_remains_when_bybit_still_silent`
+  (НОВЫЙ) — если Bybit на reconcile-цикле всё ещё молчит, позиция
+  остаётся в pending для следующей попытки.
+
+**Compliance с правилом `ai-arena-sources.mdc`:**
+
+- ✅ PnL остаётся **net** (closedPnl от Bybit), не gross.
+- ✅ Никаких локальных `(exit-entry)*qty` расчётов.
+- ✅ Новая семантика `None` → «не знаем», в БД честный NULL.
+- ✅ Это «forced infrastructural adaptation» (Bybit API latency vs
+  Hyperliquid synchronous response в Nof1) — **изменения только в
+  механизме получения** PnL, не в его смысле / источнике.
+
+**Файлы:** `src/ai_arena/trading/executor.py`,
+`src/ai_arena/state/db.py`, `src/ai_arena/trading/reconcile.py` (new),
+`src/ai_arena/app/main.py`, `tests/test_ai_arena_executor_logic.py`,
+`BUILDLOG_AI_ARENA.md`, `.cursor/rules/ai-arena-sources.mdc`.
+
+---
+
 ## 2026-05-15 (вторая итерация)
 
 ### fix(ai-arena): 5 пропущенных отклонений в SYSTEM_PROMPT — финальный 1-в-1

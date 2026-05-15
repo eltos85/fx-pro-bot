@@ -424,10 +424,17 @@ class TestNetPnLFromClosedPnlEndpoint:
             ).fetchone()
         assert row["realized_pnl_usd"] == pytest.approx(4.5, abs=0.001)
 
-    def test_close_defers_when_closed_pnl_unavailable(self, store):
-        # Если get_closed_pnl=None (API outage) — не вычислять gross,
-        # а вернуть PnL=0 + ticker fallback. PnL «доберётся» через
-        # _reconcile_closed_positions на следующем цикле.
+    def test_close_defers_when_closed_pnl_unavailable(
+        self, store, monkeypatch
+    ):
+        # Если get_closed_pnl=None (API outage) после всех retry —
+        # PnL=NULL в БД. _reconcile_pending_pnl на следующем цикле
+        # подберёт. Это лучше чем `0.0`: пользователь не получает
+        # враньё «pnl=$0.00 (net of fees)» в Telegram.
+        # monkeypatch time.sleep чтобы 4×retry прошли мгновенно.
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
         self._open_in_db(store, entry_price=100000.0, qty=0.005)
 
         class _NoneCpnl(FakeBybitClient):
@@ -438,12 +445,182 @@ class TestNetPnLFromClosedPnlEndpoint:
         bybit = _NoneCpnl()
         result = _apply_close(_close_action("BTC"), client=bybit, store=store)
         assert result.executed
+        assert "pending" in result.summary  # UX: «pnl=pending…», не $0.00
         with store._conn() as c:
             row = c.execute(
                 "SELECT realized_pnl_usd FROM positions WHERE closed_at IS NOT NULL"
             ).fetchone()
-        # PnL = 0 (явный indicator «считать без биржи мы не имеем права»)
-        assert row["realized_pnl_usd"] == 0.0
+        # PnL = NULL (биржа не отдала после 4 retry, добьём в reconcile)
+        assert row["realized_pnl_usd"] is None
+        # daily_pnl не должен быть обновлён (PnL ещё неизвестен)
+        with store._conn() as c:
+            agg = c.execute(
+                "SELECT COALESCE(SUM(realized_pnl_usd), 0) AS s, "
+                "COALESCE(SUM(n_trades), 0) AS n FROM daily_pnl"
+            ).fetchone()
+        assert agg["s"] == 0.0 and agg["n"] == 0
+        # Bybit действительно вызван 4 раза (max_retries)
+        cpnl_calls = [c for c in bybit.calls if c.method == "get_closed_pnl"]
+        assert len(cpnl_calls) == 4
+
+    def test_close_resolves_on_retry_when_bybit_lags(
+        self, store, monkeypatch
+    ):
+        # Real-world сценарий: Bybit `closed-pnl` появляется через
+        # ~3-5 секунд после executed close. Первая попытка возвращает
+        # пустой list (ещё нет записи), вторая — уже содержит запись.
+        # Бот должен подобрать PnL без отложки.
+        import ai_arena.trading.executor as ex
+        sleeps: list[float] = []
+        monkeypatch.setattr(ex.time, "sleep", lambda s: sleeps.append(s))
+
+        self._open_in_db(store, entry_price=100000.0, qty=0.005)
+
+        class _LaggyCpnl(FakeBybitClient):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._calls_seen = 0
+
+            def get_closed_pnl(self, **kw):
+                self._record("get_closed_pnl", **kw)
+                self._calls_seen += 1
+                if self._calls_seen == 1:
+                    return []  # ещё не зарегистрирован
+                return [
+                    ClosedPnlRecord(
+                        symbol="BTCUSDT", side="Sell", qty=0.005,
+                        avg_entry_price=100000.0, avg_exit_price=99500.0,
+                        closed_pnl=2.45,  # net (gross 2.50 − fees 0.05)
+                        open_fee=0.025, close_fee=0.025, leverage=3.0,
+                        exec_type="Trade", order_id="x",
+                        created_time_ms=0,
+                        updated_time_ms=int(__import__("time").time() * 1000),
+                    ),
+                ]
+
+        bybit = _LaggyCpnl()
+        result = _apply_close(_close_action("BTC"), client=bybit, store=store)
+        assert result.executed
+        assert "pending" not in result.summary
+        assert "2.45" in result.summary or "+2.45" in result.summary
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, exit_price FROM positions "
+                "WHERE closed_at IS NOT NULL"
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(2.45, abs=0.001)
+        assert row["exit_price"] == pytest.approx(99500.0, abs=0.001)
+        cpnl_calls = [c for c in bybit.calls if c.method == "get_closed_pnl"]
+        assert len(cpnl_calls) == 2  # 1 пустая + 1 с матчем
+        assert sleeps == [1.0]  # один backoff между attempt 1 и 2
+
+
+# ─── _reconcile_pending_pnl: добивает NULL → net PnL ────────────────────
+
+
+class TestReconcilePendingPnl:
+    """`_reconcile_pending_pnl` гарантирует что закрытые позиции с
+    PnL=NULL (биржа не успела отдать запись за 4 retry) подберут
+    PnL на следующем цикле + daily_pnl агрегат обновится РОВНО ОДИН
+    РАЗ (двойной learn запрещён)."""
+
+    def _open_and_close_with_null_pnl(self, store, *, qty: float = 0.005):
+        store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=qty,
+            entry_price=100000.0, sl_price=None, tp_price=None,
+            leverage=3, order_link_id="t-link",
+            llm_justification="test", confidence=0.7,
+            invalidation_condition=None, risk_usd=None,
+        )
+        pos = store.get_open_positions()[0]
+        store.close_position(
+            pos.id, exit_price=99500.0, realized_pnl_usd=None,
+            close_reason="exchange_closed",
+        )
+        return pos
+
+    def test_pending_position_resolved_on_next_cycle(
+        self, store, monkeypatch
+    ):
+        from ai_arena.trading.reconcile import reconcile_pending_pnl
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
+        pos = self._open_and_close_with_null_pnl(store)
+        assert len(store.get_pending_pnl_positions()) == 1
+
+        bybit = FakeBybitClient(
+            closed_pnl_records=[
+                ClosedPnlRecord(
+                    symbol="BTCUSDT", side="Sell", qty=0.005,
+                    avg_entry_price=100000.0, avg_exit_price=99500.0,
+                    closed_pnl=2.45, open_fee=0.025, close_fee=0.025,
+                    leverage=3.0, exec_type="Trade", order_id="x",
+                    created_time_ms=0,
+                    updated_time_ms=int(__import__("time").time() * 1000),
+                ),
+            ],
+        )
+        reconcile_pending_pnl(bybit, store, tg=None)
+
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, exit_price FROM positions WHERE id = ?",
+                (pos.id,),
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(2.45, abs=0.001)
+        assert row["exit_price"] == pytest.approx(99500.0, abs=0.001)
+        assert store.get_pending_pnl_positions() == []
+        # daily_pnl: добавлено 1 trade с pnl=2.45 (1 win)
+        with store._conn() as c:
+            agg = c.execute(
+                "SELECT SUM(realized_pnl_usd) AS s, SUM(n_trades) AS n, "
+                "SUM(n_wins) AS w FROM daily_pnl"
+            ).fetchone()
+        assert agg["s"] == pytest.approx(2.45, abs=0.001)
+        assert agg["n"] == 1
+        assert agg["w"] == 1
+
+    def test_finalize_pending_pnl_does_not_double_count(self, store):
+        # Если позиция уже была закрыта с PnL!=NULL (через
+        # reconcile_closed_positions), finalize_pending_pnl должна
+        # отказаться, чтобы не задвоить daily_pnl.
+        store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.005,
+            entry_price=100000.0, sl_price=None, tp_price=None,
+            leverage=3, order_link_id="t-link2",
+            llm_justification="test", confidence=0.7,
+            invalidation_condition=None, risk_usd=None,
+        )
+        pos = store.get_open_positions()[0]
+        store.close_position(
+            pos.id, exit_price=99500.0, realized_pnl_usd=2.45,
+            close_reason="exchange_closed",
+        )
+        # daily_pnl уже содержит 1 trade
+        with pytest.raises(ValueError, match="already has PnL"):
+            store.finalize_pending_pnl(
+                pos.id, exit_price=99500.0, realized_pnl_usd=2.45,
+            )
+        # Агрегат не задвоился
+        with store._conn() as c:
+            agg = c.execute(
+                "SELECT SUM(n_trades) AS n FROM daily_pnl"
+            ).fetchone()
+        assert agg["n"] == 1
+
+    def test_pending_position_remains_when_bybit_still_silent(
+        self, store, monkeypatch
+    ):
+        from ai_arena.trading.reconcile import reconcile_pending_pnl
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
+        self._open_and_close_with_null_pnl(store)
+        bybit = FakeBybitClient(closed_pnl_records=[])  # пусто
+        reconcile_pending_pnl(bybit, store, tg=None)
+        # Позиция осталась в pending (PnL всё ещё NULL)
+        assert len(store.get_pending_pnl_positions()) == 1
 
 
 # ─── No pyramiding (gist L108) ──────────────────────────────────────────

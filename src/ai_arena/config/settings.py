@@ -93,24 +93,32 @@ class AiArenaSettings(BaseSettings):
         default=180, validation_alias="AI_ARENA_POLL_INTERVAL_SEC"
     )
 
-    # Виртуальный капитал — номинальная метка для SYSTEM_PROMPT
-    # ("Starting Capital: $X"). 1-в-1 с Nof1 каноном $10,000 USD.
-    # См. правило ai-arena-sources.mdc § «Что МОЖНО менять» — virtual
-    # capital должен совпадать с scaled equity (иначе LLM решит что
-    # просел в 5-10× и будет в панике).
+    # Виртуальный капитал — sandbox-обманка для LLM. Единственное
+    # обоснованное отклонение от Nof1 ($10k у source). Bybit demo
+    # выдаёт фиксированный $50k, мы хотим обкатывать на $1k → LLM
+    # видит $1000 «начального капитала», а **реальный PnL в $$
+    # прибавляется/вычитается напрямую** (offset-based, не divisor):
+    #
+    #   scaled_equity = virtual_capital + (real_equity - real_at_start)
+    #
+    # Quantities в sandbox-вселенной = quantities на Bybit (исполняются
+    # как есть). Real PnL не масштабируется — это уже малая абсолютная
+    # сумма, и она 1-в-1 отражается в sandbox.
+    #
+    # Например: real_at_start=$50000, real_now=$50007.32
+    #   → scaled_equity = $1000 + $7.32 = $1007.32
     virtual_capital_usd: float = Field(
-        default=10000.0, validation_alias="AI_ARENA_VIRTUAL_CAPITAL"
+        default=1000.0, validation_alias="AI_ARENA_VIRTUAL_CAPITAL"
     )
 
-    # Делитель реального Bybit equity для масштабирования вниз перед
-    # передачей в LLM-промпт. На demo-аккаунте Bybit стартовый баланс
-    # ≈ $50k, делитель 5 → LLM видит ≈$10k (1-в-1 с Nof1 budget на
-    # Hyperliquid, см. gist L62: «Starting Capital: $10,000 USD»).
-    # Это единственное обоснованное отклонение от source — у Bybit
-    # demo фиксированный $50k, на Hyperliquid Nof1 даёт ровно $10k.
-    # Через scaling 1:5 LLM работает в $10k окне (= virtual_capital_usd).
+    # DEPRECATED. Раньше использовался для divisor-scaling
+    # (scaled = real / divisor), но это давало некорректную семантику
+    # PnL: реальный профит +$7.32 → виртуальный +$0.15. Сейчас
+    # используется offset-based формула с anchor `real_equity_at_start`
+    # (в kv_state). Поле оставлено для обратной совместимости с .env;
+    # значение игнорируется. Удалить после 2026-06.
     equity_scale_divisor: float = Field(
-        default=5.0, validation_alias="AI_ARENA_EQUITY_SCALE_DIVISOR"
+        default=1.0, validation_alias="AI_ARENA_EQUITY_SCALE_DIVISOR"
     )
 
     # Leverage cap — source говорит 1-20x (gist:

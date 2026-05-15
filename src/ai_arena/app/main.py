@@ -42,10 +42,10 @@ from ai_arena.trading.context import (
     format_open_positions_block,
     format_per_symbol_blocks,
 )
-from ai_arena.trading.executor import (
-    _resolve_net_close,
-    apply_action,
-    parse_action,
+from ai_arena.trading.executor import apply_action, parse_action
+from ai_arena.trading.reconcile import (
+    reconcile_closed_positions,
+    reconcile_pending_pnl,
 )
 
 log = logging.getLogger("ai_arena")
@@ -57,76 +57,6 @@ def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
     global _shutdown
     _shutdown = True
     log.info("Получен сигнал %d, завершаю...", signum)
-
-
-def _reconcile_closed_positions(
-    client: AiArenaBybitClient,
-    store: AiArenaStore,
-    tg: TelegramArenaBot | None,
-) -> None:
-    """Если SL/TP закрыли позицию на бирже — обновим БД + push.
-
-    Защита от false-close при transient outage биржи: если
-    `get_positions(symbol)` возвращает None — пропускаем символ
-    целиком (не помечаем closed).
-
-    PnL и exit_price берутся из Bybit `get_closed_pnl` (net после
-    fees + funding) через ``_resolve_net_close`` — 1-в-1 с биржей.
-    Локальный `(exit-entry)*qty` запрещён (см. BUILDLOG 2026-05-15).
-    """
-    open_db = store.get_open_positions()
-    if not open_db:
-        return
-
-    api_positions_by_symbol: dict[str, list] = {}
-    failed_symbols: set[str] = set()
-    for sym in {p.symbol for p in open_db}:
-        positions = client.get_positions(symbol=sym)
-        if positions is None:
-            failed_symbols.add(sym)
-            log.warning(
-                "RECONCILE skipped for %s: get_positions=None (API outage)", sym
-            )
-            continue
-        api_positions_by_symbol[sym] = list(positions)
-
-    for db_pos in open_db:
-        if db_pos.symbol in failed_symbols:
-            continue
-        api_list = api_positions_by_symbol.get(db_pos.symbol, [])
-        still_open = any(
-            p.side == db_pos.side and abs(p.size - db_pos.qty) < 1e-6 for p in api_list
-        )
-        if still_open:
-            continue
-        exit_price, pnl = _resolve_net_close(
-            client=client,
-            symbol=db_pos.symbol,
-            opened_at_iso=db_pos.opened_at,
-            opened_side=db_pos.side,
-            qty=db_pos.qty,
-            fallback_entry=db_pos.entry_price,
-        )
-        if pnl == 0.0 and exit_price == db_pos.entry_price:
-            log.warning(
-                "RECONCILE deferred for id=%d %s %s: closed_pnl unavailable",
-                db_pos.id, db_pos.side, db_pos.symbol,
-            )
-            continue
-        store.close_position(
-            db_pos.id,
-            exit_price=exit_price,
-            realized_pnl_usd=pnl,
-            close_reason="exchange_closed (SL/TP/manual)",
-        )
-        msg = (
-            f"id={db_pos.id} {db_pos.side} {db_pos.symbol} qty={db_pos.qty}\n"
-            f"entry=${db_pos.entry_price:.6g} exit=${exit_price:.6g}\n"
-            f"PnL: ${pnl:+.2f} (net of fees)\nReason: exchange_closed"
-        )
-        log.info("RECONCILE closed: %s", msg.replace("\n", " | "))
-        if tg:
-            tg.notify_close(msg)
 
 
 def run() -> None:
@@ -148,8 +78,8 @@ def run() -> None:
         settings.leverage_max,
     )
     log.info(
-        "Equity scale divisor: %.1f (Bybit demo equity → LLM-видимый equity)",
-        settings.equity_scale_divisor,
+        "Equity model: offset-based (LLM видит $%.0f + реальный PnL с Bybit)",
+        settings.virtual_capital_usd,
     )
     log.info("Mode: %s", "LIVE" if settings.trading_enabled else "PAPER (decisions only)")
     log.info(
@@ -240,7 +170,8 @@ def _run_cycle(
         0, int((datetime.now(tz=UTC).timestamp() - started_ts) // 60)
     )
 
-    _reconcile_closed_positions(bybit, store, tg)
+    reconcile_closed_positions(bybit, store, tg)
+    reconcile_pending_pnl(bybit, store, tg)
 
     # Cumulative Sharpe с момента старта эксперимента (1-в-1 с Nof1
     # Season 1, который идёт cumulative с 17 окт 2025). nullable если
@@ -276,29 +207,33 @@ def _run_cycle(
         unrealized_by_symbol=unrealized,
     )
 
-    # Scaling Bybit equity вниз для LLM (demo $50k → /50 → $1000 sandbox).
-    # Делитель — `equity_scale_divisor` из settings (см. settings.py).
-    # Это единственное обоснованное отклонение от source: Hyperliquid
-    # позволяет дать модели $10k бюджет, Bybit demo выдаёт фиксированный
-    # $50k — масштабируем чтобы LLM работал в $1000 окне.
-    divisor = max(1.0, settings.equity_scale_divisor)
-    scaled_equity = ctx.real_equity_usd / divisor
-    scaled_cash = ctx.available_cash_usd / divisor
+    # Offset-based scaling (sandbox $1000 + реальный PnL):
+    #   scaled_equity = virtual_capital + (real_now - real_at_start)
+    #   scaled_cash   = real_avail - (real_at_start - virtual_capital)
+    #
+    # `real_at_start` — anchor реального Bybit equity на момент первого
+    # цикла, сохраняется в kv_state. Anchor НЕ пересчитывается рестартом
+    # контейнера (см. правило deploy-vps.mdc: ai_arena_data сохраняется).
+    #
+    # Семантика: quantities в LLM-вселенной = quantities на Bybit
+    # (исполняются как есть). Реальный PnL в $$ прибавляется к sandbox
+    # 1-в-1 (а не делится на divisor — это давало некорректное
+    # «+$0.15 за реальную +$7.32 прибыль»).
+    real_at_start = _get_or_init_real_anchor(store, ctx.real_equity_usd)
+    cumulative_real_pnl = ctx.real_equity_usd - real_at_start
+    scaled_equity = settings.virtual_capital_usd + cumulative_real_pnl
+    # cash на стороне Bybit за вычетом «скрытой» части real_at_start
+    # (которая не должна быть видна LLM как доступная). Если real_avail
+    # = real_equity (нет открытых), то scaled_cash = scaled_equity.
+    scaled_cash = ctx.available_cash_usd - (real_at_start - settings.virtual_capital_usd)
+    if scaled_cash < 0:
+        # Защита: когда позиции лочат больше чем sandbox-cash, обнуляем
+        # (LLM не должен видеть отрицательный cash — формат source).
+        scaled_cash = 0.0
 
-    # total_return_pct — % изменения equity от **самого первого**
-    # snapshot'а (с момента старта эксперимента), как `Current Total
-    # Return` у Nof1 Season 1. Раньше брали первый snapshot за 14 дней
-    # (rolling baseline) — это давало корректный return только первые
-    # 14 дней работы, после baseline начинал «скользить». Cumulative
-    # baseline — 1-в-1 с source. Формула инвариантна к equity scaling.
-    total_return_pct = 0.0
-    first_snapshot = store.get_first_equity_snapshot()
-    if first_snapshot:
-        baseline = float(first_snapshot["total_equity_usd"])
-        if baseline > 0:
-            total_return_pct = (
-                (ctx.real_equity_usd - baseline) / baseline * 100
-            )
+    # total_return_pct = % изменения sandbox-equity от virtual_capital
+    # (cumulative с момента старта, 1-в-1 с Nof1 Season 1).
+    total_return_pct = (cumulative_real_pnl / settings.virtual_capital_usd) * 100
 
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(
@@ -312,10 +247,14 @@ def _run_cycle(
     )
 
     log.info(
-        "LLM call: positions=%d real_equity=$%.2f scaled=$%.2f sharpe=%s minutes=%d",
+        "LLM call: positions=%d real=$%.2f anchor=$%.2f → sandbox=$%.2f "
+        "(PnL %+.2f, %+.2f%%) sharpe=%s minutes=%d",
         len(ctx.open_positions),
         ctx.real_equity_usd,
+        real_at_start,
         scaled_equity,
+        cumulative_real_pnl,
+        total_return_pct,
         f"{sharpe:.3f}" if sharpe is not None else "n/a",
         minutes_elapsed,
     )
@@ -344,7 +283,7 @@ def _run_cycle(
         log.error("LLM error: %s", resp.error)
         if tg:
             tg.notify_error("LLM", resp.error)
-        _save_equity_snapshot(store, ctx, cycle, sharpe, total_return_pct)
+        _save_equity_snapshot(store, scaled_equity=scaled_equity, scaled_cash=scaled_cash, cycle=cycle, sharpe=sharpe, total_return_pct=total_return_pct)
         return
 
     log.info(
@@ -374,7 +313,7 @@ def _run_cycle(
             cost_usd=resp.cost_usd,
         )
         log.error("Parse error: %s", parsed)
-        _save_equity_snapshot(store, ctx, cycle, sharpe, total_return_pct)
+        _save_equity_snapshot(store, scaled_equity=scaled_equity, scaled_cash=scaled_cash, cycle=cycle, sharpe=sharpe, total_return_pct=total_return_pct)
         return
 
     apply = apply_action(
@@ -411,27 +350,63 @@ def _run_cycle(
             elif parsed.signal == "close":
                 tg.notify_close(apply.summary)
 
-    _save_equity_snapshot(store, ctx, cycle, sharpe, total_return_pct)
+    _save_equity_snapshot(store, scaled_equity=scaled_equity, scaled_cash=scaled_cash, cycle=cycle, sharpe=sharpe, total_return_pct=total_return_pct)
 
 
 def _save_equity_snapshot(
     store: AiArenaStore,
-    ctx,
+    *,
+    scaled_equity: float,
+    scaled_cash: float,
     cycle: int,
     sharpe: float | None,
     total_return_pct: float,
 ) -> None:
-    """Шаг 13 — equity snapshot для следующего rolling Sharpe."""
+    """Шаг 13 — equity snapshot **scaled-значений** для cumulative Sharpe.
+
+    Сохраняем sandbox-equity (то что LLM видит), не real Bybit equity.
+    Тогда Sharpe и total_return считаются в LLM-вселенной — согласовано
+    с тем что модель наблюдает в каждом prompt'е.
+    """
     try:
         store.add_equity_snapshot(
-            total_equity_usd=ctx.real_equity_usd,
-            available_cash_usd=ctx.available_cash_usd,
+            total_equity_usd=scaled_equity,
+            available_cash_usd=scaled_cash,
             total_return_pct=total_return_pct,
             sharpe_rolling_14d=sharpe,
             cycle_no=cycle,
         )
     except Exception:
         log.exception("equity snapshot save failed (cycle %d)", cycle)
+
+
+_REAL_ANCHOR_KEY = "real_equity_at_start_usd"
+
+
+def _get_or_init_real_anchor(store: AiArenaStore, current_real_equity: float) -> float:
+    """Возвращает anchor `real_equity_at_start` из kv_state.
+
+    При первом цикле (anchor отсутствует) — сохраняет current_real_equity
+    как anchor. Дальше anchor неизменен (не сбрасывается рестартом
+    контейнера, т.к. ai_arena_data volume переживает recreate).
+
+    Это **единственная инфраструктурная адаптация** в формуле equity:
+    у source (Hyperliquid) изначальный capital задан декларативно
+    ($10k бюджет на model), у нас он анкерится автоматически на
+    первом цикле — иначе divisor пришлось бы захардкодить.
+    """
+    raw = store.kv_get(_REAL_ANCHOR_KEY)
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    store.kv_set(_REAL_ANCHOR_KEY, str(current_real_equity))
+    log.info(
+        "Real-equity anchor зафиксирован: $%.2f (на этой точке LLM видит "
+        "Starting Capital в SYSTEM_PROMPT)", current_real_equity,
+    )
+    return current_real_equity
 
 
 if __name__ == "__main__":

@@ -264,11 +264,10 @@ def _apply_close(
         err_msg = (resp or {}).get("error", "close_position returned empty")
         return ApplyResult(executed=False, summary="", error=f"close_failed: {err_msg}")
 
-    # Берём net PnL и реальный avgExitPrice из Bybit `get_closed_pnl`.
+    # Берём net PnL и реальный avgExitPrice из Bybit `get_closed_pnl`
+    # (с retry — у биржи ~1-10s latency на регистрацию записи).
     # Локальный `(exit-entry)*qty` запрещён — игнорирует maker/taker
-    # fees и расходится с биржей (см. BUILDLOG 2026-05-15 «net PnL
-    # alignment»). Bybit endpoint `/v5/position/closed-pnl` отдаёт
-    # `closedPnl` — уже **после** fees + funding, 1-в-1 с UI Bybit.
+    # fees и расходится с биржей (см. BUILDLOG 2026-05-15).
     exit_price, pnl = _resolve_net_close(
         client=client,
         symbol=pos.symbol,
@@ -277,19 +276,27 @@ def _apply_close(
         qty=pos.qty,
         fallback_entry=pos.entry_price,
     )
+    # `pnl is None` → biрже нужно ещё время; пишем NULL и добиваем
+    # на следующем цикле через _reconcile_pending_pnl. Так пользователь
+    # не получает враньё `pnl=$0.00` в Telegram.
     store.close_position(
         pos.id,
         exit_price=exit_price,
-        realized_pnl_usd=pnl,
+        realized_pnl_usd=pnl,  # None допустимо
         close_reason=action.raw.get("justification", "llm_close")[:200],
     )
-    return ApplyResult(
-        executed=True,
-        summary=(
+    if pnl is None:
+        summary = (
+            f"CLOSE id={pos.id} {pos.side} {pos.symbol} "
+            f"exit=${exit_price:.6g} pnl=pending… (биржа ещё не зарегистрировала, "
+            f"добьём на след. цикле)"
+        )
+    else:
+        summary = (
             f"CLOSE id={pos.id} {pos.side} {pos.symbol} "
             f"exit=${exit_price:.6g} pnl=${pnl:+.2f} (net of fees)"
-        ),
-    )
+        )
+    return ApplyResult(executed=True, summary=summary)
 
 
 def _resolve_net_close(
@@ -300,52 +307,66 @@ def _resolve_net_close(
     opened_side: str,
     qty: float,
     fallback_entry: float,
-) -> tuple[float, float]:
+    max_retries: int = 4,
+    retry_backoff_sec: tuple[float, ...] = (1.0, 2.0, 3.0, 5.0),
+) -> tuple[float, float | None]:
     """Возвращает ``(avg_exit_price, net_pnl)`` из Bybit `get_closed_pnl`.
 
-    Параметры матчинга — symbol + сторона ЗАКРЫВАЮЩЕГО ордера
-    (`opposite(opened_side)`) + qty + временное окно от ``opened_at_iso``
-    до сейчас. Bybit окно ≤ 7 дней — наши позиции живут много
-    меньше, поэтому матч однозначен.
+    Bybit регистрирует запись в `/v5/position/closed-pnl` с задержкой
+    ~1-10 секунд после executed close-ордера (наблюдено эмпирически
+    2026-05-15). Поэтому делаем `max_retries` попыток с backoff
+    `retry_backoff_sec` (всего ≤ 11 секунд ожидания) перед сдачей.
 
-    Если запрос упал (None) или ничего не нашлось — fallback на
-    `ticker.last_price` для exit и **0** для PnL (явно сигнализируем
-    что считать без биржи мы не имеем права; реконсиляция подтянет
-    PnL на следующем цикле). Это лучше чем gross-расчёт, который
-    считал «прибыль» из price-разницы и ломал /status.
+    Если по истечении всех попыток матч не найден — возвращаем
+    `(ticker.last_price, None)`. **None** сигнализирует «PnL ещё не
+    знаем»: caller (close_position) сохранит `None` в БД, а
+    `_reconcile_closed_positions` на следующем цикле подберёт net PnL
+    через тот же endpoint (там запись уже точно появится). Это лучше
+    чем `0.0`, который ломал /status и Telegram-уведомления о закрытии.
     """
     closing_side = "Sell" if opened_side == "Buy" else "Buy"
     try:
         opened_ts_ms = _iso_to_ms(opened_at_iso)
     except ValueError:
         opened_ts_ms = int(time.time() * 1000) - 7 * 24 * 60 * 60 * 1000
-    end_ms = int(time.time() * 1000) + 60 * 1000
 
-    records = client.get_closed_pnl(
-        symbol=symbol,
-        start_time_ms=opened_ts_ms,
-        end_time_ms=end_ms,
+    for attempt in range(max_retries):
+        end_ms = int(time.time() * 1000) + 60 * 1000
+        records = client.get_closed_pnl(
+            symbol=symbol, start_time_ms=opened_ts_ms, end_time_ms=end_ms,
+        )
+        if records is None:
+            log.warning(
+                "get_closed_pnl=None for %s (attempt %d/%d) — retry",
+                symbol, attempt + 1, max_retries,
+            )
+        else:
+            candidates = [
+                r for r in records
+                if r.symbol == symbol
+                and r.side == closing_side
+                and abs(r.qty - qty) <= max(qty * 1e-4, 1e-8)
+                and r.updated_time_ms >= opened_ts_ms
+            ]
+            if candidates:
+                rec = candidates[-1]  # самая поздняя по времени
+                if attempt > 0:
+                    log.info(
+                        "closed_pnl matched for %s on attempt %d/%d",
+                        symbol, attempt + 1, max_retries,
+                    )
+                return rec.avg_exit_price, rec.closed_pnl
+
+        if attempt < max_retries - 1:
+            wait = retry_backoff_sec[min(attempt, len(retry_backoff_sec) - 1)]
+            time.sleep(wait)
+
+    log.warning(
+        "no closed_pnl match for %s side=%s qty=%s after %d attempts — "
+        "defer net PnL to next cycle reconcile",
+        symbol, closing_side, qty, max_retries,
     )
-    if records is None:
-        log.warning(
-            "get_closed_pnl=None for %s — defer net PnL to next reconcile",
-            symbol,
-        )
-        return _ticker_fallback_exit(client, symbol, fallback_entry), 0.0
-    candidates = [
-        r for r in records
-        if r.symbol == symbol
-        and r.side == closing_side
-        and abs(r.qty - qty) <= max(qty * 1e-4, 1e-8)
-    ]
-    if not candidates:
-        log.warning(
-            "no closed_pnl match for %s side=%s qty=%s — defer to reconcile",
-            symbol, closing_side, qty,
-        )
-        return _ticker_fallback_exit(client, symbol, fallback_entry), 0.0
-    rec = candidates[-1]  # самая последняя — ближе к моменту нашего close
-    return rec.avg_exit_price, rec.closed_pnl
+    return _ticker_fallback_exit(client, symbol, fallback_entry), None
 
 
 def _ticker_fallback_exit(

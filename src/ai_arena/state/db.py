@@ -253,15 +253,20 @@ class AiArenaStore:
         position_id: int,
         *,
         exit_price: float,
-        realized_pnl_usd: float,
+        realized_pnl_usd: float | None,
         close_reason: str,
     ) -> None:
         """Закрывает позицию + обновляет daily_pnl агрегат.
 
-        ВАЖНО: ``realized_pnl_usd`` должен быть **net** (после fees +
-        funding), идентичный Bybit `closedPnl`. Локальный gross-расчёт
-        `(exit-entry)*qty` запрещён — расходится с биржей и ломает
-        Sharpe + /status (см. BUILDLOG 2026-05-15 «net PnL alignment»).
+        ``realized_pnl_usd`` — **net** (после fees + funding), 1-в-1
+        с Bybit `closedPnl`. Локальный gross-расчёт `(exit-entry)*qty`
+        запрещён (BUILDLOG 2026-05-15 «net PnL alignment»).
+
+        ``None`` допустимо: биржа ещё не зарегистрировала запись в
+        `/v5/position/closed-pnl` (наблюдена latency 1-10s). Тогда
+        позиция помечается closed без обновления daily_pnl —
+        `update_position_realized` подберёт PnL на следующем цикле
+        через `_reconcile_pending_pnl`.
         """
         with self._conn() as c:
             c.execute(
@@ -279,6 +284,8 @@ class AiArenaStore:
                     position_id,
                 ),
             )
+            if realized_pnl_usd is None:
+                return  # daily_pnl будет обновлён через update_position_realized
             today = date.today().isoformat()
             won = 1 if realized_pnl_usd > 0 else 0
             c.execute(
@@ -292,6 +299,68 @@ class AiArenaStore:
                 """,
                 (today, realized_pnl_usd, won),
             )
+
+    def get_pending_pnl_positions(self) -> list[ArenaPosition]:
+        """Закрытые позиции с ещё не подтянутым net PnL (NULL).
+
+        Используется ``_reconcile_pending_pnl`` в main.py — на каждом
+        цикле проходим по таким записям и пытаемся добить PnL через
+        Bybit `get_closed_pnl` (там запись уже точно появится через
+        несколько секунд после close).
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM positions "
+                "WHERE closed_at IS NOT NULL AND realized_pnl_usd IS NULL "
+                "ORDER BY closed_at"
+            ).fetchall()
+        return [ArenaPosition(**dict(r)) for r in rows]
+
+    def finalize_pending_pnl(
+        self,
+        position_id: int,
+        *,
+        exit_price: float,
+        realized_pnl_usd: float,
+    ) -> None:
+        """Подтягивает net PnL для позиции, закрытой с PnL=NULL.
+
+        Проставляет `realized_pnl_usd` + `exit_price` и **впервые**
+        обновляет `daily_pnl` агрегат на эту сделку (n_trades+=1,
+        n_wins+=won, sum+=pnl). Использовать ТОЛЬКО для позиций с
+        текущим pnl=NULL — иначе сделка попадёт в daily_pnl дважды
+        (для overwrite используй `update_position_realized`).
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT closed_at, realized_pnl_usd FROM positions WHERE id = ?",
+                (position_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"position id={position_id} not found")
+            if row["realized_pnl_usd"] is not None:
+                raise ValueError(
+                    f"position id={position_id} already has PnL — "
+                    "use update_position_realized for overwrite"
+                )
+            c.execute(
+                "UPDATE positions SET exit_price = ?, realized_pnl_usd = ? WHERE id = ?",
+                (exit_price, realized_pnl_usd, position_id),
+            )
+            day = (row["closed_at"] or "")[:10]
+            if day:
+                won = 1 if realized_pnl_usd > 0 else 0
+                c.execute(
+                    """
+                    INSERT INTO daily_pnl (day, realized_pnl_usd, n_trades, n_wins)
+                    VALUES (?, ?, 1, ?)
+                    ON CONFLICT(day) DO UPDATE SET
+                        realized_pnl_usd = realized_pnl_usd + excluded.realized_pnl_usd,
+                        n_trades = n_trades + 1,
+                        n_wins = n_wins + excluded.n_wins
+                    """,
+                    (day, realized_pnl_usd, won),
+                )
 
     def update_position_realized(
         self,

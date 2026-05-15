@@ -259,13 +259,16 @@ services:
       # + gist nof1-prompt.md). Любые правки — только из этих двух
       # источников + лог в BUILDLOG_AI_ARENA.md.
       AI_ARENA_POLL_INTERVAL_SEC: ${AI_ARENA_POLL_INTERVAL_SEC:-180}
-      # 1-в-1 с Nof1 (gist L62 «Starting Capital: $10,000 USD»). Меняй
-      # ВМЕСТЕ с EQUITY_SCALE_DIVISOR — иначе модель увидит расхождение
-      # «start $10k, current $X» и решит что просела (паника-режим).
-      AI_ARENA_VIRTUAL_CAPITAL: ${AI_ARENA_VIRTUAL_CAPITAL:-10000}
-      # Bybit demo стартует с ≈$50k. Делим на divisor=5 → LLM видит ≈$10k
-      # (= virtual_capital, 1-в-1 с Nof1 budget на Hyperliquid).
-      AI_ARENA_EQUITY_SCALE_DIVISOR: ${AI_ARENA_EQUITY_SCALE_DIVISOR:-5}
+      # Sandbox capital для LLM. ЕДИНСТВЕННОЕ обоснованное отклонение
+      # от Nof1 ($10k у source). У нас бот видит $1000 «начального
+      # капитала», и реальный Bybit PnL прибавляется/вычитается 1-в-1
+      # (offset-based, а не divisor — см. settings.py). Например:
+      # реальный +$7.32 → sandbox $1007.32, а не $1000.15.
+      AI_ARENA_VIRTUAL_CAPITAL: ${AI_ARENA_VIRTUAL_CAPITAL:-1000}
+      # DEPRECATED. Старый divisor-scaling больше не используется.
+      # Anchor real_equity_at_start хранится в kv_state (БД). Удалить
+      # после 2026-06.
+      AI_ARENA_EQUITY_SCALE_DIVISOR: ${AI_ARENA_EQUITY_SCALE_DIVISOR:-1}
       # Asset Universe 1-в-1 c Nof1 (gist L62): BTC, ETH, SOL, BNB, DOGE, XRP.
       # Порядок (DOGE перед XRP) обязателен — он попадает в SYSTEM_PROMPT
       # и в JSON output schema. Тикеры с суффиксом USDT — Bybit perp naming.
