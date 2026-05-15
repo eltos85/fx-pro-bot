@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,6 +74,8 @@ class FakeBybitClient(AiArenaBybitClient):
         closed_pnl_records: list[ClosedPnlRecord] | None = None,
         place_order_ok: bool = True,
         get_positions_response: list[Position] | None = None,
+        wallet_balance_usdt: float | None = None,
+        wallet_balance_sequence: list[float | None] | None = None,
     ):
         self.calls: list[_Call] = []
         self._ticker_price = ticker_price
@@ -88,6 +91,11 @@ class FakeBybitClient(AiArenaBybitClient):
         self._closed_pnl_records = closed_pnl_records or []
         self._place_order_ok = place_order_ok
         self._get_positions_response = get_positions_response
+        # `wallet_balance_sequence` — для сценариев [before_close, after_close]
+        # с разными значениями (тестируем balance-delta fallback).
+        # `wallet_balance_usdt` — статичное значение для каждого вызова.
+        self._wallet_balance_usdt = wallet_balance_usdt
+        self._wallet_balance_sequence = list(wallet_balance_sequence or [])
 
     def _record(self, method: str, *args, **kwargs):
         self.calls.append(_Call(method=method, args=args, kwargs=kwargs))
@@ -152,6 +160,12 @@ class FakeBybitClient(AiArenaBybitClient):
             limit=limit,
         )
         return list(self._closed_pnl_records)
+
+    def get_wallet_balance_usdt(self) -> float | None:
+        self._record("get_wallet_balance_usdt")
+        if self._wallet_balance_sequence:
+            return self._wallet_balance_sequence.pop(0)
+        return self._wallet_balance_usdt
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -424,25 +438,30 @@ class TestNetPnLFromClosedPnlEndpoint:
             ).fetchone()
         assert row["realized_pnl_usd"] == pytest.approx(4.5, abs=0.001)
 
-    def test_close_defers_when_closed_pnl_unavailable(
+    def test_close_defers_when_closed_pnl_and_balance_both_unavailable(
         self, store, monkeypatch
     ):
-        # Если get_closed_pnl=None (API outage) после всех retry —
-        # PnL=NULL в БД. _reconcile_pending_pnl на следующем цикле
-        # подберёт. Это лучше чем `0.0`: пользователь не получает
-        # враньё «pnl=$0.00 (net of fees)» в Telegram.
-        # monkeypatch time.sleep чтобы 4×retry прошли мгновенно.
+        # Если get_closed_pnl=None (API outage) после всех retry И
+        # wallet balance тоже недоступен → PnL=NULL в БД,
+        # `reconcile_pending_pnl` на следующем цикле подберёт.
+        # Это лучше чем `0.0`: пользователь не получает враньё
+        # «pnl=$0.00 (net of fees)» в Telegram.
+        # monkeypatch time.sleep чтобы retry прошли мгновенно.
         import ai_arena.trading.executor as ex
         monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
 
         self._open_in_db(store, entry_price=100000.0, qty=0.005)
 
-        class _NoneCpnl(FakeBybitClient):
+        class _AllNone(FakeBybitClient):
             def get_closed_pnl(self, **kw):
                 self._record("get_closed_pnl", **kw)
                 return None
 
-        bybit = _NoneCpnl()
+            def get_wallet_balance_usdt(self):
+                self._record("get_wallet_balance_usdt")
+                return None  # тоже упал
+
+        bybit = _AllNone()
         result = _apply_close(_close_action("BTC"), client=bybit, store=store)
         assert result.executed
         assert "pending" in result.summary  # UX: «pnl=pending…», не $0.00
@@ -450,7 +469,7 @@ class TestNetPnLFromClosedPnlEndpoint:
             row = c.execute(
                 "SELECT realized_pnl_usd FROM positions WHERE closed_at IS NOT NULL"
             ).fetchone()
-        # PnL = NULL (биржа не отдала после 4 retry, добьём в reconcile)
+        # PnL = NULL (оба пути failed: closed-pnl + wallet-delta)
         assert row["realized_pnl_usd"] is None
         # daily_pnl не должен быть обновлён (PnL ещё неизвестен)
         with store._conn() as c:
@@ -459,9 +478,13 @@ class TestNetPnLFromClosedPnlEndpoint:
                 "COALESCE(SUM(n_trades), 0) AS n FROM daily_pnl"
             ).fetchone()
         assert agg["s"] == 0.0 and agg["n"] == 0
-        # Bybit действительно вызван 4 раза (max_retries)
+        # Bybit действительно вызван 6 раз (max_retries для close-action)
         cpnl_calls = [c for c in bybit.calls if c.method == "get_closed_pnl"]
-        assert len(cpnl_calls) == 4
+        assert len(cpnl_calls) == 6
+        # wallet balance вызван 1 раз — для wallet_before. После — fallback
+        # пропущен (т.к. wallet_before=None, fallback не вызывается)
+        wb_calls = [c for c in bybit.calls if c.method == "get_wallet_balance_usdt"]
+        assert len(wb_calls) == 1
 
     def test_close_resolves_on_retry_when_bybit_lags(
         self, store, monkeypatch
@@ -513,6 +536,162 @@ class TestNetPnLFromClosedPnlEndpoint:
         cpnl_calls = [c for c in bybit.calls if c.method == "get_closed_pnl"]
         assert len(cpnl_calls) == 2  # 1 пустая + 1 с матчем
         assert sleeps == [1.0]  # один backoff между attempt 1 и 2
+
+
+# ─── Balance-delta fallback (когда closed-pnl молчит) ──────────────────
+
+
+class TestBalanceDeltaFallback:
+    """Когда Bybit closed-pnl недоступен, вычисляем net PnL как
+    ``walletBalance_after - walletBalance_before``.
+
+    Bybit V5 ``walletBalance`` (UNIFIED) обновляется мгновенно при
+    executed close (списывает realized PnL + fees сразу). Это
+    надёжный обход demo latency closed-pnl endpoint (BUILDLOG
+    2026-05-15).
+
+    Bybit docs: https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+    """
+
+    def _open_in_db(self, store, *, entry_price: float, qty: float):
+        store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=qty,
+            entry_price=entry_price, sl_price=None, tp_price=None,
+            leverage=3, order_link_id=f"open_{uuid.uuid4().hex[:6]}",
+            llm_justification="test", confidence=0.7,
+            invalidation_condition=None, risk_usd=None,
+        )
+
+    def test_close_uses_balance_delta_when_closed_pnl_silent(
+        self, store, monkeypatch
+    ):
+        # Сценарий: closed-pnl всегда отдаёт пусто (как demo Bybit
+        # 2026-05-15), но walletBalance работает. Бот должен:
+        # 1. Сохранить wallet_before=$50000 в positions перед close.
+        # 2. После 6 retry closed-pnl (всё пусто) → fallback к balance.
+        # 3. wallet_after = $49997.55 → delta = -$2.45 = net PnL.
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
+        self._open_in_db(store, entry_price=100000.0, qty=0.005)
+
+        bybit = FakeBybitClient(
+            closed_pnl_records=[],  # closed-pnl всегда пусто
+            # 1й вызов: wallet_before=50000 (перед close);
+            # 2й вызов: wallet_after=49997.55 (для дельты)
+            wallet_balance_sequence=[50000.00, 49997.55],
+        )
+        result = _apply_close(_close_action("BTC"), client=bybit, store=store)
+
+        assert result.executed
+        assert "pending" not in result.summary
+        assert "-2.45" in result.summary  # delta = 49997.55 - 50000 = -2.45
+
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, wallet_balance_before_close "
+                "FROM positions WHERE closed_at IS NOT NULL"
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(-2.45, abs=0.001)
+        assert row["wallet_balance_before_close"] == pytest.approx(50000.0)
+
+        # daily_pnl обновлён (lose, n_trades+=1, n_wins=0)
+        with store._conn() as c:
+            agg = c.execute(
+                "SELECT SUM(realized_pnl_usd) AS s, SUM(n_trades) AS n, "
+                "SUM(n_wins) AS w FROM daily_pnl"
+            ).fetchone()
+        assert agg["s"] == pytest.approx(-2.45, abs=0.001)
+        assert agg["n"] == 1
+        assert agg["w"] == 0  # лосс
+
+    def test_close_uses_balance_delta_for_winning_trade(
+        self, store, monkeypatch
+    ):
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
+        self._open_in_db(store, entry_price=100000.0, qty=0.005)
+        bybit = FakeBybitClient(
+            closed_pnl_records=[],
+            wallet_balance_sequence=[50000.0, 50012.50],
+        )
+        result = _apply_close(_close_action("BTC"), client=bybit, store=store)
+        assert result.executed
+        assert "+12.50" in result.summary
+
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd FROM positions WHERE closed_at IS NOT NULL"
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(12.50, abs=0.001)
+
+    def test_closed_pnl_takes_priority_over_balance_delta(
+        self, store, monkeypatch
+    ):
+        # Если closed-pnl ОТДАЛ запись — её используем, balance delta
+        # НЕ нужна (даже если wallet_before сохранён).
+        # Защищает от случая funding payment в окне между before/after.
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
+        self._open_in_db(store, entry_price=100000.0, qty=0.005)
+        bybit = FakeBybitClient(
+            closed_pnl_records=[
+                ClosedPnlRecord(
+                    symbol="BTCUSDT", side="Sell", qty=0.005,
+                    avg_entry_price=100000.0, avg_exit_price=99500.0,
+                    closed_pnl=-2.55,  # net of fees
+                    open_fee=0.025, close_fee=0.025, leverage=3.0,
+                    exec_type="Trade", order_id="x",
+                    created_time_ms=0,
+                    updated_time_ms=int(__import__("time").time() * 1000),
+                ),
+            ],
+            # Если бы балансовый fallback сработал, дал бы -10 (50000 → 49990).
+            # Закрытие должно использовать closed_pnl=-2.55, НЕ -10.
+            wallet_balance_sequence=[50000.0, 49990.0],
+        )
+        result = _apply_close(_close_action("BTC"), client=bybit, store=store)
+        assert result.executed
+        assert "-2.55" in result.summary
+
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd FROM positions WHERE closed_at IS NOT NULL"
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(-2.55, abs=0.001)
+
+        # closed-pnl вызван 1 раз (нашёл сразу), wallet_balance — только
+        # 1 раз (для wallet_before, дельта НЕ запрашивалась).
+        wb_calls = [c for c in bybit.calls if c.method == "get_wallet_balance_usdt"]
+        assert len(wb_calls) == 1
+
+    def test_wallet_before_saved_even_if_balance_check_fails(
+        self, store, monkeypatch
+    ):
+        # Если первый вызов get_wallet_balance_usdt дал None
+        # (API outage) — wallet_before не сохраняется, но close
+        # всё равно отправляется. Fallback просто не сработает —
+        # позиция останется pending для reconcile_pending_pnl.
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
+        self._open_in_db(store, entry_price=100000.0, qty=0.005)
+        bybit = FakeBybitClient(
+            closed_pnl_records=[],
+            wallet_balance_sequence=[None],  # упал
+        )
+        result = _apply_close(_close_action("BTC"), client=bybit, store=store)
+        assert result.executed
+        assert "pending" in result.summary
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, wallet_balance_before_close "
+                "FROM positions WHERE closed_at IS NOT NULL"
+            ).fetchone()
+        assert row["realized_pnl_usd"] is None
+        assert row["wallet_balance_before_close"] is None
 
 
 # ─── _reconcile_pending_pnl: добивает NULL → net PnL ────────────────────
@@ -612,6 +791,9 @@ class TestReconcilePendingPnl:
     def test_pending_position_remains_when_bybit_still_silent(
         self, store, monkeypatch
     ):
+        # closed-pnl=пусто И wallet_before=NULL (helper не сохраняет
+        # — позиция как exchange-closed) → fallback недоступен,
+        # позиция остаётся pending.
         from ai_arena.trading.reconcile import reconcile_pending_pnl
         import ai_arena.trading.executor as ex
         monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
@@ -621,6 +803,43 @@ class TestReconcilePendingPnl:
         reconcile_pending_pnl(bybit, store, tg=None)
         # Позиция осталась в pending (PnL всё ещё NULL)
         assert len(store.get_pending_pnl_positions()) == 1
+
+    def test_pending_resolved_via_balance_delta_when_wallet_before_saved(
+        self, store, monkeypatch
+    ):
+        # Если позиция была закрыта ботом (wallet_before сохранён)
+        # И closed-pnl всё ещё молчит на reconcile-цикле — fallback
+        # к balance delta срабатывает.
+        from ai_arena.trading.reconcile import reconcile_pending_pnl
+        import ai_arena.trading.executor as ex
+        monkeypatch.setattr(ex.time, "sleep", lambda _s: None)
+
+        pos = self._open_and_close_with_null_pnl(store)
+        # Симулируем что _apply_close сохранил wallet_before
+        store.set_wallet_before_close(pos.id, 50000.0)
+
+        bybit = FakeBybitClient(
+            closed_pnl_records=[],  # closed-pnl всё ещё пусто
+            wallet_balance_usdt=49997.55,  # wallet_after
+        )
+        reconcile_pending_pnl(bybit, store, tg=None)
+
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd FROM positions WHERE id = ?",
+                (pos.id,),
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(-2.45, abs=0.001)
+        assert store.get_pending_pnl_positions() == []
+        # daily_pnl обновлён ровно один раз (loss)
+        with store._conn() as c:
+            agg = c.execute(
+                "SELECT SUM(realized_pnl_usd) AS s, SUM(n_trades) AS n, "
+                "SUM(n_wins) AS w FROM daily_pnl"
+            ).fetchone()
+        assert agg["s"] == pytest.approx(-2.45, abs=0.001)
+        assert agg["n"] == 1
+        assert agg["w"] == 0
 
 
 # ─── No pyramiding (gist L108) ──────────────────────────────────────────

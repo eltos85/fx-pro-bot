@@ -298,6 +298,58 @@ class AiArenaBybitClient:
                         return (0.0, 0.0)
         return (0.0, 0.0)
 
+    def get_wallet_balance_usdt(self) -> float | None:
+        """Возвращает чистый ``walletBalance`` USDT (Bybit V5 UNIFIED).
+
+        В отличие от ``get_wallet_balance`` (который возвращает
+        ``equity = walletBalance + unrealisedPnL``), этот метод даёт
+        именно **wallet** — кошелёк после всех realized событий, **без**
+        unrealized PnL по открытым позициям.
+
+        Используется в ``_resolve_pnl_from_balance_delta`` (executor.py)
+        как fallback: ``net_pnl = wallet_after_close - wallet_before_close``.
+        Bybit обновляет ``walletBalance`` мгновенно при executed close
+        (списывает PnL+fees сразу) — это надёжный источник net PnL когда
+        ``closed-pnl`` endpoint молчит из-за demo latency (BUILDLOG
+        2026-05-15).
+
+        Возвращает:
+        - ``float`` — USDT walletBalance.
+        - ``None`` — запрос упал / coin USDT не найден / parse-error.
+          Caller ОБЯЗАН различать (как ``get_positions``: None ≠ 0.0).
+
+        Bybit docs: https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+        """
+        try:
+            resp = self._session.get_wallet_balance(
+                accountType="UNIFIED", coin="USDT"
+            )
+        except Exception:
+            log.exception("get_wallet_balance_usdt failed")
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_wallet_balance_usdt non-zero retCode: code=%s msg=%s",
+                ret_code, resp.get("retMsg", ""),
+            )
+            return None
+        accounts = resp.get("result", {}).get("list", []) or []
+        for acc in accounts:
+            for coin in acc.get("coin", []) or []:
+                if coin.get("coin") == "USDT":
+                    raw = coin.get("walletBalance")
+                    if raw in (None, ""):
+                        return None
+                    try:
+                        return float(raw)
+                    except (ValueError, TypeError):
+                        log.warning(
+                            "walletBalance parse failed: %r", raw
+                        )
+                        return None
+        return None
+
     def get_positions(self, symbol: str | None = None) -> list[Position] | None:
         """Открытые позиции.
 

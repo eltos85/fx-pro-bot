@@ -51,6 +51,7 @@ class ArenaPosition:
     confidence: float | None
     invalidation_condition: str | None
     risk_usd: float | None
+    wallet_balance_before_close: float | None = None
 
 
 _SCHEMA = """
@@ -72,7 +73,15 @@ CREATE TABLE IF NOT EXISTS positions (
     llm_justification TEXT NOT NULL,
     confidence REAL,
     invalidation_condition TEXT,
-    risk_usd REAL
+    risk_usd REAL,
+    -- Wallet balance (USDT) РОВНО перед close-ордером. Записывается
+    -- в _apply_close, используется fallback'ом _resolve_pnl_from_balance_delta
+    -- когда Bybit closed-pnl endpoint молчит (наблюдено demo latency
+    -- 5+ минут, BUILDLOG 2026-05-15). NULL для:
+    --   * открытых позиций (close ещё не было)
+    --   * exchange-инициированных closes (SL/TP/manual — бот не знал
+    --     заранее и wallet_before не сохранил)
+    wallet_balance_before_close REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
@@ -136,6 +145,22 @@ class AiArenaStore:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Идемпотентные миграции для существующих БД (на VPS).
+
+        ``CREATE TABLE IF NOT EXISTS`` НЕ добавляет колонки в уже
+        существующую таблицу — для этого нужен ``ALTER TABLE ADD COLUMN``.
+        SQLite не поддерживает ``IF NOT EXISTS`` для ADD COLUMN, поэтому
+        проверяем `PRAGMA table_info` перед добавлением.
+        """
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(positions)")}
+        if "wallet_balance_before_close" not in cols:
+            conn.execute(
+                "ALTER TABLE positions ADD COLUMN wallet_balance_before_close REAL"
+            )
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -247,6 +272,28 @@ class AiArenaStore:
                 ),
             )
             return int(cur.lastrowid or 0)
+
+    def set_wallet_before_close(
+        self, position_id: int, wallet_balance_usd: float
+    ) -> None:
+        """Сохраняет wallet balance USDT РОВНО перед close-ордером.
+
+        Используется fallback'ом ``_resolve_pnl_from_balance_delta`` в
+        ``trading/executor.py``: когда Bybit ``closed-pnl`` endpoint
+        молчит (наблюдено demo latency 5+ минут), бот считает net PnL
+        как ``wallet_after_close - wallet_balance_before_close``.
+
+        Bybit V5 ``walletBalance`` (UNIFIED account) обновляется
+        мгновенно при executed close (биржа списывает PnL+fees сразу,
+        unrealized PnL по другим открытым позициям НЕ влияет — это в
+        ``equity``, не ``walletBalance``).
+        Docs: https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+        """
+        with self._conn() as c:
+            c.execute(
+                "UPDATE positions SET wallet_balance_before_close = ? WHERE id = ?",
+                (wallet_balance_usd, position_id),
+            )
 
     def close_position(
         self,

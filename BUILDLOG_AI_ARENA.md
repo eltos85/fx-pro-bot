@@ -16,6 +16,140 @@
 
 ---
 
+## 2026-05-15 (четвёртая итерация)
+
+### fix(ai-arena): balance-delta fallback для net PnL (обходит demo latency Bybit closed-pnl)
+`(коммит ниже)`
+
+**Симптом:** Несколько закрытий подряд приходили в Telegram как
+`pnl=pending… (биржа задержала, добьём на след. цикле)` и продолжали
+оставаться pending даже через 3+ цикла reconcile (≥9 минут):
+
+```
+CLOSE id=43 Buy BNBUSDT entry=$682 exit=$681.7 PnL: pending…
+CLOSE id=44 Buy BNBUSDT exit=$685.9 pnl=pending…
+PENDING-PNL: id=43 Buy BNBUSDT ещё не виден в Bybit closed_pnl, повторим…
+```
+
+**Диагностика:**
+
+Прямой вызов `client.get_closed_pnl(symbol="BNBUSDT")` на VPS показал:
+запись для id=43 (qty=8.0, avg_exit=681.5, closed_pnl=-9.99,
+updated_time=09:42:50) **существует**, но возвращается ТОЛЬКО без
+`start_time_ms` фильтра. С `start_time_ms=opened_ms` (09:41:40)
+endpoint возвращал `n=0`, хотя `record.updated_time` (09:42:50) ≥
+`opened_ms` на 70 секунд.
+
+Дополнительно: между двумя последовательными запросами с разницей
+~5 минут, **результат менялся** — Bybit demo agg-job регистрирует
+записи в closed-pnl с задержкой **до 5+ минут** (mainnet обычно
+<10s по доке).
+
+**Корневая причина:** Bybit demo `/v5/position/closed-pnl` имеет
+significant latency регистрации + некорректно фильтрует по
+`startTime` на demo (фильтр режет валидные записи). Symptomatic
+retry не помогает (10s, 30s, ≥60s — Bybit продолжает молчать).
+
+**Решение** (компромисс между symptomatic retry и полным
+рефакторингом на WebSocket execution stream):
+
+**Primary path** (без изменений): Bybit `closed-pnl` retry-loop.
+Если работает — берём net PnL и avg_exit_price 1-в-1 с биржей.
+
+**Fallback path (НОВЫЙ)** — `_resolve_pnl_from_balance_delta`:
+- Перед close-ордером сохраняем `walletBalance` USDT в новой колонке
+  `positions.wallet_balance_before_close`.
+- После close через ~1.5s ждём fill, запрашиваем `walletBalance`
+  снова → `net_pnl = wallet_after - wallet_before`.
+- Источник правды: Bybit V5 docs
+  (<https://bybit-exchange.github.io/docs/v5/account/wallet-balance>):
+  «walletBalance» (UNIFIED account) обновляется **мгновенно** при
+  executed close (списывает realized PnL + fees сразу). Не путать
+  с «equity = walletBalance + unrealisedPnL» — equity флуктуирует
+  от цены открытых позиций, walletBalance — нет.
+
+**Почему это «forced infrastructural adaptation»** (правило
+`ai-arena-sources.mdc`): Hyperliquid (на котором Nof1 работает)
+отдаёт net PnL synchronously при close. Bybit demo — асинхронно
+с большой задержкой. Чтобы остаться 1-в-1 по семантике («net PnL
+от биржи 1-в-1, без локального gross-расчёта»), используем
+balance-delta как deriving from first principles от того же
+truth source (Bybit walletBalance), просто другим маршрутом.
+
+**Что меняется в коде (5 файлов):**
+
+1. **`src/ai_arena/state/db.py`:**
+   - Новая колонка `positions.wallet_balance_before_close REAL NULL`.
+   - Идемпотентная миграция через `_migrate()` (ALTER TABLE для
+     существующих БД на VPS).
+   - Метод `set_wallet_before_close(position_id, value)`.
+   - `ArenaPosition` dataclass: новое поле
+     `wallet_balance_before_close: float | None = None`.
+
+2. **`src/ai_arena/trading/client.py`:**
+   - Новый метод `get_wallet_balance_usdt() -> float | None` через
+     `/v5/account/wallet-balance?accountType=UNIFIED&coin=USDT`.
+     Возвращает чистый `walletBalance` USDT (не equity).
+
+3. **`src/ai_arena/trading/executor.py`:**
+   - В `_apply_close` ПЕРЕД close-ордером: `wallet_before =
+     client.get_wallet_balance_usdt()` + `store.set_wallet_before_close`.
+   - Новая функция `_resolve_pnl_from_balance_delta` (см. выше).
+   - После `_resolve_net_close`: если pnl=None И wallet_before
+     сохранён → fallback к balance delta.
+
+4. **`src/ai_arena/trading/reconcile.py::reconcile_pending_pnl`:**
+   - Тот же fallback после неудачного closed-pnl retry на reconcile-
+     цикле. Срабатывает только для позиций с сохранённым
+     `wallet_balance_before_close` (т.е. бот закрыл, не биржа).
+   - Telegram сообщение теперь указывает source:
+     `«PnL добит для id=X: $-2.45 (net of fees, via balance-delta)»`.
+
+5. **`tests/test_ai_arena_executor_logic.py`:**
+   - Новый класс `TestBalanceDeltaFallback` (4 теста):
+     - balance-delta срабатывает когда closed-pnl молчит (loss).
+     - balance-delta для winning trade.
+     - closed-pnl имеет приоритет над balance-delta когда оба доступны
+       (защита от funding payment в окне).
+     - wallet_before не сохраняется если первый balance-запрос упал;
+       позиция остаётся pending.
+   - Расширенный `test_close_defers_when_closed_pnl_and_balance_both_unavailable`
+     (оба пути failed → pending как раньше).
+   - Новый тест `test_pending_resolved_via_balance_delta_when_wallet_before_saved`
+     в `TestReconcilePendingPnl`.
+   - `FakeBybitClient` обновлён: `wallet_balance_sequence` параметр
+     для эмуляции [before, after] значений.
+
+**Что НЕ трогаем (изоляция изменений):**
+
+- `_resolve_net_close` (closed-pnl логика без изменений).
+- `reconcile_closed_positions` (SL/TP/exchange-инициированные closes —
+  там wallet_before нет, balance-delta невозможна, остаётся
+  closed-pnl + reconcile_pending_pnl как было).
+- LLM prompt / decision loop / equity scaling.
+- Семантика `realized_pnl_usd` в БД (всё ещё net of fees).
+
+**Тесты:** 254 ai_arena (+9 новых), 806 в репо. Все passed.
+
+**Compliance с правилом `ai-arena-sources.mdc`:**
+
+- ✅ PnL остаётся **net** (closedPnl от Bybit ИЛИ balance delta —
+  обе net of fees + funding).
+- ✅ Никаких локальных `(exit-entry)*qty` gross-расчётов.
+- ✅ Forced infrastructural adaptation: Bybit demo latency не
+  присуща Hyperliquid у source, у нас обходится через
+  balance-delta — другой маршрут к тому же Bybit truth (walletBalance).
+- ✅ Источник правды для balance-delta: Bybit V5 wallet-balance
+  docs (cited в коде + правиле).
+
+**Файлы:** `src/ai_arena/state/db.py`,
+`src/ai_arena/trading/client.py`, `src/ai_arena/trading/executor.py`,
+`src/ai_arena/trading/reconcile.py`,
+`tests/test_ai_arena_executor_logic.py`, `BUILDLOG_AI_ARENA.md`,
+`.cursor/rules/ai-arena-sources.mdc`.
+
+---
+
 ## 2026-05-15 (третья итерация)
 
 ### fix(ai-arena): net PnL теперь не «врёт нулём» при Bybit-latency + retry/pending

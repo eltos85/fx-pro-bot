@@ -258,16 +258,26 @@ def _apply_close(
             error=f"close: no open position for {coin} ({bybit_symbol})",
         )
 
+    # Снимок wallet balance USDT РОВНО перед close-ордером —
+    # для fallback'а _resolve_pnl_from_balance_delta когда Bybit
+    # closed-pnl endpoint молчит (наблюдено demo latency 5+ минут,
+    # BUILDLOG 2026-05-15). Bybit обновляет walletBalance мгновенно
+    # при executed close (списывает PnL+fees сразу). None если
+    # запрос упал — fallback просто не сработает, останется текущее
+    # поведение (closed-pnl + reconcile_pending_pnl).
+    wallet_before = client.get_wallet_balance_usdt()
+    if wallet_before is not None:
+        store.set_wallet_before_close(pos.id, wallet_before)
+
     link_id = f"arena_close_{uuid.uuid4().hex[:10]}"
     resp = client.close_position(pos.symbol, pos.side, pos.qty, link_id)
     if not resp or not resp.get("ok"):
         err_msg = (resp or {}).get("error", "close_position returned empty")
         return ApplyResult(executed=False, summary="", error=f"close_failed: {err_msg}")
 
-    # Берём net PnL и реальный avgExitPrice из Bybit `get_closed_pnl`
-    # (с retry — у биржи ~1-10s latency на регистрацию записи).
-    # Локальный `(exit-entry)*qty` запрещён — игнорирует maker/taker
-    # fees и расходится с биржей (см. BUILDLOG 2026-05-15).
+    # Primary: Bybit `closed-pnl` (net PnL + avgExitPrice от биржи 1-в-1).
+    # Локальный `(exit-entry)*qty` запрещён — игнорирует fees и
+    # funding (BUILDLOG 2026-05-15).
     exit_price, pnl = _resolve_net_close(
         client=client,
         symbol=pos.symbol,
@@ -276,13 +286,22 @@ def _apply_close(
         qty=pos.qty,
         fallback_entry=pos.entry_price,
     )
-    # `pnl is None` → biрже нужно ещё время; пишем NULL и добиваем
-    # на следующем цикле через _reconcile_pending_pnl. Так пользователь
-    # не получает враньё `pnl=$0.00` в Telegram.
+
+    # Fallback: balance delta (только если closed-pnl молчит И мы
+    # сохранили wallet_before выше). Net PnL = wallet_after - wallet_before
+    # — это и есть net of fees + funding (Bybit списывает их в
+    # walletBalance моментально). Источник правды: Bybit V5 wallet-balance
+    # docs (https://bybit-exchange.github.io/docs/v5/account/wallet-balance).
+    if pnl is None and wallet_before is not None:
+        pnl = _resolve_pnl_from_balance_delta(
+            client=client, wallet_before=wallet_before,
+            position_id=pos.id, symbol=pos.symbol,
+        )
+
     store.close_position(
         pos.id,
         exit_price=exit_price,
-        realized_pnl_usd=pnl,  # None допустимо
+        realized_pnl_usd=pnl,  # None допустимо → reconcile_pending_pnl добьёт
         close_reason=action.raw.get("justification", "llm_close")[:200],
     )
     if pnl is None:
@@ -299,6 +318,60 @@ def _apply_close(
     return ApplyResult(executed=True, summary=summary)
 
 
+def _resolve_pnl_from_balance_delta(
+    *,
+    client: AiArenaBybitClient,
+    wallet_before: float,
+    position_id: int,
+    symbol: str,
+    settle_wait_sec: float = 1.5,
+) -> float | None:
+    """Считает net PnL как ``walletBalance_after - wallet_before``.
+
+    Используется как fallback в ``_apply_close`` и
+    ``reconcile_pending_pnl`` когда Bybit ``/v5/position/closed-pnl``
+    endpoint молчит (наблюдено demo latency 5+ минут эмпирически
+    2026-05-15). На mainnet обычно <10s — fallback редко срабатывает.
+
+    Bybit V5 ``walletBalance`` (UNIFIED account, USDT coin) обновляется
+    мгновенно при executed close: биржа списывает realized PnL и fees
+    в walletBalance сразу, **без задержки агрегации** в closed-pnl
+    endpoint. ``unrealisedPnl`` по другим открытым позициям сюда **не
+    попадает** (это в ``equity = walletBalance + unrealisedPnL``).
+
+    Edge cases:
+    - Funding payment в окне ``settle_wait_sec`` (раз в 8ч в 00/08/16
+      UTC): попадёт в дельту. Окно 1.5s vs ~28800s между funding —
+      крайне маловероятное пересечение, игнорируем.
+    - Deposit/transfer в окне: то же — игнорируем (1.5s vs минуты-часы
+      между такими событиями).
+    - ``get_wallet_balance_usdt`` упал → возвращаем None, caller
+      пишет ``realized_pnl_usd=NULL`` → ``reconcile_pending_pnl``
+      попробует на следующем цикле.
+
+    Bybit docs: https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+    """
+    # Маленькая задержка чтобы Bybit зарегистрировал fill в walletBalance.
+    # Эмпирически достаточно ~1s на mainnet, 1.5s даёт запас на demo.
+    time.sleep(settle_wait_sec)
+
+    wallet_after = client.get_wallet_balance_usdt()
+    if wallet_after is None:
+        log.warning(
+            "balance-delta fallback: get_wallet_balance_usdt=None for id=%d %s",
+            position_id, symbol,
+        )
+        return None
+
+    delta = wallet_after - wallet_before
+    log.info(
+        "balance-delta resolved net PnL for id=%d %s: "
+        "wallet_before=%.6f wallet_after=%.6f → pnl=$%+.4f",
+        position_id, symbol, wallet_before, wallet_after, delta,
+    )
+    return delta
+
+
 def _resolve_net_close(
     *,
     client: AiArenaBybitClient,
@@ -307,22 +380,32 @@ def _resolve_net_close(
     opened_side: str,
     qty: float,
     fallback_entry: float,
-    max_retries: int = 4,
-    retry_backoff_sec: tuple[float, ...] = (1.0, 2.0, 3.0, 5.0),
+    max_retries: int = 6,
+    retry_backoff_sec: tuple[float, ...] = (1.0, 2.0, 3.0, 5.0, 8.0, 10.0),
 ) -> tuple[float, float | None]:
     """Возвращает ``(avg_exit_price, net_pnl)`` из Bybit `get_closed_pnl`.
 
-    Bybit регистрирует запись в `/v5/position/closed-pnl` с задержкой
-    ~1-10 секунд после executed close-ордера (наблюдено эмпирически
-    2026-05-15). Поэтому делаем `max_retries` попыток с backoff
-    `retry_backoff_sec` (всего ≤ 11 секунд ожидания) перед сдачей.
+    Bybit demo `/v5/position/closed-pnl` имеет наблюдаемую latency
+    регистрации запис: 1-10 сек на mainnet, **до 5+ минут на demo**
+    (эмпирически 2026-05-15). Поэтому делаем `max_retries` попыток с
+    backoff `retry_backoff_sec` (всего ≤ 30 секунд ожидания) перед
+    сдачей.
+
+    **Не передаём** `start_time_ms` в Bybit запрос: на demo endpoint
+    глючит и возвращает 0 записей даже когда `record.updated_time >
+    start_time` (наблюдено 2026-05-15: с фильтром n=0, без фильтра
+    n=20). Полагаемся на дефолтное 7-day окно + `symbol`-фильтр +
+    `qty/side/exec_type` матч.
+
+    Также фильтруем `exec_type ∈ {Trade, BustTrade}` — исключаем
+    Settle / SessionSettlePnL / MovePosition записи (Bybit V5 docs).
 
     Если по истечении всех попыток матч не найден — возвращаем
     `(ticker.last_price, None)`. **None** сигнализирует «PnL ещё не
-    знаем»: caller (close_position) сохранит `None` в БД, а
-    `_reconcile_closed_positions` на следующем цикле подберёт net PnL
-    через тот же endpoint (там запись уже точно появится). Это лучше
-    чем `0.0`, который ломал /status и Telegram-уведомления о закрытии.
+    знаем»: caller сохранит `None` в БД, а `reconcile_pending_pnl` на
+    следующем цикле подберёт net PnL через тот же endpoint (на demo
+    Bybit может задержать на >5 минут, добивание идёт несколько
+    циклов). Это лучше чем `0.0` (он ломал UX и врал про net PnL).
     """
     closing_side = "Sell" if opened_side == "Buy" else "Buy"
     try:
@@ -330,11 +413,12 @@ def _resolve_net_close(
     except ValueError:
         opened_ts_ms = int(time.time() * 1000) - 7 * 24 * 60 * 60 * 1000
 
+    qty_tolerance = max(qty * 1e-4, 1e-8)
+
     for attempt in range(max_retries):
-        end_ms = int(time.time() * 1000) + 60 * 1000
-        records = client.get_closed_pnl(
-            symbol=symbol, start_time_ms=opened_ts_ms, end_time_ms=end_ms,
-        )
+        # ВАЖНО: не передаём start_time_ms — Bybit demo фильтрует не
+        # по тому полю и режет валидные записи (BUILDLOG 2026-05-15).
+        records = client.get_closed_pnl(symbol=symbol, limit=100)
         if records is None:
             log.warning(
                 "get_closed_pnl=None for %s (attempt %d/%d) — retry",
@@ -345,7 +429,8 @@ def _resolve_net_close(
                 r for r in records
                 if r.symbol == symbol
                 and r.side == closing_side
-                and abs(r.qty - qty) <= max(qty * 1e-4, 1e-8)
+                and abs(r.qty - qty) <= qty_tolerance
+                and r.exec_type in ("Trade", "BustTrade")
                 and r.updated_time_ms >= opened_ts_ms
             ]
             if candidates:
@@ -363,7 +448,7 @@ def _resolve_net_close(
 
     log.warning(
         "no closed_pnl match for %s side=%s qty=%s after %d attempts — "
-        "defer net PnL to next cycle reconcile",
+        "defer net PnL to next cycle reconcile_pending_pnl",
         symbol, closing_side, qty, max_retries,
     )
     return _ticker_fallback_exit(client, symbol, fallback_entry), None

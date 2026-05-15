@@ -20,7 +20,10 @@ import logging
 from ai_arena.state.db import AiArenaStore
 from ai_arena.telegram.bot import TelegramArenaBot
 from ai_arena.trading.client import AiArenaBybitClient
-from ai_arena.trading.executor import _resolve_net_close
+from ai_arena.trading.executor import (
+    _resolve_net_close,
+    _resolve_pnl_from_balance_delta,
+)
 
 log = logging.getLogger("ai_arena")
 
@@ -108,11 +111,19 @@ def reconcile_pending_pnl(
 ) -> None:
     """Добивает net PnL для позиций, закрытых ботом с PnL=NULL.
 
-    Bybit ``/v5/position/closed-pnl`` имеет наблюдаемую latency
-    1-10s; при close мы делаем 4 retry (≤11s). Если биржа всё ещё
-    не отдала запись — позиция попадает сюда. На этом цикле от
-    закрытия прошло ≥``poll_interval_sec`` (default 180s) — запись
-    гарантированно есть.
+    Два пути добивания (в порядке приоритета):
+
+    1. **Primary**: Bybit ``/v5/position/closed-pnl`` (3 retry, ≤6s).
+       Если запись появилась — берём `closedPnl` + `avgExitPrice`.
+    2. **Fallback**: balance delta — net_pnl = wallet_now - wallet_before
+       (где `wallet_balance_before_close` сохранён в `positions` при
+       `_apply_close`). Срабатывает только для позиций закрытых
+       ботом (для exchange-инициированных closes wallet_before
+       отсутствует — fallback недоступен, остаётся ждать closed-pnl).
+
+    Bybit demo `/v5/position/closed-pnl` имеет наблюдаемую latency
+    **до 5+ минут** (BUILDLOG 2026-05-15). Без balance-delta fallback
+    pending-сообщения копились бы пока demo agg-job не сработает.
     """
     pending = store.get_pending_pnl_positions()
     if not pending:
@@ -125,25 +136,40 @@ def reconcile_pending_pnl(
             opened_side=pos.side,
             qty=pos.qty,
             fallback_entry=pos.entry_price,
-            max_retries=2,  # уже прошло >180s — retry короче
-            retry_backoff_sec=(1.0, 2.0),
+            max_retries=3,  # уже прошло >180s — короткий retry
+            retry_backoff_sec=(1.0, 2.0, 3.0),
         )
+        # Fallback: balance delta (только если бот закрыл и сохранил
+        # wallet_before). Для exchange-инициированных closes wallet_before
+        # = NULL → fallback пропускаем, ждём closed-pnl.
+        used_fallback = False
+        if pnl is None and pos.wallet_balance_before_close is not None:
+            pnl = _resolve_pnl_from_balance_delta(
+                client=client,
+                wallet_before=pos.wallet_balance_before_close,
+                position_id=pos.id,
+                symbol=pos.symbol,
+                settle_wait_sec=0.0,  # на этом цикле уже >180s, fill точно прошёл
+            )
+            used_fallback = pnl is not None
         if pnl is None:
             log.warning(
-                "PENDING-PNL: id=%d %s %s ещё не виден в Bybit closed_pnl, "
-                "повторим на след. цикле",
+                "PENDING-PNL: id=%d %s %s ещё не виден в Bybit closed_pnl "
+                "(wallet_before=%s) — повторим на след. цикле",
                 pos.id, pos.side, pos.symbol,
+                pos.wallet_balance_before_close,
             )
             continue
         store.finalize_pending_pnl(
             pos.id, exit_price=exit_price, realized_pnl_usd=pnl,
         )
+        source = "balance-delta" if used_fallback else "closed-pnl"
         log.info(
-            "PENDING-PNL resolved: id=%d %s %s exit=$%.6g pnl=$%+.2f (net)",
-            pos.id, pos.side, pos.symbol, exit_price, pnl,
+            "PENDING-PNL resolved via %s: id=%d %s %s exit=$%.6g pnl=$%+.2f (net)",
+            source, pos.id, pos.side, pos.symbol, exit_price, pnl,
         )
         if tg:
             tg.notify_close(
                 f"PnL добит для id={pos.id} {pos.side} {pos.symbol}: "
-                f"${pnl:+.2f} (net of fees)"
+                f"${pnl:+.2f} (net of fees, via {source})"
             )
