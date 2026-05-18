@@ -1,5 +1,54 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-18 (ночь) — feat: belt-and-suspenders label guard в _apply_close (multi-bot isolation)
+
+`коммит при deploy`
+
+**Что.** В `src/fx_ai_trader/trading/executor.py::_apply_close` и зеркально
+в `src/fx_ai_trend/trading/executor.py::_apply_close` добавлен явный
+guard, который **непосредственно перед** live `close_position()` API
+call'ом проверяет что `broker_position_id` из нашей БД сейчас активен у
+broker'а **с нашим label**. Если broker_pid не в нашем label-filtered
+set'е:
+1. Пытаемся подтянуть closing deal за 48h — если есть, это broker_auto
+   SL/TP close, маркируем с broker-true net PnL.
+2. Если deal не найден — отказываемся от `close_position()` API call'а
+   во избежание cross-bot interference и помечаем позицию closed
+   локально с `close_reason='label_guard_orphan'`, `pnl=0`.
+
+**Зачем.** На одном cTrader account (46883073, FxPro demo) сейчас
+живут два LLM-бота:
+- `fx-ai-trader` (Discretionary), `order_label="ai-fx-trader"`,
+  БД `fx_ai_trader.sqlite`.
+- `fx-ai-trend` (Trend-follower), `order_label="ai-fx-trend"`,
+  БД `fx_ai_trend.sqlite`.
+
+cTrader OAuth-токен один на account (через `ctrader-token-service`), но
+наша архитектура изоляции построена на label-фильтрации:
+
+| Слой | Где | Что делает |
+|---|---|---|
+| 1. OPEN | `place_market_order` | каждый ордер кладётся с `label=settings.order_label` |
+| 2. CONTEXT | `client_adapter.get_open_positions` | возвращает ТОЛЬКО позиции с нашим label → LLM не видит чужие в context |
+| 3. БД-isolation | `state.db.AiFx*Store` | отдельный sqlite-файл на бот, чужие позиции физически отсутствуют |
+| 4. RECONCILE | `get_active_broker_position_ids` | label-filtered set для `broker_reconcile` |
+| 5. **CLOSE-guard** | `_apply_close` (новое) | belt-and-suspenders проверка перед close API call'ом |
+
+Layer 5 защищает от edge-case'ов:
+- manual вмешательство в cTrader Web (закрыли/реоткрыли позицию руками,
+  broker_pid в БД устарел),
+- корраптион БД,
+- race-condition если два процесса одного бота шли бы параллельно.
+
+**Файлы.** `src/fx_ai_trader/trading/executor.py`,
+`src/fx_ai_trend/trading/executor.py`, `tests/test_fx_ai_trader.py`
+(+ new test `test_label_guard_skips_close_for_orphan_broker_pid` +
+update `_FakeAdapter.get_open_positions`).
+
+**Тесты.** 71/71 fx_ai_trader+fx_ai_trend, 808/808 total — зелёные.
+
+---
+
 ## 2026-05-18 (вечер) — feat: добавлен NG=F (Natural Gas, NAT.GAS / Henry Hub)
 
 `коммит при deploy`

@@ -674,6 +674,34 @@ class _FakeAdapter:
     def get_active_broker_position_ids(self) -> set[int] | None:
         return self._active_pids
 
+    def get_open_positions(self):
+        """Label-filtered set of broker positions (mirrors active_pids).
+
+        Используется belt-and-suspenders label guard в `_apply_close`:
+        перед live-close проверяется что broker_pid активен у broker'а
+        с нашим label. Если active_pids=None — broker API недоступно
+        (caller отличает от пустого set'а).
+        """
+        if self._active_pids is None:
+            return None
+        from fx_ai_trader.trading.client_adapter import BrokerPosition
+
+        return [
+            BrokerPosition(
+                position_id=pid,
+                symbol_name="DUMMY",
+                internal_symbol="DUMMY",
+                side="BUY",
+                volume=1000,
+                volume_lots=0.01,
+                entry_price=0.0,
+                sl_price=None,
+                tp_price=None,
+                label="ai-fx-trader",
+            )
+            for pid in self._active_pids
+        ]
+
     def get_closing_deal_for_position(
         self, broker_position_id: int, lookback_hours: int = 24,
     ) -> dict | None:
@@ -844,6 +872,73 @@ class TestBrokerReconcile:
                 "SELECT realized_pnl_usd FROM positions WHERE id = ?", (pid,),
             ).fetchone()
         assert row[0] == pytest.approx(92.82)
+
+    def test_label_guard_skips_close_for_orphan_broker_pid(
+        self, store: AiFxTraderStore,
+    ):
+        """Multi-bot isolation: если broker_pid в нашей БД НЕ в нашем
+        label-filtered active set'е, executor НЕ должен дёргать
+        ``close_position()``.
+
+        Симуляция: позиция корраптилась/была затрана manual, broker_pid
+        теперь принадлежит другому label (другому боту). closing deal
+        тоже не найден (т.е. позиция жива у другого бота). Label guard
+        обязан отказаться от close API call'а и пометить позицию closed
+        локально с ``close_reason='label_guard_orphan'``.
+        """
+        from fx_ai_trader.config.settings import AiFxTraderSettings
+        from fx_ai_trader.safety.killswitch import (
+            KillSwitch,
+            KillSwitchConfig,
+        )
+        from fx_ai_trader.trading.executor import (
+            CloseAction,
+            ParsedAction,
+            apply_action,
+        )
+
+        pid = store.open_position(
+            symbol="BZ=F", side="BUY", volume_lots=0.01,
+            entry_price=105.031, sl_price=104.7, tp_price=106.3,
+            broker_position_id=999_999,
+            broker_order_label="ai-fx-trader",
+            llm_reason="setup", is_paper=False,
+        )
+        # broker_pid 999_999 нет в active_pids (он у "другого" label),
+        # closing deal тоже не найден → label guard сработает.
+        adapter = _FakeAdapter(
+            active_pids={111_111},  # какая-то другая наша позиция
+            deals={},  # closing deal для 999_999 отсутствует
+            current_prices={"BZ=F": 104.5},
+        )
+        action = ParsedAction(
+            action_type="close",
+            model=CloseAction(action="close", position_id=pid, reason="test"),
+            raw={"action": "close", "position_id": pid, "reason": "test"},
+        )
+        settings = AiFxTraderSettings()
+        object.__setattr__(settings, "trading_enabled", True)
+        ks = KillSwitch(KillSwitchConfig(
+            max_daily_loss_usd=150, max_total_loss_usd=300,
+            max_open_positions=3, max_positions_per_symbol=3,
+        ), store)
+
+        result = apply_action(
+            action, adapter=adapter, store=store,
+            settings=settings, killswitch=ks,
+        )
+        assert result.executed is True
+        # КЛЮЧЕВОЕ: close_position() НЕ был дёрнут (cross-bot защита).
+        assert adapter.close_calls == []
+        # Позиция помечена closed локально с label_guard_orphan reason.
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, close_reason "
+                "FROM positions WHERE id = ?", (pid,),
+            ).fetchone()
+        assert row[0] == pytest.approx(0.0)  # no PnL, safe orphan-close
+        assert row[1] == "label_guard_orphan"
+        assert "SKIP-CLOSE" in result.summary
 
     def test_position_not_found_in_apply_close_recovers(
         self, store: AiFxTraderStore,

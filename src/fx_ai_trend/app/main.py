@@ -1,0 +1,417 @@
+"""FX AI Trend (Trend-follower) main loop — dual-timer (15 мин full + 5 мин review).
+
+Архитектура скопирована с fx_ai_trader (Discretionary) с теми же
+компонентами (cTrader через CTraderFxAdapter, paper-mode reconcile,
+multi-dim sentiment audit, label-based broker-side изоляция). Различия:
+- Системный промпт переписан под trend-following (Faith/Covel/Clenow/AQR),
+  см. ``fx_ai_trend/llm/prompts.py``.
+- Order label = "ai-fx-trend" (vs "ai-fx-trader" у Discretionary).
+- БД = fx_ai_trend.sqlite.
+- KillSwitch caps: total_loss=$500 (vs $300 у Discretionary) — CTA
+  drawdown 20-30% типичен на тренд, не должен отключать эксперимент.
+
+Запуск: ``python -m fx_ai_trend`` или ``fx-ai-trader`` (entry-point).
+"""
+from __future__ import annotations
+
+import logging
+import signal
+import time
+from datetime import UTC, datetime
+from typing import Any
+
+from fx_ai_trend.config.settings import AiFxTrendSettings
+from fx_ai_trend.llm.client import DeepSeekClient
+from fx_ai_trend.llm.prompts import (
+    SYSTEM_PROMPT,
+    build_system_prompt_review,
+    build_user_prompt,
+    build_user_prompt_review,
+)
+from fx_ai_trend.news.eia import EiaProvider
+from fx_ai_trend.news.rss import CommodityRssNewsProvider
+from fx_ai_trend.safety.killswitch import KillSwitch, KillSwitchConfig
+from fx_ai_trend.state.db import AiFxTraderStore
+from fx_ai_trend.trading.client_adapter import CTraderFxAdapter
+from fx_ai_trend.trading.context import (
+    collect_market_context,
+    collect_review_context,
+    format_context_for_prompt,
+    format_context_for_review,
+)
+from fx_ai_trend.trading.broker_reconcile import reconcile_broker_positions
+from fx_ai_trend.trading.executor import apply_action, parse_action
+from fx_ai_trend.trading.paper_reconcile import reconcile_paper_positions
+
+log = logging.getLogger("fx_ai_trend")
+
+_shutdown = False
+
+
+def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
+    global _shutdown
+    _shutdown = True
+    log.info("Получен сигнал %d, завершаю...", signum)
+
+
+def _extract_sentiment(parsed_raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Извлекает sentiment-блок из parsed JSON для audit-log."""
+    s = parsed_raw.get("sentiment")
+    if isinstance(s, dict):
+        return s
+    return None
+
+
+def run() -> None:
+    settings = AiFxTrendSettings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    log.info("=" * 60)
+    log.info("FX AI Trend (Trend-follower) Phase 1: gold + Brent + Natural Gas")
+    log.info("Symbols: %s | Mode: %s",
+             ", ".join(settings.symbols),
+             "LIVE" if settings.trading_enabled else "PAPER")
+    log.info("Full poll: %ds | Review poll: %ds",
+             settings.poll_interval_sec, settings.review_interval_sec)
+    log.info(
+        "Killswitch v1.0 (broker-safety only): daily=$%.0f total=$%.0f "
+        "maxpos=%d maxpos/sym=%d max_lot=%.2f "
+        "[R:R/risk/correlation сняты — LLM решает сам]",
+        settings.max_daily_loss_usd, settings.max_total_loss_usd,
+        settings.max_open_positions, settings.max_positions_per_symbol,
+        settings.max_lot_size,
+    )
+    log.info("Order label: %s", settings.order_label)
+    log.info("News (RSS): %s | EIA: %s",
+             "ON" if settings.news_enabled else "OFF",
+             "ON" if settings.eia_api_key else "OFF")
+    log.info("=" * 60)
+
+    if not settings.deepseek_api_key:
+        log.error("DEEPSEEK_API_KEY не задан, выход")
+        return
+    if not settings.ctrader_client_id or not settings.ctrader_client_secret:
+        log.error("CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET не заданы, выход")
+        return
+
+    store = AiFxTraderStore(settings.db_path)
+
+    adapter = CTraderFxAdapter(settings)
+    try:
+        adapter.start(timeout=30.0)
+    except Exception:
+        log.exception(
+            "CTraderFxAdapter.start() failed — exiting. Проверьте токены: "
+            "fx-pro-auth и наличие %s",
+            settings.ctrader_token_path,
+        )
+        return
+    if not adapter.is_ready:
+        log.error("Adapter не готов после start(), exit")
+        adapter.stop()
+        return
+
+    # Token-status log на старте: видимость в `docker logs` про сколько
+    # дней до expiration. WARNING при <7d, ERROR при expired (детали в
+    # auth.log_token_status). Часть «защиты от просрочки» 2026-05-12.
+    try:
+        from fx_pro_bot.trading.auth import log_token_status
+        from fx_ai_trend.trading.token_lock import _read_token  # noqa: PLC2701
+        from pathlib import Path as _Path
+        _tok = _read_token(_Path(settings.ctrader_token_path))
+        log_token_status(_tok, label="FX-AI-Trader cTrader", logger=log)
+    except Exception:
+        log.debug("Token status log skipped", exc_info=True)
+
+    llm = DeepSeekClient(
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
+        model=settings.deepseek_model,
+        max_tokens=settings.deepseek_max_tokens,
+        thinking_enabled=settings.deepseek_thinking_enabled,
+    )
+
+    killswitch = KillSwitch(
+        KillSwitchConfig(
+            max_daily_loss_usd=settings.max_daily_loss_usd,
+            max_total_loss_usd=settings.max_total_loss_usd,
+            max_open_positions=settings.max_open_positions,
+            max_positions_per_symbol=settings.max_positions_per_symbol,
+        ),
+        store,
+    )
+
+    news_provider: CommodityRssNewsProvider | None = None
+    if settings.news_enabled:
+        news_provider = CommodityRssNewsProvider(
+            cache_ttl_sec=600,
+            max_items_per_symbol=settings.news_max_items_per_symbol,
+            max_age_hours=settings.news_max_age_hours,
+        )
+    eia_provider = EiaProvider(
+        api_key=settings.eia_api_key,
+        cache_ttl_sec=settings.eia_cache_ttl_sec,
+    )
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    cycle = 0
+    last_full_ts = 0.0
+    last_review_ts = 0.0
+    review_enabled = settings.review_interval_sec > 0
+
+    while not _shutdown:
+        now_mono = time.monotonic()
+
+        if last_full_ts == 0.0 or (now_mono - last_full_ts) >= settings.poll_interval_sec:
+            cycle += 1
+            try:
+                _run_full_cycle(
+                    cycle, settings, store, adapter, llm, killswitch,
+                    news_provider, eia_provider,
+                )
+            except Exception:
+                log.exception("Full cycle %d crashed (продолжаю)", cycle)
+            last_full_ts = time.monotonic()
+            last_review_ts = last_full_ts
+        elif review_enabled and (now_mono - last_review_ts) >= settings.review_interval_sec:
+            cycle += 1
+            try:
+                _run_review_cycle(
+                    cycle, settings, store, adapter, llm, killswitch,
+                )
+            except Exception:
+                log.exception("Review cycle %d crashed (продолжаю)", cycle)
+            last_review_ts = time.monotonic()
+
+        time.sleep(1)
+
+    adapter.stop()
+    log.info("FX AI Trend остановлен")
+
+
+def _run_full_cycle(
+    cycle: int,
+    settings: AiFxTrendSettings,
+    store: AiFxTraderStore,
+    adapter: CTraderFxAdapter,
+    llm: DeepSeekClient,
+    killswitch: KillSwitch,
+    news_provider: CommodityRssNewsProvider | None,
+    eia_provider: EiaProvider,
+) -> None:
+    log.info("─── Full cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
+
+    # 1a. Paper-reconcile (SL/TP hit detection через M1) — для paper-позиций.
+    closed = reconcile_paper_positions(adapter, store)
+    if closed:
+        log.info("Paper reconcile: закрыто %d позиций", closed)
+
+    # 1b. Broker-reconcile (SL/TP сработавшие на cTrader стороне) — для live.
+    closed_live = reconcile_broker_positions(adapter, store)
+    if closed_live:
+        log.info("Broker reconcile: закрыто %d live-позиций", closed_live)
+
+    if store.is_paused():
+        log.info("PAUSED — пропускаю цикл")
+        return
+
+    gen = killswitch.check_can_trade()
+    if not gen.allowed:
+        log.warning("KILLSWITCH: %s — пропускаю цикл", gen.reason)
+        return
+
+    ctx = collect_market_context(
+        adapter, store, settings.symbols, settings.virtual_capital_usd,
+        news_provider=news_provider, eia_provider=eia_provider,
+    )
+    user_prompt = build_user_prompt(format_context_for_prompt(ctx))
+
+    log.info(
+        "LLM call (full): positions=%d news_total=%d eia=%s",
+        len(ctx.open_positions),
+        sum(len(v) for v in ctx.news_per_symbol.values()),
+        "YES" if ctx.eia_block_text else "no",
+    )
+    resp = llm.ask(SYSTEM_PROMPT, user_prompt)
+    store.add_api_cost(resp.cost_usd)
+
+    if resp.error:
+        store.log_decision(
+            cycle=cycle, cycle_type="full",
+            prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+            response_raw=None, parsed_action=None, sentiment=None,
+            executed=False, error=f"llm_error: {resp.error}",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        log.error("LLM error: %s", resp.error)
+        return
+
+    log.info(
+        "LLM tokens: in=%d out=%d cost=$%.5f",
+        resp.tokens_input, resp.tokens_output, resp.cost_usd,
+    )
+    # Truncation guard: если out впритык к max_tokens — JSON скорее всего
+    # обрезан. Не парсим broken-payload, поднимаем явный WARNING,
+    # чтобы регрессия лимита была видна в logs (см. инцидент 2026-05-18
+    # «not a decision dict (missing 'action')» из-за дефолта 4096).
+    if resp.tokens_output >= settings.deepseek_max_tokens - 16:
+        log.warning(
+            "LLM truncated: out=%d ≈ max_tokens=%d. JSON вероятно обрезан, "
+            "skipping cycle. Поднимите AI_FX_TREND_DEEPSEEK_MAX_TOKENS.",
+            resp.tokens_output, settings.deepseek_max_tokens,
+        )
+        store.log_decision(
+            cycle=cycle, cycle_type="full",
+            prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+            response_raw=resp.text, parsed_action=None, sentiment=None,
+            executed=False, error="llm_truncated_at_max_tokens",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        return
+    log.info("LLM response: %s", resp.text[:300].replace("\n", " "))
+
+    parsed = parse_action(resp.text, settings.symbols)
+    if isinstance(parsed, str):
+        store.log_decision(
+            cycle=cycle, cycle_type="full",
+            prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+            response_raw=resp.text, parsed_action=None, sentiment=None,
+            executed=False, error=f"parse_error: {parsed}",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        log.error("Parse error: %s", parsed)
+        return
+
+    sentiment = _extract_sentiment(parsed.raw)
+    apply = apply_action(
+        parsed, adapter=adapter, store=store,
+        settings=settings, killswitch=killswitch,
+    )
+    store.log_decision(
+        cycle=cycle, cycle_type="full",
+        prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+        response_raw=resp.text, parsed_action=parsed.raw, sentiment=sentiment,
+        executed=apply.executed, error=apply.error,
+        tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+        cost_usd=resp.cost_usd,
+    )
+    if apply.error:
+        log.error("Apply error: %s", apply.error)
+    elif apply.summary:
+        log.info("APPLY: %s", apply.summary)
+
+
+def _run_review_cycle(
+    cycle: int,
+    settings: AiFxTrendSettings,
+    store: AiFxTraderStore,
+    adapter: CTraderFxAdapter,
+    llm: DeepSeekClient,
+    killswitch: KillSwitch,
+) -> None:
+    log.info("─── Review %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
+
+    closed = reconcile_paper_positions(adapter, store)
+    if closed:
+        log.info("Paper reconcile (review): закрыто %d позиций", closed)
+
+    closed_live = reconcile_broker_positions(adapter, store)
+    if closed_live:
+        log.info("Broker reconcile (review): закрыто %d live-позиций", closed_live)
+
+    if store.is_paused():
+        log.info("PAUSED — пропускаю review")
+        return
+
+    gen = killswitch.check_can_trade()
+    if not gen.allowed:
+        log.info("KILLSWITCH (%s) — пропускаю review", gen.reason)
+        return
+
+    open_positions = store.get_open_positions()
+    if not open_positions:
+        log.info("Нет открытых позиций — пропускаю review")
+        return
+
+    ctx = collect_review_context(adapter, store, settings.virtual_capital_usd)
+    system_prompt = build_system_prompt_review(settings)
+    user_prompt = build_user_prompt_review(format_context_for_review(ctx))
+
+    log.info("Review LLM call: positions=%d", len(ctx.open_positions))
+    resp = llm.ask(system_prompt, user_prompt)
+    store.add_api_cost(resp.cost_usd)
+
+    if resp.error:
+        store.log_decision(
+            cycle=cycle, cycle_type="review",
+            prompt_system=system_prompt, prompt_user=user_prompt,
+            response_raw=None, parsed_action=None, sentiment=None,
+            executed=False, error=f"llm_error: {resp.error}",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        log.error("Review LLM error: %s", resp.error)
+        return
+
+    log.info(
+        "Review tokens: in=%d out=%d cost=$%.5f",
+        resp.tokens_input, resp.tokens_output, resp.cost_usd,
+    )
+    if resp.tokens_output >= settings.deepseek_max_tokens - 16:
+        log.warning(
+            "Review LLM truncated: out=%d ≈ max_tokens=%d, skipping cycle",
+            resp.tokens_output, settings.deepseek_max_tokens,
+        )
+        store.log_decision(
+            cycle=cycle, cycle_type="review",
+            prompt_system=system_prompt, prompt_user=user_prompt,
+            response_raw=resp.text, parsed_action=None, sentiment=None,
+            executed=False, error="llm_truncated_at_max_tokens",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        return
+    log.info("Review response: %s", resp.text[:200].replace("\n", " "))
+
+    parsed = parse_action(resp.text, settings.symbols, review_mode=True)
+    if isinstance(parsed, str):
+        store.log_decision(
+            cycle=cycle, cycle_type="review",
+            prompt_system=system_prompt, prompt_user=user_prompt,
+            response_raw=resp.text, parsed_action=None, sentiment=None,
+            executed=False, error=f"parse_error: {parsed}",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        log.error("Review parse error: %s", parsed)
+        return
+
+    apply = apply_action(
+        parsed, adapter=adapter, store=store,
+        settings=settings, killswitch=killswitch,
+    )
+    store.log_decision(
+        cycle=cycle, cycle_type="review",
+        prompt_system=system_prompt, prompt_user=user_prompt,
+        response_raw=resp.text, parsed_action=parsed.raw, sentiment=None,
+        executed=apply.executed, error=apply.error,
+        tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+        cost_usd=resp.cost_usd,
+    )
+    if apply.error:
+        log.error("Review apply error: %s", apply.error)
+    elif apply.summary:
+        log.info("REVIEW APPLY: %s", apply.summary)
+
+
+if __name__ == "__main__":
+    run()

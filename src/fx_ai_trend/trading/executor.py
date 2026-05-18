@@ -31,10 +31,10 @@ from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 
-from fx_ai_trader.config.settings import AiFxTraderSettings
-from fx_ai_trader.safety.killswitch import KillSwitch
-from fx_ai_trader.state.db import AiFxTraderStore
-from fx_ai_trader.trading.client_adapter import CTraderFxAdapter
+from fx_ai_trend.config.settings import AiFxTrendSettings
+from fx_ai_trend.safety.killswitch import KillSwitch
+from fx_ai_trend.state.db import AiFxTraderStore
+from fx_ai_trend.trading.client_adapter import CTraderFxAdapter
 
 log = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ def apply_action(
     *,
     adapter: CTraderFxAdapter,
     store: AiFxTraderStore,
-    settings: AiFxTraderSettings,
+    settings: AiFxTrendSettings,
     killswitch: KillSwitch,
 ) -> ApplyResult:
     if action.action_type == "hold":
@@ -314,7 +314,7 @@ def _apply_close(
     *,
     adapter: CTraderFxAdapter,
     store: AiFxTraderStore,
-    settings: AiFxTraderSettings,
+    settings: AiFxTrendSettings,
 ) -> ApplyResult:
     assert isinstance(action.model, CloseAction)
     pos_id = action.model.position_id
@@ -478,7 +478,7 @@ def _apply_open(
     *,
     adapter: CTraderFxAdapter,
     store: AiFxTraderStore,
-    settings: AiFxTraderSettings,
+    settings: AiFxTrendSettings,
     killswitch: KillSwitch,
 ) -> ApplyResult:
     assert isinstance(action.model, OpenAction)
@@ -580,7 +580,7 @@ def _apply_open(
         internal_symbol=m.symbol, side=m.side,
         volume_lots=volume_lots,
         sl_price=m.stop_loss, tp_price=m.take_profit,
-        comment=f"ai-fx-trader:{uuid.uuid4().hex[:8]}",
+        comment=f"ai-fx-trend:{uuid.uuid4().hex[:8]}",
     )
     if not res.success:
         return ApplyResult(

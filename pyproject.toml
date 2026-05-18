@@ -35,6 +35,7 @@ fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
 bybit-bot = "bybit_bot.app.main:main"
 ai-trader = "ai_trader.app.main:run"
 fx-ai-trader = "fx_ai_trader.app.main:run"
+fx-ai-trend = "fx_ai_trend.app.main:run"
 ai-arena = "ai_arena.app.main:run"
 ctrader-token-service = "ctrader_token_service.__main__:main"
 
@@ -44,6 +45,7 @@ packages = [
   "src/bybit_bot",
   "src/ai_trader",
   "src/fx_ai_trader",
+  "src/fx_ai_trend",
   "src/ai_arena",
   "src/shared_oauth",
   "src/ctrader_token_service",
