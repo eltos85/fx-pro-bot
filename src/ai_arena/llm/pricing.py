@@ -137,23 +137,35 @@ class TokenUsage:
 def extract_token_usage(usage: Any) -> TokenUsage:
     """Достаёт raw-числа из ``msg.usage`` (объект Anthropic SDK или dict).
 
-    Defensive: DeepSeek через свой Anthropic-compat endpoint может
-    возвращать поля кэша в двух стилях:
+    Поддерживает ДВЕ разные семантики usage-блока (важная разница в том,
+    что значит ``input_tokens``):
 
-    1. **DeepSeek native** (OpenAI-style):
-       ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``
-       (https://api-docs.deepseek.com/guides/kv_cache).
+    1. **DeepSeek native** (OpenAI-style,
+       https://api-docs.deepseek.com/guides/kv_cache):
+       - ``prompt_tokens`` (= ``input_tokens`` в нашем SDK-маппинге) —
+         **ВСЁ** input total
+       - ``prompt_cache_hit_tokens`` — часть из total, обслужена кэшом
+       - ``prompt_cache_miss_tokens`` — остальная часть
+       - Инвариант: ``hit + miss == prompt_tokens``
 
-    2. **Anthropic native**:
-       ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
-       (https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).
+    2. **Anthropic native**
+       (https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching):
+       - ``input_tokens`` — **только non-cache** (по факту = miss)
+       - ``cache_read_input_tokens`` — hit (отдельно, **прибавляется**)
+       - ``cache_creation_input_tokens`` — tokens создавшие cache entry
+         сейчас (платятся как input, и в будущем могут стать hit)
+       - Инвариант: total billable input = input_tokens +
+         cache_read_input_tokens + cache_creation_input_tokens
 
-    Какой именно используется DeepSeek в Anthropic-compat — в их доке не
-    указано явно. Пробуем оба варианта; если ни один не найден — fallback
-    в безопасный режим (всё считается cache_miss, цена не занижается).
+    DeepSeek через свой Anthropic-compat endpoint использует
+    **Anthropic-семантику** (эмпирически: `input_tokens=4113`,
+    `cache_read_input_tokens=2304` приходят одновременно — для DeepSeek-
+    native это было бы `prompt_tokens=4113` и hit как **часть** от него).
 
-    Принимает либо объект (с attr-доступом, как Anthropic SDK), либо
-    dict — для устойчивости к тестам и возможной смене SDK.
+    Защита: автоматически определяем семантику по наличию полей, чтобы
+    не привязываться к одному endpoint'у. Если ничего не нашли —
+    fallback в безопасный режим (всё считается cache_miss, цена не
+    занижается).
     """
     if usage is None:
         return TokenUsage(0, 0, 0, 0)
@@ -168,33 +180,39 @@ def extract_token_usage(usage: Any) -> TokenUsage:
         except (TypeError, ValueError):
             return default
 
-    input_tokens = _get("input_tokens")
+    raw_input = _get("input_tokens")
     output_tokens = _get("output_tokens")
 
-    cache_hit = _get("prompt_cache_hit_tokens") or _get("cache_read_input_tokens")
-    cache_miss = (
-        _get("prompt_cache_miss_tokens")
-        or _get("cache_creation_input_tokens")
-    )
-
-    if cache_hit == 0 and cache_miss == 0:
+    ds_hit = _get("prompt_cache_hit_tokens")
+    ds_miss = _get("prompt_cache_miss_tokens")
+    if ds_hit > 0 or ds_miss > 0:
+        if abs((ds_hit + ds_miss) - raw_input) > 2:
+            log.warning(
+                "DeepSeek-native usage: hit+miss=%d != input_tokens=%d",
+                ds_hit + ds_miss, raw_input,
+            )
         return TokenUsage(
-            input_tokens=input_tokens,
+            input_tokens=raw_input,
             output_tokens=output_tokens,
-            cache_hit_tokens=0,
-            cache_miss_tokens=input_tokens,
+            cache_hit_tokens=ds_hit,
+            cache_miss_tokens=ds_miss,
         )
 
-    if cache_hit + cache_miss > 0 and abs((cache_hit + cache_miss) - input_tokens) > 2:
-        log.warning(
-            "cache_hit + cache_miss = %d, input_tokens = %d (расхождение). "
-            "Возможно поля несинхронны — используем как есть.",
-            cache_hit + cache_miss, input_tokens,
+    anth_read = _get("cache_read_input_tokens")
+    anth_create = _get("cache_creation_input_tokens")
+    if anth_read > 0 or anth_create > 0:
+        miss_billable = raw_input + anth_create
+        total_input = miss_billable + anth_read
+        return TokenUsage(
+            input_tokens=total_input,
+            output_tokens=output_tokens,
+            cache_hit_tokens=anth_read,
+            cache_miss_tokens=miss_billable,
         )
 
     return TokenUsage(
-        input_tokens=input_tokens,
+        input_tokens=raw_input,
         output_tokens=output_tokens,
-        cache_hit_tokens=cache_hit,
-        cache_miss_tokens=cache_miss,
+        cache_hit_tokens=0,
+        cache_miss_tokens=raw_input,
     )

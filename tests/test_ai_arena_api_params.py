@@ -423,16 +423,53 @@ class TestExtractTokenUsage:
         assert u.cache_hit_tokens == 4000
         assert u.cache_miss_tokens == 1000
 
-    def test_anthropic_native_field_names_dict(self):
-        """Anthropic-style имена (на случай если DeepSeek роутит так)."""
+    def test_anthropic_native_semantics(self):
+        """Anthropic-style semantics: ``input_tokens`` это **non-cache**
+        (по факту miss), ``cache_read_input_tokens`` суммируется СВЕРХУ.
+
+        DeepSeek через Anthropic-compat endpoint использует именно эту
+        семантику (эмпирически подтверждено на live-запросе 2026-05-18:
+        input_tokens=4113 и cache_read=2304 пришли одновременно — для
+        DeepSeek-native это значило бы что hit это **часть** от 4113).
+        """
+        u = extract_token_usage({
+            "input_tokens": 1000,             # non-cache input (= miss)
+            "output_tokens": 200,
+            "cache_read_input_tokens": 4000,  # hit
+            "cache_creation_input_tokens": 0,
+        })
+        assert u.cache_hit_tokens == 4000, "hit берётся из cache_read"
+        assert u.cache_miss_tokens == 1000, "miss = input_tokens + cache_creation"
+        assert u.input_tokens == 5000, (
+            "total input = miss + hit (для совместимости с DeepSeek-style)"
+        )
+
+    def test_anthropic_native_with_cache_creation(self):
+        """cache_creation_input_tokens — это miss-tokens, которые ПРЯМО
+        СЕЙЧАС создают cache entry (billable как обычный input)."""
+        u = extract_token_usage({
+            "input_tokens": 500,
+            "output_tokens": 200,
+            "cache_read_input_tokens": 2000,
+            "cache_creation_input_tokens": 1500,
+        })
+        assert u.cache_hit_tokens == 2000
+        assert u.cache_miss_tokens == 2000, "500 non-cache + 1500 cache_creation"
+        assert u.input_tokens == 4000
+
+    def test_deepseek_native_takes_priority_over_anthropic(self):
+        """Если случайно пришли поля обоих стилей — приоритет у
+        DeepSeek-native (т.к. там точная семантика hit+miss=total)."""
         u = extract_token_usage({
             "input_tokens": 5000,
             "output_tokens": 200,
-            "cache_read_input_tokens": 4000,
-            "cache_creation_input_tokens": 1000,
+            "prompt_cache_hit_tokens": 3000,
+            "prompt_cache_miss_tokens": 2000,
+            "cache_read_input_tokens": 999,    # должно игнорироваться
+            "cache_creation_input_tokens": 999,
         })
-        assert u.cache_hit_tokens == 4000
-        assert u.cache_miss_tokens == 1000
+        assert u.cache_hit_tokens == 3000
+        assert u.cache_miss_tokens == 2000
 
     def test_no_cache_fields_treats_all_as_miss(self):
         """Если cache-полей нет — безопасный fallback: весь input = miss
