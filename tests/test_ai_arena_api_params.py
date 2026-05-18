@@ -21,6 +21,14 @@ from typing import Any
 
 import pytest
 
+from ai_arena.llm.pricing import (
+    DEFAULT_PRICING,
+    MODEL_PRICES,
+    ModelPricing,
+    TokenUsage,
+    extract_token_usage,
+    get_pricing,
+)
 from ai_arena.llm.thinking_config import build_thinking_extra_body
 from ai_arena.trading.client import AiArenaBybitClient
 
@@ -309,3 +317,162 @@ class TestGetWalletBalance:
         equity, avail = client.get_wallet_balance()
         assert equity == 0.0
         assert avail == 0.0  # пустой `return (0.0, 0.0)` — нет USDT-конца
+
+
+# ─── DeepSeek pricing + context-caching extraction ──────────────────────
+
+
+class TestModelPricing:
+    """Источник правды по ценам: api-docs.deepseek.com/quick_start/pricing.
+
+    Зашитые в MODEL_PRICES числа — то что **реально списывается** со
+    счёта на 2026-05-18 (V4-Pro = 75% off до 2026-05-31). После expiry
+    discount тесты упадут — это намеренно, чтобы заметить смену цены.
+    """
+
+    def test_v4_pro_uses_discounted_prices(self):
+        """V4-Pro: $0.003625/$0.435/$0.87 = list × 0.25 (75% off)."""
+        p = MODEL_PRICES["deepseek-v4-pro"]
+        assert p.cache_hit_per_m == pytest.approx(0.003625)
+        assert p.cache_miss_per_m == pytest.approx(0.435)
+        assert p.output_per_m == pytest.approx(0.87)
+
+    def test_v4_flash_prices(self):
+        p = MODEL_PRICES["deepseek-v4-flash"]
+        assert p.cache_hit_per_m == pytest.approx(0.0028)
+        assert p.cache_miss_per_m == pytest.approx(0.14)
+        assert p.output_per_m == pytest.approx(0.28)
+
+    def test_cache_hit_is_at_least_50x_cheaper_than_miss(self):
+        """Sanity: cache_hit ВСЕГДА должен быть кратно дешевле miss
+        (DeepSeek говорит ~100×). Если кто-то по ошибке заменил
+        одно на другое — поймаем."""
+        for name, p in MODEL_PRICES.items():
+            ratio = p.cache_miss_per_m / max(p.cache_hit_per_m, 1e-9)
+            assert ratio >= 50, (
+                f"{name}: cache_miss/{p.cache_hit_per_m}={ratio:.1f}× — "
+                "ожидаем >=50× (DeepSeek docs: ~100×). "
+                "Возможно местами перепутаны цены."
+            )
+
+    def test_legacy_aliases_map_to_flash(self):
+        """deepseek-chat / deepseek-reasoner сейчас роутятся в v4-flash
+        (см. changelog 2026-04-24, retire 2026-07-24)."""
+        flash = MODEL_PRICES["deepseek-v4-flash"]
+        assert MODEL_PRICES["deepseek-chat"] == flash
+        assert MODEL_PRICES["deepseek-reasoner"] == flash
+
+    def test_get_pricing_unknown_falls_back_to_default(self, caplog):
+        result = get_pricing("deepseek-v5-experimental-xyz")
+        assert result == DEFAULT_PRICING
+        assert any("Unknown model" in r.message for r in caplog.records)
+
+    def test_get_pricing_none_returns_default(self):
+        assert get_pricing(None) == DEFAULT_PRICING
+
+    def test_get_pricing_case_insensitive(self):
+        assert get_pricing("DeepSeek-V4-Pro") == MODEL_PRICES["deepseek-v4-pro"]
+
+    def test_cost_calculation_v4_pro_full_miss(self):
+        """Без context caching: 10k input miss, 200 output = расчёт по
+        реальным ценам (а не нашему старому $0.27/$1.10)."""
+        p = MODEL_PRICES["deepseek-v4-pro"]
+        cost = p.cost(
+            cache_hit_tokens=0,
+            cache_miss_tokens=10_000,
+            output_tokens=200,
+        )
+        # 10_000 * 0.435 / 1M + 200 * 0.87 / 1M = 0.00435 + 0.000174 = 0.004524
+        assert cost == pytest.approx(0.004524, abs=1e-6)
+
+    def test_cost_calculation_v4_pro_with_caching(self):
+        """С caching: 80% input из кэша — стоимость ниже почти в 5×."""
+        p = MODEL_PRICES["deepseek-v4-pro"]
+        cost_full_miss = p.cost(
+            cache_hit_tokens=0, cache_miss_tokens=10_000, output_tokens=200,
+        )
+        cost_with_cache = p.cost(
+            cache_hit_tokens=8_000, cache_miss_tokens=2_000, output_tokens=200,
+        )
+        # 8000*0.003625/M + 2000*0.435/M + 200*0.87/M = 0.000029 + 0.00087 + 0.000174 = 0.001073
+        assert cost_with_cache == pytest.approx(0.001073, abs=1e-6)
+        # Кэш экономит существенно — должно быть в 3+ раза дешевле
+        assert cost_full_miss / cost_with_cache >= 3.0
+
+
+class TestExtractTokenUsage:
+    """Defensive parser usage-блока: DeepSeek Anthropic-compat не
+    декларирует явно имя cache-полей. Пробуем оба стиля (свой OpenAI
+    style + Anthropic native).
+    """
+
+    def test_none_usage_returns_zeros(self):
+        u = extract_token_usage(None)
+        assert u == TokenUsage(0, 0, 0, 0)
+
+    def test_deepseek_native_field_names_dict(self):
+        """OpenAI-style имена (DeepSeek's native кэширования)."""
+        u = extract_token_usage({
+            "input_tokens": 5000,
+            "output_tokens": 200,
+            "prompt_cache_hit_tokens": 4000,
+            "prompt_cache_miss_tokens": 1000,
+        })
+        assert u.input_tokens == 5000
+        assert u.output_tokens == 200
+        assert u.cache_hit_tokens == 4000
+        assert u.cache_miss_tokens == 1000
+
+    def test_anthropic_native_field_names_dict(self):
+        """Anthropic-style имена (на случай если DeepSeek роутит так)."""
+        u = extract_token_usage({
+            "input_tokens": 5000,
+            "output_tokens": 200,
+            "cache_read_input_tokens": 4000,
+            "cache_creation_input_tokens": 1000,
+        })
+        assert u.cache_hit_tokens == 4000
+        assert u.cache_miss_tokens == 1000
+
+    def test_no_cache_fields_treats_all_as_miss(self):
+        """Если cache-полей нет — безопасный fallback: весь input = miss
+        (цена не занижается)."""
+        u = extract_token_usage({
+            "input_tokens": 5000,
+            "output_tokens": 200,
+        })
+        assert u.cache_hit_tokens == 0
+        assert u.cache_miss_tokens == 5000
+
+    def test_works_with_object_attributes(self):
+        """SDK обычно отдаёт объект, не dict."""
+
+        class _Usage:
+            input_tokens = 5000
+            output_tokens = 200
+            prompt_cache_hit_tokens = 3000
+            prompt_cache_miss_tokens = 2000
+
+        u = extract_token_usage(_Usage())
+        assert u.cache_hit_tokens == 3000
+        assert u.cache_miss_tokens == 2000
+
+    def test_cache_hit_rate_property(self):
+        u = TokenUsage(
+            input_tokens=5000, output_tokens=200,
+            cache_hit_tokens=4000, cache_miss_tokens=1000,
+        )
+        assert u.cache_hit_rate == pytest.approx(0.8)
+
+    def test_cache_hit_rate_zero_input(self):
+        u = TokenUsage(0, 0, 0, 0)
+        assert u.cache_hit_rate == 0.0
+
+    def test_invalid_values_dont_crash(self):
+        """SDK может вернуть строку или None в редких случаях."""
+        u = extract_token_usage({
+            "input_tokens": "garbage",
+            "output_tokens": None,
+        })
+        assert u.input_tokens == 0
+        assert u.output_tokens == 0

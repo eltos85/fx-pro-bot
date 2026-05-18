@@ -36,16 +36,10 @@ from dataclasses import dataclass
 
 import anthropic
 
+from ai_arena.llm.pricing import extract_token_usage, get_pricing
 from ai_arena.llm.thinking_config import build_thinking_extra_body
 
 log = logging.getLogger(__name__)
-
-
-# Цены DeepSeek V4-Pro на момент 2026-04-24 (release date) — могут
-# уточниться, см. api-docs.deepseek.com. Цель — приблизительный учёт
-# в БД (cost_usd в decisions), не биллинг.
-COST_PER_M_INPUT_USD = 0.27
-COST_PER_M_OUTPUT_USD = 1.10
 
 
 @dataclass
@@ -54,7 +48,22 @@ class LlmResponse:
     tokens_input: int
     tokens_output: int
     cost_usd: float
+    # Context caching tracking (см. llm/pricing.py extract_token_usage).
+    # Cache_hit_tokens — дешёвые ($0.003625/M на V4-Pro), cache_miss —
+    # дорогие ($0.435/M). При byte-identical prefix между запросами
+    # DeepSeek автоматически возвращает большую долю как cache_hit
+    # (https://api-docs.deepseek.com/guides/kv_cache). Если поля
+    # неизвестны (старый SDK / другой провайдер) — оба = 0 и весь
+    # input трактуется как miss (безопасный fallback).
+    tokens_cache_hit: int = 0
+    tokens_cache_miss: int = 0
     error: str | None = None
+
+    @property
+    def cache_hit_rate(self) -> float:
+        if self.tokens_input <= 0:
+            return 0.0
+        return self.tokens_cache_hit / self.tokens_input
 
 
 class DeepSeekArenaClient:
@@ -94,13 +103,18 @@ class DeepSeekArenaClient:
                 )
                 time.sleep(self._retry_sleep_sec)
         if last is None:
-            return LlmResponse(text="", tokens_input=0, tokens_output=0, cost_usd=0, error="no attempts")
+            return LlmResponse(
+                text="", tokens_input=0, tokens_output=0, cost_usd=0,
+                error="no attempts",
+            )
         if not last.text and last.error is None:
             return LlmResponse(
                 text="",
                 tokens_input=last.tokens_input,
                 tokens_output=last.tokens_output,
                 cost_usd=last.cost_usd,
+                tokens_cache_hit=last.tokens_cache_hit,
+                tokens_cache_miss=last.tokens_cache_miss,
                 error=f"empty response after {attempts} attempts",
             )
         return last
@@ -119,7 +133,10 @@ class DeepSeekArenaClient:
             msg = self._client.messages.create(**kwargs)
         except Exception as e:
             log.exception("DeepSeek API call failed")
-            return LlmResponse(text="", tokens_input=0, tokens_output=0, cost_usd=0, error=str(e))
+            return LlmResponse(
+                text="", tokens_input=0, tokens_output=0, cost_usd=0,
+                error=str(e),
+            )
 
         text_parts: list[str] = []
         for block in msg.content:
@@ -130,11 +147,18 @@ class DeepSeekArenaClient:
             # Nof1-style единственный канал CoT — required JSON-поля.
         text = "\n".join(text_parts).strip()
 
-        usage = getattr(msg, "usage", None)
-        tokens_in = int(getattr(usage, "input_tokens", 0)) if usage else 0
-        tokens_out = int(getattr(usage, "output_tokens", 0)) if usage else 0
-        cost = (
-            tokens_in / 1_000_000 * COST_PER_M_INPUT_USD
-            + tokens_out / 1_000_000 * COST_PER_M_OUTPUT_USD
+        usage = extract_token_usage(getattr(msg, "usage", None))
+        pricing = get_pricing(self._model)
+        cost = pricing.cost(
+            cache_hit_tokens=usage.cache_hit_tokens,
+            cache_miss_tokens=usage.cache_miss_tokens,
+            output_tokens=usage.output_tokens,
         )
-        return LlmResponse(text=text, tokens_input=tokens_in, tokens_output=tokens_out, cost_usd=cost)
+        return LlmResponse(
+            text=text,
+            tokens_input=usage.input_tokens,
+            tokens_output=usage.output_tokens,
+            cost_usd=cost,
+            tokens_cache_hit=usage.cache_hit_tokens,
+            tokens_cache_miss=usage.cache_miss_tokens,
+        )

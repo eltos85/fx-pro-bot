@@ -278,6 +278,8 @@ def _run_cycle(
             error=f"llm_error: {resp.error}",
             tokens_input=resp.tokens_input,
             tokens_output=resp.tokens_output,
+            tokens_cache_hit=resp.tokens_cache_hit,
+            tokens_cache_miss=resp.tokens_cache_miss,
             cost_usd=resp.cost_usd,
         )
         log.error("LLM error: %s", resp.error)
@@ -287,8 +289,13 @@ def _run_cycle(
         return
 
     log.info(
-        "LLM tokens: in=%d out=%d cost=$%.5f",
-        resp.tokens_input, resp.tokens_output, resp.cost_usd,
+        "LLM tokens: in=%d (hit=%d miss=%d, %.1f%% cache) out=%d cost=$%.5f",
+        resp.tokens_input,
+        resp.tokens_cache_hit,
+        resp.tokens_cache_miss,
+        resp.cache_hit_rate * 100,
+        resp.tokens_output,
+        resp.cost_usd,
     )
     log.info("LLM response (first 300): %s", resp.text[:300].replace("\n", " "))
 
@@ -310,6 +317,8 @@ def _run_cycle(
             error=f"parse_error: {parsed}",
             tokens_input=resp.tokens_input,
             tokens_output=resp.tokens_output,
+            tokens_cache_hit=resp.tokens_cache_hit,
+            tokens_cache_miss=resp.tokens_cache_miss,
             cost_usd=resp.cost_usd,
         )
         log.error("Parse error: %s", parsed)
@@ -338,6 +347,8 @@ def _run_cycle(
         error=apply.error,
         tokens_input=resp.tokens_input,
         tokens_output=resp.tokens_output,
+        tokens_cache_hit=resp.tokens_cache_hit,
+        tokens_cache_miss=resp.tokens_cache_miss,
         cost_usd=resp.cost_usd,
     )
     if apply.error:

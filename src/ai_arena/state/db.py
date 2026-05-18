@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     error TEXT,
     tokens_input INTEGER,
     tokens_output INTEGER,
+    tokens_cache_hit INTEGER,
+    tokens_cache_miss INTEGER,
     cost_usd REAL
 );
 
@@ -162,6 +164,19 @@ class AiArenaStore:
                 "ALTER TABLE positions ADD COLUMN wallet_balance_before_close REAL"
             )
 
+        # 2026-05-18: context-caching tracking. Старые decisions
+        # останутся с NULL — на дашборде показывать как «n/a». Новые
+        # пишутся с актуальными числами для cost-аналитики.
+        dcols = {r["name"] for r in conn.execute("PRAGMA table_info(decisions)")}
+        if "tokens_cache_hit" not in dcols:
+            conn.execute(
+                "ALTER TABLE decisions ADD COLUMN tokens_cache_hit INTEGER"
+            )
+        if "tokens_cache_miss" not in dcols:
+            conn.execute(
+                "ALTER TABLE decisions ADD COLUMN tokens_cache_miss INTEGER"
+            )
+
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=30.0)
@@ -193,6 +208,8 @@ class AiArenaStore:
         tokens_input: int | None = None,
         tokens_output: int | None = None,
         cost_usd: float | None = None,
+        tokens_cache_hit: int | None = None,
+        tokens_cache_miss: int | None = None,
     ) -> int:
         with self._conn() as c:
             cur = c.execute(
@@ -201,9 +218,10 @@ class AiArenaStore:
                     cycle, ts, minutes_elapsed, sharpe_at_decision,
                     prompt_system, prompt_user, response_raw, parsed_action,
                     signal, confidence, invalidation_condition, risk_usd,
-                    executed, error, tokens_input, tokens_output, cost_usd
+                    executed, error, tokens_input, tokens_output,
+                    tokens_cache_hit, tokens_cache_miss, cost_usd
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cycle,
@@ -222,6 +240,8 @@ class AiArenaStore:
                     error,
                     tokens_input,
                     tokens_output,
+                    tokens_cache_hit,
+                    tokens_cache_miss,
                     cost_usd,
                 ),
             )

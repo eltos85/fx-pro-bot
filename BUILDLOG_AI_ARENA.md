@@ -18,6 +18,105 @@
 
 ## 2026-05-18
 
+### feat(ai-arena): context-caching tracking + корректные цены V4-Pro
+`(коммит ниже)`
+
+**Контекст.** При аудите V4 vs V3 (changelog 2026-04-24) обнаружились
+две проблемы в нашей бухгалтерии:
+
+1. **Захардкоженные цены устарели.** В `llm/client.py` стояло
+   `COST_PER_M_INPUT_USD = 0.27`, `COST_PER_M_OUTPUT_USD = 1.10` —
+   похоже на старые V3.1 standard цены. Актуальные V4-Pro (с 75% off
+   до 2026-05-31, [pricing](https://api-docs.deepseek.com/quick_start/pricing)):
+   - cache miss input: **$0.435/M** (×1.6 от нашего 0.27)
+   - output: **$0.87/M** (×0.79)
+
+2. **Не считали context caching.** DeepSeek с 2024-08-02 имеет
+   автоматический KV-cache: повторяющиеся prefix-у дают
+   ``prompt_cache_hit_tokens`` со ставкой **в 100× дешевле**
+   ($0.003625/M vs $0.435/M на V4-Pro). У нас SYSTEM_PROMPT 1-в-1
+   между циклами (≈3500-4000 tokens) + большая часть user_prompt —
+   огромная вероятность что мы **платим в 5-10× меньше чем считаем**.
+
+   **Важно:** цены никогда не передавались в LLM, это только наш
+   локальный счётчик в `decisions.cost_usd` и `daily_pnl.api_cost_usd`.
+   Торговые решения не зависели от этого — но нам было непонятно
+   реальную экономику бота.
+
+**Реализация:**
+
+Новый pure-модуль `src/ai_arena/llm/pricing.py`:
+
+- `MODEL_PRICES` — словарь моделей с tarif-ами per million tokens
+  (cache hit / cache miss / output). Сейчас зашиты:
+  - `deepseek-v4-pro` (75% off discounted)
+  - `deepseek-v4-flash`
+  - legacy `deepseek-chat` / `deepseek-reasoner` (роутятся в flash,
+    retire 2026-07-24)
+- `ModelPricing.cost(cache_hit, cache_miss, output)` — расчёт
+- `extract_token_usage(usage)` — defensive парсер usage-блока,
+  пробует оба возможных стиля cache-полей:
+  1. DeepSeek native (OpenAI-style): `prompt_cache_hit_tokens` /
+     `prompt_cache_miss_tokens`
+  2. Anthropic native: `cache_read_input_tokens` /
+     `cache_creation_input_tokens`
+
+  Это нужно потому что DeepSeek в Anthropic-compat явно не задокументировал
+  имя cache-полей. Defensive подход: пробуем оба, если ни одного — весь
+  input трактуется как cache_miss (цена **не занижается**).
+
+- `get_pricing(model)` — с case-insensitive lookup и warning'ом на
+  неизвестную модель.
+
+`llm/client.py`:
+- Удалены хардкоды `COST_PER_M_INPUT_USD/OUTPUT`
+- `LlmResponse` получил поля `tokens_cache_hit` / `tokens_cache_miss`
+  + property `cache_hit_rate`
+- `_call` теперь использует `extract_token_usage` + `get_pricing(model).cost(...)`
+
+`state/db.py`:
+- В `decisions` добавлены колонки `tokens_cache_hit` / `tokens_cache_miss`
+  (nullable, идемпотентная миграция `ALTER TABLE ADD COLUMN`)
+- `log_decision` принимает их опционально, старые вызовы не сломаны
+
+`app/main.py`:
+- Расширенный лог: `LLM tokens: in=4279 (hit=3500 miss=779, 81.8% cache)
+  out=160 cost=$0.000484` — сразу видим экономику и здоровье prompt-cache
+- Cache-поля пробрасываются в `log_decision` во всех трёх ветках
+  (success / parse-error / llm-error)
+
+**Тесты:** новый `TestModelPricing` (9 тестов) + `TestExtractTokenUsage`
+(8 тестов). Всего по `api_params.py` 33 passed (было 16). Full suite
+839 passed.
+
+**Ключевые проверки в тестах:**
+- Sanity: `cache_miss_per_m / cache_hit_per_m >= 50×` (по докам DeepSeek
+  должно быть ~100×, если кто-то перепутает поля — поймаем)
+- Discount-prices зашиты как-есть (тесты упадут после 2026-05-31, когда
+  V4-Pro 75% off закончится — это намеренно, чтобы не пропустить)
+- Defensive парсер: оба стиля field-names, dict + объект, мусор
+- Cost-калькуляция с/без caching: подтверждено что cache даёт ~3× экономию
+  при 80% hit-rate
+
+**Что НЕ внедрено (из аудита V4):**
+- `response_format={"type": "json_object"}` — только в OpenAI-format
+  endpoint, потребует миграции с anthropic SDK
+- `temperature=0.0` для детерминизма — отход от Nof1 default, нужно
+  отдельное обсуждение
+- 1M context, tool_calls, FIM, prefix_completion — нашему single-shot
+  use-case не подходят
+
+**Файлы:**
+- `src/ai_arena/llm/pricing.py` (новый, 144 строк)
+- `src/ai_arena/llm/client.py` (использует pricing, без хардкодов)
+- `src/ai_arena/state/db.py` (миграция + 2 nullable колонки)
+- `src/ai_arena/app/main.py` (расширенный лог + проброс cache-полей)
+- `tests/test_ai_arena_api_params.py` (+17 тестов)
+
+---
+
+## 2026-05-18 (ранее)
+
 ### fix(ai-arena): корректное управление thinking-mode + `positionIdx=0` + `totalAvailableBalance`
 `(коммит ниже)`
 
