@@ -1,5 +1,79 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-18 (вечер, 14:50 UTC) — CRITICAL FIX: откатан label guard, восстановлены 2 потерянные позиции
+
+`коммит при deploy — INCIDENT FIX`
+
+**Симптом — 2 позиции БРОШЕНЫ ботом за 1.5 часа:**
+
+| id | symbol | broker_pid | opened | "closed" (false) | реальный статус |
+|---|---|---|---|---|---|
+| 7 | BZ=F SELL | 150837215 | 13:20:19 | 14:01:36 (label_guard_orphan) | broker auto-close по SL ($106.059, PnL −$10.48) |
+| 8 | XAUUSD SELL | 150839089 | 14:33:16 | 14:38:37 (label_guard_orphan) | **ЖИВАЯ на broker'е**, ботом не управлялась 16+ минут |
+
+**Корень — мой собственный фикс**. Belt-and-suspenders label guard,
+добавленный 2026-05-18 (commit `6b3665e`) для «multi-bot isolation»,
+выглядел так:
+
+```python
+active_ours = adapter.get_open_positions()
+if pos.broker_position_id not in {p.position_id for p in active_ours}:
+    # Считаем что pid принадлежит "другому боту" → не дёргаем close,
+    # маркируем locally как label_guard_orphan
+```
+
+`adapter.get_open_positions()` под капотом дёргает
+`ProtoOAReconcileReq`, который из-за **Spotware per-session caching
+bug** (обнаружен в этой же сессии при разборе grace-period fix'а
+13:50 UTC) systematically НЕ ОТДАЁТ свежие positionIds через
+долгоживущую TCP-сессию бота. Контрольный эксперимент с короткоживущей
+сессией (`fx_ai_dump_all_positions.py`) подтверждает: pid 150839089
+жив, label `ai-fx-trader` корректный, но reconcile() через основную
+сессию его не показывает.
+
+Label guard принял этот глюк за «orphan другого бота» и **бросил**
+обе активные позиции.
+
+**Recovery (sequence):**
+
+1. `scripts/fx_ai_recover_label_guard_orphans.py` — диагностика +
+   рекавери:
+   - id=7 BZ=F: `get_closing_deal_for_position(150837215)` → нашли
+     deal_id=331969996, exit $106.059, gross=-$10.48 →
+     `close_reason='broker_auto_recovered'`, `realized_pnl_usd=-$10.48`.
+   - id=8 XAUUSD: `UPDATE positions SET closed_at=NULL, close_reason=
+     NULL, exit_price=NULL, realized_pnl_usd=NULL WHERE id=8` →
+     восстановлена как open.
+2. Label guard **полностью удалён** из `_apply_close` (в обоих ботах:
+   fx_ai_trader + fx_ai_trend).
+3. Тест `test_label_guard_skips_close_for_orphan_broker_pid` удалён.
+4. Rebuild + deploy.
+
+**Почему cross-bot interference и без guard'а невозможна**:
+
+| Слой | Где | Что защищает |
+|---|---|---|
+| OPEN | `place_market_order` | label=settings.order_label → broker сохраняет на позицию |
+| LLM CONTEXT | `store.get_open_positions()` | LLM видит только записи из НАШЕЙ БД, где чужих физически нет |
+| DB ISOLATION | `fx_ai_trader.sqlite` ≠ `fx_ai_trend.sqlite` | разные файлы, разные таблицы |
+| _apply_close LOOKUP | `pos = next(p for p in db_positions if p.id == pos_id)` | LLM передаёт internal DB-id, не broker_pid |
+| BROKER PID SOURCE | `pos.broker_position_id` из НАШЕЙ БД | гарантия что это наша позиция, записана при OPEN |
+| broker_reconcile | `get_active_broker_position_ids` label-filtered | даже массовый reconcile не трогает чужие |
+
+Чтобы fx_ai_trader смог закрыть позицию fx_ai_trend, должно случиться
+ОДНОВРЕМЕННО: (а) `fx_ai_trader.sqlite` содержит запись с чужим
+broker_pid, (б) LLM передаёт её internal-id. Сценарий физически
+невозможен.
+
+**Тесты.** 72/72 fx_ai_trader+fx_ai_trend зелёные после удаления
+теста label_guard.
+
+**Файлы:** `src/fx_ai_trader/trading/executor.py`,
+`src/fx_ai_trend/trading/executor.py`, `tests/test_fx_ai_trader.py`,
+`scripts/fx_ai_recover_label_guard_orphans.py` (recovery one-shot).
+
+---
+
 ## 2026-05-18 (ночь, 13:50 UTC) — fix: broker_reconcile grace-period + log-level + fx_ai_trend rename consistency
 
 `коммит при deploy`

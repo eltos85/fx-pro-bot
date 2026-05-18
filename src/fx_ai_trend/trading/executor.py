@@ -347,73 +347,13 @@ def _apply_close(
         and settings.trading_enabled
         and pos.broker_position_id is not None
     ):
-        # ── Belt-and-suspenders label guard (multi-bot isolation) ──────
-        # На одном cTrader account могут жить несколько LLM-ботов
-        # (Discretionary fx-ai-trader, Trend-follower fx-ai-trend, etc.).
-        # У каждого свой ``order_label`` + изолированная БД. LLM этого
-        # бота получает в context ТОЛЬКО позиции с нашим label, поэтому
-        # halлюцинировать чужой position_id невозможно. Но если по
-        # какой-то причине broker_position_id в нашей БД устарел (manual
-        # вмешательство в cTrader Web, корраптион БД, race-condition в
-        # multi-process scenario), нельзя позволить нам случайно закрыть
-        # позицию **другого бота**. Поэтому: непосредственно перед live
-        # close дополнительно проверяем что этот broker_pid сейчас
-        # активен у broker'а **с нашим label**.
-        active_ours = adapter.get_open_positions()
-        if active_ours is not None:
-            our_ids = {p.position_id for p in active_ours}
-            if pos.broker_position_id not in our_ids:
-                # broker_pid не в нашем label-filtered set → либо broker
-                # уже закрыл (SL/TP), либо позиция принадлежит другому
-                # боту (никогда не должно случиться, но защищаемся).
-                # Пытаемся подтянуть closing deal — если есть, это наш
-                # broker_auto close. Если нет — отказываемся от call.
-                deal = adapter.get_closing_deal_for_position(
-                    pos.broker_position_id, lookback_hours=48,
-                )
-                if deal is not None:
-                    broker_net = (
-                        deal["gross_pnl_usd"]
-                        + deal["swap_usd"]
-                        + deal["commission_usd"]
-                    )
-                    store.close_position(
-                        pos.id,
-                        exit_price=deal["exit_price"],
-                        realized_pnl_usd=broker_net,
-                        close_reason="broker_auto",
-                    )
-                    return ApplyResult(
-                        executed=True,
-                        summary=(
-                            f"[LIVE] CLOSE id={pos.id} {pos.side} {pos.symbol} "
-                            f"lots={pos.volume_lots} entry=${pos.entry_price:.6g} "
-                            f"exit=${deal['exit_price']:.6g} "
-                            f"pnl=${broker_net:+.2f} (broker_auto SL/TP, "
-                            f"label-guard caught stale broker_pid)"
-                        ),
-                    )
-                log.warning(
-                    "label guard: broker_pid=%d не в нашем label-filtered set "
-                    "(label='%s') и closing deal не найден за 48h. "
-                    "ОТКАЗ от close_position() во избежание cross-bot interference. "
-                    "Маркирую позицию id=%d как closed locally с pnl=0.",
-                    pos.broker_position_id, settings.order_label, pos.id,
-                )
-                store.close_position(
-                    pos.id,
-                    exit_price=current_price,
-                    realized_pnl_usd=0.0,
-                    close_reason="label_guard_orphan",
-                )
-                return ApplyResult(
-                    executed=True,
-                    summary=(
-                        f"[LIVE] SKIP-CLOSE id={pos.id} {pos.side} {pos.symbol}: "
-                        f"broker_pid={pos.broker_position_id} not in our label "
-                        f"set ('{settings.order_label}') — marked closed locally"
-                    ),
-                )
+        # ВАЖНО: НЕ добавляем "belt-and-suspenders label guard" через
+        # adapter.get_open_positions() здесь. Попытка такого guard'а
+        # 2026-05-18 (commit 6b3665e) превратила Spotware per-session
+        # reconcile caching bug в РЕАЛЬНУЮ потерю позиций в fx-ai-trader
+        # (id=7 BZ=F, id=8 XAUUSD). Cross-bot interference и без
+        # guard'а физически невозможна (см. полный комментарий в
+        # src/fx_ai_trader/trading/executor.py::_apply_close).
         info = adapter.get_symbol_info(pos.symbol)
         contract_size = info.contract_size if info else 100_000
         volume_int = int(round(pos.volume_lots * contract_size))
