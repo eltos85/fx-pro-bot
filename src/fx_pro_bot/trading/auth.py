@@ -135,8 +135,30 @@ def ensure_valid_token(
     store: TokenStore,
     client_id: str,
     client_secret: str,
+    client_label: str = "advisor",
 ) -> TokenData:
-    """Загрузить токен и обновить при необходимости."""
+    """Загрузить токен и обновить при необходимости.
+
+    Если задан ENV ``CTRADER_TOKEN_SERVICE_URL`` — сначала пробуем
+    fetch у централизованного token-service. Если service недоступен
+    (network error / 5xx) — fallback на локальный TokenStore. Это
+    защищает от downtime сервиса (Advisor продолжит работать).
+    """
+    service_token = _try_fetch_from_service(client_label)
+    if service_token is not None:
+        token = TokenData(
+            access_token=service_token.access_token,
+            refresh_token=service_token.refresh_token,
+            expires_at=service_token.expires_at,
+            token_type=service_token.token_type,
+        )
+        try:
+            store.save(token)
+        except Exception as exc:
+            log.warning("ensure_valid_token: не удалось зеркалировать токен в %s: %s",
+                        store._path, exc)
+        return token
+
     token = store.load()
     if not token.access_token:
         raise RuntimeError(
@@ -151,6 +173,42 @@ def ensure_valid_token(
                  (token.expires_at - time.time()) / 86400)
 
     return token
+
+
+def _try_fetch_from_service(client_label: str):
+    """Возвращает ``ServiceToken`` если token-service настроен и отвечает, иначе None.
+
+    Импорт shared_oauth внутри функции, чтобы избежать cyclic-import при
+    распространении пакета без shared_oauth (forward compat).
+    """
+    try:
+        from shared_oauth.token_client import (  # type: ignore
+            TokenServiceRejected,
+            TokenServiceUnavailable,
+            fetch_token,
+            load_service_config,
+        )
+    except Exception:
+        return None
+
+    cfg = load_service_config(client_label=client_label)
+    if cfg is None:
+        return None
+    try:
+        tok = fetch_token(cfg)
+        if not tok.access_token:
+            log.warning("token-service: вернул пустой токен (label=%s) — fallback на файл", client_label)
+            return None
+        return tok
+    except TokenServiceRejected as exc:
+        log.error("token-service: rejected (%s) — fallback на файл; проверьте CTRADER_TOKEN_SERVICE_SECRET", exc)
+        return None
+    except TokenServiceUnavailable as exc:
+        log.warning("token-service: недоступен (%s) — fallback на локальный TokenStore", exc)
+        return None
+    except Exception as exc:
+        log.warning("token-service: unexpected error (%s) — fallback на TokenStore", exc)
+        return None
 
 
 def log_token_status(

@@ -4,6 +4,92 @@
 
 ---
 
+## 2026-05-18
+
+### feat(ctrader-token-service): централизованный OAuth refresh-сервис
+
+`коммит при deploy`
+
+**Проблема.** Advisor и fx-ai-trader используют один cTrader demo-аккаунт
+(`ctid=46883073`), но **разные** token-файлы:
+- Advisor → `/data/ctrader_tokens.json`
+- fx-ai-trader → `/data/ctrader_tokens_ai_fx.json` (`AI_FX_TRADER_CTRADER_TOKEN_PATH`)
+
+cTrader OAuth использует **rotating refresh_tokens** (RFC 6749 §6,
+[Auth0 Refresh Token Rotation](https://auth0.com/docs/secure/tokens/refresh-tokens/refresh-token-rotation):
+каждый refresh инвалидирует предыдущий `refresh_token`). Когда два бота
+независимо refresh-ят свои файлы — у них **разные** rotation chain'ы, и
+Spotware silent-rotation invalidate-ит сессию того бота, чей токен
+«устарел». Симптом: fx-ai-trader попадал в петлю
+`ConnectionError: cTrader: token refreshed, reconnect required` каждые
+15 минут (backoff после 5 неудачных reconnect-ов).
+
+flock в `fx_ai_trader/trading/token_lock.py` защищал от concurrent
+**file** write, но НЕ от того, что **сами файлы разные** — это была
+архитектурная дыра, не race condition.
+
+**Решение.** Новый микросервис `ctrader-token-service` —
+**один источник истины** для OAuth-токенов:
+- Хранит токен в `/data/ctrader_tokens.json`;
+- HTTP API на изолированном порту 8080 docker-network'а:
+  - `GET /token` — текущий свежий (auto-refresh при близком expiry);
+  - `POST /refresh` — force refresh с **server-side dedup-окном 5с**
+    (защита от burst-запросов из двух ботов в одну секунду);
+  - `POST /token` — push от бота после in-flight refresh
+    (newer-wins по `expires_at`);
+  - `GET /status` — диагностика (last_refresh_ts, last_pushed_by);
+  - `GET /healthz` — liveness;
+- Background-таймер pro-actively refresh-ит за `REFRESH_MARGIN_SEC` до
+  expiry (по умолчанию 24ч), чтобы боты не сталкивались с устаревшим
+  токеном «на горячую»;
+- `threading.Lock` + dedup внутри процесса — singleflight pattern
+  (Nango «How to handle concurrency with OAuth token refreshes»);
+- HTTP-Bearer auth через `CTRADER_TOKEN_SERVICE_SECRET`.
+
+**Изменения в ботах.** Backward-compatible: если
+`CTRADER_TOKEN_SERVICE_URL` пустой — всё работает по-старому.
+
+- `fx_pro_bot.trading.auth.ensure_valid_token()` сначала пробует
+  service, при недоступности fallback на `TokenStore`.
+- `fx_ai_trader.trading.token_lock.ensure_valid_token_race_safe()` —
+  то же, fallback на flock-путь.
+- `CTraderClient._try_refresh_token()` — при silent rotation сначала
+  `GET /token` (другой бот мог уже обновить), затем `POST /refresh`
+  с dedup. Fallback на локальный `refresh_access_token` при
+  недоступности сервиса.
+- `_on_token_refreshed` callback в обоих ботах + `save_refreshed_token`
+  в fx-ai-trader дополнительно пушат в service для синхронизации.
+
+**Дополнительные artifacts.**
+- `Dockerfile.ctrader-token-service` — отдельный image,
+  optional-extra `[token-service]` в `pyproject.toml` (fastapi +
+  uvicorn только в сервисном контейнере, не в ботах).
+- `docker-compose.yml`: новый сервис, `depends_on:
+  ctrader-token-service: service_healthy` у Advisor и fx-ai-trader.
+- `src/shared_oauth/token_client.py` — HTTP-клиент с retry 5xx +
+  `ServiceConfig.client_label` для аудита (видно кто запрашивал).
+- 24 unit-теста в `tests/test_ctrader_token_service.py`: TokenManager
+  (load/save/get/force_refresh/push/dedup), FastAPI endpoints
+  (auth, /token, /refresh, /status, /healthz), HTTP client
+  (retry/401/500), CTraderClient integration (newer-from-service,
+  force-refresh-when-same, fallback), ensure_valid_token + race_safe
+  через service.
+
+**Файлы:**
+- `src/ctrader_token_service/{__init__,__main__,app,manager,settings}.py`
+- `src/shared_oauth/{__init__,token_client}.py`
+- `src/fx_pro_bot/trading/auth.py` — `_try_fetch_from_service`
+- `src/fx_pro_bot/trading/client.py` — `_try_refresh_via_service`,
+  `_update_token_state`
+- `src/fx_pro_bot/app/main.py` — `_on_token_refreshed` пушит в service
+- `src/fx_ai_trader/trading/token_lock.py` — service-first +
+  `_push_to_service`
+- `Dockerfile.ctrader-token-service`, `docker-compose.yml`,
+  `pyproject.toml`
+- `tests/test_ctrader_token_service.py`
+
+---
+
 ## 2026-05-12
 
 ### fix(ctrader-client): defensive token sync + startup token-status log

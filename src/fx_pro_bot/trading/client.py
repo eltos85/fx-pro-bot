@@ -862,12 +862,22 @@ class CTraderClient:
                 self._schedule_reconnect()
 
     def _try_refresh_token(self) -> bool:
-        """Обновить access_token через refresh_token и обновить in-memory + callback.
+        """Обновить access_token. Стратегия:
 
-        НЕ делает reauth и НЕ трогает соединение — это задача вызывающей стороны.
-        Возвращает True если access_token успешно обновлён, False если
-        refresh_token отсутствует или OAuth-endpoint вернул ошибку.
+        1. Если настроен ``CTRADER_TOKEN_SERVICE_URL`` — сначала GET /token
+           (другой бот мог уже обновить → используем готовый, избегаем
+           дублирующего refresh и rotation conflict).
+        2. Если service выдал тот же или более старый токен — POST /refresh
+           (сервис с server-side dedup делает refresh ровно один раз).
+        3. Если service недоступен — fallback на локальный
+           ``refresh_access_token`` (старое поведение, backward compat).
+
+        НЕ трогает соединение — это задача вызывающей стороны.
+        Возвращает True если access_token успешно обновлён.
         """
+        if self._try_refresh_via_service():
+            return True
+
         if not self._refresh_token:
             log.error("cTrader: refresh_token отсутствует — refresh невозможен")
             return False
@@ -900,6 +910,75 @@ class CTraderClient:
         except Exception as exc:
             log.error("cTrader: refresh_access_token не удался: %s", exc)
             return False
+
+    def _try_refresh_via_service(self) -> bool:
+        """Попытка обновить токен через ctrader-token-service.
+
+        Returns:
+            True — токен обновлён (in-memory state + callback вызван);
+            False — service не настроен/недоступен (caller fallback-ит).
+        """
+        try:
+            from shared_oauth.token_client import (  # type: ignore
+                TokenServiceRejected,
+                TokenServiceUnavailable,
+                fetch_token,
+                force_refresh,
+                load_service_config,
+            )
+        except Exception:
+            return False
+
+        cfg = load_service_config(client_label="ctrader-client")
+        if cfg is None:
+            return False
+
+        try:
+            tok = fetch_token(cfg)
+            if (
+                tok.access_token
+                and tok.access_token != self._access_token
+                and tok.expires_at > self._token_expires_at + 60
+            ):
+                log.info(
+                    "cTrader: token-service выдал более свежий токен "
+                    "(last_pushed_by=%s, expires +%.1f дней) — используем без refresh",
+                    tok.last_pushed_by,
+                    (tok.expires_at - time.time()) / 86400.0,
+                )
+                self._update_token_state(tok.access_token, tok.refresh_token, tok.expires_at)
+                return True
+
+            tok = force_refresh(cfg, reason="ctrader-client-silent-rotation")
+            if tok.access_token:
+                log.info(
+                    "cTrader: token-service refresh OK (expires +%.1f дней)",
+                    (tok.expires_at - time.time()) / 86400.0,
+                )
+                self._update_token_state(tok.access_token, tok.refresh_token, tok.expires_at)
+                return True
+            log.warning("cTrader: token-service force_refresh вернул пустой токен")
+            return False
+        except TokenServiceRejected as exc:
+            log.error("cTrader: token-service rejected (%s) — fallback на local refresh", exc)
+            return False
+        except TokenServiceUnavailable as exc:
+            log.warning("cTrader: token-service unavailable (%s) — fallback на local refresh", exc)
+            return False
+        except Exception as exc:
+            log.warning("cTrader: token-service unexpected (%s) — fallback на local refresh", exc)
+            return False
+
+    def _update_token_state(self, access_token: str, refresh_token: str, expires_at: float) -> None:
+        """Применить новый токен внутри клиента и нотифицировать callback."""
+        self._access_token = access_token
+        self._refresh_token = refresh_token
+        self._token_expires_at = expires_at
+        if self._on_token_refreshed:
+            try:
+                self._on_token_refreshed(access_token, refresh_token, expires_at)
+            except Exception as cb_err:
+                log.warning("cTrader: on_token_refreshed callback error: %s", cb_err)
 
     def _handle_token_invalidated(self) -> None:
         """Обновить токен и переавторизовать аккаунт после TokenInvalidatedEvent."""

@@ -1,5 +1,67 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-18 — feat: централизованный ctrader-token-service
+
+`коммит при deploy`
+
+**Симптом.** fx-ai-trader попадал в петлю
+`ConnectionError: cTrader: token refreshed, reconnect required`
+каждые ~15 минут (после 5 reconnect-failures клиент уходит в backoff
+delays=[5,10,20,30,60]), при этом Advisor работал стабильно. Логи
+показывали LLM-вызовы на **пустых** market-data (`get_trendbars(...)
+failed: cTrader: нет подключения`), что приводило к тратe DeepSeek
+tokens впустую.
+
+**Причина.** Архитектурная: оба бота используют один cTrader demo-аккаунт
+(`ctid=46883073`), но **разные** token-файлы (`/data/ctrader_tokens.json`
+у Advisor vs `/data/ctrader_tokens_ai_fx.json` у fx-ai-trader,
+управляется `AI_FX_TRADER_CTRADER_TOKEN_PATH`). cTrader OAuth
+использует rotating refresh_tokens — каждый refresh инвалидирует
+предыдущий. Два независимых rotation chain-а на одном аккаунте =
+Spotware silent-rotation отстреливает сессию того, чей токен «отстал».
+
+Существующий `fx_ai_trader.trading.token_lock.flock` защищал от
+concurrent file-write **внутри одного файла**, но не от того, что
+файлы **разные**. Это был не race condition — это был split-brain.
+
+**Решение.** Новый микросервис `ctrader-token-service`
+(см. `BUILDLOG.md 2026-05-18` для общих деталей). Для fx-ai-trader
+конкретно:
+
+- `ensure_valid_token_race_safe()` теперь сначала пробует HTTP-fetch
+  у сервиса. flock-путь остаётся как fallback, если сервис недоступен.
+- `save_refreshed_token()` (callback для `CTraderClient.on_token_refreshed`)
+  сначала пушит токен в сервис, потом зеркалирует в локальный файл.
+- `CTraderClient._try_refresh_token()` при silent rotation сначала
+  `GET /token` у сервиса (другой бот мог уже обновить — берём готовый),
+  затем `POST /refresh` с dedup-окном 5с (защита от burst-запросов
+  обоих ботов в одну секунду). Локальный refresh — только fallback.
+
+ENV-переменные (одинаковые для Advisor и fx-ai-trader, оба сервиса
+ходят к общему контейнеру):
+- `CTRADER_TOKEN_SERVICE_URL=http://ctrader-token-service:8080`
+- `CTRADER_TOKEN_SERVICE_SECRET=...` (HTTP-Bearer)
+
+Backward-compat: если URL/SECRET пустые — fx-ai-trader работает по
+старому через flock-файл. Это позволяет постепенный rollout.
+
+**Тесты.** Покрыты scenarios «service выдал более свежий токен —
+клиент его взял без refresh», «service вернул тот же — клиент дёрнул
+force_refresh с dedup», «service down — fallback на flock-путь»,
+«race_safe → mirror в файл», см. `tests/test_ctrader_token_service.py`
+(24 теста). Полный suite 897 passed, без регрессий.
+
+**Файлы:**
+- `src/fx_ai_trader/trading/token_lock.py` — service-first +
+  `_push_to_service` helper
+- `src/fx_pro_bot/trading/client.py` — `_try_refresh_via_service` (общий
+  для обоих ботов, fx-ai-trader тоже использует `CTraderClient` через
+  `client_adapter.py`)
+- `docker-compose.yml` — `depends_on: ctrader-token-service:
+  service_healthy`, env vars
+
+---
+
 ## 2026-05-13 (вечер) — bug-fix: broker-side reconcile (stale live-позиции)
 
 `коммит при deploy`

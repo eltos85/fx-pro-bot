@@ -260,7 +260,10 @@ def _init_trading(settings: Settings, store: StatsStore):
     token_store = TokenStore(settings.ctrader_token_path)
     try:
         token_data = ensure_valid_token(
-            token_store, settings.ctrader_client_id, settings.ctrader_client_secret,
+            token_store,
+            settings.ctrader_client_id,
+            settings.ctrader_client_secret,
+            client_label="advisor",
         )
     except Exception as exc:
         log.warning("cTrader: токены недоступны (%s), торговля отключена", exc)
@@ -268,6 +271,12 @@ def _init_trading(settings: Settings, store: StatsStore):
 
     from fx_pro_bot.trading.auth import log_token_status
     log_token_status(token_data, label="Advisor cTrader", logger=log)
+
+    try:
+        from shared_oauth.token_client import load_service_config, push_token
+        _service_cfg = load_service_config(client_label="advisor")
+    except Exception:
+        _service_cfg = None
 
     def _on_token_refreshed(
         new_access: str, new_refresh: str, expires_at: float,
@@ -280,6 +289,12 @@ def _init_trading(settings: Settings, store: StatsStore):
             refresh_token=new_refresh,
             expires_at=expires_at if expires_at > 0 else _time.time() + 2_628_000,
         )
+        if _service_cfg is not None:
+            try:
+                push_token(_service_cfg, new_access, new_refresh, updated.expires_at)
+                log.info("cTrader: refreshed token pushed в token-service")
+            except Exception as exc:
+                log.warning("cTrader: token-service push failed (%s) — пишем в файл", exc)
         try:
             token_store.save(updated)
         except Exception as exc:

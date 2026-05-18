@@ -1,8 +1,46 @@
 services:
+  ctrader-token-service:
+    # Централизованный OAuth refresh-сервис: один источник истины
+    # для cTrader access/refresh токенов между Advisor и fx-ai-trader.
+    # Решает rotation conflict (cTrader refresh_token = single-use; два
+    # бота независимо refresh-ят → один получает Access denied).
+    # См. src/ctrader_token_service/__init__.py для архитектуры.
+    build:
+      context: .
+      dockerfile: Dockerfile.ctrader-token-service
+    image: ctrader-token-service:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
+      CTRADER_TOKEN_SERVICE_TOKEN_PATH: ${CTRADER_TOKEN_SERVICE_TOKEN_PATH:-/data/ctrader_tokens.json}
+      CTRADER_TOKEN_SERVICE_HOST: 0.0.0.0
+      CTRADER_TOKEN_SERVICE_PORT: 8080
+      CTRADER_TOKEN_SERVICE_LOG_LEVEL: ${CTRADER_TOKEN_SERVICE_LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
   advisor:
     build: .
     image: fx-pro-bot:local
     restart: unless-stopped
+    depends_on:
+      ctrader-token-service:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
@@ -12,6 +50,8 @@ services:
       - .env
     environment:
       DATA_DIR: /data
+      CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
+      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
       YFINANCE_INTERVAL: ${YFINANCE_INTERVAL:-5m}
       YFINANCE_PERIOD: ${YFINANCE_PERIOD:-1mo}
       POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-300}
@@ -179,6 +219,9 @@ services:
       dockerfile: Dockerfile.fx-ai-trader
     image: fx-ai-trader:local
     restart: unless-stopped
+    depends_on:
+      ctrader-token-service:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
@@ -188,6 +231,8 @@ services:
       - .env
     environment:
       AI_FX_TRADER_DATA_DIR: /data
+      CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
+      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
       AI_FX_TRADER_LOG_LEVEL: ${AI_FX_TRADER_LOG_LEVEL:-INFO}
       # Phase 1: paper-mode минимум 14 дней. Trading_enabled=false по умолчанию
       # (research: NexusTrade 2026 «30–90 days paper before live»; Kiploks

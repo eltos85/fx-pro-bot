@@ -96,10 +96,16 @@ def ensure_valid_token_race_safe(
     token_path: Path | str,
     client_id: str,
     client_secret: str,
+    client_label: str = "fx-ai-trader",
 ) -> TokenData:
     """Race-safe аналог ``fx_pro_bot.trading.auth.ensure_valid_token``.
 
-    Поведение:
+    Если задан ENV ``CTRADER_TOKEN_SERVICE_URL`` — приоритет за
+    централизованным token-service (он сам решает rotation conflict
+    между всеми ботами). Локальный flock-путь остаётся как fallback
+    при недоступности сервиса.
+
+    Поведение fallback-пути:
     1. Читаем текущий токен из ``token_path``.
     2. Если ``expires_at - now > TOKEN_REFRESH_MARGIN_SEC`` — свежий, возвращаем.
     3. Иначе acquire flock на ``token_path.lock``, RE-READ (другой процесс
@@ -109,6 +115,21 @@ def ensure_valid_token_race_safe(
     """
     token_path = Path(token_path)
     lock_path = token_path.with_suffix(token_path.suffix + ".lock")
+
+    service_token = _try_fetch_from_service(client_label)
+    if service_token is not None:
+        token = TokenData(
+            access_token=service_token.access_token,
+            refresh_token=service_token.refresh_token,
+            expires_at=service_token.expires_at,
+            token_type=service_token.token_type,
+        )
+        try:
+            _atomic_write(token_path, token)
+        except Exception as exc:
+            log.warning("ensure_valid_token_race_safe: mirror to %s failed: %s",
+                        token_path, exc)
+        return token
 
     token = _read_token(token_path)
     if not token.access_token:
@@ -148,14 +169,17 @@ def save_refreshed_token(
     access_token: str,
     refresh_token: str,
     expires_at: float | None = None,
+    client_label: str = "fx-ai-trader",
 ) -> None:
-    """Callback для ``CTraderClient.on_token_refreshed`` — атомарная запись под flock.
+    """Callback для ``CTraderClient.on_token_refreshed``.
 
-    Используется когда сам клиент cTrader выполняет refresh внутри своей
-    логики (например, через _handle_token_invalidated). Чтобы не
-    переписать токен Advisor'а, который мог refresh'нуть параллельно,
-    делаем acquire lock + re-check expires_at.
+    Сначала пушим в token-service (если настроен) — это authoritative
+    store. Затем зеркалируем в локальный файл под flock для
+    fallback-режима (если сервис позже упадёт). Если сервис не настроен,
+    работаем по старому: только flock + atomic write.
     """
+    _push_to_service(client_label, access_token, refresh_token, expires_at or 0.0)
+
     token_path = Path(token_path)
     lock_path = token_path.with_suffix(token_path.suffix + ".lock")
 
@@ -179,3 +203,54 @@ def save_refreshed_token(
             ),
         )
         log.info("FX AI save_refreshed_token: записан в %s", token_path)
+
+
+def _try_fetch_from_service(client_label: str):
+    """Возвращает ``ServiceToken`` если token-service доступен, иначе None."""
+    try:
+        from shared_oauth.token_client import (  # type: ignore
+            TokenServiceRejected,
+            TokenServiceUnavailable,
+            fetch_token,
+            load_service_config,
+        )
+    except Exception:
+        return None
+    cfg = load_service_config(client_label=client_label)
+    if cfg is None:
+        return None
+    try:
+        tok = fetch_token(cfg)
+        if not tok.access_token:
+            log.warning("token-service: пустой токен (label=%s) — fallback", client_label)
+            return None
+        return tok
+    except TokenServiceRejected as exc:
+        log.error("token-service: rejected (%s) — fallback на flock-путь", exc)
+        return None
+    except TokenServiceUnavailable as exc:
+        log.warning("token-service: недоступен (%s) — fallback на flock-путь", exc)
+        return None
+    except Exception as exc:
+        log.warning("token-service: unexpected (%s) — fallback на flock-путь", exc)
+        return None
+
+
+def _push_to_service(
+    client_label: str,
+    access_token: str,
+    refresh_token: str,
+    expires_at: float,
+) -> None:
+    try:
+        from shared_oauth.token_client import load_service_config, push_token  # type: ignore
+    except Exception:
+        return
+    cfg = load_service_config(client_label=client_label)
+    if cfg is None:
+        return
+    try:
+        push_token(cfg, access_token, refresh_token, expires_at)
+        log.info("token-service: pushed refreshed token (label=%s)", client_label)
+    except Exception as exc:
+        log.warning("token-service: push failed (%s) — токен сохранён только локально", exc)
