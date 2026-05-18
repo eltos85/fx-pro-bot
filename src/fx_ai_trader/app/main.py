@@ -253,6 +253,25 @@ def _run_full_cycle(
         "LLM tokens: in=%d out=%d cost=$%.5f",
         resp.tokens_input, resp.tokens_output, resp.cost_usd,
     )
+    # Truncation guard: если out впритык к max_tokens — JSON скорее всего
+    # обрезан. Не парсим broken-payload, поднимаем явный WARNING,
+    # чтобы регрессия лимита была видна в logs (см. инцидент 2026-05-18
+    # «not a decision dict (missing 'action')» из-за дефолта 4096).
+    if resp.tokens_output >= settings.deepseek_max_tokens - 16:
+        log.warning(
+            "LLM truncated: out=%d ≈ max_tokens=%d. JSON вероятно обрезан, "
+            "skipping cycle. Поднимите AI_FX_TRADER_DEEPSEEK_MAX_TOKENS.",
+            resp.tokens_output, settings.deepseek_max_tokens,
+        )
+        store.log_decision(
+            cycle=cycle, cycle_type="full",
+            prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+            response_raw=resp.text, parsed_action=None, sentiment=None,
+            executed=False, error="llm_truncated_at_max_tokens",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        return
     log.info("LLM response: %s", resp.text[:300].replace("\n", " "))
 
     parsed = parse_action(resp.text, settings.symbols)
@@ -343,6 +362,20 @@ def _run_review_cycle(
         "Review tokens: in=%d out=%d cost=$%.5f",
         resp.tokens_input, resp.tokens_output, resp.cost_usd,
     )
+    if resp.tokens_output >= settings.deepseek_max_tokens - 16:
+        log.warning(
+            "Review LLM truncated: out=%d ≈ max_tokens=%d, skipping cycle",
+            resp.tokens_output, settings.deepseek_max_tokens,
+        )
+        store.log_decision(
+            cycle=cycle, cycle_type="review",
+            prompt_system=system_prompt, prompt_user=user_prompt,
+            response_raw=resp.text, parsed_action=None, sentiment=None,
+            executed=False, error="llm_truncated_at_max_tokens",
+            tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
+            cost_usd=resp.cost_usd,
+        )
+        return
     log.info("Review response: %s", resp.text[:200].replace("\n", " "))
 
     parsed = parse_action(resp.text, settings.symbols, review_mode=True)

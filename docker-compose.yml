@@ -268,7 +268,13 @@ services:
       AI_FX_TRADER_DEEPSEEK_MODEL: ${AI_FX_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}
       AI_FX_TRADER_DEEPSEEK_BASE_URL: ${AI_FX_TRADER_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
       AI_FX_TRADER_DEEPSEEK_THINKING: ${AI_FX_TRADER_DEEPSEEK_THINKING:-true}
-      AI_FX_TRADER_DEEPSEEK_MAX_TOKENS: ${AI_FX_TRADER_DEEPSEEK_MAX_TOKENS:-4096}
+      # 8192 — hard cap у DeepSeek Anthropic-compat. С 4096 наблюдался
+      # out=4096 и оборванный JSON: thinking-блок + sentiment-блок
+      # (multi-dim: 5 measures × N items) + decision = ~5–7k токенов
+      # суммарно. Регрессия 2026-05-18: лимит был ошибочно установлен
+      # 4096, появилась ошибка «not a decision dict (missing 'action')»
+      # — последний balanced JSON в обрубке = sentiment, без action.
+      AI_FX_TRADER_DEEPSEEK_MAX_TOKENS: ${AI_FX_TRADER_DEEPSEEK_MAX_TOKENS:-8192}
       # News: RSS (ForexLive/Investing/OilPrice/Kitco) + EIA Open Data API.
       # EIA API key опционален: пустой ключ → EIA-блок отключён, RSS остаётся.
       AI_FX_TRADER_NEWS_ENABLED: ${AI_FX_TRADER_NEWS_ENABLED:-true}

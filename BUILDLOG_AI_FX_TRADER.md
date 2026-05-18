@@ -1,5 +1,45 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-18 (ночь) — fix: max_tokens regression + truncation-guard
+
+`коммит при deploy`
+
+**Симптом.**
+```
+10:11:23 LLM tokens: in=1460 out=4096 cost=$0.00135
+10:11:23 [ERROR] Parse error: JSON parse error: not a decision dict (missing 'action'): dict
+```
+
+**Причина.** `AI_FX_TRADER_DEEPSEEK_MAX_TOKENS` в `docker-compose.yml`
+стоял default `4096` — регрессия с ранней эпохи бота. В коде
+`settings.py` default `8000` с явным комментарием «С 4096 наблюдался
+out=4096 и оборванный JSON». LLM упёрся в потолок, JSON-блок
+с `"action"` не дописался. Парсер `_extract_last_json_object` идёт
+с конца и нашёл валидный `{...}` обрубок (sentiment-блок или часть
+рассуждения), но без ключа `"action"` → ошибка.
+
+Full-cycle output состоит из: thinking-блок (DeepSeek-V4 reasoning)
++ commentary (4–8 строк) + JSON с multi-dim sentiment (5 measures ×
+N items) + decision. С двумя инструментами это легко 5–7k токенов.
+
+**Фикс.**
+1. `docker-compose.yml`: default поднят `4096 → 8192` (hard cap у
+   DeepSeek Anthropic-compat API).
+2. `src/fx_ai_trader/app/main.py`: добавлен **truncation-guard** в
+   `_run_full_cycle` и `_run_review_cycle`. Если `tokens_output >=
+   max_tokens - 16` → бот логирует `WARNING` (видно регрессию), пишет
+   `error=llm_truncated_at_max_tokens` в БД, **не парсит** broken
+   payload (избегаем ложного `Parse error`). Цикл пропускается, LLM
+   попробует снова на следующем тике.
+
+Truncation-guard также защитит от будущих случаев: если LLM
+по какой-то причине станет жадным до токенов, проблема будет
+**сразу** видна в логах, а не маскироваться под parse-error.
+
+**Файлы:** `docker-compose.yml`, `src/fx_ai_trader/app/main.py`.
+
+---
+
 ## 2026-05-18 (вечер) — refactor: убран local-mirror, сервис = single source
 
 `коммит при deploy`
