@@ -1,4 +1,102 @@
-# BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
+# BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
+
+## 2026-05-18 (вечер) — feat: добавлен NG=F (Natural Gas, NAT.GAS / Henry Hub)
+
+`коммит при deploy`
+
+**Что.** Discretionary бот теперь следит и торгует gold + Brent +
+**natural gas** (NG=F → cTrader NAT.GAS id=1118 на FxPro demo).
+По правилу `no-data-fitting.mdc` это instrument-add, не стратегическое
+изменение — экспериментальный n=0 счётчик прошлого forward-test'а
+**не сбрасывается** (стратегические thresholds и правила оставлены
+один к одному, см. prompts.py v1.1 docstring).
+
+**Разведка.**
+- Новый скрипт `scripts/fx_ai_scout_gas_symbols.py` — однократно
+  запущен на VPS, дампит ProtoOASymbol для всех инструментов с gas-
+  keywords (NAT, GAS, NG, TTF, HENRY).
+- На FxPro demo доступен **только NAT.GAS** (NG / Henry Hub).
+  TTF (европейский Dutch front-month) **отсутствует** — торгуем
+  только US-bench.
+- Ещё 8 инструментов `#NGas_*26` — это месячные futures, ненужны
+  для CFD-стратегии.
+
+**Pip-value research (правило `no-data-fitting.mdc`, ≥2 confirmation).**
+1. CME NYMEX Henry Hub Natural Gas Futures canonical spec:
+   contract size 10 000 MMBtu, minimum tick $0.001/MMBtu = **$10/tick**.
+2. cTrader Open API ProtoOASymbol(id=1118, NAT.GAS, ctid=46883073):
+   `digits=3`, `pipPosition=3`, `lotSize=1_000_000`,
+   `swapLong=-$11.11/3d`, `swapShort=+$1.81/3d` (contango carry).
+   pip-value = `(10^-pipPosition) × (lotSize/100)` = `0.001 × 10_000` =
+   **$10/pip/lot**.
+3. Sanity: на 0.01 lot pip-value = $0.10/pip — идентично BRENT.
+   1-lot $0.10 movement = 100 pips × $10 = $1000 PnL.
+
+**Код.**
+- `src/fx_ai_trader/trading/executor.py`:
+  - `_pip_size_for("NG=F") = 0.001` (digits=3).
+  - `_PIP_VALUE_USD_PER_STD_LOT["NG=F"] = 10.0` (с research-блоком
+    в комментариях).
+- `src/fx_ai_trader/config/settings.py`:
+  - `DEFAULT_AI_FX_SYMBOLS = ("XAUUSD", "BZ=F", "NG=F")`.
+- `src/fx_ai_trader/llm/prompts.py` (v1.1):
+  - Header: «You trade ONLY three instruments» + NAT.GAS contract spec.
+  - Новая секция «NATURAL GAS — STORAGE / WEATHER / LNG FRAMEWORK»
+    (5 драйверов: storage cycle, weather HDD/CDD, LNG exports,
+    production / rig count, geopolitics; mistakes-to-avoid block).
+  - Noise-band sizing: NG standard $0.10–0.20, EIA Thu $0.20–0.40,
+    cold-snap $0.50–1.00+/MMBtu.
+  - Worked sizing examples: NG entry 3.250 / SL 3.100 / 0.017 lot для
+    risk $25; WARN на 50-pip stops (inside hourly noise).
+  - Trading windows: добавлены Thu 14:30 UTC (EIA NG storage) + Fri
+    16:00 UTC (Baker Hughes rigs).
+  - JSON schema: `"symbol": "XAUUSD" | "BZ=F" | "NG=F"`.
+  - Review prompt: добавлено NAT.GAS в шапку.
+- `src/fx_ai_trader/news/rss.py`:
+  - `GAS_KEYWORDS` (storage, EIA, NOAA, HDD/CDD, LNG terminals,
+    rig count, Henry Hub, TTF, pipeline outages).
+  - `SYMBOL_KEYWORDS["NG=F"] = GAS_KEYWORDS`.
+- `src/fx_ai_trader/news/eia.py`:
+  - `_SERIES_NG_STORAGE = "NG.NW2_EPG0_SWO_R48_BCF.W"` (Weekly Working
+    Underground Storage, Lower 48, Bcf — headline EIA Thursday).
+  - `EiaSnapshot.ng_storage_*` поля + format_eia_snapshot печатает
+    отдельный «EIA Weekly Natural Gas (Thursday update)» блок.
+- `docker-compose.yml`: default `AI_FX_TRADER_SYMBOLS` →
+  `XAUUSD,BZ=F,NG=F`.
+
+**Тесты (13 новых, все зелёные).**
+- `TestPipValueTable`:
+  - `test_ng_pip_value_is_10usd_per_lot`.
+  - `test_ng_pip_size_is_0_001`.
+  - `test_ng_pnl_canonical` (0.10 lot, $0.10 move = ~$100).
+  - `test_ng_short_pnl` (0.05 lot SHORT, $0.10 move = ~$50).
+- `TestRssGasClassification`:
+  - `test_ng_storage_headline_matched` (EIA storage report → NG=F).
+  - `test_lng_terminal_headline_matched` (Freeport LNG outage → NG=F).
+  - `test_weather_forecast_headline_matched` (NOAA polar vortex → NG=F).
+  - `test_oil_headline_not_classified_as_gas` (false-positive guard).
+- `TestSettings.test_defaults`: ожидание обновлено на
+  `("XAUUSD", "BZ=F", "NG=F")`.
+
+Полная регрессия `tests/test_fx_ai_trader.py + test_ctrader_token_service.py`
+74 passed.
+
+**Что _не_ менялось** (важно для n-counter): R:R/risk-budget rules,
+sentiment-uncertainty gate (0.7), max-positions (3), max-lot-size
+(0.50), KillSwitch caps, paper/live mode flags — все одинаковы.
+
+**Файлы.**
+- `src/fx_ai_trader/trading/executor.py`
+- `src/fx_ai_trader/config/settings.py`
+- `src/fx_ai_trader/llm/prompts.py`
+- `src/fx_ai_trader/news/rss.py`
+- `src/fx_ai_trader/news/eia.py`
+- `docker-compose.yml`
+- `scripts/fx_ai_scout_gas_symbols.py` (new)
+- `tests/test_fx_ai_trader.py`
+- `BUILDLOG_AI_FX_TRADER.md`
+
+---
 
 ## 2026-05-18 (ночь) — fix: max_tokens regression + truncation-guard
 

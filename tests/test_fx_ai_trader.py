@@ -384,6 +384,51 @@ class TestPipValueTable:
         )
         assert abs(pnl - 100.0) < 0.01
 
+    def test_ng_pip_value_is_10usd_per_lot(self):
+        """NG=F (NAT.GAS) pip-value = $10/lot.
+
+        Источники (2026-05-18):
+        1. CME NYMEX Henry Hub Natural Gas Futures contract spec:
+           10,000 MMBtu × $0.001/MMBtu tick = $10/tick.
+        2. cTrader Open API ProtoOASymbol(id=1118, NAT.GAS):
+           lotSize=1_000_000, pipPosition=3 → pip_value = 0.001 × 10_000
+           = $10/lot. Verified via scripts/fx_ai_scout_gas_symbols.py.
+        """
+        from fx_ai_trader.trading.executor import _pip_value_per_std_lot
+
+        assert _pip_value_per_std_lot("NG=F") == 10.0
+
+    def test_ng_pip_size_is_0_001(self):
+        """NG=F pip = 0.001 USD/MMBtu (digits=3, pipPosition=3)."""
+        from fx_ai_trader.trading.executor import _pip_size_for
+
+        assert _pip_size_for("NG=F") == 0.001
+
+    def test_ng_pnl_canonical(self):
+        """0.10 lot NG, move от 3.250 до 3.350 (100 pips = $0.10) = $100.
+
+        Sanity: $0.10 move на 0.10 lot = 0.10 × 10,000 MMBtu × $0.10/MMBtu
+        = $100. По формуле pip = pip_diff × volume × pip_value =
+        100 × 0.10 × $10 = $100.
+        """
+        from fx_ai_trader.trading.executor import _calc_pnl_usd
+
+        pnl = _calc_pnl_usd(
+            side="BUY", entry=3.250, exit_price=3.350,
+            volume_lots=0.10, symbol="NG=F",
+        )
+        assert abs(pnl - 100.0) < 0.5, f"NG PnL {pnl} should be ~$100"
+
+    def test_ng_short_pnl(self):
+        """0.05 lot NG SHORT, move от 3.500 down to 3.400 (100 pips) = +$50."""
+        from fx_ai_trader.trading.executor import _calc_pnl_usd
+
+        pnl = _calc_pnl_usd(
+            side="SELL", entry=3.500, exit_price=3.400,
+            volume_lots=0.05, symbol="NG=F",
+        )
+        assert abs(pnl - 50.0) < 0.5, f"NG SHORT PnL {pnl} should be ~$50"
+
     def test_unknown_symbol_falls_back_safe(self):
         from fx_ai_trader.trading.executor import _pip_value_per_std_lot
 
@@ -532,7 +577,9 @@ class TestTokenLockRecheck:
 class TestSettings:
     def test_defaults(self):
         s = AiFxTraderSettings()
-        assert s.symbols == ("XAUUSD", "BZ=F")
+        # NG=F (NAT.GAS) добавлен 2026-05-18. Это instrument-add, не
+        # стратегическое изменение (см. prompts.py v1.1 docstring).
+        assert s.symbols == ("XAUUSD", "BZ=F", "NG=F")
         assert s.order_label == "ai-fx-trader"
         assert s.trading_enabled is False  # paper по умолчанию
         assert s.poll_interval_sec == 900
@@ -549,6 +596,55 @@ class TestSettings:
     def test_db_path(self):
         s = AiFxTraderSettings()
         assert s.db_path.endswith("fx_ai_trader.sqlite")
+
+
+# ─── RSS gas classification (2026-05-18 NG=F instrument-add) ────────────
+
+
+class TestRssGasClassification:
+    """Sanity-check что gas-keywords ловят релевантные news headlines.
+
+    Маппинг GAS_KEYWORDS подобран по research-источникам, см.
+    src/fx_ai_trader/news/rss.py docstring.
+    """
+
+    def test_ng_storage_headline_matched(self):
+        from fx_ai_trader.news.rss import SYMBOL_KEYWORDS, _classify_symbols
+
+        text = (
+            "Working Gas in Storage rises 95 Bcf — EIA Weekly Natural "
+            "Gas Storage Report shows bearish build vs consensus"
+        )
+        symbols = _classify_symbols(text, list(SYMBOL_KEYWORDS.keys()))
+        assert "NG=F" in symbols
+
+    def test_lng_terminal_headline_matched(self):
+        from fx_ai_trader.news.rss import SYMBOL_KEYWORDS, _classify_symbols
+
+        text = "Freeport LNG terminal cuts feedgas after compressor outage"
+        symbols = _classify_symbols(text, list(SYMBOL_KEYWORDS.keys()))
+        assert "NG=F" in symbols
+
+    def test_weather_forecast_headline_matched(self):
+        from fx_ai_trader.news.rss import SYMBOL_KEYWORDS, _classify_symbols
+
+        text = "NOAA: polar vortex incursion forecast lifts Henry Hub natgas"
+        symbols = _classify_symbols(text, list(SYMBOL_KEYWORDS.keys()))
+        assert "NG=F" in symbols
+
+    def test_oil_headline_not_classified_as_gas(self):
+        """Гарантия: новость о crude не должна классифицироваться как NG=F.
+
+        Это защита от false-positives — gas-keywords пересекаются с oil
+        в зоне "EIA", "pipeline", "Henry Hub" etc. Headline только про
+        WTI / Brent должен попасть в BZ=F, не в NG=F.
+        """
+        from fx_ai_trader.news.rss import SYMBOL_KEYWORDS, _classify_symbols
+
+        text = "Brent crude jumps as OPEC+ extends cuts; WTI follows"
+        symbols = _classify_symbols(text, list(SYMBOL_KEYWORDS.keys()))
+        assert "BZ=F" in symbols
+        assert "NG=F" not in symbols
 
 
 # ─── broker reconcile (sync DB ↔ cTrader, 2026-05-13 bug-fix) ──────────

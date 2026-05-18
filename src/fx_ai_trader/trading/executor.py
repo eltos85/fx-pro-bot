@@ -551,12 +551,17 @@ def _round_to_step(value: float, step: float) -> float:
 
 
 def _pip_size_for(symbol: str) -> float:
-    """Pip size в АБСОЛЮТНЫХ единицах цены для XAUUSD / BZ=F.
+    """Pip size в АБСОЛЮТНЫХ единицах цены для XAUUSD / BZ=F / NG=F.
 
-    На FxPro обычно: XAUUSD digits=2, BRENT digits=2. 1 pip = 0.01.
+    На FxPro:
+    - XAUUSD digits=2, pip = 0.01 (USD/oz);
+    - BRENT  digits=2, pip = 0.01 (USD/barrel);
+    - NAT.GAS digits=3, pipPosition=3 → pip = 0.001 (USD/MMBtu).
     """
     if symbol in ("XAUUSD", "BZ=F"):
         return 0.01
+    if symbol == "NG=F":
+        return 0.001
     return 0.0001
 
 
@@ -587,6 +592,27 @@ _PIP_VALUE_USD_PER_STD_LOT: dict[str, float] = {
     # R-multiple = 0.2R при фактическом +2R+ floating — это маскировало
     # locked-profit guard (≥1.5R), бот не фиксировал прибыль вовремя.
     "BZ=F": 10.0,
+    # NG=F (internal yfinance-нотация, cTrader name "NAT.GAS"). 1 std
+    # lot = **10,000 MMBtu**, pip = $0.001 per MMBtu →
+    # pip-value = 10,000 × $0.001 = **$10.0 / pip / lot**.
+    #
+    # ИСТОЧНИКИ (правило ``no-data-fitting.mdc`` — нужно ≥2 confirmation):
+    # 1. NYMEX Henry Hub Natural Gas Futures (canonical spec, CME): contract
+    #    size 10,000 MMBtu, minimum price fluctuation $0.001/MMBtu =
+    #    $10.00/tick. URL:
+    #    https://www.cmegroup.com/markets/energy/natural-gas/natural-gas.contractSpecs.html
+    # 2. cTrader Open API ProtoOASymbol (id=1118, NAT.GAS, ctid=46883073,
+    #    2026-05-18 разведка через scripts/fx_ai_scout_gas_symbols.py):
+    #    digits=3, pipPosition=3, lotSize=1_000_000.
+    #    Формула pip_value = (10^-pipPosition) × (lotSize / 100) =
+    #    0.001 × 10_000 = $10/pip/lot.
+    # 3. swapLong = -$11.11 / 3 days, swapShort = +$1.81 / 3 days —
+    #    swap rollover особенность NG-futures (contango premium для short).
+    #    Подтверждает что 1 lot = ~$30k notional (price ~$3 × 10k MMBtu).
+    #
+    # На минимальный 0.01 lot pip-value = $0.10/pip — идентично BRENT,
+    # т.е. одинаковая «единица риска» при стандартных min-volume позициях.
+    "NG=F": 10.0,
 }
 
 

@@ -70,12 +70,31 @@ OIL_KEYWORDS = (
     "spr ", "strategic petroleum reserve",
 )
 
+# Газ-keywords подобраны по research-источникам (см. prompts.py): EIA
+# Weekly NatGas Storage Report, NOAA HDD/CDD outlooks, LNG export news,
+# Henry Hub vs TTF spread, Baker Hughes rig count.
+GAS_KEYWORDS = (
+    "natural gas", "nat gas", "nat-gas", " gas ", "lng",
+    "henry hub", "ttf", "title transfer facility",
+    "freeport lng", "sabine pass", "corpus christi",
+    "cheniere", "venture global",
+    "storage report", "storage build", "storage draw",
+    "working gas in storage", "ng storage", "natgas storage",
+    "hdd", "cdd", "heating degree", "cooling degree",
+    "cold snap", "heatwave", "heat wave", "polar vortex",
+    "noaa", "weather forecast", "winter outlook",
+    "pipeline outage", "gas pipeline",
+    "rig count", "baker hughes",
+    "feedgas", "feed gas", "lng exports", "lng cargo",
+)
+
 
 # Mapping symbol → keyword set. Если в settings.symbols пользователь
 # добавит ещё инструменты — придётся расширить эту таблицу.
 SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "XAUUSD": GOLD_KEYWORDS,
     "BZ=F": OIL_KEYWORDS,
+    "NG=F": GAS_KEYWORDS,
 }
 
 

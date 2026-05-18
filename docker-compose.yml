@@ -34,59 +34,72 @@ services:
       retries: 3
       start_period: 5s
 
-  advisor:
-    build: .
-    image: fx-pro-bot:local
-    restart: unless-stopped
-    depends_on:
-      ctrader-token-service:
-        condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    env_file:
-      - .env
-    environment:
-      DATA_DIR: /data
-      CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
-      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
-      YFINANCE_INTERVAL: ${YFINANCE_INTERVAL:-5m}
-      YFINANCE_PERIOD: ${YFINANCE_PERIOD:-1mo}
-      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-300}
-      VERIFY_HORIZONS: ${VERIFY_HORIZONS:-15,30,60}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      FXPRO_ENABLED: ${FXPRO_ENABLED:-false}
-      FXPRO_CLIENT_ID: ${FXPRO_CLIENT_ID:-}
-      FXPRO_CLIENT_SECRET: ${FXPRO_CLIENT_SECRET:-}
-      FXPRO_ACCOUNT_ID: ${FXPRO_ACCOUNT_ID:-}
-      FXPRO_API_URL: ${FXPRO_API_URL:-https://connect.fxpro.com/api/v1}
-      CTRADER_TRADING_ENABLED: ${CTRADER_TRADING_ENABLED:-false}
-      CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
-      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
-      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
-      CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
-      CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-https://openapi.ctrader.com/apps/token}
-      OUTSIDERS_MODE: ${OUTSIDERS_MODE:-confirmed}
-      # Флаги стратегий (defaults = совместимость; реальное значение — в .env)
-      LEADERS_ENABLED: ${LEADERS_ENABLED:-true}
-      OUTSIDERS_ENABLED: ${OUTSIDERS_ENABLED:-true}
-      ENSEMBLE_ENABLED: ${ENSEMBLE_ENABLED:-true}
-      SCALPING_GOLD_ORB_ENABLED: ${SCALPING_GOLD_ORB_ENABLED:-true}
-      SCALPING_GOLD_ORB_SHADOW: ${SCALPING_GOLD_ORB_SHADOW:-true}
-      # H2 ATR-regime filter — отключён 05.05.2026 по решению пользователя
-      # (compression-режим долго блокировал все сигналы; см. BUILDLOG).
-      # H5 (liquidity-sweep) остаётся активным.
-      SCALPING_GOLD_ORB_H2_REGIME_FILTER: ${SCALPING_GOLD_ORB_H2_REGIME_FILTER:-false}
-      SCALPING_GOLD_ORB_H5_SWEEP_FILTER: ${SCALPING_GOLD_ORB_H5_SWEEP_FILTER:-true}
-      SCALPING_MAX_POSITIONS: ${SCALPING_MAX_POSITIONS:-50}
-      KILLSWITCH_MAX_DAILY_LOSS: ${KILLSWITCH_MAX_DAILY_LOSS:-50.0}
-      KILLSWITCH_MAX_DRAWDOWN_PCT: ${KILLSWITCH_MAX_DRAWDOWN_PCT:-20.0}
-      KILLSWITCH_MAX_POSITIONS: ${KILLSWITCH_MAX_POSITIONS:-10}
-      KILLSWITCH_MAX_LOSS_PER_TRADE: ${KILLSWITCH_MAX_LOSS_PER_TRADE:-25.0}
-    volumes:
-      - ./data:/data
+  # Advisor (fx_pro_bot) — rule-based ensemble: Leaders, Outsiders,
+  # Shadow, GoldORB, SqueezeH4, TurtleH4, GBPJPYFade, COT, sentiment,
+  # paper exit-strategies. История 2169 закрытых сделок.
+  #
+  # 2026-05-18: ОТКЛЮЧЁН по решению пользователя. Заменяется на LLM-
+  # Trend-follower (fx_ai_trend, см. ниже). Причины:
+  # - rule-based ensemble «торгует плохо и молчит» в текущем рыночном
+  #   режиме (наблюдение пользователя; на полную статистическую базу
+  #   ≥100 сделок × 2 недели на конкретную связку не претендуем —
+  #   решение пользователя продолжать с LLM-подходом).
+  # - Код и БД сохранены: src/fx_pro_bot/* + data/advisor_stats.sqlite
+  #   (backup: advisor_stats.sqlite.backup-stop-20260518T114956Z).
+  #   Возврат = раскомментировать сервис + git pull + compose up.
+  # - Slot на cTrader account (FxPro demo, ctid=46883073) освобождается
+  #   для нового Trend-follower бота (один cTrader account = один OAuth
+  #   grant в общем-то, но через ctrader-token-service лимит снят).
+  #
+  # advisor:
+  #   build: .
+  #   image: fx-pro-bot:local
+  #   restart: unless-stopped
+  #   depends_on:
+  #     ctrader-token-service:
+  #       condition: service_healthy
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: "50m"
+  #       max-file: "3"
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     DATA_DIR: /data
+  #     CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
+  #     CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
+  #     YFINANCE_INTERVAL: ${YFINANCE_INTERVAL:-5m}
+  #     YFINANCE_PERIOD: ${YFINANCE_PERIOD:-1mo}
+  #     POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-300}
+  #     VERIFY_HORIZONS: ${VERIFY_HORIZONS:-15,30,60}
+  #     LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  #     FXPRO_ENABLED: ${FXPRO_ENABLED:-false}
+  #     FXPRO_CLIENT_ID: ${FXPRO_CLIENT_ID:-}
+  #     FXPRO_CLIENT_SECRET: ${FXPRO_CLIENT_SECRET:-}
+  #     FXPRO_ACCOUNT_ID: ${FXPRO_ACCOUNT_ID:-}
+  #     FXPRO_API_URL: ${FXPRO_API_URL:-https://connect.fxpro.com/api/v1}
+  #     CTRADER_TRADING_ENABLED: ${CTRADER_TRADING_ENABLED:-false}
+  #     CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
+  #     CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+  #     CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+  #     CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
+  #     CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-https://openapi.ctrader.com/apps/token}
+  #     OUTSIDERS_MODE: ${OUTSIDERS_MODE:-confirmed}
+  #     LEADERS_ENABLED: ${LEADERS_ENABLED:-true}
+  #     OUTSIDERS_ENABLED: ${OUTSIDERS_ENABLED:-true}
+  #     ENSEMBLE_ENABLED: ${ENSEMBLE_ENABLED:-true}
+  #     SCALPING_GOLD_ORB_ENABLED: ${SCALPING_GOLD_ORB_ENABLED:-true}
+  #     SCALPING_GOLD_ORB_SHADOW: ${SCALPING_GOLD_ORB_SHADOW:-true}
+  #     SCALPING_GOLD_ORB_H2_REGIME_FILTER: ${SCALPING_GOLD_ORB_H2_REGIME_FILTER:-false}
+  #     SCALPING_GOLD_ORB_H5_SWEEP_FILTER: ${SCALPING_GOLD_ORB_H5_SWEEP_FILTER:-true}
+  #     SCALPING_MAX_POSITIONS: ${SCALPING_MAX_POSITIONS:-50}
+  #     KILLSWITCH_MAX_DAILY_LOSS: ${KILLSWITCH_MAX_DAILY_LOSS:-50.0}
+  #     KILLSWITCH_MAX_DRAWDOWN_PCT: ${KILLSWITCH_MAX_DRAWDOWN_PCT:-20.0}
+  #     KILLSWITCH_MAX_POSITIONS: ${KILLSWITCH_MAX_POSITIONS:-10}
+  #     KILLSWITCH_MAX_LOSS_PER_TRADE: ${KILLSWITCH_MAX_LOSS_PER_TRADE:-25.0}
+  #   volumes:
+  #     - ./data:/data
 
   bybit-bot:
     build:
@@ -239,7 +252,9 @@ services:
       # «weeks not hours»). Включать LIVE только после подтверждённой
       # стабильности парсера, sentiment-uncertainty calibration и ≥30 paper-trades.
       AI_FX_TRADER_TRADING_ENABLED: ${AI_FX_TRADER_TRADING_ENABLED:-false}
-      AI_FX_TRADER_SYMBOLS: ${AI_FX_TRADER_SYMBOLS:-XAUUSD,BZ=F}
+      # 2026-05-18: добавлен NG=F (NAT.GAS, NYMEX Henry Hub). Research
+      # & verification — см. prompts.py v1.1, scripts/fx_ai_scout_gas_symbols.py.
+      AI_FX_TRADER_SYMBOLS: ${AI_FX_TRADER_SYMBOLS:-XAUUSD,BZ=F,NG=F}
       AI_FX_TRADER_ORDER_LABEL: ${AI_FX_TRADER_ORDER_LABEL:-ai-fx-trader}
       AI_FX_TRADER_POLL_INTERVAL_SEC: ${AI_FX_TRADER_POLL_INTERVAL_SEC:-900}
       AI_FX_TRADER_REVIEW_INTERVAL_SEC: ${AI_FX_TRADER_REVIEW_INTERVAL_SEC:-300}

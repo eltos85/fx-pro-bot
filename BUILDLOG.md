@@ -6,6 +6,38 @@
 
 ## 2026-05-18
 
+### chore(advisor): остановлен на VPS, заменяется на LLM Trend-follower
+
+`коммит при deploy`
+
+По решению пользователя rule-based Advisor (Leaders, Outsiders, Shadow,
+GoldORB, SqueezeH4, TurtleH4, GBPJPYFade, COT, sentiment, paper exit-
+strategies — 2169 закрытых сделок к моменту остановки) отключается на
+VPS в пользу нового LLM-Trend-follower'а (`fx_ai_trend`, отдельный бот,
+будет создан в следующих коммитах).
+
+Обоснование (пользователь): «торгует плохо и молчит» в текущем режиме.
+По правилам `sample-size.mdc` строгого статистического основания
+(≥100 сделок × 2 недели × p-value <0.05 на каждую связку стратегия×
+инструмент) для отключения **не накоплено по каждой подстратегии
+отдельно**. Решение пользователя продолжать с LLM-подходом учитывается
+как стратегический pivot, не data-driven disable.
+
+**Что сделано.**
+- `docker-compose.yml`: сервис `advisor` закомментирован целиком (не
+  удалён) — возврат = раскомментировать + git pull + compose up.
+- `data/advisor_stats.sqlite` забэкаплен в
+  `advisor_stats.sqlite.backup-stop-20260518T114956Z` перед остановкой.
+- На брокере 0 открытых позиций — остановка безопасна, ничего не
+  пропадает.
+- Код `src/fx_pro_bot/*` оставлен в репо (read-only артефакт для
+  ретроспективы + основа для возможного reuse).
+- cTrader OAuth токен (`/data/ctrader_tokens.json`) остаётся
+  собственностью `ctrader-token-service` — новый Trend-follower бот
+  будет ходить через тот же сервис.
+
+**Файлы:** `docker-compose.yml`, `BUILDLOG.md`, `BUILDLOG_AI_FX_TRADER.md`.
+
 ### refactor(ctrader-token-service): убран local-file mirror (single source of truth)
 
 `коммит при deploy`

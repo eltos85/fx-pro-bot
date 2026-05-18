@@ -17,12 +17,18 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# Дефолтные инструменты Phase 1.
+# Дефолтные инструменты Phase 1+ (2026-05-18: добавлен газ NG=F).
 # - XAUUSD: spot gold CFD (от Advisor GC=F futures отделён на cTrader как
 #   разный symbolId → полная broker-side изоляция).
 # - BZ=F: Brent crude в yfinance-нотации; в SymbolCache маппится на cTrader
 #   "BRENT" (см. src/fx_pro_bot/trading/symbols.py).
-DEFAULT_AI_FX_SYMBOLS: tuple[str, ...] = ("XAUUSD", "BZ=F")
+# - NG=F: Natural gas spot CFD (NYMEX Henry Hub Natural Gas Futures
+#   underlying); в SymbolCache маппится на cTrader "NAT.GAS"
+#   (id=1118 на FxPro demo, разведка через
+#   scripts/fx_ai_scout_gas_symbols.py 2026-05-18).
+#   TTF (Dutch front-month) на FxPro demo отсутствует — единственный
+#   доступный gas-инструмент NG/Henry Hub.
+DEFAULT_AI_FX_SYMBOLS: tuple[str, ...] = ("XAUUSD", "BZ=F", "NG=F")
 
 
 class AiFxTraderSettings(BaseSettings):
