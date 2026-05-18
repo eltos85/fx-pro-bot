@@ -36,6 +36,13 @@ class AiPosition:
     realized_pnl_usd: float | None
     close_reason: str | None
     llm_reason: str  # rationale из LLM
+    # v0.13 (2026-05-18): meta-cognition поля Nof1-style. Заставляют LLM
+    # явно посчитать (а не «прикинуть») уверенность, риск и заранее
+    # сформулировать условие, при котором тезис сделки неверен.
+    # См. BUILDLOG_AI_TRADER.md v0.13 + AI_TRADER_PROPOSAL_ALPHA_ARENA.md.
+    confidence: float | None = None  # 0.0-1.0, обязательно при open
+    invalidation_condition: str | None = None  # observable exit signal
+    risk_usd_declared: float | None = None  # |entry-SL|*qty по расчёту LLM
 
 
 _SCHEMA = """
@@ -99,6 +106,27 @@ class AiTraderStore:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            self._migrate(c)
+
+    def _migrate(self, c: sqlite3.Connection) -> None:
+        """Идемпотентные миграции для существующих БД на VPS.
+
+        SQLite не поддерживает ``ADD COLUMN IF NOT EXISTS``, поэтому
+        проверяем через ``pragma_table_info``. ``ALTER TABLE ADD COLUMN``
+        с NULL default безопасен для существующих строк.
+
+        v0.13 (2026-05-18): meta-cognition поля для open positions
+        (см. AI_TRADER_PROPOSAL_ALPHA_ARENA.md, Nof1-style schema).
+        """
+        existing = {row[1] for row in c.execute("PRAGMA table_info(positions)")}
+        migrations: list[tuple[str, str]] = [
+            ("confidence", "ALTER TABLE positions ADD COLUMN confidence REAL"),
+            ("invalidation_condition", "ALTER TABLE positions ADD COLUMN invalidation_condition TEXT"),
+            ("risk_usd_declared", "ALTER TABLE positions ADD COLUMN risk_usd_declared REAL"),
+        ]
+        for col_name, ddl in migrations:
+            if col_name not in existing:
+                c.execute(ddl)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -164,14 +192,25 @@ class AiTraderStore:
         leverage: int,
         order_link_id: str,
         llm_reason: str,
+        confidence: float | None = None,
+        invalidation_condition: str | None = None,
+        risk_usd_declared: float | None = None,
     ) -> int:
+        """Открыть позицию с записью meta-cognition полей.
+
+        v0.13: ``confidence`` / ``invalidation_condition`` / ``risk_usd_declared``
+        обязательны на стороне promp'а (parser требует), но дефолтные
+        ``None`` сохраняются для backward compatibility (старые тесты,
+        потенциальные future паттерны без этих полей).
+        """
         with self._conn() as c:
             cur = c.execute(
                 """
                 INSERT INTO positions
                 (symbol, side, qty, entry_price, sl_price, tp_price, leverage,
-                 order_link_id, opened_at, llm_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 order_link_id, opened_at, llm_reason,
+                 confidence, invalidation_condition, risk_usd_declared)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -184,6 +223,9 @@ class AiTraderStore:
                     order_link_id,
                     datetime.now(tz=UTC).isoformat(),
                     llm_reason,
+                    confidence,
+                    invalidation_condition,
+                    risk_usd_declared,
                 ),
             )
             return int(cur.lastrowid or 0)

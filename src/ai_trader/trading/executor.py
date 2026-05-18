@@ -152,6 +152,35 @@ def parse_action(
             if not isinstance(v, (int, float)) or v <= 0:
                 return f"invalid {key}: {v!r}"
 
+        # v0.13 (2026-05-18) — meta-cognition поля Nof1-style.
+        # Эти три поля обязательны для action=open и принуждают LLM
+        # явно посчитать (а не «прикинуть») уверенность, риск и заранее
+        # сформулировать observable условие, при котором тезис неверен.
+        # См. AI_TRADER_PROPOSAL_ALPHA_ARENA.md § Output Schema.
+        conf = obj.get("confidence")
+        if not isinstance(conf, (int, float)) or isinstance(conf, bool):
+            return f"confidence required (number 0.0-1.0), got {conf!r}"
+        if not (0.0 <= float(conf) <= 1.0):
+            return f"confidence out of range [0.0, 1.0]: {conf!r}"
+
+        inv = obj.get("invalidation_condition")
+        if not isinstance(inv, str):
+            return f"invalidation_condition required (string), got {type(inv).__name__}"
+        inv_stripped = inv.strip()
+        if not inv_stripped:
+            return "invalidation_condition required (non-empty string)"
+        if len(inv_stripped) > 500:
+            return f"invalidation_condition too long (max 500 chars): got {len(inv_stripped)}"
+
+        risk_decl = obj.get("risk_usd")
+        if not isinstance(risk_decl, (int, float)) or isinstance(risk_decl, bool):
+            return f"risk_usd required (number), got {risk_decl!r}"
+        if float(risk_decl) <= 0 or float(risk_decl) > 10.0:
+            return (
+                f"risk_usd out of range (must be 0 < x <= 10): {risk_decl!r}. "
+                "Per-trade cap = $10 (2% of $500 capital)."
+            )
+
     if action == "close":
         if not isinstance(obj.get("position_id"), int):
             return f"close requires int position_id, got {obj.get('position_id')!r}"
@@ -236,6 +265,11 @@ def _apply_open(
     sl_price = float(raw["stop_loss"])
     tp_price = float(raw["take_profit"])
     reason = str(raw.get("reason", ""))[:200]
+    # v0.13: meta-cognition поля. Парсер их уже отвалидировал; здесь
+    # просто извлекаем для проброса в БД и summary.
+    confidence = float(raw["confidence"])
+    invalidation_condition = str(raw["invalidation_condition"]).strip()[:500]
+    risk_usd_declared = float(raw["risk_usd"])
 
     check = killswitch.check_can_open_position(leverage)
     if not check.allowed:
@@ -303,7 +337,9 @@ def _apply_open(
             executed=False,
             summary=(
                 f"[PAPER] OPEN {side} {symbol} qty={qty} @ ${price:.6g} "
-                f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x — {reason}"
+                f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
+                f"conf={confidence:.2f} risk_decl=${risk_usd_declared:.2f} "
+                f"inv=\"{invalidation_condition[:80]}\" — {reason}"
             ),
         )
 
@@ -343,11 +379,16 @@ def _apply_open(
         leverage=leverage,
         order_link_id=link_id,
         llm_reason=reason,
+        confidence=confidence,
+        invalidation_condition=invalidation_condition,
+        risk_usd_declared=risk_usd_declared,
     )
     return ApplyResult(
         executed=True,
         summary=(
             f"OPEN {side} {symbol} qty={qty} @ ${price:.6g} "
-            f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x — {reason}"
+            f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
+            f"conf={confidence:.2f} risk_decl=${risk_usd_declared:.2f} "
+            f"inv=\"{invalidation_condition[:80]}\" — {reason}"
         ),
     )

@@ -74,6 +74,37 @@ v0.12 также убирает look-ahead bias через incomplete 1H/4H ба
 определение (≤25 / ≥75) — см. indicators.py и SYSTEM_PROMPT
 counter-trend rule.
 
+v0.13 (2026-05-18): meta-cognition fields в JSON schema для `action="open"` —
+порт Nof1 Alpha Arena дисциплины мышления без изменения нашей стратегии:
+- `confidence` (0.0-1.0): обязательная самооценка LLM. Принуждает явно
+  оценить «насколько я уверен», не «нравится сетап». Бэндинг 0.3-0.49 /
+  0.5-0.69 / 0.7-1.0 описан в секции CONFIDENCE CALIBRATION.
+- `invalidation_condition` (string): pre-registered observable signal,
+  при котором тезис сделки неверен. Например «BTC closes 1H below $80k»
+  или «1H RSI breaks back below 50». LLM пишет до commit'а, бот хранит
+  per-position, на review-цикле доступен для разговорной проверки
+  (Этап 2 plan). Дополнительный exit-сигнал к нашим механическим
+  4 триггерам, не замена.
+- `risk_usd` (number, 0 < x ≤ 10): самопросчёт долларового риска
+  (|entry-SL|*qty). Парсер reject'ит если LLM ошибся — это раннее
+  поймание бага «думал риск $5, а стоп далеко, реально $20».
+Также добавлены секции CONFIDENCE CALIBRATION, COMMON PITFALLS,
+PRE-REGISTERED INVALIDATION в SYSTEM_PROMPT — guidance из Nof1
+gist (https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83)
+и tech-post (https://nof1.ai/blog/TechPost1) § Trading Philosophy и
+§ Risk Management Protocol. Список pitfalls буквальный из source
+(Overtrading / Revenge Trading / Analysis Paralysis / Ignoring
+Correlation / Overleveraging).
+
+Стратегия НЕ меняется: все триггеры PEAK-DRAWDOWN/LOCKED-PROFIT/
+ADVERSE-NEW-EVIDENCE остаются, dual-timer остаётся, RSS news остаётся,
+KillSwitch остаётся. Единственная новая дисциплина — обязательность
+3 полей в open-action и обновление текста промпта.
+
+SYSTEM_PROMPT_REVIEW v0.13 не трогается (review-цикл выдаёт только
+close|hold, новые поля не нужны). Использование invalidation_condition
+для семантического exit-trigger в review — Этап 2.
+
 Дизайн:
 - system: фиксированные правила (роль, ограничения, формат ответа)
 - user: динамический market context + текущее состояние
@@ -130,7 +161,7 @@ MARKET CONTEXT (2026 you should be aware of):
 ANALYSIS APPROACH (use this structure each cycle):
 
 Before producing the JSON answer, write a brief analysis commentary in
-plain English (3-7 short lines) covering, in order:
+plain English (3-8 short lines) covering, in order:
   1) TREND: 4H trend direction by EMA20 vs EMA50 + price location.
   2) VOLATILITY: ATR%%, BB position (squeeze vs expansion).
   3) SENTIMENT: funding rate band per relevant symbol; news bias.
@@ -140,9 +171,56 @@ plain English (3-7 short lines) covering, in order:
      c) any contrary new evidence (news, funding flip, EMA shift)?
      This drives close/hold decision per EXIT MANAGEMENT below.
   5) CONFIRMATIONS: list which signals align (need 2+ for entry).
-  6) R:R CHECK: if considering entry, compute reward/risk in price
-     distance terms; reject if R:R < 1.5.
-  7) DECISION: open / close / hold and why.
+  6) R:R CHECK + RISK_USD: if considering entry, compute reward/risk
+     in price distance terms (reject if R:R < 1.5) AND compute the
+     dollar risk |entry - SL| * qty (must be 0 < x <= 10).
+  7) PRE-COMMIT CHECK (open only): state your confidence band (low /
+     medium / high → number) per CONFIDENCE CALIBRATION; state the
+     specific PRE-REGISTERED INVALIDATION condition that would void
+     the thesis. Both go into the JSON.
+  8) DECISION: open / close / hold and why.
+
+CONFIDENCE CALIBRATION (mandatory for "open"):
+
+Each "open" decision MUST include a self-rated `confidence` in [0.0, 1.0].
+Use the following bands to ground the number — do not eyeball it:
+- 0.30-0.49 (low): you see one confirmation but the rest of the context
+  is ambiguous, OR there is mild contrary evidence. Prefer HOLD; if
+  taking the trade, use minimum leverage and smaller `position_size_usd`.
+- 0.50-0.69 (medium): 2+ independent confirmations align AND no major
+  contrary evidence. Standard sizing.
+- 0.70-1.00 (high): strong multi-timeframe + sentiment + (when relevant)
+  news alignment. Textbook setup. Standard sizing within the $10 risk
+  cap is justified.
+
+Be honest. Confidence is logged per decision and will be correlated with
+realised PnL across cycles — overstating it is self-defeating, the
+record shows. Calibration matters more than bravado.
+
+PRE-REGISTERED INVALIDATION (mandatory for "open"):
+
+Each "open" decision MUST include `invalidation_condition` — a single
+SPECIFIC observable signal that, if it occurs, voids your thesis. Examples:
+- "BTC closes 1H below $80,000 (loss of EMA50 support)"
+- "1H RSI breaks back below 50 (momentum failure)"
+- "Funding flips from STRONG-positive to NEUTRAL band"
+- "4H candle closes back below the breakout level $X"
+
+The condition must be OBJECTIVE (a price level, an indicator value, a
+funding band change) — never "I feel the trade is no longer working".
+Subsequent cycles will re-display this condition next to the position
+and you'll be asked whether it tripped. This is an ADDITIONAL exit
+signal on top of EXIT MANAGEMENT triggers 1-4 — not a replacement.
+
+RISK_USD self-check (mandatory for "open"):
+
+Each "open" decision MUST include `risk_usd` — your computed dollar risk:
+  risk_usd = |entry - stop_loss| * qty
+where `qty` is what your `position_size_usd` and current price imply.
+The bot will reject the trade if `risk_usd` is outside (0, 10] (per-trade
+cap = $10 = 2% of $500 capital). Computing this number forces you to
+verify SL distance is compatible with sizing BEFORE the order goes out —
+not after rejection.
 
 Trading rules:
 - Trend confirmation: prefer trades aligned with 4H trend. Counter-trend
@@ -168,6 +246,22 @@ Trading rules:
   WHY a trade should work using 2+ confirmations AND R:R >= 1.5, do not
   open it.
 - 0-2 actions per cycle is normal; many cycles will be hold.
+
+COMMON PITFALLS TO AVOID:
+- OVERTRADING: every fill pays taker fees + slippage. Activity for
+  activity's sake erodes capital. Most cycles SHOULD be HOLD.
+- REVENGE TRADING: do NOT increase position size or relax R:R standards
+  after a loss to "make it back". Stick to the framework — losses are
+  noise, not personal.
+- ANALYSIS PARALYSIS: do NOT wait for the "perfect" setup — it doesn't
+  exist. If 2+ confirmations align and R:R >= 1.5, take the trade with
+  appropriate confidence band.
+- IGNORING CORRELATION: BTC tends to lead alts. If BTC is strongly
+  bearish, long-altcoin trades carry hidden BTC-beta risk. Do not treat
+  altcoin signals as fully independent of BTC.
+- OVERLEVERAGING: leverage amplifies BOTH gains AND losses, with
+  liquidation risk. Stay within the 5x cap; reserve max leverage only
+  for high-conviction (>= 0.70) setups.
 
 EXIT MANAGEMENT (when to close existing positions early — research-based):
 
@@ -266,8 +360,15 @@ For opening a new position:
   "position_size_usd": 50-500,
   "stop_loss": <number>,
   "take_profit": <number>,
+  "confidence": <number 0.00-1.00>,
+  "invalidation_condition": "<observable signal that voids the thesis>",
+  "risk_usd": <number, |entry-stop_loss|*qty, must be 0 < x <= 10>,
   "reason": "<short rationale, max 200 chars>"
 }
+
+All three of `confidence`, `invalidation_condition`, `risk_usd` are
+MANDATORY for action="open". A missing or out-of-range value will be
+rejected by the bot's parser and the trade will NOT be placed.
 
 For closing an existing position:
 {
@@ -289,6 +390,10 @@ CRITICAL CONSTRAINTS:
   Buy: SL < current price < TP. Sell: SL > current price > TP.
 - For "open": (TP-price)/(price-SL) for Buy, or (price-TP)/(SL-price)
   for Sell, MUST be >= 1.5. Otherwise return "hold".
+- For "open": `confidence`, `invalidation_condition`, `risk_usd` are
+  MANDATORY. Missing or out-of-range values are auto-rejected. Ranges:
+  confidence ∈ [0.0, 1.0]; invalidation_condition non-empty (≤500 chars);
+  risk_usd ∈ (0, 10].
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or all conditions are unclear → return action="hold".
 - Risk = |entry - stop_loss| * qty MUST be <= $10 (2% of $500). If your
@@ -304,11 +409,13 @@ def build_user_prompt(market_context: str) -> str:
     return (
         "Current market state and your open positions:\n\n"
         f"{market_context}\n\n"
-        "Now produce the analysis commentary (3-7 lines) following the "
+        "Now produce the analysis commentary (3-8 lines) following the "
         "TREND → VOLATILITY → SENTIMENT → OPEN POSITIONS REVIEW → "
-        "CONFIRMATIONS → R:R CHECK → DECISION structure "
-        "(skip OPEN POSITIONS REVIEW if no open positions), then "
-        "output the single JSON object."
+        "CONFIRMATIONS → R:R CHECK + RISK_USD → PRE-COMMIT CHECK → "
+        "DECISION structure (skip OPEN POSITIONS REVIEW if no open "
+        "positions, skip PRE-COMMIT CHECK if not opening), then output "
+        "the single JSON object. For action=\"open\", the JSON MUST "
+        "include `confidence`, `invalidation_condition`, `risk_usd`."
     )
 
 

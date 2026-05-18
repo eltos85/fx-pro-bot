@@ -27,13 +27,19 @@ class TestParseAction:
         text = (
             '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
             '"leverage": 3, "position_size_usd": 200, '
-            '"stop_loss": 60000, "take_profit": 65000, "reason": "breakout"}'
+            '"stop_loss": 60000, "take_profit": 65000, '
+            '"confidence": 0.65, '
+            '"invalidation_condition": "1H closes below 59500 (EMA50 lost)", '
+            '"risk_usd": 6.5, '
+            '"reason": "breakout"}'
         )
         result = parse_action(text, ALLOWED)
         assert isinstance(result, ParsedAction)
         assert result.action == "open"
         assert result.raw["symbol"] == "BTCUSDT"
         assert result.raw["leverage"] == 3
+        assert result.raw["confidence"] == 0.65
+        assert result.raw["risk_usd"] == 6.5
 
     def test_open_with_markdown_fence(self):
         """LLM иногда оборачивает в ```json ... ``` несмотря на инструкцию."""
@@ -385,6 +391,9 @@ class TestQtyRounding:
                 "action": "open", "symbol": "XRPUSDT", "side": "Buy",
                 "leverage": 2, "position_size_usd": 482.7,
                 "stop_loss": 1.3853, "take_profit": 1.4586,
+                "confidence": 0.6,
+                "invalidation_condition": "test inv",
+                "risk_usd": 9.5,
                 "reason": "test",
             },
         )
@@ -446,6 +455,9 @@ class TestQtyRounding:
                 "leverage": 2, "position_size_usd": 50.0,
                 # 50 / 80000 = 0.000625 → floor(0.001) = 0.0 → < min 0.001
                 "stop_loss": 78000, "take_profit": 82000,
+                "confidence": 0.5,
+                "invalidation_condition": "test inv",
+                "risk_usd": 1.25,
                 "reason": "test",
             },
         )
@@ -720,7 +732,11 @@ class TestReviewModeParseAction:
         text = (
             '{"action": "open", "symbol": "BTCUSDT", "side": "Buy", '
             '"leverage": 3, "position_size_usd": 200, '
-            '"stop_loss": 60000, "take_profit": 65000, "reason": "x"}'
+            '"stop_loss": 60000, "take_profit": 65000, '
+            '"confidence": 0.6, '
+            '"invalidation_condition": "BTC closes 1H below 59500", '
+            '"risk_usd": 4.0, '
+            '"reason": "x"}'
         )
         result = parse_action(text, ALLOWED)  # review_mode=False по умолчанию
         assert isinstance(result, ParsedAction)
@@ -1281,3 +1297,342 @@ class TestRsiExtremeThreshold:
         assert "RSI >= 75" in SYSTEM_PROMPT
         assert "[EXTREME OVERSOLD]" in SYSTEM_PROMPT
         assert "[EXTREME OVERBOUGHT]" in SYSTEM_PROMPT
+
+
+# ─── v0.13 (2026-05-18): Nof1-style meta-cognition fields ────────────────
+#
+# parse_action для action="open" должен ТРЕБОВАТЬ:
+#   - confidence: number 0.0-1.0
+#   - invalidation_condition: non-empty string ≤ 500 chars
+#   - risk_usd: number 0 < x ≤ 10
+#
+# Также SYSTEM_PROMPT должен содержать секции guidance, чтобы LLM знал
+# зачем эти поля и как их грамотно заполнить.
+
+
+def _open_json(**overrides) -> str:
+    """Helper: minimal valid open-JSON со всеми required полями v0.13.
+    overrides позволяют выкинуть/переопределить любое поле для reject-тестов.
+    """
+    base = {
+        "action": "open",
+        "symbol": "BTCUSDT",
+        "side": "Buy",
+        "leverage": 3,
+        "position_size_usd": 200,
+        "stop_loss": 60000,
+        "take_profit": 65000,
+        "confidence": 0.65,
+        "invalidation_condition": "1H closes below 59500 (EMA50 lost)",
+        "risk_usd": 6.5,
+        "reason": "breakout",
+    }
+    for k, v in overrides.items():
+        if v is _MISSING:
+            base.pop(k, None)
+        else:
+            base[k] = v
+    import json as _json
+    return _json.dumps(base)
+
+
+_MISSING = object()
+
+
+class TestOpenSchemaV13Required:
+    """Все три новых поля обязательны при action=open."""
+
+    def test_open_full_valid(self):
+        result = parse_action(_open_json(), ALLOWED)
+        assert isinstance(result, ParsedAction)
+        assert result.raw["confidence"] == 0.65
+        assert result.raw["invalidation_condition"].startswith("1H closes")
+        assert result.raw["risk_usd"] == 6.5
+
+    def test_open_missing_confidence_rejected(self):
+        result = parse_action(_open_json(confidence=_MISSING), ALLOWED)
+        assert isinstance(result, str)
+        assert "confidence required" in result
+
+    def test_open_missing_invalidation_rejected(self):
+        result = parse_action(_open_json(invalidation_condition=_MISSING), ALLOWED)
+        assert isinstance(result, str)
+        assert "invalidation_condition required" in result
+
+    def test_open_missing_risk_usd_rejected(self):
+        result = parse_action(_open_json(risk_usd=_MISSING), ALLOWED)
+        assert isinstance(result, str)
+        assert "risk_usd required" in result
+
+    def test_open_confidence_negative_rejected(self):
+        result = parse_action(_open_json(confidence=-0.1), ALLOWED)
+        assert isinstance(result, str)
+        assert "confidence out of range" in result
+
+    def test_open_confidence_above_one_rejected(self):
+        result = parse_action(_open_json(confidence=1.5), ALLOWED)
+        assert isinstance(result, str)
+        assert "confidence out of range" in result
+
+    def test_open_confidence_string_rejected(self):
+        result = parse_action(_open_json(confidence="high"), ALLOWED)
+        assert isinstance(result, str)
+        assert "confidence required" in result
+
+    def test_open_confidence_bool_rejected(self):
+        # Bool — подтип int в Python, нужно явно отбить
+        result = parse_action(_open_json(confidence=True), ALLOWED)
+        assert isinstance(result, str)
+        assert "confidence required" in result
+
+    def test_open_confidence_zero_allowed(self):
+        # 0.0 — допустимый low-bound
+        result = parse_action(_open_json(confidence=0.0), ALLOWED)
+        assert isinstance(result, ParsedAction)
+
+    def test_open_confidence_one_allowed(self):
+        result = parse_action(_open_json(confidence=1.0), ALLOWED)
+        assert isinstance(result, ParsedAction)
+
+    def test_open_invalidation_empty_string_rejected(self):
+        result = parse_action(_open_json(invalidation_condition="   "), ALLOWED)
+        assert isinstance(result, str)
+        assert "non-empty" in result
+
+    def test_open_invalidation_too_long_rejected(self):
+        long_str = "x" * 501
+        result = parse_action(_open_json(invalidation_condition=long_str), ALLOWED)
+        assert isinstance(result, str)
+        assert "too long" in result
+
+    def test_open_invalidation_non_string_rejected(self):
+        result = parse_action(_open_json(invalidation_condition=123), ALLOWED)
+        assert isinstance(result, str)
+        assert "invalidation_condition required" in result
+
+    def test_open_risk_usd_zero_rejected(self):
+        result = parse_action(_open_json(risk_usd=0.0), ALLOWED)
+        assert isinstance(result, str)
+        assert "risk_usd out of range" in result
+
+    def test_open_risk_usd_negative_rejected(self):
+        result = parse_action(_open_json(risk_usd=-5.0), ALLOWED)
+        assert isinstance(result, str)
+        assert "risk_usd out of range" in result
+
+    def test_open_risk_usd_above_cap_rejected(self):
+        # Cap = $10 (2% of $500)
+        result = parse_action(_open_json(risk_usd=15.0), ALLOWED)
+        assert isinstance(result, str)
+        assert "risk_usd out of range" in result
+
+    def test_open_risk_usd_at_cap_allowed(self):
+        result = parse_action(_open_json(risk_usd=10.0), ALLOWED)
+        assert isinstance(result, ParsedAction)
+
+    def test_open_risk_usd_string_rejected(self):
+        result = parse_action(_open_json(risk_usd="five"), ALLOWED)
+        assert isinstance(result, str)
+        assert "risk_usd required" in result
+
+    def test_close_does_not_require_new_fields(self):
+        """Action="close" не требует новых полей — только position_id."""
+        text = '{"action": "close", "position_id": 42, "reason": "invalidated"}'
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, ParsedAction)
+        assert result.action == "close"
+
+    def test_hold_does_not_require_new_fields(self):
+        text = '{"action": "hold", "reason": "no setup"}'
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, ParsedAction)
+        assert result.action == "hold"
+
+
+class TestOpenSchemaV13PromptGuidance:
+    """SYSTEM_PROMPT должен содержать секции с инструкциями по новым полям,
+    чтобы LLM знал зачем они и как их корректно заполнить.
+    """
+
+    def test_prompt_mentions_confidence_field(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "\"confidence\"" in SYSTEM_PROMPT
+        assert "0.00-1.00" in SYSTEM_PROMPT or "0.0, 1.0" in SYSTEM_PROMPT
+
+    def test_prompt_mentions_invalidation_condition_field(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "\"invalidation_condition\"" in SYSTEM_PROMPT
+
+    def test_prompt_mentions_risk_usd_field(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "\"risk_usd\"" in SYSTEM_PROMPT
+
+    def test_prompt_has_confidence_calibration_section(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "CONFIDENCE CALIBRATION" in SYSTEM_PROMPT
+        # Бэнды должны быть явно перечислены
+        assert "0.30-0.49" in SYSTEM_PROMPT
+        assert "0.50-0.69" in SYSTEM_PROMPT
+        assert "0.70-1.00" in SYSTEM_PROMPT
+
+    def test_prompt_has_pre_registered_invalidation_section(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "PRE-REGISTERED INVALIDATION" in SYSTEM_PROMPT
+
+    def test_prompt_has_common_pitfalls_section(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "COMMON PITFALLS" in SYSTEM_PROMPT
+        # Канонический список из Nof1 (TechPost1 § Risk Management Protocol)
+        for token in (
+            "OVERTRADING",
+            "REVENGE TRADING",
+            "ANALYSIS PARALYSIS",
+            "IGNORING CORRELATION",
+            "OVERLEVERAGING",
+        ):
+            assert token in SYSTEM_PROMPT, f"missing pitfall token: {token}"
+
+    def test_prompt_marks_three_fields_as_mandatory(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        # В CRITICAL CONSTRAINTS должно быть прямое указание на required
+        assert "MANDATORY" in SYSTEM_PROMPT
+        # И в schema-блоке тоже
+        assert "must be 0 < x <= 10" in SYSTEM_PROMPT
+
+    def test_prompt_has_pre_commit_check_step(self):
+        """ANALYSIS APPROACH должен включать PRE-COMMIT CHECK для open."""
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "PRE-COMMIT CHECK" in SYSTEM_PROMPT
+
+
+class TestOpenSchemaV13DBRoundTrip:
+    """БД должна корректно хранить и возвращать новые поля.
+
+    Также проверяем что миграция идемпотентна — если БД уже создана
+    (как на VPS) и колонки добавлены, повторный init не падает.
+    """
+
+    def test_open_position_persists_v13_fields(self, store):
+        pid = store.open_position(
+            symbol="BTCUSDT",
+            side="Buy",
+            qty=0.005,
+            entry_price=80000.0,
+            sl_price=78000.0,
+            tp_price=84000.0,
+            leverage=3,
+            order_link_id="ai_v13_rt1",
+            llm_reason="rt test",
+            confidence=0.7,
+            invalidation_condition="1H closes below 79000",
+            risk_usd_declared=10.0,
+        )
+        assert pid > 0
+        opens = store.get_open_positions()
+        match = [p for p in opens if p.id == pid]
+        assert len(match) == 1
+        p = match[0]
+        assert p.confidence == pytest.approx(0.7)
+        assert p.invalidation_condition == "1H closes below 79000"
+        assert p.risk_usd_declared == pytest.approx(10.0)
+
+    def test_open_position_legacy_call_without_v13_fields_works(self, store):
+        """Backward-compat: старый код вызывающий open_position без новых
+        kwargs должен работать (поля nullable, default=None)."""
+        pid = store.open_position(
+            symbol="ETHUSDT",
+            side="Sell",
+            qty=0.5,
+            entry_price=3000.0,
+            sl_price=3100.0,
+            tp_price=2800.0,
+            leverage=3,
+            order_link_id="ai_v13_legacy",
+            llm_reason="legacy",
+        )
+        opens = store.get_open_positions()
+        match = [p for p in opens if p.id == pid]
+        assert len(match) == 1
+        p = match[0]
+        assert p.confidence is None
+        assert p.invalidation_condition is None
+        assert p.risk_usd_declared is None
+
+    def test_migration_idempotent(self, tmp_path):
+        """Повторный init на той же БД не должен падать — миграция
+        проверяет PRAGMA table_info и пропускает существующие колонки."""
+        from ai_trader.state.db import AiTraderStore
+
+        db_path = tmp_path / "v13_idem.sqlite"
+        store1 = AiTraderStore(db_path)
+        store1.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.001, entry_price=80000,
+            sl_price=78000, tp_price=84000, leverage=3,
+            order_link_id="ai_idem_1", llm_reason="t",
+            confidence=0.5, invalidation_condition="x", risk_usd_declared=2.0,
+        )
+        # Второй init на тот же файл — не должен падать на ALTER TABLE
+        store2 = AiTraderStore(db_path)
+        opens = store2.get_open_positions()
+        assert len(opens) == 1
+        assert opens[0].confidence == pytest.approx(0.5)
+
+    def test_migration_old_db_without_columns_is_upgraded(self, tmp_path):
+        """Симулируем старую БД (без новых колонок), затем открываем
+        через текущий AiTraderStore — миграция должна ALTER TABLE и
+        получившаяся БД должна корректно работать с новыми полями."""
+        import sqlite3
+        from ai_trader.state.db import AiTraderStore
+
+        db_path = tmp_path / "v13_legacy.sqlite"
+        # Создаём «старую» схему — без confidence/invalidation_condition/risk_usd_declared
+        legacy_schema = """
+        CREATE TABLE positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            qty REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            sl_price REAL,
+            tp_price REAL,
+            leverage INTEGER NOT NULL,
+            order_link_id TEXT NOT NULL UNIQUE,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT,
+            exit_price REAL,
+            realized_pnl_usd REAL,
+            close_reason TEXT,
+            llm_reason TEXT NOT NULL
+        );
+        """
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript(legacy_schema)
+            conn.execute(
+                """
+                INSERT INTO positions (symbol, side, qty, entry_price, sl_price,
+                tp_price, leverage, order_link_id, opened_at, llm_reason)
+                VALUES ('BTCUSDT', 'Buy', 0.001, 80000.0, 78000.0, 84000.0, 3,
+                'ai_legacy_pre_v13', '2026-05-17T00:00:00+00:00', 'pre v13')
+                """
+            )
+            conn.commit()
+        # Открываем через текущий код — должен мигрировать
+        store = AiTraderStore(db_path)
+        opens = store.get_open_positions()
+        assert len(opens) == 1
+        legacy_pos = opens[0]
+        # Старая позиция: новые поля = None (миграция не заполняет данные)
+        assert legacy_pos.confidence is None
+        assert legacy_pos.invalidation_condition is None
+        assert legacy_pos.risk_usd_declared is None
+        # И можно вставить НОВУЮ позицию с новыми полями
+        new_id = store.open_position(
+            symbol="ETHUSDT", side="Sell", qty=0.5, entry_price=3000,
+            sl_price=3100, tp_price=2800, leverage=2,
+            order_link_id="ai_post_v13", llm_reason="new",
+            confidence=0.8, invalidation_condition="ETH 1H above 3050",
+            risk_usd_declared=5.0,
+        )
+        new_pos = next(p for p in store.get_open_positions() if p.id == new_id)
+        assert new_pos.confidence == pytest.approx(0.8)
+        assert new_pos.invalidation_condition == "ETH 1H above 3050"

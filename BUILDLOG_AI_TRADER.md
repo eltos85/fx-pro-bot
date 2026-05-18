@@ -1,6 +1,137 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
-## 2026-05-12 — v0.12 bug-fix: incomplete-bar bias + prompt clean-up + RSI extreme threshold
+## 2026-05-18 — v0.13 Stage 1: Nof1-style meta-cognition fields (`confidence` / `invalidation_condition` / `risk_usd`)
+
+**Запрос пользователя:** «Вариант B» (после обсуждения как усилить
+`ai_trader` инсайтами из `ai_arena` (Nof1 clone), сохранив текущую стратегию
+бота). Backport дисциплины мышления из Nof1 Alpha Arena в JSON-схему и
+prompt'ы — БЕЗ изменения наших триггеров (PEAK-DRAWDOWN, LOCKED-PROFIT,
+ADVERSE-NEW-EVIDENCE), без трогания NEWS, dual-timer, KillSwitch.
+
+Источники research:
+- Nof1 Alpha Arena prompt gist:
+  https://gist.github.com/wquguru/7d268099b8c04b7e5b6ad6fae922ae83
+  (§ Output Schema, § Trading Philosophy, § Risk Management Protocol)
+- Nof1 TechPost1: https://nof1.ai/blog/TechPost1
+  (раздел про meta-cognition + pre-registered invalidation +
+  confidence calibration as anti-overconfidence guard)
+- AI_TRADER_PROPOSAL_ALPHA_ARENA.md (внутренний документ, разработан
+  при планировании `ai_arena`).
+
+Это **не** изменение стратегии: правила входа/выхода, пороги, R:R, EXIT
+MANAGEMENT — без изменений. Меняется только дисциплина self-reporting:
+LLM теперь обязан явно посчитать (а не «прикинуть») три метрики на
+каждом open-action. Это раннее поймание багов «думал риск $5, реально
+$15» и регрессия на overconfidence.
+
+### Что добавлено
+
+**1. JSON schema для `action="open"` — три обязательных поля:**
+
+| Поле | Тип | Диапазон | Что означает |
+|---|---|---|---|
+| `confidence` | float | `[0.0, 1.0]` | Самооценка уверенности |
+| `invalidation_condition` | string | non-empty, ≤500 chars | Pre-registered observable exit-сигнал |
+| `risk_usd` | float | `(0, 10]` | Самопросчёт `\|entry-SL\|*qty` (cap = 2% of $500) |
+
+Парсер `parse_action` в `executor.py` отвергает open-JSON если хоть одно
+поле отсутствует, неверного типа или вне диапазона. Это hard-guard:
+LLM невозможно «забыть» новые поля без явного rejection.
+
+**2. SYSTEM_PROMPT — три новые секции:**
+
+- **CONFIDENCE CALIBRATION**: бэнды 0.30-0.49 (low) / 0.50-0.69 (medium) /
+  0.70-1.00 (high) с описанием когда использовать каждый. Замена
+  «эмоциональному» рейтингу.
+- **PRE-REGISTERED INVALIDATION**: требование сформулировать
+  observable signal (price level / indicator value / funding band)
+  ДО commit'а ордера, плюс примеры. Это additional exit-trigger
+  (не замена) к нашим mechanical triggers 1-4.
+- **COMMON PITFALLS**: канонический список из Nof1 Risk Management
+  Protocol (Overtrading / Revenge Trading / Analysis Paralysis /
+  Ignoring Correlation / Overleveraging). Чёрный список ошибок,
+  которые статистически дороже всего стоят retail-трейдерам.
+
+Также добавлены:
+- **RISK_USD self-check** мини-секция с формулой `|entry-SL|*qty`.
+- В **ANALYSIS APPROACH** добавлен 7-й шаг **PRE-COMMIT CHECK**
+  (только для open) — обязывает проговорить confidence band и
+  invalidation condition в commentary до JSON.
+- В **CRITICAL CONSTRAINTS** прописана обязательность 3 полей с
+  диапазонами — explicit за-fail-safe для LLM.
+
+**3. БД миграция (идемпотентная):**
+
+- `ALTER TABLE positions ADD COLUMN confidence REAL`
+- `ALTER TABLE positions ADD COLUMN invalidation_condition TEXT`
+- `ALTER TABLE positions ADD COLUMN risk_usd_declared REAL`
+
+Миграция в `AiTraderStore._migrate()` через `PRAGMA table_info` — на
+существующей VPS-БД ALTER TABLE отрабатывает только для отсутствующих
+колонок. Старые позиции получают `NULL` в новых полях (тест
+`test_migration_old_db_without_columns_is_upgraded`).
+
+`AiPosition` dataclass расширен 3 nullable полями. `open_position()`
+принимает их как опциональные kwargs (default `None`) для backward
+compat — реальный fail-safe это парсер, БД остаётся permissive.
+
+**4. Telegram summary:**
+
+`OPEN ...` сообщение теперь включает `conf=0.65 risk_decl=$6.50
+inv="..."` (первые 80 символов invalidation). Видимый трекинг для
+оператора без захода в БД.
+
+**5. SYSTEM_PROMPT_REVIEW не трогается:**
+
+Review-цикл выдаёт только close|hold, новые поля у этих action не
+обязательны. Использование `invalidation_condition` для семантического
+exit-trigger в review-цикле — Этап 2 (через неделю наблюдений по
+calibration данным confidence ↔ realised PnL).
+
+### Что НЕ трогалось
+
+- Триггеры EXIT MANAGEMENT 1-4 (SETUP INVALIDATION / LOCKED-PROFIT /
+  ADVERSE NEW EVIDENCE / PEAK-DRAWDOWN) — все на месте, формулировки
+  без изменений.
+- Dual-timer (full + review cycle).
+- RSS news provider.
+- KillSwitch ($50 daily / $200 total / 3 max positions / 5x leverage).
+- ATR/RSI/MACD/EMA/BB context — те же индикаторы, те же periods.
+- Allowed pairs (BTC/ETH/BNB/XRP/DOGE).
+- Risk cap 2% per trade ($10).
+
+### Файлы
+
+- `src/ai_trader/state/db.py`: `AiPosition` dataclass +3 nullable поля,
+  `_migrate()` идемпотентная миграция, `open_position()` принимает
+  3 новых опциональных kwargs.
+- `src/ai_trader/trading/executor.py`: `parse_action` валидирует
+  `confidence` / `invalidation_condition` / `risk_usd` для open;
+  `_apply_open` извлекает поля, передаёт в `store.open_position()`,
+  включает в `summary` для Telegram.
+- `src/ai_trader/llm/prompts.py`: docstring v0.13 запись;
+  CONFIDENCE CALIBRATION + PRE-REGISTERED INVALIDATION + RISK_USD
+  self-check + COMMON PITFALLS секции; обновлены JSON schema, ANALYSIS
+  APPROACH (7-й шаг PRE-COMMIT CHECK), CRITICAL CONSTRAINTS,
+  `build_user_prompt`.
+- `tests/test_ai_trader.py`: +30 тестов в трёх классах
+  (`TestOpenSchemaV13Required`, `TestOpenSchemaV13PromptGuidance`,
+  `TestOpenSchemaV13DBRoundTrip`); существующие positive open-тесты
+  обновлены добавлением 3 полей.
+  Локально: 873/873 PASS.
+
+### План Этапа 2 (через неделю наблюдений)
+
+1. Сбор статистики calibration: для каждого закрытого trade'а
+   correlate `confidence_at_open` с `realised_pnl_r` — overconfidence
+   sanity check.
+2. Использование `invalidation_condition` в review-цикле как
+   semantic exit-trigger: показываем условие LLM каждый review,
+   если LLM ответил «invalidation tripped: ... » → close.
+3. (опционально) `equity_snapshots` table + Sharpe в промпт для
+   feedback loop как в Nof1.
+
+После недели — решение по Этапу 2 на основе фактических данных.
 
 **Запрос пользователя:** «нужно изучить нашего бота и всю его логику, у меня
 есть ощущение что где то есть противоречия которые вводят бота в заблуждения.
