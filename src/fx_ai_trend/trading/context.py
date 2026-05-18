@@ -23,7 +23,7 @@ from fx_ai_trend.analysis.indicators import (
 )
 from fx_ai_trend.news.eia import EiaProvider, format_eia_snapshot
 from fx_ai_trend.news.rss import CommodityRssNewsProvider, NewsItem
-from fx_ai_trend.state.db import AiFxPosition, AiFxTraderStore
+from fx_ai_trend.state.db import AiFxPosition, AiFxTrendStore
 from fx_ai_trend.trading.client_adapter import Bar, CTraderFxAdapter
 
 log = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ def _price_change_pct_24h(bars_1h: list[Bar]) -> float | None:
 
 def collect_market_context(
     adapter: CTraderFxAdapter,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
     symbols: tuple[str, ...],
     virtual_capital_usd: float,
     *,
@@ -128,7 +128,7 @@ def collect_market_context(
 
 def collect_review_context(
     adapter: CTraderFxAdapter,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
     virtual_capital_usd: float,
 ) -> MarketContext:
     open_positions = store.get_open_positions()

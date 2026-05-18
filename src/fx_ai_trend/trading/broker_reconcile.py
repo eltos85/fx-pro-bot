@@ -31,24 +31,68 @@
 """
 from __future__ import annotations
 
+import datetime
 import logging
 
-from fx_ai_trend.state.db import AiFxTraderStore
+from fx_ai_trend.state.db import AiFxTrendStore
 from fx_ai_trend.trading.client_adapter import CTraderFxAdapter
 from fx_ai_trend.trading.executor import _calc_pnl_usd
 
 log = logging.getLogger(__name__)
 
+# Grace-period: после открытия позиции через ProtoOAExecutionEvent
+# Spotware'у нужно время чтобы свежий positionId появился в
+# ProtoOAReconcileRes (session-state propagation latency). Наблюдаемая
+# latency 2026-05-18 (позиция id=7, broker_pid=150837215, открыта
+# 13:20:19 UTC, BZ=F SELL):
+#   * 13:25:20 (age=5:01)  — reconcile НЕ видит pid → false-positive #1
+#   * 13:30:29 (age=10:10) — reconcile НЕ видит pid → false-positive #2
+#   * 13:35:xx (age=15:xx) — reconcile уже видит pid → OK
+#
+# Защита через get_closing_deal_for_position сработала (deal не найден
+# → не закрыли в БД), но log-noise + теоретический риск false-close
+# если closing-deal lookup был бы корраптирован.
+#
+# Берём 900s = 15 минут (1.5× наблюдаемого max latency как safety
+# margin). Это означает что broker-auto SL/TP, сработавший в первые
+# 15 минут жизни позиции, будет обнаружен на следующем цикле —
+# приемлемо для AI-trader'а с 5-минутным review-loop (worst-case
+# задержка ~3 cycle).
+#
+# Spotware не публикует SLA на ReconcileRes latency. Если этот баг
+# всплывёт с latency >15 мин — поднять до 30 мин (2× margin) либо
+# переходить на event-stream listener (ProtoOAExecutionEvent
+# subscription) вместо polling reconcile.
+GRACE_PERIOD_SEC = 900
+
+# Порог "старой" позиции: после grace_period + этого срока ситуация
+# "deal not found" эскалируется в WARNING (manual review). До этого —
+# INFO (вероятно session-state catch-up или legitimate stale-state).
+STALE_POSITION_THRESHOLD_SEC = 86_400  # 24h
+
+
+def _parse_opened_at(ts: str) -> datetime.datetime | None:
+    """ISO-8601 строка → datetime (UTC-aware). None при parse error."""
+    try:
+        return datetime.datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+
 
 def reconcile_broker_positions(
     adapter: CTraderFxAdapter,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
 ) -> int:
     """Синхронизирует live-позиции в БД с активными у broker'а.
 
     Returns количество позиций, помеченных как closed по факту broker-close.
     Безопасно при недоступности broker'а: ``None`` от
     ``get_active_broker_position_ids`` → no-op (НЕ закрываем фантомно).
+
+    Race-condition защита: позиции младше ``GRACE_PERIOD_SEC`` пропускаются —
+    Spotware reconcile latency после ProtoOAExecutionEvent может быть
+    несколько минут, и свежий positionId может временно отсутствовать в
+    ReconcileRes. См. docstring ``GRACE_PERIOD_SEC``.
     """
     db_open = [
         p for p in store.get_open_positions()
@@ -65,10 +109,24 @@ def reconcile_broker_positions(
         )
         return 0
 
+    now = datetime.datetime.now(datetime.timezone.utc)
     closed_count = 0
     for pos in db_open:
         if pos.broker_position_id in active:
             continue
+        # Grace-period для свежих позиций — Spotware ReconcileRes latency.
+        opened = _parse_opened_at(pos.opened_at)
+        if opened is not None:
+            age_sec = (now - opened).total_seconds()
+            if 0 <= age_sec < GRACE_PERIOD_SEC:
+                log.info(
+                    "broker reconcile: позиция id=%d (broker_pid=%d, %s %s "
+                    "lots=%s) свежая (age=%.0fs < %ds grace) — Spotware "
+                    "reconcile latency, пропускаю до следующего цикла",
+                    pos.id, pos.broker_position_id, pos.side, pos.symbol,
+                    pos.volume_lots, age_sec, GRACE_PERIOD_SEC,
+                )
+                continue
         log.info(
             "broker reconcile: позиция id=%d (broker_pid=%d, %s %s lots=%s) "
             "закрыта broker'ом сам — ищу closing deal",
@@ -79,11 +137,24 @@ def reconcile_broker_positions(
             pos.broker_position_id, lookback_hours=48,
         )
         if deal is None:
-            log.warning(
-                "broker reconcile: closing deal для broker_pid=%d не "
-                "найден за 48h — оставляю позицию open в БД (manual review)",
-                pos.broker_position_id,
-            )
+            # Age позиции > STALE_POSITION_THRESHOLD_SEC + closing deal
+            # отсутствует → это реальная аномалия (manual review). Иначе
+            # — вероятно session-state catch-up latency, INFO достаточно.
+            age_sec_late = (now - opened).total_seconds() if opened else None
+            if age_sec_late is not None and age_sec_late > STALE_POSITION_THRESHOLD_SEC:
+                log.warning(
+                    "broker reconcile: closing deal для broker_pid=%d не "
+                    "найден за 48h, позиция age=%.0fh — STALE state, "
+                    "manual review",
+                    pos.broker_position_id, age_sec_late / 3600,
+                )
+            else:
+                log.info(
+                    "broker reconcile: closing deal для broker_pid=%d не "
+                    "найден за 48h — позиция жива у broker'а (Spotware "
+                    "session-state catch-up), оставляю open",
+                    pos.broker_position_id,
+                )
             continue
         broker_gross = deal["gross_pnl_usd"]
         broker_swap = deal["swap_usd"]

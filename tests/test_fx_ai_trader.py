@@ -742,6 +742,7 @@ class TestBrokerReconcile:
     """
 
     def test_closes_broker_closed_position(self, store: AiFxTraderStore):
+        import datetime
         from fx_ai_trader.trading.broker_reconcile import (
             reconcile_broker_positions,
         )
@@ -753,6 +754,17 @@ class TestBrokerReconcile:
             broker_order_label="ai-fx-trader",
             llm_reason="setup", is_paper=False,
         )
+        # Backdate opened_at past GRACE_PERIOD_SEC=900 (15 мин) чтобы
+        # reconcile её обрабатывал, а не пропускал как свежую.
+        aged_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=30)
+        ).isoformat()
+        with store._conn() as c:
+            c.execute(
+                "UPDATE positions SET opened_at = ? WHERE id = ?",
+                (aged_iso, pid),
+            )
         adapter = _FakeAdapter(
             active_pids=set(),  # broker'a больше не имеет
             deals={150428404: {
@@ -795,6 +807,76 @@ class TestBrokerReconcile:
         closed = reconcile_broker_positions(adapter, store)
         assert closed == 0
         assert len(store.get_open_positions()) == 1
+
+    def test_grace_period_skips_fresh_positions(
+        self, store: AiFxTraderStore,
+    ):
+        """Race-condition fix 2026-05-18: позиции младше GRACE_PERIOD_SEC
+        не должны попадать в broker_reconcile — Spotware session-state
+        latency для свежих ExecutionEvent может быть до 15 минут.
+
+        Симуляция: позиция открылась только что (свежая), broker через
+        reconcile() пока её не видит (active_pids=set()). До patch'а
+        бот идёт искать closing deal → WARNING лог. После patch'а
+        позиция пропускается без вызова deal-history API.
+        """
+        import datetime
+        from fx_ai_trader.trading.broker_reconcile import (
+            reconcile_broker_positions,
+        )
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        fresh_iso = (now - datetime.timedelta(seconds=120)).isoformat()
+        with store._conn() as c:
+            c.execute(
+                "INSERT INTO positions (symbol, side, volume_lots, "
+                "entry_price, sl_price, tp_price, broker_position_id, "
+                "broker_order_label, opened_at, llm_reason, is_paper) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("BZ=F", "SELL", 0.01, 104.9, 106.0, 102.5,
+                 999_111, "ai-fx-trader", fresh_iso, "fresh setup", 0),
+            )
+        # broker НЕ видит свежий pid (latency); deals dict пустой — если
+        # фикс не работает, мы бы пошли в get_closing_deal_for_position
+        # и increment'нули close_calls / warning. С фиксом — НЕТ.
+        adapter = _FakeAdapter(active_pids=set(), deals={})
+        closed = reconcile_broker_positions(adapter, store)
+        assert closed == 0
+        # Позиция всё ещё open (правильно: мы её пропустили)
+        opens = [p for p in store.get_open_positions() if p.broker_position_id == 999_111]
+        assert len(opens) == 1
+
+    def test_grace_period_lets_through_aged_positions(
+        self, store: AiFxTraderStore,
+    ):
+        """После GRACE_PERIOD_SEC старая позиция должна обрабатываться
+        обычным путём (закрыться по broker-true deal)."""
+        import datetime
+        from fx_ai_trader.trading.broker_reconcile import (
+            reconcile_broker_positions,
+        )
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # 30 минут назад — точно > GRACE_PERIOD_SEC=900s
+        aged_iso = (now - datetime.timedelta(minutes=30)).isoformat()
+        with store._conn() as c:
+            c.execute(
+                "INSERT INTO positions (symbol, side, volume_lots, "
+                "entry_price, sl_price, tp_price, broker_position_id, "
+                "broker_order_label, opened_at, llm_reason, is_paper) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("BZ=F", "SELL", 0.01, 105.0, 106.0, 102.5,
+                 999_222, "ai-fx-trader", aged_iso, "aged setup", 0),
+            )
+        adapter = _FakeAdapter(
+            active_pids=set(),
+            deals={999_222: {
+                "deal_id": 1, "ts_ms": 0, "exit_price": 104.0,
+                "gross_pnl_usd": 10.0, "swap_usd": 0.0, "commission_usd": 0.0,
+            }},
+        )
+        closed = reconcile_broker_positions(adapter, store)
+        assert closed == 1  # aged position обрабатывается → закрылась
 
     def test_no_op_when_broker_api_unreachable(
         self, store: AiFxTraderStore,
@@ -845,6 +927,7 @@ class TestBrokerReconcile:
         """Симулируем 2026-05-13 BRENT id=2 close: broker gross=+92.82,
         our_formula at current_price would give +101.53. После reconcile
         в БД должна быть broker'ская цифра."""
+        import datetime
         from fx_ai_trader.trading.broker_reconcile import (
             reconcile_broker_positions,
         )
@@ -856,6 +939,16 @@ class TestBrokerReconcile:
             broker_order_label="ai-fx-trader",
             llm_reason="setup", is_paper=False,
         )
+        # Backdate past GRACE_PERIOD_SEC=900 (15 мин).
+        aged_iso = (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=30)
+        ).isoformat()
+        with store._conn() as c:
+            c.execute(
+                "UPDATE positions SET opened_at = ? WHERE id = ?",
+                (aged_iso, pid),
+            )
         adapter = _FakeAdapter(
             active_pids=set(),
             deals={500: {

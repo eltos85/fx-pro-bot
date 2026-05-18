@@ -1,5 +1,79 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-18 (ночь, 13:50 UTC) — fix: broker_reconcile grace-period + log-level + fx_ai_trend rename consistency
+
+`коммит при deploy`
+
+**Симптом.** Свежеоткрытая позиция id=7 (BZ=F SELL, broker_pid=150837215,
+opened 13:20:19 UTC) триггерила WARNING'и каждые 5 минут:
+
+```
+13:25:20 broker reconcile: позиция id=7 закрыта broker'ом сам — ищу closing deal
+13:25:21 [WARNING] closing deal не найден за 48h — оставляю позицию open (manual review)
+13:30:29 broker reconcile: позиция id=7 закрыта broker'ом сам — ищу closing deal
+13:30:30 [WARNING] closing deal не найден ...
+13:35:20 ... та же история
+```
+
+После ~15 минут (cycle 13:35+) ситуация саморазрешилась — позиция
+появилась в `get_active_broker_position_ids()` set'е и WARNING'и
+прекратились.
+
+**Диагноз.** Spotware reconcile session-state latency: после
+`ProtoOAExecutionEvent` (с позицией) `ProtoOAReconcileReq` через
+**ту же** TCP-сессию иногда не видит свежий positionId до 10-15 минут.
+Контрольный эксперимент: дамп позиций через **новую** сессию (через
+`docker exec ... fx_ai_dump_all_positions.py`) показал pid 150837215
+активным — то есть это per-session caching артефакт у Spotware,
+не общая проблема broker'а.
+
+Защита `closing_deal_not_found → keep open` сработала — позиция в БД
+**не** закрылась. Бот корректно держал её через `positions=1` в каждом
+review-цикле (`13:25 / 13:30 / 13:35: REVIEW APPLY: HOLD: Sell setup
+intact`). Никакой реальной потери ни данных, ни PnL — только log-noise
+и misleading wording ("закрыта broker'ом сам — ищу closing deal" звучит
+тревожнее чем "проверяю гипотезу — не закрылась ли").
+
+**Фикс (`src/fx_ai_trader/trading/broker_reconcile.py` + зеркально
+`src/fx_ai_trend/trading/broker_reconcile.py`).**
+
+1. **GRACE_PERIOD_SEC = 900** (15 мин). Позиции младше grace вообще
+   пропускаются в reconcile-loop — Spotware всё равно еще catch-up'ит
+   session-state, polling бесполезен.
+2. **Conditional log level**: для свежих позиций (age < 24h) "deal not
+   found" → `INFO` ("позиция жива у broker'а, оставляю open"); для
+   старых (>24h) — `WARNING` (реальная аномалия).
+3. **Misleading wording** убран: вместо "закрыта broker'ом сам" теперь
+   просто "проверяю не закрыта ли broker'ом".
+
+Trade-off: broker-auto SL/TP в первые 15 минут жизни позиции будет
+обнаружен на следующем цикле (~3 review-cycle worst-case). Это
+приемлемо. Если латентность когда-нибудь окажется >15 минут, поднимем
+до 30 (или перейдём на event-stream listener).
+
+**Bonus fix.** При bulk-rename `fx_ai_trader → fx_ai_trend` я пропустил
+переименование класса `AiFxTraderStore` → `AiFxTrendStore` в
+`src/fx_ai_trend/state/db.py:112` (и его импорты в 7 файлах). Класс
+был **локальным** в `fx_ai_trend.state.db` (не импортировался из
+`fx_ai_trader`), поэтому функционально fx_ai_trend работал
+корректно — БД `fx_ai_trend.sqlite` создавалась изолированно. Но
+имя класса вводило в заблуждение → потенциальный footgun при будущей
+правке. Переименован.
+
+**Тесты.** 73/73 fx_ai_trader + fx_ai_trend, 810/810 total — зелёные.
++ 2 новых теста: `test_grace_period_skips_fresh_positions`,
+`test_grace_period_lets_through_aged_positions`. Старые тесты
+`test_closes_broker_closed_position` и `test_uses_broker_net_pnl_not_local_calc`
+адаптированы — backdate `opened_at` на 30 мин чтобы пройти grace.
+
+**Файлы:** `src/fx_ai_trader/trading/broker_reconcile.py`,
+`src/fx_ai_trend/trading/broker_reconcile.py`,
+`src/fx_ai_trend/state/db.py`, `src/fx_ai_trend/app/main.py`,
+`src/fx_ai_trend/safety/killswitch.py`, `src/fx_ai_trend/trading/{context,executor,paper_reconcile}.py`,
+`tests/test_fx_ai_trader.py`.
+
+---
+
 ## 2026-05-18 (ночь) — feat: belt-and-suspenders label guard в _apply_close (multi-bot isolation)
 
 `коммит при deploy`

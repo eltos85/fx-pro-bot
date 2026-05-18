@@ -1,4 +1,4 @@
-"""SQLite-хранилище FX AI Trader.
+"""SQLite-хранилище FX AI Trend (Trend-follower).
 
 Хранит:
 - positions: открытые/закрытые позиции (только наши, по `label=ai-fx-trend`)
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS kv_state (
 """
 
 
-class AiFxTraderStore:
+class AiFxTrendStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

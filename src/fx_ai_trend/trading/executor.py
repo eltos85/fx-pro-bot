@@ -33,7 +33,7 @@ from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 
 from fx_ai_trend.config.settings import AiFxTrendSettings
 from fx_ai_trend.safety.killswitch import KillSwitch
-from fx_ai_trend.state.db import AiFxTraderStore
+from fx_ai_trend.state.db import AiFxTrendStore
 from fx_ai_trend.trading.client_adapter import CTraderFxAdapter
 
 log = logging.getLogger(__name__)
@@ -289,7 +289,7 @@ def apply_action(
     action: ParsedAction,
     *,
     adapter: CTraderFxAdapter,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
     settings: AiFxTrendSettings,
     killswitch: KillSwitch,
 ) -> ApplyResult:
@@ -313,7 +313,7 @@ def _apply_close(
     action: ParsedAction,
     *,
     adapter: CTraderFxAdapter,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
     settings: AiFxTrendSettings,
 ) -> ApplyResult:
     assert isinstance(action.model, CloseAction)
@@ -477,7 +477,7 @@ def _apply_open(
     action: ParsedAction,
     *,
     adapter: CTraderFxAdapter,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
     settings: AiFxTrendSettings,
     killswitch: KillSwitch,
 ) -> ApplyResult:

@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from fx_ai_trend.state.db import AiFxPosition, AiFxTraderStore
+from fx_ai_trend.state.db import AiFxPosition, AiFxTrendStore
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class CheckResult:
 
 
 class KillSwitch:
-    def __init__(self, config: KillSwitchConfig, store: AiFxTraderStore) -> None:
+    def __init__(self, config: KillSwitchConfig, store: AiFxTrendStore) -> None:
         self.config = config
         self.store = store
 

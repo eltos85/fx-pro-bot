@@ -20,7 +20,7 @@ import logging
 import time
 from datetime import datetime
 
-from fx_ai_trend.state.db import AiFxTraderStore
+from fx_ai_trend.state.db import AiFxTrendStore
 from fx_ai_trend.trading.client_adapter import Bar, CTraderFxAdapter
 from fx_ai_trend.trading.executor import _calc_pnl_usd, _pip_size_for
 
@@ -57,7 +57,7 @@ def _touched(
 
 def reconcile_paper_positions(
     adapter: CTraderFxAdapter,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
 ) -> int:
     """Проходит по всем paper-позициям и закрывает достигшие SL/TP по M1 барам.
 

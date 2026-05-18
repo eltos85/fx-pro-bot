@@ -31,7 +31,7 @@ from fx_ai_trend.llm.prompts import (
 from fx_ai_trend.news.eia import EiaProvider
 from fx_ai_trend.news.rss import CommodityRssNewsProvider
 from fx_ai_trend.safety.killswitch import KillSwitch, KillSwitchConfig
-from fx_ai_trend.state.db import AiFxTraderStore
+from fx_ai_trend.state.db import AiFxTrendStore
 from fx_ai_trend.trading.client_adapter import CTraderFxAdapter
 from fx_ai_trend.trading.context import (
     collect_market_context,
@@ -98,7 +98,7 @@ def run() -> None:
         log.error("CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET не заданы, выход")
         return
 
-    store = AiFxTraderStore(settings.db_path)
+    store = AiFxTrendStore(settings.db_path)
 
     adapter = CTraderFxAdapter(settings)
     try:
@@ -198,7 +198,7 @@ def run() -> None:
 def _run_full_cycle(
     cycle: int,
     settings: AiFxTrendSettings,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
     adapter: CTraderFxAdapter,
     llm: DeepSeekClient,
     killswitch: KillSwitch,
@@ -313,7 +313,7 @@ def _run_full_cycle(
 def _run_review_cycle(
     cycle: int,
     settings: AiFxTrendSettings,
-    store: AiFxTraderStore,
+    store: AiFxTrendStore,
     adapter: CTraderFxAdapter,
     llm: DeepSeekClient,
     killswitch: KillSwitch,
