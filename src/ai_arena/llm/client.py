@@ -11,9 +11,22 @@ required fields (justification, confidence, invalidation_condition)
 forces the model to show reasoning»). Это инвариант правила
 `ai-arena-sources.mdc`.
 
-DeepSeek V4-Pro `reasoning_effort` (`off|high|max`) — direct аналог
-V3.1 standard на `off`. Если LLM-реквест требует это как extra-параметр,
-передаём через `extra_body` (Anthropic SDK поддерживает).
+DeepSeek thinking-mode управление (Anthropic-compat, см.
+https://api-docs.deepseek.com/guides/thinking_mode и /guides/anthropic_api):
+
+- **По умолчанию для V4-моделей thinking ENABLED** (default effort=high).
+  Чтобы получить поведение Nof1 (без CoT-блока) — нужно ЯВНО передать
+  ``extra_body={"thinking": {"type": "disabled"}}``. Без этого даже
+  reasoning_effort=off на нашей стороне игнорируется и thinking всё
+  равно работает (баг до 2026-05-18 — см. BUILDLOG_AI_ARENA.md).
+
+- Toggle: ``{"thinking": {"type": "enabled" | "disabled"}}``
+- Effort: ``{"output_config": {"effort": "high" | "max"}}``
+  (low/medium → high, xhigh → max — мапинг DeepSeek).
+
+OpenAI-format ``reasoning_effort`` через ``extra_body`` НЕ работает в
+Anthropic-compat endpoint — это поле отсутствует в списке supported
+fields доки. Использовать ТОЛЬКО ``thinking`` / ``output_config``.
 """
 from __future__ import annotations
 
@@ -22,6 +35,8 @@ import time
 from dataclasses import dataclass
 
 import anthropic
+
+from ai_arena.llm.thinking_config import build_thinking_extra_body
 
 log = logging.getLogger(__name__)
 
@@ -98,13 +113,9 @@ class DeepSeekArenaClient:
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_prompt}],
             }
-            # DeepSeek V4-Pro: `reasoning_effort` через extra_body
-            # (Anthropic-compat не имеет нативного поля, передаём как
-            # vendor-specific). На `off` поведение совпадает с V3.1 standard.
-            if self._reasoning_effort and self._reasoning_effort != "off":
-                kwargs["extra_body"] = {
-                    "reasoning_effort": self._reasoning_effort,
-                }
+            extra = build_thinking_extra_body(self._reasoning_effort)
+            if extra:
+                kwargs["extra_body"] = extra
             msg = self._client.messages.create(**kwargs)
         except Exception as e:
             log.exception("DeepSeek API call failed")

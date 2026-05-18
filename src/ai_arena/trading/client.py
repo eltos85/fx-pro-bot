@@ -273,9 +273,22 @@ class AiArenaBybitClient:
     def get_wallet_balance(self) -> tuple[float, float]:
         """Возвращает (equity, available_cash) в USDT.
 
-        equity — total account value (используется для total_return_pct).
-        available_cash — то, что не залочено в позициях (используется
-        для notional-cap расчёта).
+        - ``equity`` — equity USDT (Asset Wallet Balance + Asset Perp UPL),
+          источник правды для total_return_pct.
+        - ``available_cash`` — account-level ``totalAvailableBalance`` в USD
+          (для UNIFIED ≈ USDT, multi-coin портфель сейчас не используется).
+          Это то, что **доступно к открытию новых позиций** с учётом
+          уже залоченной маржи под активные ордера/позиции.
+
+        Источник правды по полям (Bybit V5 `/v5/account/wallet-balance`):
+        https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+
+        Важное (правило api-docs.mdc):
+        - Поле ``availableToWithdraw`` per-coin DEPRECATED для UNIFIED с
+          9 января 2025. Использование завышает «free cash» (не учитывает
+          locked-в-позициях), искажая величину, которую LLM видит как
+          доступную для открытия. Поэтому переходим на account-level
+          ``totalAvailableBalance``.
         """
         try:
             resp = self._session.get_wallet_balance(accountType="UNIFIED")
@@ -284,18 +297,17 @@ class AiArenaBybitClient:
             return (0.0, 0.0)
         accounts = resp.get("result", {}).get("list", []) or []
         for acc in accounts:
+            try:
+                total_avail = float(acc.get("totalAvailableBalance", 0) or 0)
+            except (ValueError, TypeError):
+                total_avail = 0.0
             for coin in acc.get("coin", []) or []:
                 if coin.get("coin") == "USDT":
                     try:
                         equity = float(coin.get("equity", 0) or 0)
-                        avail = float(
-                            coin.get("availableToWithdraw")
-                            or coin.get("walletBalance")
-                            or 0
-                        )
-                        return (equity, avail)
+                        return (equity, total_avail)
                     except (ValueError, TypeError):
-                        return (0.0, 0.0)
+                        return (0.0, total_avail)
         return (0.0, 0.0)
 
     def get_wallet_balance_usdt(self) -> float | None:
@@ -433,6 +445,16 @@ class AiArenaBybitClient:
         Возвращает dict:
         - При успехе: ``{"ok": True, "result": <bybit result>, "raw": <resp>}``
         - При ошибке: ``{"ok": False, "error": <message>, "params": <params>}``
+
+        Bybit V5 spec: https://bybit-exchange.github.io/docs/v5/order/create-order
+        - ``positionIdx=0`` — one-way mode (наш аккаунт по умолчанию).
+          Передаём ЯВНО, чтобы при случайном переключении аккаунта в
+          hedge mode ошибка была сразу видна, а не безмолвно открывала
+          несовместимую позицию.
+        - ``stopLoss`` / ``takeProfit`` без ``tpslMode`` → дефолт ``Full``
+          (entire position closed by market), что нам и нужно. Передавать
+          ``Partial`` нельзя — для qty-less SL/TP без partial-size.
+        - При ``reduceOnly=True`` SL/TP не передаём (Bybit запрещает).
         """
         params: dict = {
             "category": self._category,
@@ -442,6 +464,7 @@ class AiArenaBybitClient:
             "qty": str(qty),
             "orderLinkId": order_link_id,
             "reduceOnly": reduce_only,
+            "positionIdx": 0,
         }
         if sl_price is not None and not reduce_only:
             params["stopLoss"] = str(sl_price)

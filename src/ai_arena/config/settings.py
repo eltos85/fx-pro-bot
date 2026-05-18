@@ -67,7 +67,13 @@ class AiArenaSettings(BaseSettings):
     # explicitly mentions DeepSeek v3.1 — the standard version, not R1»).
     # CoT принуждается через required JSON-поля (justification/confidence/
     # invalidation_condition), а не через native reasoning.
-    # Дефолт `off` = direct аналог V3.1 standard.
+    #
+    # Допустимые значения: ``off|high|max`` (см. llm/client.py
+    # ``_build_thinking_extra_body``). DeepSeek V4 thinking enabled by
+    # default — на ``off`` мы ЯВНО отправляем ``{"thinking": {"type":
+    # "disabled"}}``, иначе модель всё равно генерирует CoT-блок
+    # (до 2026-05-18 это был баг: значение игнорировалось, см. BUILDLOG).
+    # Дефолт `off` = соответствие Nof1 (single-turn без reasoning).
     deepseek_reasoning_effort: str = Field(
         default="off", validation_alias="AI_ARENA_DEEPSEEK_REASONING"
     )

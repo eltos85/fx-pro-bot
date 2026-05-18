@@ -16,6 +16,110 @@
 
 ---
 
+## 2026-05-18
+
+### fix(ai-arena): корректное управление thinking-mode + `positionIdx=0` + `totalAvailableBalance`
+`(коммит ниже)`
+
+**Контекст.** Аудит всех параметров API после инцидента с попыткой
+переключения модели на `deepseek-v4-flash` с `reasoning=on`: выяснилось
+что `AI_ARENA_DEEPSEEK_REASONING` env-переменная **никак не влияла
+на API** ≥4 дней. Заодно прошлись по всем Bybit V5 параметрам и
+сверили с официальной докой.
+
+**Найдено и исправлено:**
+
+**1. RED — `reasoning_effort` фактически no-op (4+ дней).**
+
+Передавали `extra_body={"reasoning_effort": "..."}` через
+Anthropic-compat endpoint. Это **невалидное поле** для Anthropic-format
+DeepSeek API (см. таблицу Simple Fields в
+[api-docs.deepseek.com/guides/anthropic_api](https://api-docs.deepseek.com/guides/anthropic_api)):
+top-level `reasoning_effort` — OpenAI-format поле, в Anthropic-compat
+оно молча игнорируется.
+
+При этом по доке
+[api-docs.deepseek.com/guides/thinking_mode](https://api-docs.deepseek.com/guides/thinking_mode):
+*«The thinking toggle defaults to enabled»* для V4-моделей. То есть
+**thinking всё время был включён** с default `effort=high`,
+независимо от значения нашей env-переменной. Это прямо противоречит
+инварианту `ai-arena-sources.mdc` («Nof1 не использует reasoning-mode»)
+и могло влиять на качество решений (модель тратила tokens на CoT,
+который мы и так требуем через JSON-поля `justification`/`confidence`/
+`invalidation_condition`).
+
+**Исправление:** новый pure-модуль `src/ai_arena/llm/thinking_config.py`
+с функцией `build_thinking_extra_body(reasoning_effort)`:
+
+- `off` → `{"thinking": {"type": "disabled"}}` (Nof1-режим, **явно**
+  выключаем thinking)
+- `high` / `low` / `medium` → `{"thinking": {"type": "enabled"},
+  "output_config": {"effort": "high"}}`
+- `max` / `xhigh` → то же с `effort=max`
+- неизвестное / пустое → off (безопасный дефолт)
+
+На VPS `.env` возвращён `AI_ARENA_DEEPSEEK_MODEL=deepseek-v4-pro` и
+`AI_ARENA_DEEPSEEK_REASONING=off` — теперь это **реально** работает
+как Nof1.
+
+**2. YELLOW — `place_order` без явного `positionIdx`.**
+
+Bybit V5 spec
+([/v5/order/create-order](https://bybit-exchange.github.io/docs/v5/order/create-order)):
+`positionIdx` нужен `0` для one-way mode, `1/2` для hedge mode. Без
+явного значения работало, потому что аккаунт по умолчанию one-way,
+**но** при случайном переключении в hedge mode (одна кнопка в UI)
+Bybit отвергал бы ордер с retCode 10001 «position idx not match
+position mode». Теперь передаём `positionIdx: 0` явно — fail-fast
+если кто-то поменяет режим.
+
+**3. YELLOW — `get_wallet_balance` читал deprecated поле.**
+
+`coin.availableToWithdraw` per-coin **deprecated для UNIFIED с
+9 января 2025** (см.
+[/v5/account/wallet-balance](https://bybit-exchange.github.io/docs/v5/account/wallet-balance)):
+*«Deprecated for accountType=UNIFIED from 9 Jan, 2025. Transferable
+balance: you can use Get Transferable Amount (Unified) or Get All
+Coins Balance instead»*. Fallback был на `walletBalance`, который
+**не вычитает locked-в-позициях** маржу — это завышало `available_cash`
+в промпте LLM, искажая представление о свободном капитале.
+
+Перешли на account-level `totalAvailableBalance` (USD) — это
+суммарный available для UNIFIED, учитывающий все открытые позиции и
+ордера. Для нашего use-case (только USDT на счету) семантически
+эквивалентно USDT-available.
+
+**Файлы:**
+- `src/ai_arena/llm/thinking_config.py` (новый — pure function без
+  `anthropic` зависимости, удобно для unit-тестов)
+- `src/ai_arena/llm/client.py` (упрощён `_call`, использует
+  `build_thinking_extra_body`, обновлён docstring модуля)
+- `src/ai_arena/trading/client.py` (`get_wallet_balance` →
+  `totalAvailableBalance`, `place_order` → явный `positionIdx=0`,
+  доку-ссылки в docstring)
+- `src/ai_arena/config/settings.py` (комментарий к
+  `deepseek_reasoning_effort`: разрешённые значения `off|high|max`,
+  упоминание бага)
+- `tests/test_ai_arena_api_params.py` (новый — 16 тестов:
+  `build_thinking_extra_body` × 9, `place_order positionIdx` × 3,
+  `get_wallet_balance totalAvailableBalance` × 4)
+
+**Тесты:** 270/270 ai_arena passed, 822/822 full suite passed.
+
+**GREEN (проверено и подтверждено корректным):**
+- Bybit V5: `category=linear`, `get_kline(interval, limit)`,
+  `get_open_interest(intervalTime, limit)`, `get_positions(settleCoin=USDT)`,
+  `get_closed_pnl(limit=100)`, `set_leverage(buyLeverage, sellLeverage)`,
+  `recv_window=10000`
+- DeepSeek Anthropic-compat: `model`, `max_tokens=8192`, `system`,
+  `messages`
+- Все 18 env-переменных `AI_ARENA_*` корректно пробрасываются от
+  `.env` → docker-compose → контейнер (проверено `docker exec env`)
+- Asset Universe порядок (BTC,ETH,SOL,BNB,DOGE,XRP) 1-в-1 с Nof1
+  gist L62
+
+---
+
 ## 2026-05-15 (четвёртая итерация)
 
 ### fix(ai-arena): balance-delta fallback для net PnL (обходит demo latency Bybit closed-pnl)
