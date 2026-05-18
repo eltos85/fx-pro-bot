@@ -1,5 +1,31 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil)
 
+## 2026-05-18 (вечер) — refactor: убран local-mirror, сервис = single source
+
+`коммит при deploy`
+
+После реализации token-service (см. предыдущую запись) обнаружилась
+концептуальная ошибка: бот всё ещё писал token-копию в локальный
+`ctrader_tokens_ai_fx.json` ради paranoid-fallback. Это **возвращало**
+split-brain (две rotation chains на одном аккаунте) — именно то от
+чего token-service спасает.
+
+**Фикс.** `ensure_valid_token_race_safe()` и `save_refreshed_token()`
+больше не пишут в локальный файл когда `CTRADER_TOKEN_SERVICE_URL`
+задан — сервис единственный owner. Файл создаётся **только** как
+fallback если push в сервис провалился (защита от потери single-use
+refresh_token при downtime сервиса).
+
+`AI_FX_TRADER_CTRADER_TOKEN_PATH` default переключён на
+`/data/ctrader_tokens.json` (общий файл с Advisor) — используется
+только в fallback-режиме.
+
+**Файлы:** `src/fx_ai_trader/trading/token_lock.py`, `docker-compose.yml`,
+тесты `test_save_refreshed_token_skips_file_when_service_accepts_push`
++ `test_save_refreshed_token_falls_back_to_file_when_service_down`.
+
+---
+
 ## 2026-05-18 — feat: централизованный ctrader-token-service
 
 `коммит при deploy`

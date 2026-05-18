@@ -252,15 +252,17 @@ services:
       AI_FX_TRADER_MAX_POSITIONS: ${AI_FX_TRADER_MAX_POSITIONS:-3}
       AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL: ${AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL:-3}
       AI_FX_TRADER_MAX_LOT_SIZE: ${AI_FX_TRADER_MAX_LOT_SIZE:-0.50}
-      # cTrader OAuth — те же creds что у Advisor (один demo-аккаунт).
-      # Token-store шарится через /data/ctrader_tokens.json. Concurrent refresh
-      # защищён через fcntl.flock (см. fx_ai_trader/trading/token_lock.py;
-      # research: Coder PR #22904, Nango OAuth-refresh, codex #10332).
+      # cTrader OAuth: те же creds что у Advisor (один demo-аккаунт).
+      # Single source of truth — ctrader-token-service (см. сервис выше).
+      # AI_FX_TRADER_CTRADER_TOKEN_PATH остаётся только как **fallback**
+      # путь когда CTRADER_TOKEN_SERVICE_URL не задан (например, локальный
+      # запуск без compose). На VPS сервис всегда поднят → этот файл не
+      # используется.
       CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
       CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
       CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
       CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
-      AI_FX_TRADER_CTRADER_TOKEN_PATH: ${AI_FX_TRADER_CTRADER_TOKEN_PATH:-/data/ctrader_tokens_ai_fx.json}
+      AI_FX_TRADER_CTRADER_TOKEN_PATH: ${AI_FX_TRADER_CTRADER_TOKEN_PATH:-/data/ctrader_tokens.json}
       # DeepSeek-V4 (тот же ключ что у ai_trader — это аккаунт-level rate-limit).
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AI_FX_TRADER_DEEPSEEK_MODEL: ${AI_FX_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}
@@ -275,11 +277,10 @@ services:
       AI_FX_TRADER_EIA_API_KEY: ${AI_FX_TRADER_EIA_API_KEY:-}
       AI_FX_TRADER_EIA_CACHE_TTL_SEC: ${AI_FX_TRADER_EIA_CACHE_TTL_SEC:-21600}
     volumes:
-      # Шарим тот же data-volume, что и Advisor — для общего
-      # /data/ctrader_tokens.json. fcntl.flock работает на bind-mount
-      # внутри одного хоста (Docker volumes на Linux = ext4, advisory lock
-      # поддерживается). Своя БД fx_ai_trader.sqlite живёт здесь же —
-      # не пересекается с stats.sqlite Advisor'а (разные filename).
+      # Шарим тот же data-volume, что и Advisor — fx_ai_trader.sqlite
+      # живёт здесь рядом с stats.sqlite Advisor'а (разные filename, не
+      # пересекаются). cTrader-токен — owned by ctrader-token-service,
+      # бот его не пишет (см. fx_ai_trader/trading/token_lock.py).
       - ./data:/data
 
   ai-arena:

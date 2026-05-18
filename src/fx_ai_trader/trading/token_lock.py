@@ -118,18 +118,14 @@ def ensure_valid_token_race_safe(
 
     service_token = _try_fetch_from_service(client_label)
     if service_token is not None:
-        token = TokenData(
+        # ctrader-token-service — единственный источник истины. Не пишем
+        # в локальный файл, чтобы не плодить вторую rotation chain.
+        return TokenData(
             access_token=service_token.access_token,
             refresh_token=service_token.refresh_token,
             expires_at=service_token.expires_at,
             token_type=service_token.token_type,
         )
-        try:
-            _atomic_write(token_path, token)
-        except Exception as exc:
-            log.warning("ensure_valid_token_race_safe: mirror to %s failed: %s",
-                        token_path, exc)
-        return token
 
     token = _read_token(token_path)
     if not token.access_token:
@@ -173,19 +169,19 @@ def save_refreshed_token(
 ) -> None:
     """Callback для ``CTraderClient.on_token_refreshed``.
 
-    Сначала пушим в token-service (если настроен) — это authoritative
-    store. Затем зеркалируем в локальный файл под flock для
-    fallback-режима (если сервис позже упадёт). Если сервис не настроен,
-    работаем по старому: только flock + atomic write.
+    Когда token-service настроен — пушим **только** в сервис, локальный
+    файл не трогаем (защита от split-brain). Только если push провалился
+    (сервис недоступен) — fallback на flock + atomic write в файл,
+    чтобы не потерять in-memory токен (cTrader refresh = single-use).
     """
-    _push_to_service(client_label, access_token, refresh_token, expires_at or 0.0)
+    if _push_to_service(client_label, access_token, refresh_token, expires_at or 0.0):
+        return
 
     token_path = Path(token_path)
     lock_path = token_path.with_suffix(token_path.suffix + ".lock")
 
     with _file_lock(lock_path):
         current = _read_token(token_path)
-        # Если на диске уже более свежий токен — не перезаписываем.
         if current.access_token == access_token:
             return
         if current.expires_at > (expires_at or 0) + 60:
@@ -241,16 +237,22 @@ def _push_to_service(
     access_token: str,
     refresh_token: str,
     expires_at: float,
-) -> None:
+) -> bool:
+    """Push refreshed token в сервис. True = service owner токена, локальный
+    файл писать НЕ нужно. False = сервис не настроен или недоступен,
+    caller должен fallback-нуть в file write.
+    """
     try:
         from shared_oauth.token_client import load_service_config, push_token  # type: ignore
     except Exception:
-        return
+        return False
     cfg = load_service_config(client_label=client_label)
     if cfg is None:
-        return
+        return False
     try:
         push_token(cfg, access_token, refresh_token, expires_at)
         log.info("token-service: pushed refreshed token (label=%s)", client_label)
+        return True
     except Exception as exc:
-        log.warning("token-service: push failed (%s) — токен сохранён только локально", exc)
+        log.warning("token-service: push failed (%s) — fallback в локальный файл", exc)
+        return False

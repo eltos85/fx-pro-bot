@@ -6,6 +6,45 @@
 
 ## 2026-05-18
 
+### refactor(ctrader-token-service): убран local-file mirror (single source of truth)
+
+`коммит при deploy`
+
+Изначальная реализация (см. следующую запись) зеркалила полученный от
+сервиса токен в локальные файлы Advisor (`ctrader_tokens.json`) и
+fx-ai-trader (`ctrader_tokens_ai_fx.json`) ради paranoid-fallback.
+Пользователь верно заметил: это **возвращает** split-brain, который
+мы только что устранили. Если service — single source of truth, локальные
+mirror-files = легитимный второй rotation chain.
+
+**Изменения.** Когда `CTRADER_TOKEN_SERVICE_URL` задан:
+- `ensure_valid_token()` / `ensure_valid_token_race_safe()` НЕ пишут
+  в локальный TokenStore/flock-файл после successful fetch;
+- `_on_token_refreshed` callback Advisor'а / `save_refreshed_token`
+  fx-ai-trader-а пишут в файл **только** если push в service провалился
+  (сервис недоступен → fallback чтобы не потерять single-use
+  refresh_token из in-memory state);
+- `AI_FX_TRADER_CTRADER_TOKEN_PATH` default изменён на
+  `/data/ctrader_tokens.json` (тот же что у Advisor) — fallback-путь,
+  не используется в нормальной работе.
+
+Архитектурно: один файл `/data/ctrader_tokens.json` принадлежит сервису,
+боты — только потребители через HTTP. `ctrader_tokens_ai_fx.json`
+больше не создаётся.
+
+Backward-compat (без сервиса): полностью сохранён старый flock-путь.
+
+Новые тесты:
+- `test_ensure_valid_token_uses_service_without_local_mirror` —
+  проверяет что файл НЕ создан после fetch.
+- `test_ensure_valid_token_race_safe_uses_service_without_mirror`.
+- `test_save_refreshed_token_skips_file_when_service_accepts_push`.
+- `test_save_refreshed_token_falls_back_to_file_when_service_down`.
+
+**Файлы:** `src/fx_pro_bot/trading/auth.py`, `src/fx_pro_bot/app/main.py`,
+`src/fx_ai_trader/trading/token_lock.py`, `docker-compose.yml`,
+`tests/test_ctrader_token_service.py`.
+
 ### feat(ctrader-token-service): централизованный OAuth refresh-сервис
 
 `коммит при deploy`

@@ -146,18 +146,15 @@ def ensure_valid_token(
     """
     service_token = _try_fetch_from_service(client_label)
     if service_token is not None:
-        token = TokenData(
+        # ctrader-token-service — единственный источник истины когда
+        # настроен. Локальный TokenStore НЕ зеркалируется, чтобы избежать
+        # split-brain (две независимые rotation chains на одном аккаунте).
+        return TokenData(
             access_token=service_token.access_token,
             refresh_token=service_token.refresh_token,
             expires_at=service_token.expires_at,
             token_type=service_token.token_type,
         )
-        try:
-            store.save(token)
-        except Exception as exc:
-            log.warning("ensure_valid_token: не удалось зеркалировать токен в %s: %s",
-                        store._path, exc)
-        return token
 
     token = store.load()
     if not token.access_token:

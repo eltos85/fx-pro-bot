@@ -458,13 +458,15 @@ def test_ctrader_client_skips_service_when_env_missing(monkeypatch) -> None:
 # ─── ensure_valid_token / ensure_valid_token_race_safe via service ──────────
 
 
-def test_ensure_valid_token_uses_service(monkeypatch, tmp_path: Path) -> None:
+def test_ensure_valid_token_uses_service_without_local_mirror(monkeypatch, tmp_path: Path) -> None:
+    """Service — single source of truth; локальный TokenStore не зеркалируется."""
     monkeypatch.setenv("CTRADER_TOKEN_SERVICE_URL", "http://svc")
     monkeypatch.setenv("CTRADER_TOKEN_SERVICE_SECRET", "S")
 
     from fx_pro_bot.trading.auth import TokenStore, ensure_valid_token
 
-    store = TokenStore(tmp_path / "advisor_tokens.json")
+    store_path = tmp_path / "advisor_tokens.json"
+    store = TokenStore(store_path)
     response = MagicMock(); response.status_code = 200; response.json.return_value = {
         "access_token": "AT-FROM-SERVICE",
         "refresh_token": "RT-FROM-SERVICE",
@@ -474,8 +476,9 @@ def test_ensure_valid_token_uses_service(monkeypatch, tmp_path: Path) -> None:
     with patch("shared_oauth.token_client.requests.request", return_value=response):
         token = ensure_valid_token(store, "cid", "csec", client_label="advisor")
     assert token.access_token == "AT-FROM-SERVICE"
-    disk = json.loads((tmp_path / "advisor_tokens.json").read_text())
-    assert disk["access_token"] == "AT-FROM-SERVICE"
+    # КЛЮЧЕВОЕ: split-brain protection — файл НЕ создан, токен живёт
+    # только в сервисе.
+    assert not store_path.exists()
 
 
 def test_ensure_valid_token_falls_back_when_service_unavailable(
@@ -500,12 +503,16 @@ def test_ensure_valid_token_falls_back_when_service_unavailable(
     assert token.access_token == "AT-LOCAL"
 
 
-def test_ensure_valid_token_race_safe_uses_service(monkeypatch, tmp_path: Path) -> None:
+def test_ensure_valid_token_race_safe_uses_service_without_mirror(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Service выдал токен → флоковый файл НЕ создаётся (split-brain protection)."""
     monkeypatch.setenv("CTRADER_TOKEN_SERVICE_URL", "http://svc")
     monkeypatch.setenv("CTRADER_TOKEN_SERVICE_SECRET", "S")
 
     from fx_ai_trader.trading.token_lock import ensure_valid_token_race_safe
 
+    token_path = tmp_path / "fx_ai_tokens.json"
     response = MagicMock(); response.status_code = 200; response.json.return_value = {
         "access_token": "AT-SERVICE-FXAI",
         "refresh_token": "RT-SERVICE-FXAI",
@@ -514,11 +521,47 @@ def test_ensure_valid_token_race_safe_uses_service(monkeypatch, tmp_path: Path) 
     }
     with patch("shared_oauth.token_client.requests.request", return_value=response):
         token = ensure_valid_token_race_safe(
-            tmp_path / "fx_ai_tokens.json",
-            "cid",
-            "csec",
-            client_label="fx-ai-trader",
+            token_path, "cid", "csec", client_label="fx-ai-trader",
         )
     assert token.access_token == "AT-SERVICE-FXAI"
-    disk = json.loads((tmp_path / "fx_ai_tokens.json").read_text())
-    assert disk["access_token"] == "AT-SERVICE-FXAI"
+    assert not token_path.exists()
+
+
+def test_save_refreshed_token_skips_file_when_service_accepts_push(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Successful push в service → бот НЕ пишет в локальный файл."""
+    monkeypatch.setenv("CTRADER_TOKEN_SERVICE_URL", "http://svc")
+    monkeypatch.setenv("CTRADER_TOKEN_SERVICE_SECRET", "S")
+
+    from fx_ai_trader.trading.token_lock import save_refreshed_token
+
+    token_path = tmp_path / "fx_ai_tokens.json"
+    ok = MagicMock(); ok.status_code = 200; ok.json.return_value = {
+        "access_token": "AT", "refresh_token": "RT", "expires_at": 1.0, "token_type": "bearer",
+    }
+    with patch("shared_oauth.token_client.requests.request", return_value=ok):
+        save_refreshed_token(token_path, "AT", "RT", expires_at=time.time() + 86400)
+
+    assert not token_path.exists()
+
+
+def test_save_refreshed_token_falls_back_to_file_when_service_down(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Service push failed → save_refreshed_token пишет в файл (fallback)."""
+    monkeypatch.setenv("CTRADER_TOKEN_SERVICE_URL", "http://svc")
+    monkeypatch.setenv("CTRADER_TOKEN_SERVICE_SECRET", "S")
+
+    from fx_ai_trader.trading.token_lock import save_refreshed_token
+
+    token_path = tmp_path / "fx_ai_tokens.json"
+    bad = MagicMock(); bad.status_code = 503; bad.text = "down"
+    expires_at = time.time() + 86400
+    with patch("shared_oauth.token_client.requests.request", return_value=bad):
+        with patch("shared_oauth.token_client.time.sleep"):
+            save_refreshed_token(token_path, "AT-FB", "RT-FB", expires_at=expires_at)
+
+    assert token_path.exists()
+    disk = json.loads(token_path.read_text())
+    assert disk["access_token"] == "AT-FB"

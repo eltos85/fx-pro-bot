@@ -289,12 +289,20 @@ def _init_trading(settings: Settings, store: StatsStore):
             refresh_token=new_refresh,
             expires_at=expires_at if expires_at > 0 else _time.time() + 2_628_000,
         )
+        # Когда token-service настроен — он единственный owner токена.
+        # Push в service; локальный TokenStore НЕ трогаем (split-brain
+        # protection). Только если service push провалился — fallback
+        # на файл, чтобы не потерять только что полученные in-memory
+        # токены (single-use refresh_token, спасает следующий старт).
         if _service_cfg is not None:
             try:
                 push_token(_service_cfg, new_access, new_refresh, updated.expires_at)
                 log.info("cTrader: refreshed token pushed в token-service")
+                return
             except Exception as exc:
-                log.warning("cTrader: token-service push failed (%s) — пишем в файл", exc)
+                log.warning(
+                    "cTrader: token-service push failed (%s) — fallback в TokenStore", exc,
+                )
         try:
             token_store.save(updated)
         except Exception as exc:
