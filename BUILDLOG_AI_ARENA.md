@@ -16,6 +16,113 @@
 
 ---
 
+## 2026-05-19
+
+### reset(ai-arena): эксперимент v1 → v2 (virtual $1000 → $10000, match Nof1 source)
+`(operation на VPS, без code-changes)`
+
+**Симптом.** За ~5 недель v1-эксперимента бот деградировал:
+- Total PnL: **−$1390.51** (на virtual=$1000 = **−139%**)
+- Win Rate: **20%** (202 closed trades), Sharpe **−0.049**
+- Today realized: −$323.20
+
+**Диагноз — feedback-loop death spiral.** Offset-model `scaled =
+$1000 + (real_now − real_anchor)` при значительных потерях даёт LLM
+**отрицательный scaled equity**. В оставленных justification'ах
+последних 50 closes доминирующая мотивация — defensive panic:
+
+- _"Account value is negative"_
+- _"Account down 97.83%"_
+- _"Negative Sharpe ratio warrants defensive posture"_
+
+89% закрытий — LLM-инициированные, средний WL-ratio 0.55 (loss > win)
+→ profit невозможен математически. Эталон Nof1 (TechPost1) — стартовый
+капитал **$10000**, наш v1 был 10× меньше — амплифицировал любую
+просадку в воспринимаемую LLM катастрофу.
+
+**Решение — clean restart с правильным базисом** (см. протокол ниже).
+Это **не** правка стратегии (промпт / output schema / cycle structure
+не меняются — инвариант `ai-arena-sources.mdc` сохранён). Меняется
+**только размер sandbox** до значения из источника + сброс накопленной
+«психологической» истории, которая загнала LLM в defensive corner.
+
+**Что сделано (operation runbook, без code-changes):**
+
+1. **Проверено**: открытых позиций на Bybit нет (BTC закрылась за
+   несколько минут до операции).
+2. **Stop** `fx-pro-bot-ai-arena-1`.
+3. **Archive БД** (sqlite на volume `ai_arena_data`):
+   ```sql
+   ALTER TABLE positions          RENAME TO positions_archive_v1;
+   ALTER TABLE decisions          RENAME TO decisions_archive_v1;
+   ALTER TABLE equity_snapshots   RENAME TO equity_snapshots_archive_v1;
+   ALTER TABLE daily_pnl          RENAME TO daily_pnl_archive_v1;
+   DELETE FROM kv_state WHERE key IN (
+       'real_equity_at_start_usd', 'started_at_ts', 'total_cost_usd'
+   );
+   ```
+   Старые таблицы НЕ удалены — нужны для post-mortem / OOS-валидации
+   будущих изменений. Новые `positions/decisions/...` создаются
+   автоматом через `CREATE TABLE IF NOT EXISTS` в `db.py::_SCHEMA`
+   при старте контейнера.
+4. **`.env` на VPS**: добавлена явная `AI_ARENA_VIRTUAL_CAPITAL=10000`
+   (раньше пользовались default из `settings.py`).
+5. **Selective rebuild** (без затрагивания advisor / bybit-bot):
+   `docker compose up -d --no-deps --build ai-arena`.
+
+**Подтверждение (cycle 1 нового запуска):**
+```
+Virtual cap: $10000.00 | leverage cap: 1-20x
+Equity model: offset-based (LLM видит $10000 + реальный PnL с Bybit)
+Real-equity anchor зафиксирован: $48346.03
+LLM call: positions=0 real=$48346.03 anchor=$48346.03
+         → sandbox=$10000.00 (PnL +0.00, +0.00%) sharpe=n/a
+APPLY: HOLD: No clear high-conviction setup ...
+```
+Anchor зафиксирован на `$48346.03` — теперь любой реальный PnL ±X
+будет отображаться LLM как `sandbox=$10000±X`, без накопленной
+«−$1390 истории» в восприятии.
+
+**Что НЕ изменилось** (sanity для `ai-arena-sources.mdc`):
+- `SYSTEM_PROMPT` 1-в-1 байты идентичны Nof1 gist (147 compliance-тестов).
+- `output_schema` (Pydantic Action) без правок.
+- Cycle structure 180s, 6 instruments, V4-Flash + thinking=disabled —
+  всё прежнее.
+- Offset-based scaling формула не изменена, изменён только её
+  параметр `virtual_capital_usd`.
+
+**Sample size note** (правило `sample-size.mdc`).
+v1 дал n=202 closed trades за ~5 недель → выборка достаточная чтобы
+зафиксировать **результат** (WR=20%, PF<1, EXP<0), но недостаточная
+чтобы понять, баг это бота или фундаментальное свойство DeepSeek
+v4-flash на этом промпте. Nof1 TechPost1 (DeepSeek v3.1, virtual=$10k,
+~70 days) показал +20% return — это benchmark для v2-эксперимента.
+
+**Forward-test критерии для v2** (фиксируем заранее, чтобы не
+подгонять post-hoc):
+- **Минимум n=100 closed trades** перед любым решением о
+  отключении/изменении модели.
+- **≥2 недели live**, чтобы охватить разные режимы (trend / flat /
+  high-vol news days).
+- Метрики: WR, PF, EXP, Sharpe, max DD. Сравнение с Nof1 baseline
+  (DeepSeek в их leaderboard).
+- Архив v1 (`*_archive_v1`) останется для контрольной точки —
+  если v2 покажет похожую деградацию при том же коде, диагноз
+  «не размер капитала, а проблема в model/prompt»; если v2 даст
+  ≥0 PnL — диагноз «v1 был задушен offset-scaling × low virtual cap».
+
+**Откат**: если за 2 недели v2 покажет такую же деградацию, обсудить
+- (a) переход на DeepSeek v3.1 / другой провайдер,
+- (b) пересмотр output schema (Nof1 v1.1 уже отказался от `confidence`),
+- (c) возврат на $1000 как было запрошено в финальном сообщении —
+  «если диагноз подтвердится то будем думать как перейти на 1000».
+
+**Файлы:** operation only, code untouched. Изменения:
+- `.env` на VPS (`AI_ARENA_VIRTUAL_CAPITAL=10000`)
+- volume `ai_arena_data/ai_arena.sqlite` (archive + clear kv_state)
+
+---
+
 ## 2026-05-18
 
 ### feat(ai-arena): context-caching tracking + корректные цены V4-Pro
