@@ -4,6 +4,49 @@
 
 ---
 
+## 2026-05-20
+
+### chore(advisor): возвращён в работу + fx-ai-trend удалён
+
+`коммит при deploy`
+
+Запрос пользователя: «верни адвижера, ai-fx-trend больше не нужен,
+его отключаем и удаляем весь его код».
+
+**Возврат Advisor:**
+- Раскомментирован service `advisor` в `docker-compose.yml` (env-vars
+  и volumes оставлены без изменений с 18 мая).
+- БД `advisor_stats.sqlite` сохранена с 18 мая, бэкап
+  `advisor_stats.sqlite.backup-stop-20260518T114956Z` остаётся.
+- Stale-позиция `ef25d270` (GC=F long, status=open в БД, но на брокере
+  закрылась 18 мая 12:58 с +$39.80 net — orphan в локальной БД, не на
+  брокере) синкнется автоматически при старте через
+  `reconcile_broker_positions` Advisor'а.
+
+**Удаление fx-ai-trend (Trend-follower LLM):**
+- `docker stop && docker rm fx-pro-bot-fx-ai-trend-1` на VPS.
+- Service block удалён из `docker-compose.yml`.
+- Entrypoint и package убраны из `pyproject.toml`.
+- Удалены файлы: `src/fx_ai_trend/`, `Dockerfile.fx-ai-trend`,
+  `tests/test_fx_ai_trend.py`.
+- БД `data/fx_ai_trend.sqlite` пока оставлена на VPS (3 paper-трейда,
+  decisions audit — реликвия эксперимента).
+
+Причина удаления: за 30+ часов жизни бот сделал 3 paper-трейда подряд
+в минус (всего −$16.05 paper) и дальше молчал. По research-канону
+trend-following (Faith/Covel) это **корректное поведение** (50-70%
+трейдов trend-следования убыточны на коротком горизонте), но для
+пользователя — бесполезен.
+
+**Файлы:** docker-compose.yml, pyproject.toml, src/fx_ai_trend/* (DEL),
+Dockerfile.fx-ai-trend (DEL), tests/test_fx_ai_trend.py (DEL).
+
+Деталь правок в LLM-боте — см. `BUILDLOG_AI_FX_TRADER.md`
+запись от 2026-05-20 (включая fix(PnL): broker NET в БД + backfill +
+post-mortem 4 убыточных трейдов).
+
+---
+
 ## 2026-05-18
 
 ### chore(advisor): остановлен на VPS, заменяется на LLM Trend-follower

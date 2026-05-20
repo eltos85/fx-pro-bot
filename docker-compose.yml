@@ -38,68 +38,66 @@ services:
   # Shadow, GoldORB, SqueezeH4, TurtleH4, GBPJPYFade, COT, sentiment,
   # paper exit-strategies. История 2169 закрытых сделок.
   #
-  # 2026-05-18: ОТКЛЮЧЁН по решению пользователя. Заменяется на LLM-
-  # Trend-follower (fx_ai_trend, см. ниже). Причины:
-  # - rule-based ensemble «торгует плохо и молчит» в текущем рыночном
-  #   режиме (наблюдение пользователя; на полную статистическую базу
-  #   ≥100 сделок × 2 недели на конкретную связку не претендуем —
-  #   решение пользователя продолжать с LLM-подходом).
-  # - Код и БД сохранены: src/fx_pro_bot/* + data/advisor_stats.sqlite
-  #   (backup: advisor_stats.sqlite.backup-stop-20260518T114956Z).
-  #   Возврат = раскомментировать сервис + git pull + compose up.
-  # - Slot на cTrader account (FxPro demo, ctid=46883073) освобождается
-  #   для нового Trend-follower бота (один cTrader account = один OAuth
-  #   grant в общем-то, но через ctrader-token-service лимит снят).
-  #
-  # advisor:
-  #   build: .
-  #   image: fx-pro-bot:local
-  #   restart: unless-stopped
-  #   depends_on:
-  #     ctrader-token-service:
-  #       condition: service_healthy
-  #   logging:
-  #     driver: json-file
-  #     options:
-  #       max-size: "50m"
-  #       max-file: "3"
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     DATA_DIR: /data
-  #     CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
-  #     CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
-  #     YFINANCE_INTERVAL: ${YFINANCE_INTERVAL:-5m}
-  #     YFINANCE_PERIOD: ${YFINANCE_PERIOD:-1mo}
-  #     POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-300}
-  #     VERIFY_HORIZONS: ${VERIFY_HORIZONS:-15,30,60}
-  #     LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  #     FXPRO_ENABLED: ${FXPRO_ENABLED:-false}
-  #     FXPRO_CLIENT_ID: ${FXPRO_CLIENT_ID:-}
-  #     FXPRO_CLIENT_SECRET: ${FXPRO_CLIENT_SECRET:-}
-  #     FXPRO_ACCOUNT_ID: ${FXPRO_ACCOUNT_ID:-}
-  #     FXPRO_API_URL: ${FXPRO_API_URL:-https://connect.fxpro.com/api/v1}
-  #     CTRADER_TRADING_ENABLED: ${CTRADER_TRADING_ENABLED:-false}
-  #     CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
-  #     CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
-  #     CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
-  #     CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
-  #     CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-https://openapi.ctrader.com/apps/token}
-  #     OUTSIDERS_MODE: ${OUTSIDERS_MODE:-confirmed}
-  #     LEADERS_ENABLED: ${LEADERS_ENABLED:-true}
-  #     OUTSIDERS_ENABLED: ${OUTSIDERS_ENABLED:-true}
-  #     ENSEMBLE_ENABLED: ${ENSEMBLE_ENABLED:-true}
-  #     SCALPING_GOLD_ORB_ENABLED: ${SCALPING_GOLD_ORB_ENABLED:-true}
-  #     SCALPING_GOLD_ORB_SHADOW: ${SCALPING_GOLD_ORB_SHADOW:-true}
-  #     SCALPING_GOLD_ORB_H2_REGIME_FILTER: ${SCALPING_GOLD_ORB_H2_REGIME_FILTER:-false}
-  #     SCALPING_GOLD_ORB_H5_SWEEP_FILTER: ${SCALPING_GOLD_ORB_H5_SWEEP_FILTER:-true}
-  #     SCALPING_MAX_POSITIONS: ${SCALPING_MAX_POSITIONS:-50}
-  #     KILLSWITCH_MAX_DAILY_LOSS: ${KILLSWITCH_MAX_DAILY_LOSS:-50.0}
-  #     KILLSWITCH_MAX_DRAWDOWN_PCT: ${KILLSWITCH_MAX_DRAWDOWN_PCT:-20.0}
-  #     KILLSWITCH_MAX_POSITIONS: ${KILLSWITCH_MAX_POSITIONS:-10}
-  #     KILLSWITCH_MAX_LOSS_PER_TRADE: ${KILLSWITCH_MAX_LOSS_PER_TRADE:-25.0}
-  #   volumes:
-  #     - ./data:/data
+  # 2026-05-20: ВОЗВРАЩЁН в работу. Причины возврата:
+  # - LLM Trend-follower (fx_ai_trend) показал 3 убыточных paper-трейда
+  #   за вечер 18 мая, дальше молчал — пользы не приносил.
+  # - Discretionary LLM (fx-ai-trader) на n=7 trades −$7.98 net, не
+  #   очевидно лучше Advisor (sample size << 100 по `sample-size.mdc`).
+  # - Advisor имеет историю 2169 сделок и подтверждённую rule-based
+  #   логику; в текущем рыночном режиме лучше иметь rule-based бэйзлайн
+  #   рядом с экспериментальным LLM.
+  # - Возможный конфликт: XAUUSD ≡ GC=F на FxPro (symbolId=41). Advisor
+  #   и fx-ai-trader торгуют один gold-инструмент. Изоляция через
+  #   broker_order_label сохранена.
+  advisor:
+    build: .
+    image: fx-pro-bot:local
+    restart: unless-stopped
+    depends_on:
+      ctrader-token-service:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
+      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
+      YFINANCE_INTERVAL: ${YFINANCE_INTERVAL:-5m}
+      YFINANCE_PERIOD: ${YFINANCE_PERIOD:-1mo}
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-300}
+      VERIFY_HORIZONS: ${VERIFY_HORIZONS:-15,30,60}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FXPRO_ENABLED: ${FXPRO_ENABLED:-false}
+      FXPRO_CLIENT_ID: ${FXPRO_CLIENT_ID:-}
+      FXPRO_CLIENT_SECRET: ${FXPRO_CLIENT_SECRET:-}
+      FXPRO_ACCOUNT_ID: ${FXPRO_ACCOUNT_ID:-}
+      FXPRO_API_URL: ${FXPRO_API_URL:-https://connect.fxpro.com/api/v1}
+      CTRADER_TRADING_ENABLED: ${CTRADER_TRADING_ENABLED:-false}
+      CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
+      CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-https://openapi.ctrader.com/apps/token}
+      OUTSIDERS_MODE: ${OUTSIDERS_MODE:-confirmed}
+      LEADERS_ENABLED: ${LEADERS_ENABLED:-true}
+      OUTSIDERS_ENABLED: ${OUTSIDERS_ENABLED:-true}
+      ENSEMBLE_ENABLED: ${ENSEMBLE_ENABLED:-true}
+      SCALPING_GOLD_ORB_ENABLED: ${SCALPING_GOLD_ORB_ENABLED:-true}
+      SCALPING_GOLD_ORB_SHADOW: ${SCALPING_GOLD_ORB_SHADOW:-true}
+      SCALPING_GOLD_ORB_H2_REGIME_FILTER: ${SCALPING_GOLD_ORB_H2_REGIME_FILTER:-false}
+      SCALPING_GOLD_ORB_H5_SWEEP_FILTER: ${SCALPING_GOLD_ORB_H5_SWEEP_FILTER:-true}
+      SCALPING_MAX_POSITIONS: ${SCALPING_MAX_POSITIONS:-50}
+      KILLSWITCH_MAX_DAILY_LOSS: ${KILLSWITCH_MAX_DAILY_LOSS:-50.0}
+      KILLSWITCH_MAX_DRAWDOWN_PCT: ${KILLSWITCH_MAX_DRAWDOWN_PCT:-20.0}
+      KILLSWITCH_MAX_POSITIONS: ${KILLSWITCH_MAX_POSITIONS:-10}
+      KILLSWITCH_MAX_LOSS_PER_TRADE: ${KILLSWITCH_MAX_LOSS_PER_TRADE:-25.0}
+    volumes:
+      - ./data:/data
 
   bybit-bot:
     build:
@@ -302,88 +300,6 @@ services:
       # живёт здесь рядом с stats.sqlite Advisor'а (разные filename, не
       # пересекаются). cTrader-токен — owned by ctrader-token-service,
       # бот его не пишет (см. fx_ai_trader/trading/token_lock.py).
-      - ./data:/data
-
-  fx-ai-trend:
-    # Trend-follower LLM (DeepSeek-V4) на cTrader FxPro demo, торгует
-    # gold + Brent + Natural Gas в systematic trend-following парадигме
-    # (Faith/Covel/Clenow/AQR). Контраст с fx-ai-trader (Discretionary)
-    # на тех же инструментах = A/B-эксперимент.
-    #
-    # Изоляция: разный order_label (ai-fx-trend vs ai-fx-trader), разный
-    # БД-файл (fx_ai_trend.sqlite), broker-side reconcile фильтрует
-    # позиции своего бота → не пересекаются.
-    #
-    # Тот же cTrader account (ctid=46883073) + общий
-    # ctrader-token-service. KillSwitch caps шире (total_loss=$500 vs
-    # $300 у Discretionary) — CTA drawdown 20-30% типичен для trend-
-    # following (Clenow), не должен auto-disable эксперимент.
-    build:
-      context: .
-      dockerfile: Dockerfile.fx-ai-trend
-    image: fx-ai-trend:local
-    restart: unless-stopped
-    depends_on:
-      ctrader-token-service:
-        condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    env_file:
-      - .env
-    environment:
-      AI_FX_TREND_DATA_DIR: /data
-      CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
-      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
-      AI_FX_TREND_LOG_LEVEL: ${AI_FX_TREND_LOG_LEVEL:-INFO}
-      # Phase 1: paper-mode минимум 14 дней. Trend-follower имеет ещё
-      # более длинный hold-horizon (weeks vs sub-day у Discretionary),
-      # 14 дней — это lower-bound для observation.
-      AI_FX_TREND_TRADING_ENABLED: ${AI_FX_TREND_TRADING_ENABLED:-false}
-      AI_FX_TREND_SYMBOLS: ${AI_FX_TREND_SYMBOLS:-XAUUSD,BZ=F,NG=F}
-      AI_FX_TREND_ORDER_LABEL: ${AI_FX_TREND_ORDER_LABEL:-ai-fx-trend}
-      AI_FX_TREND_POLL_INTERVAL_SEC: ${AI_FX_TREND_POLL_INTERVAL_SEC:-900}
-      AI_FX_TREND_REVIEW_INTERVAL_SEC: ${AI_FX_TREND_REVIEW_INTERVAL_SEC:-300}
-      AI_FX_TREND_VIRTUAL_CAPITAL: ${AI_FX_TREND_VIRTUAL_CAPITAL:-500}
-      # KillSwitch v1.0 (broker-safety only): caps шире чем у
-      # Discretionary, потому что CTA trend-follower имеет натурально
-      # больший drawdown по природе стратегии (Clenow «Following the
-      # Trend»: 20-30% DD на тренд = норма).
-      AI_FX_TREND_MAX_DAILY_LOSS: ${AI_FX_TREND_MAX_DAILY_LOSS:-150}
-      AI_FX_TREND_MAX_TOTAL_LOSS: ${AI_FX_TREND_MAX_TOTAL_LOSS:-500}
-      AI_FX_TREND_MAX_POSITIONS: ${AI_FX_TREND_MAX_POSITIONS:-6}
-      AI_FX_TREND_MAX_POSITIONS_PER_SYMBOL: ${AI_FX_TREND_MAX_POSITIONS_PER_SYMBOL:-4}
-      AI_FX_TREND_MAX_LOT_SIZE: ${AI_FX_TREND_MAX_LOT_SIZE:-0.50}
-      # cTrader OAuth: те же creds что у fx-ai-trader и Advisor (один
-      # demo-аккаунт, multi-bot через ctrader-token-service).
-      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
-      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
-      CTRADER_ACCOUNT_ID: ${CTRADER_ACCOUNT_ID:-0}
-      CTRADER_HOST_TYPE: ${CTRADER_HOST_TYPE:-demo}
-      AI_FX_TREND_CTRADER_TOKEN_PATH: ${AI_FX_TREND_CTRADER_TOKEN_PATH:-/data/ctrader_tokens.json}
-      # DeepSeek (тот же ключ, account-level rate-limit shared).
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      AI_FX_TREND_DEEPSEEK_MODEL: ${AI_FX_TREND_DEEPSEEK_MODEL:-deepseek-v4-flash}
-      AI_FX_TREND_DEEPSEEK_BASE_URL: ${AI_FX_TREND_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
-      AI_FX_TREND_DEEPSEEK_THINKING: ${AI_FX_TREND_DEEPSEEK_THINKING:-true}
-      # max_tokens=8000: trend-follower prompt больше (research блок,
-      # Donchian/N математика, pyramid rules) → выходные токены могут
-      # быть выше. 8192 = hard cap у DeepSeek Anthropic-compat.
-      AI_FX_TREND_DEEPSEEK_MAX_TOKENS: ${AI_FX_TREND_DEEPSEEK_MAX_TOKENS:-8192}
-      # News: тот же RSS-фид + EIA. Trend-follower использует sentiment
-      # как secondary confirmation, не primary signal.
-      AI_FX_TREND_NEWS_ENABLED: ${AI_FX_TREND_NEWS_ENABLED:-true}
-      AI_FX_TREND_NEWS_MAX_AGE_HOURS: ${AI_FX_TREND_NEWS_MAX_AGE_HOURS:-12}
-      AI_FX_TREND_NEWS_MAX_ITEMS_PER_SYMBOL: ${AI_FX_TREND_NEWS_MAX_ITEMS_PER_SYMBOL:-5}
-      AI_FX_TREND_EIA_API_KEY: ${AI_FX_TREND_EIA_API_KEY:-}
-      AI_FX_TREND_EIA_CACHE_TTL_SEC: ${AI_FX_TREND_EIA_CACHE_TTL_SEC:-21600}
-    volumes:
-      # Тот же data-volume что и у Discretionary fx-ai-trader. БД
-      # fx_ai_trend.sqlite живёт рядом с fx_ai_trader.sqlite (разные
-      # filenames, не пересекаются). cTrader токен общий через
-      # ctrader-token-service.
       - ./data:/data
 
   ai-arena:

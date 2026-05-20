@@ -1,5 +1,210 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-20 (день, 06:30 UTC) — fix(PnL): broker NET вместо gross в БД + backfill + post-mortem 4 убыточных + удаление fx-ai-trend + возврат Advisor
+
+`коммит при deploy`
+
+### 1. Bug-fix: realized_pnl_usd хранит broker NET, не idealized gross
+
+**Симптом:** локальная БД `fx_ai_trader.sqlite` за 18-20 мая показывала
+`net +$2.72` по 7 closed live-трейдам, а cTrader app History — `−$7.98`.
+Разница **−$10.70 (≈ −$1.53/trade)** — это swap (overnight) +
+commissions, которые `_calc_pnl_usd` не учитывает.
+
+**Корень:** `_apply_close` в LIVE-режиме после успешного
+`adapter.close_position()` писал `realized_pnl_usd = _calc_pnl_usd(...)`
+— gross на основе entry/exit/lots/pip_value. Broker фактически списывает
+NET = `cpd.grossProfit + cpd.swap + cpd.commission` через
+`ProtoOAClosePositionDetail`.
+
+**Фикс** (`src/fx_ai_trader/trading/executor.py:336-465`):
+- После успешного broker-close делаем до 3 попыток с `time.sleep(1.0)`
+  достать closing deal через `adapter.get_closing_deal_for_position(
+  broker_pid, lookback_hours=1)`. Spotware фиксирует deal с latency
+  ~0.5–2с — sleep+retry это покрывает.
+- Если deal получен → `realized_pnl_usd = gross + swap + commission`,
+  `exit_price = deal.exit_price`. Summary в логах включает breakdown
+  (`pnl=$X (net: gross=$A + swap=$B + comm=$C)`).
+- Если 3 попытки не дали deal → fallback на idealized gross + WARNING
+  в логах с broker_pid, чтобы backfill-скриптом догнать позже.
+
+POSITION_NOT_FOUND path (broker_auto recovery) уже использует broker
+NET с 2026-05-13 — не трогаем.
+
+Paper-mode (`is_paper=True`) и `paper_reconcile.py` — оставляем gross
+через `_calc_pnl_usd`. Paper не имеет broker swap/commission по природе
+(симуляция без слипажа).
+
+### 2. Backfill: пересчёт исторических PnL
+
+Скрипт `scripts/fx_ai_backfill_net_pnl.py`:
+- Берёт все closed live-позиции с `broker_position_id` из БД.
+- Для каждой запрашивает closing deal через
+  `get_closing_deal_for_position` (lookback по умолчанию 30 дней).
+- Сравнивает `realized_pnl_usd` с broker NET, печатает diff.
+- С флагом `--apply`: UPDATE + пересборка `daily_pnl` с нуля.
+- Без флага: dry-run.
+
+Запуск:
+```bash
+docker exec fx-pro-bot-fx-ai-trader-1 python /tmp/backfill_net_pnl.py        # dry-run
+docker exec fx-pro-bot-fx-ai-trader-1 python /tmp/backfill_net_pnl.py --apply  # commit
+```
+
+### 3. Post-mortem 4 убыточных трейдов с 18 мая
+
+Read-only анализ из `decisions` table (`parsed_action.reason` +
+`sentiment_json`). Sample size n=4 << 100 → **никаких изменений
+порогов не делаем** (правило `sample-size.mdc`).
+
+| pos | open thesis | uncertainty | NET | разбор |
+|---|---|---|---|---|
+| id=7 BZ=F SELL | China refiners cut + real-yield USD strength + 4H break ниже EMA20 | 0.2 | −$10.48 | **Не LLM**. Жертва label-guard incident (commit 6b3665e уже откачен). LLM был прав, Brent действительно упал к SL. |
+| id=10 NG=F BUY | Australian LNG strike + 4H uptrend + pullback к mid-BB | 0.38 | −$2.51 | **Mixed thesis**: trend-follow + mean-reversion в одной сделке. Чистый exit в безубыток, минус только от overnight swap −$1.11. |
+| id=11 BZ=F SELL | Trump паузнул Iran strike → geopolitical premium decay | 0.2 | −$7.47 | **SL слишком узкий**: 10 центов от entry (entry ~106.93, SL 107.10). Brent intraday range ~$1-2, шумовое движение легко сбило. Концепция верная, **risk sizing провал**. |
+| id=12 BZ=F BUY | Massive API crude draw + Iran risk premium + pullback к 4H EMA20 | **0.45** | −$2.99 | **High uncertainty open** (0.45 — гранична). Через 2h тренд развернулся, LLM закрыл по invalidation. Exit правильный, but entry questionable. |
+
+**Чистый LLM-fault counter:**
+- "Невинная жертва нашего бага": id=7 (0 LLM trades)
+- "Mixed thesis": id=10 (0.5)
+- "SL too tight": id=11 (1.0 — concrete bug)
+- "High uncertainty open": id=12 (0.5)
+- Итого: **2.0 LLM-faults из 4 трейдов**
+
+**Общий паттерн:** Все 4 убыточных — BZ=F или NG=F. Все 3 XAUUSD-трейда
+(id=6, id=8) — wins. Это **наблюдение**, не сигнал что-то менять
+(n слишком мал, на разных днях / разных режимах гипотеза перевернётся).
+
+### 4. Удаление fx-ai-trend, возврат Advisor
+
+**fx-ai-trend** (trend-follower LLM):
+- За 14ч жизни 3 paper-трейда подряд, все убыточные (−$16.05 paper).
+- Потом 30+ часов тишины — Donchian/Turtle-фильтры не находили clean
+  breakouts. Поведение **корректное по research** (Faith/Covel: 50-70%
+  трейдов trend-следования убыточны на тестах с маленьким горизонтом),
+  но для пользователя — бесполезен.
+- **Удалён полностью**: `src/fx_ai_trend/`, `Dockerfile.fx-ai-trend`,
+  `tests/test_fx_ai_trend.py`, service block в `docker-compose.yml`,
+  entrypoint в `pyproject.toml`. БД `fx_ai_trend.sqlite` оставлена на
+  диске VPS как реликвия эксперимента (3 paper-trades + decisions
+  audit), удалим вручную при следующей подаче.
+
+**Advisor (fx_pro_bot)** возвращён:
+- Раскомментирован service block в `docker-compose.yml`.
+- Старт через `docker compose up -d --build advisor` на VPS.
+- БД `advisor_stats.sqlite` цела с 2026-05-18 (backup в
+  `advisor_stats.sqlite.backup-stop-20260518T114956Z`).
+- При старте Advisor сделает reconcile позиций — stale `ef25d270`
+  (GC=F long, status=open в БД, но на брокере закрылась 18 мая 12:58
+  с +$39.80 net) синкнется автоматически через
+  `reconcile_broker_positions`-механизм Advisor'а.
+
+**Файлы:**
+- `src/fx_ai_trader/trading/executor.py` — broker NET path + retry +
+  fallback с WARNING (новый код 336-465)
+- `scripts/fx_ai_backfill_net_pnl.py` (NEW)
+- `tests/test_fx_ai_trader.py` — новый тест
+  `test_llm_close_stores_broker_net_not_idealized_gross`
+- `docker-compose.yml` — advisor uncomment + fx-ai-trend remove
+- `pyproject.toml` — убран fx-ai-trend entrypoint и package
+- `src/fx_ai_trend/`, `Dockerfile.fx-ai-trend`, `tests/test_fx_ai_trend.py` — DELETED
+- `scripts/fx_ai_broker_history_audit.py` — убран match по fx_ai_trend.sqlite
+
+**Тесты:** 910 passed (55 в test_fx_ai_trader.py, +1 новый).
+
+**Источники:**
+- cTrader Open API ProtoOAClosePositionDetail: `grossProfit` + `swap` +
+  `commission` ([docs](https://help.ctrader.com/open-api/model-messages/#protooaclosepositiondetail))
+- FxPro Trading Conditions: overnight swap rollover на 5pm NY
+- BUILDLOG 2026-05-18 (label-guard incident, контекст для id=7)
+- BUILDLOG 2026-05-13 (broker_auto NET path, прецедент использования
+  get_closing_deal_for_position)
+
+---
+
+## 2026-05-20 (утро, 04:30 UTC) — broker-truth audit + находка: БД хранит GROSS, брокер списывает NET
+
+`commit при deploy — diagnostic + buildlog`
+
+**Контекст.** Пользователь обратил внимание, что после добавления газа
+(NG=F) и запуска Trend-follower бота Discretionary стал торговать «в
+минус», но локальная БД показывала **net +$2.72** за 7 трейдов с 18 мая.
+Заподозрили расхождение.
+
+**Что сделал.** Написал `scripts/fx_ai_broker_history_audit.py` — он
+тянет `ProtoOAGetDealListReq` за окно (с 2026-05-18 00:00 UTC) +
+`ProtoOAReconcileReq` (открытые сейчас), сшивает каждый
+`positionId` с тремя локальными БД (`fx_ai_trader`, `fx_ai_trend`,
+`advisor`) и печатает **NET** = `gross + swap + commission`
+(broker-truth, как в cTrader app History).
+
+**Находки:**
+
+1. **БД fx-ai-trader хранит GROSS, а брокер списывает NET.**
+   - DB sum 7 трейдов: **+$2.72** (gross без вычета swap/comm).
+   - Broker app sum: **−$7.98 net** (что реально списано со счёта).
+   - Delta = **−$10.70** в 7 трейдах = swap/commission, в среднем **−$1.53/trade**.
+   - Источник: `realized_pnl_usd` в `positions` (схема `db.py:66`) пишется
+     из `_calc_pnl_usd()` (формула gross на основе entry/exit/lots/pip_value),
+     либо из `broker.grossProfit` без вычета `swap` и `commission`.
+
+2. **Орфанов на брокере нет.** `ProtoOAReconcileRes.position = []`.
+   Та запись Advisor (`ef25d270` GC=F long, status=open в БД advisor)
+   на брокере закрылась 2026-05-18 12:58 с **+$39.80 net**. Локальная
+   advisor.sqlite stale (контейнер выключен с 11:50 UTC того же дня).
+
+3. **XAUUSD ≡ GC=F на FxPro** (`symbolId=41`). Один и тот же
+   gold-инструмент под двумя internal именами. Advisor торговал
+   `GC=F`, fx-ai-trader — `XAUUSD`. Это **одинаковая экспозиция**,
+   разные labels позволяли управлять независимо.
+
+4. **Итог broker-truth с 18 мая (sample size 9 deals):**
+   - Advisor: 2 trades, +$32.50 net (одна большая сделка +$39.80)
+   - fx-ai-trader: 7 trades, **−$7.98 net** (W=3, L=4)
+   - Σ = **+$24.52** ✓ (== Realised P&L в cTrader app)
+   - Без −$10.48 label-guard incident → fx-ai-trader **+$2.50 net**
+   - Без overnight swap −$1.11 (id=10 NG=F): **+$3.61 net**
+
+**По правилу `sample-size.mdc` (n=7 < 100) делать вывод что Discretionary
+"стал торговать в минус из-за добавления газа" нельзя.** Продолжаем
+наблюдение. Менять стратегию по такому объёму запрещено.
+
+**Что НЕ делал:**
+- Не менял `_calc_pnl_usd` (gross-формула корректна для своей цели —
+  оценки theoretical PnL вне зависимости от broker fee structure).
+- Не правил БД-схему (рефакторинг хранения net потребует backfill
+  через `ProtoOADealListReq` для всей истории + миграция, отдельная
+  задача).
+
+**Что выявлено к решению (TODO):**
+
+a. Локальная advisor.sqlite stale — `ef25d270` показана open хотя
+   на брокере closed. Не критично (Advisor выключен), но если будем
+   делать сравнение Advisor pre/post — нужен one-shot reconcile-сcript.
+
+b. `broker_reconcile.py` для **non-broker-auto** закрытий (когда LLM
+   сам решил выйти) сейчас пишет `gross` в `realized_pnl_usd`. Должен
+   писать `net` = `cpd.grossProfit + cpd.swap + cpd.commission` (точно
+   так же, как в audit-скрипте). Иначе все будущие dashboard'ы будут
+   врать.
+
+c. Прометей/dashboards в БД считают W/L и avg по `realized_pnl_usd`
+   → текущая метрика **оптимистична**. После фикса (b) → реальные
+   цифры.
+
+**Файлы:**
+- `scripts/fx_ai_broker_history_audit.py` (NEW, read-only diagnostic)
+- `BUILDLOG_AI_FX_TRADER.md` (эта запись)
+
+**Источники:**
+- cTrader Open API: `ProtoOAGetDealListReq` / `ProtoOAClosePositionDetail`
+  — поля `grossProfit`, `swap`, `commission` (см. `compare_stats.py:50-56`
+  и `src/fx_pro_bot/trading/executor.py:599-627`).
+- FxPro Trading Conditions: gold/oil без commission, swap считается
+  на rollover (5pm NY) — объясняет −$1.11 swap у NG=F overnight position.
+
+---
+
 ## 2026-05-18 (вечер, 14:50 UTC) — CRITICAL FIX: откатан label guard, восстановлены 2 потерянные позиции
 
 `коммит при deploy — INCIDENT FIX`

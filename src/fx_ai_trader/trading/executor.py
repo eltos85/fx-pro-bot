@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Optional
@@ -333,6 +334,10 @@ def _apply_close(
             executed=False, summary="",
             error=f"current price unavailable for {pos.symbol}",
         )
+    # Idealized gross PnL — fallback для paper-mode и если broker NET
+    # не подтянется через get_closing_deal_for_position. НЕ ровно тому,
+    # что брокер реально спишет (нет swap/commission); см. broker NET
+    # path ниже для LIVE.
     pnl_usd = _calc_pnl_usd(
         side=pos.side,
         entry=pos.entry_price,
@@ -406,6 +411,57 @@ def _apply_close(
                 executed=False, summary="",
                 error=f"broker close_failed: {res.error}",
             )
+
+        # LIVE close прошёл успешно. Достаём broker-side NET через
+        # ProtoOADealListReq, чтобы записать в БД реальную сумму, которую
+        # брокер спишет/начислит = grossProfit + swap + commission.
+        # Без этого `realized_pnl_usd` хранится как _calc_pnl_usd (gross
+        # idealized) — она расходится с приложением брокера на сумму
+        # комиссий и swap (overnight) — см. BUILDLOG_AI_FX_TRADER.md
+        # 2026-05-20 «broker-truth audit». Spotware фиксирует deal с
+        # latency ~0.5–2с, поэтому делаем короткий sleep + retry.
+        broker_net: float | None = None
+        deal_meta: dict | None = None
+        for attempt in range(3):
+            if attempt > 0:
+                time.sleep(1.0)
+            deal_meta = adapter.get_closing_deal_for_position(
+                pos.broker_position_id, lookback_hours=1,
+            )
+            if deal_meta is not None:
+                broker_net = (
+                    deal_meta["gross_pnl_usd"]
+                    + deal_meta["swap_usd"]
+                    + deal_meta["commission_usd"]
+                )
+                break
+
+        if broker_net is not None and deal_meta is not None:
+            store.close_position(
+                pos.id,
+                exit_price=deal_meta["exit_price"] or current_price,
+                realized_pnl_usd=broker_net,
+                close_reason=action.raw.get("reason", "llm_close"),
+            )
+            return ApplyResult(
+                executed=True,
+                summary=(
+                    f"[LIVE] CLOSE id={pos.id} {pos.side} {pos.symbol} "
+                    f"lots={pos.volume_lots} entry=${pos.entry_price:.6g} "
+                    f"exit=${deal_meta['exit_price']:.6g} "
+                    f"pnl=${broker_net:+.2f} (net: gross="
+                    f"${deal_meta['gross_pnl_usd']:+.2f} + swap="
+                    f"${deal_meta['swap_usd']:+.2f} + comm="
+                    f"${deal_meta['commission_usd']:+.2f})"
+                ),
+            )
+        # Broker deal не нашёлся за 3 попытки — fallback на idealized
+        # gross. Логируем warning чтобы потом backfill-скриптом догнать.
+        log.warning(
+            "broker NET unavailable for pos=%d (broker_pid=%d) after 3 attempts — "
+            "storing idealized gross PnL=%.2f, will need backfill",
+            pos.id, pos.broker_position_id, pnl_usd,
+        )
 
     store.close_position(
         pos.id,

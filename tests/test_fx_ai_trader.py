@@ -1034,3 +1034,84 @@ class TestBrokerReconcile:
         assert row[0] == pytest.approx(-3.32)
         assert row[1] == pytest.approx(104.721)
         assert row[2] == "broker_auto"
+
+    def test_llm_close_stores_broker_net_not_idealized_gross(
+        self, store: AiFxTraderStore,
+    ):
+        """После успешного LIVE close executor должен достать broker NET
+        (gross + swap + commission) через get_closing_deal_for_position
+        и записать его в realized_pnl_usd, а не idealized gross из
+        _calc_pnl_usd. Bug-fix 2026-05-20: до этого БД хранила gross,
+        что расходилось с cTrader app History на сумму swap+commission
+        (см. broker-truth audit, BUILDLOG_AI_FX_TRADER 2026-05-20)."""
+        from fx_ai_trader.config.settings import AiFxTraderSettings
+        from fx_ai_trader.safety.killswitch import (
+            KillSwitch,
+            KillSwitchConfig,
+        )
+        from fx_ai_trader.trading.executor import (
+            CloseAction,
+            ParsedAction,
+            apply_action,
+        )
+
+        # Setup: open NG=F BUY, держим 6h overnight → swap −$1.11.
+        # _calc_pnl_usd дал бы +$1.00 gross (по entry/exit/lots), а
+        # broker NET = +1.00 + (−1.11) = −$0.11.
+        pid = store.open_position(
+            symbol="NG=F", side="BUY", volume_lots=0.01,
+            entry_price=3.17, sl_price=3.09, tp_price=3.25,
+            broker_position_id=150845078,
+            broker_order_label="ai-fx-trader",
+            llm_reason="overnight mean-rev setup", is_paper=False,
+        )
+        # _FakeAdapter возвращает deal с -1.40 gross + -1.11 swap (NET=-2.51)
+        # _calc_pnl_usd на current_price=3.155 дал бы −$1.50 gross (exit 0.015
+        # ниже entry 3.17, 100 MMBtu лотов × $10/pip = $15/pip). Если в БД
+        # окажется ≈ −1.5 — значит fallback на gross, баг не пофикшен.
+        adapter = _FakeAdapter(
+            active_pids=set(),
+            deals={150845078: {
+                "deal_id": 99999, "ts_ms": 0,
+                "exit_price": 3.155,
+                "gross_pnl_usd": -1.40,
+                "swap_usd": -1.11,
+                "commission_usd": 0.0,
+            }},
+            current_prices={"NG=F": 3.155},
+        )
+        action = ParsedAction(
+            action_type="close",
+            model=CloseAction(
+                action="close", position_id=pid,
+                reason="mean-rev invalidated",
+            ),
+            raw={"action": "close", "position_id": pid, "reason": "mean-rev"},
+        )
+        settings = AiFxTraderSettings()
+        object.__setattr__(settings, "trading_enabled", True)
+        ks = KillSwitch(KillSwitchConfig(
+            max_daily_loss_usd=150, max_total_loss_usd=300,
+            max_open_positions=3, max_positions_per_symbol=3,
+        ), store)
+
+        result = apply_action(
+            action, adapter=adapter, store=store,
+            settings=settings, killswitch=ks,
+        )
+        assert result.executed is True
+        # NET = gross + swap + commission = -1.40 + (-1.11) + 0.0 = -2.51
+        with store._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, exit_price, close_reason "
+                "FROM positions WHERE id = ?", (pid,),
+            ).fetchone()
+        assert row[0] == pytest.approx(-2.51), (
+            f"realized_pnl_usd должен быть broker NET (-2.51), не idealized "
+            f"gross. Получено: {row[0]}"
+        )
+        assert row[1] == pytest.approx(3.155)
+        # close_reason берётся из LLM-сообщения (не "broker_auto" — это путь
+        # успешного LLM-close, не recovery)
+        assert row[2] == "mean-rev"
+        assert "net:" in result.summary  # формат summary включает breakdown
