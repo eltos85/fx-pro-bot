@@ -1,5 +1,151 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-20 — v0.14: trader-discretion override whitelist + bybit-bot отключён + SYSTEM_PROMPT template-driven
+
+**Запрос пользователя:** «оставить только ai-trader и ai-arena. ai-trader
+теперь торгует только LTCUSDT (+$43.75, 3/3 wins!), ATOMUSDT (+$13.57),
+BTCUSDT (+$9.35) и если есть прибыльные монеты — дополнить от bybit-bot».
+
+### Контекст: 30-дневная stat-сводка (источник — Bybit API, 3-bot collector)
+
+Сбор сделан скриптом `scripts/collect_bybit_3bots_stats.py` (новый, см.
+ниже) — фильтрация trades по `orderLinkId` через `get_order_history`
+(потому что `get_closed_pnl` не возвращает `orderLinkId`).
+
+| Bot | n | WR | PnL | Sample-size verdict |
+|---|---:|---:|---:|---|
+| bybit-bot | 278 | 47% | **−$274.29** | n>>100, statistical significance ОК — disable обоснован |
+| ai-trader | 56 | 50% | +$48.49 | n=56, на грани минимального порога (правило ≥100 trades) |
+| ai-arena | 219 | 20% | −$1840.65 | Отдельный subaccount, не входит в текущий decision |
+
+### Sample-size warning (правило `.cursor/rules/sample-size.mdc`)
+
+Per-pair выборки в `ai-trader` за 30 дней:
+- LTCUSDT: n=**3** (3 win), 100% WR — статистически 3 удачные сделки.
+- ATOMUSDT: n=**5**, WR 40%, +$13.57 — плюс из 1-2 крупных winners.
+- BTCUSDT: n=**6**, WR 50%, +$9.35 — на грани coin-flip.
+- XRPUSDT (bybit-bot): n=**4**, WR 50%, +$23.23 — единичные сделки.
+
+Per-pair выборки **НЕ удовлетворяют** требованиям sample-size.mdc
+(≥100 trades, p<0.05). Решение принято как **trader-discretion
+override** с явным согласием пользователя ("ack_yes" на question
+prompt). Пользователь подтверждает что понимает curve-fitting risk.
+
+Для `bybit-bot` правило соблюдено (n=278 >> 100, PnL персистентно
+негативный). Для `ai-trader` whitelist изменение — discretion.
+
+### Что сделано
+
+**1. Whitelist пар сужен до 5 монет (`AI_TRADER_SYMBOLS` в `.env`):**
+
+| Старый (5 монет) | Новый (5 монет) |
+|---|---|
+| BTCUSDT | BTCUSDT (kept, +$9.35 30d) |
+| ETHUSDT | ❌ removed (−$11.61, n=7) |
+| BNBUSDT | ❌ removed (n=2 — слишком мало) |
+| XRPUSDT | ❌ removed (−$8.45, n=11 у ai-trader, противоречие с +$23 у bybit-bot, sample-size XRP n=4 у bybit недостаточен) |
+| DOGEUSDT | ❌ removed (n=8, +$1.94 не репрезентативно) |
+| | LTCUSDT (added, +$43.75) |
+| | ATOMUSDT (added, +$13.57) |
+| | SUIUSDT (added — единственная прибыльная у bybit-bot с большим sample n=40) |
+| | LINKUSDT (added — bybit-bot n=22, +$2.43, единственная вторая по sample) |
+
+**2. SYSTEM_PROMPT теперь template-driven (single source of truth = `.env`).**
+
+Раньше `ALLOWED PAIRS (only these): - BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT,
+DOGEUSDT.` было захардкожено в `prompts.py`. При смене whitelist через
+`.env` промпт продолжал показывать старый список — рассинхрон.
+
+Теперь:
+- `_SYSTEM_PROMPT_TEMPLATE` — приватный template с placeholder `__ALLOWED_PAIRS__`.
+- `build_system_prompt(settings)` — render с `settings.symbols`, используется в `main.py`.
+- `SYSTEM_PROMPT` (legacy public constant) — default render с `DEFAULT_AI_SYMBOLS`,
+  только для тестов / docs. Real-use идёт через `build_system_prompt`.
+
+**3. RSS news keywords для новых монет.**
+
+`SYMBOL_KEYWORDS` в `src/ai_trader/news/rss.py` расширен на 4 новых
+монеты (LTC/ATOM/SUI/LINK). Без этого `filter_for_symbols` подхватывал
+бы только generic-новости (ETF, Fed, regulation), пропуская
+specific-новости по монете.
+
+**4. bybit-bot отключён через `profiles: [disabled]`.**
+
+В `docker-compose.yml` сервису `bybit-bot` добавлен `profiles: [disabled]`.
+Compose не поднимает сервисы с profile без явного флага `--profile disabled`,
+так что `docker compose up -d` больше не запустит контейнер. Код
+`src/bybit_bot/` сохранён нетронутым — можно вернуть через
+`docker compose --profile disabled up -d bybit-bot`.
+
+**5. Открытая позиция bybit-bot закрыта вручную.**
+
+На момент изменений на shared subaccount висел `Sell XRPUSDT 845.3 @
+$1.36` (uPnL −$8.21). Закрыто через `place_order(reduceOnly=True)`
+по market price (orderId `a47d49fa-7ef4-4235-9632-4c6969f00cc6`).
+После закрытия `get_positions` возвращает 0 active positions. Это
+гарантирует что выключение `bybit-bot` не оставит «висячих» orphan
+positions без управляющего бота.
+
+### Файлы
+
+- `src/ai_trader/llm/prompts.py` — refactor SYSTEM_PROMPT → template + `build_system_prompt(settings)`.
+- `src/ai_trader/app/main.py` — все 4 использования `SYSTEM_PROMPT` заменены на render через settings.
+- `src/ai_trader/news/rss.py` — `SYMBOL_KEYWORDS` расширен на LTC/ATOM/SUI/LINK.
+- `docker-compose.yml` — `bybit-bot.profiles: [disabled]` + новый default для `AI_TRADER_SYMBOLS`.
+- `.env` (на VPS, не в git) — `AI_TRADER_SYMBOLS=LTCUSDT,ATOMUSDT,BTCUSDT,SUIUSDT,LINKUSDT`.
+  Backup исходного `.env` сохранён как `.env.backup-YYYYMMDD-HHMMSS`.
+- `tests/test_ai_trader.py` — новый класс `TestSystemPromptDynamicWhitelist` (5 тестов).
+- `scripts/collect_bybit_3bots_stats.py` — новый script для API-first
+  3-bot stats reporting (используется для periodic review).
+
+### Тесты
+
+`pytest tests/` → 915 passed, 0 lint errors. Новый класс
+`TestSystemPromptDynamicWhitelist` проверяет:
+- Default render лежит со списком `DEFAULT_AI_SYMBOLS` (backward compat).
+- `build_system_prompt(settings)` подставляет именно `settings.symbols`.
+- Placeholder `__ALLOWED_PAIRS__` полностью исчезает из рендера.
+- Template сохраняет все ключевые секции v0.13 (CONFIDENCE CALIBRATION,
+  PRE-REGISTERED INVALIDATION, COMMON PITFALLS, PEAK-DRAWDOWN и т.д.).
+
+### Что НЕ изменилось
+
+- Стратегия (триггеры open/close, EXIT MANAGEMENT, R:R thresholds, ADX
+  regime filter, PEAK-DRAWDOWN guard) — без изменений.
+- v0.13 meta-cognition fields (`confidence`/`invalidation_condition`/
+  `risk_usd`) — продолжают работать.
+- Dual-timer (full/review intervals) — без изменений.
+- Killswitch limits ($50/$200) — без изменений.
+- ai-arena, fx-ai-trader, advisor — без изменений.
+
+### Последующие шаги
+
+1. Наблюдать ai-trader следующие 7 дней с новым whitelist (n=0).
+2. Через ~2 недели — повторить `collect_bybit_3bots_stats.py` и
+   сравнить per-pair статистику. Если LTC/ATOM/BTC/SUI/LINK останутся
+   profitable на больших выборках (n≥30 each, total ≥100) — это
+   подтвердит trader-discretion решение.
+3. Если выборка покажет что новый whitelist хуже старого — pre-mortem
+   ошибки (были ли это просто 30-day rough patches?). Возможен rollback
+   через `git revert <commit>` + восстановление из `.env.backup-*`.
+
+### Why это НЕ нарушение sample-size.mdc
+
+Правило различает:
+- **«ЗАПРЕЩЕНО** отключать инструмент по <100 сделок без обсуждения
+  с пользователем» — discussion **была** (4 question prompt), пользователь
+  подтвердил.
+- **«ЗАПРЕЩЕНО** ужесточать фильтры на основе анализа одного дня»
+  — это override на 30-day window с пониманием что выборка мала.
+- **«Допустимые быстрые правки без полной выборки»** включают
+  **«технические улучшения»** — refactor SYSTEM_PROMPT в template
+  попадает сюда (поведенческая эквивалентность подтверждена тестами).
+
+Whitelist override зафиксирован в этом BUILDLOG как `trader-discretion`,
+не как `data-driven`. Это явное trail для аудита.
+
+---
+
 ## 2026-05-18 — v0.13 Stage 1: Nof1-style meta-cognition fields (`confidence` / `invalidation_condition` / `risk_usd`)
 
 **Запрос пользователя:** «Вариант B» (после обсуждения как усилить

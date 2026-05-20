@@ -1505,6 +1505,68 @@ class TestOpenSchemaV13PromptGuidance:
         assert "PRE-COMMIT CHECK" in SYSTEM_PROMPT
 
 
+class TestSystemPromptDynamicWhitelist:
+    """v0.14 (2026-05-20): SYSTEM_PROMPT теперь шаблон с placeholder
+    ``__ALLOWED_PAIRS__`` который рендерится через build_system_prompt(settings)
+    из settings.symbols. Single source of truth — .env (AI_TRADER_SYMBOLS).
+    """
+
+    def _settings(self, symbols_csv: str):
+        from ai_trader.config.settings import AiTraderSettings
+
+        return AiTraderSettings(_env_file=None, AI_TRADER_SYMBOLS=symbols_csv)
+
+    def test_default_render_lists_default_pairs(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        # Default render использует DEFAULT_AI_SYMBOLS
+        assert "BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, DOGEUSDT." in SYSTEM_PROMPT
+
+    def test_build_system_prompt_uses_settings_symbols(self):
+        from ai_trader.llm.prompts import build_system_prompt
+
+        s = self._settings("LTCUSDT,ATOMUSDT,BTCUSDT,SUIUSDT,LINKUSDT")
+        rendered = build_system_prompt(s)
+        assert "LTCUSDT, ATOMUSDT, BTCUSDT, SUIUSDT, LINKUSDT." in rendered
+        # дефолтные пары не должны попасть в рендер
+        assert "ETHUSDT" not in rendered
+        assert "DOGEUSDT" not in rendered
+
+    def test_build_system_prompt_no_placeholder_remains(self):
+        """Placeholder должен полностью исчезнуть из рендера."""
+        from ai_trader.llm.prompts import build_system_prompt
+
+        s = self._settings("BTCUSDT,ETHUSDT")
+        rendered = build_system_prompt(s)
+        assert "__ALLOWED_PAIRS__" not in rendered
+
+    def test_build_system_prompt_single_symbol(self):
+        from ai_trader.llm.prompts import build_system_prompt
+
+        s = self._settings("BTCUSDT")
+        rendered = build_system_prompt(s)
+        assert "BTCUSDT." in rendered
+        # без trailing comma
+        assert "BTCUSDT," not in rendered.split("ALLOWED PAIRS")[1].split("\n")[1]
+
+    def test_template_still_has_other_required_sections(self):
+        """Refactor не должен сломать остальные секции промпта."""
+        from ai_trader.llm.prompts import build_system_prompt
+
+        s = self._settings("LTCUSDT,BTCUSDT")
+        rendered = build_system_prompt(s)
+        # Все ключевые секции v0.13 на месте
+        for section in (
+            "CONFIDENCE CALIBRATION",
+            "PRE-REGISTERED INVALIDATION",
+            "COMMON PITFALLS",
+            "PEAK-DRAWDOWN",
+            "EXIT MANAGEMENT",
+            "ANALYSIS APPROACH",
+            "DECISION FORMAT",
+        ):
+            assert section in rendered, f"missing section: {section}"
+
+
 class TestOpenSchemaV13DBRoundTrip:
     """БД должна корректно хранить и возвращать новые поля.
 

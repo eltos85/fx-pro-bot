@@ -1,241 +1,306 @@
-# Proposal: AI-Trader → Senior Discretionary Trader (LLM-led)
+# Proposal: AI-Trader — Roadmap расширения market context (после v0.13)
 
-> **Статус:** DRAFT / PENDING APPROVAL. Не реализовано. Реализация планируется
-> в отдельной ветке (например `feat/discretionary-trader`) после подтверждения
-> пользователя и наблюдения 24+ часов за текущей v0.12-логикой.
->
-> **Дата создания:** 2026-05-12
-> **Автор контекста:** запрос пользователя «я хочу создать опытного трейдера
-> из LLM, а не бота который у него советуется».
+> **Статус:** DRAFT / PENDING APPROVAL. Не реализовано.
+> **Дата создания:** 2026-05-18 (после деплоя v0.13 Nof1-style meta-cognition).
+> **Реализация:** не раньше 2026-05-19. Сегодня — наблюдение за v0.13 baseline.
+> **Запрос пользователя:** «что из {Data Layer / Analysis Layer / Decision /
+> Execution / Monitoring / Agents} можно добавить нашему текущему боту».
 
 ---
 
 ## 1. Цель
 
-Сейчас промпт `SYSTEM_PROMPT` представляет собой длинный чек-лист правил
-(«Counter-trend ONLY when ALL THREE…», «RSI MUST be ≤25», «need 2+
-confirmations», «HOLD is always safe»). LLM по факту играет роль
-**бухгалтера**, валидирующего условия — а не **трейдера**, который
-взвешивает сетап на основе опыта.
+Расширить **Data Layer** `ai_trader`-а несколькими бесплатными Bybit-сигналами,
+чтобы у LLM появился больший набор реальных микро-структурных и
+позиционных входов. Это **расширение контекста**, а не изменение
+стратегии — все наши триггеры (PEAK-DRAWDOWN, LOCKED-PROFIT,
+ADVERSE-NEW-EVIDENCE, SETUP INVALIDATION) и dual-timer остаются как есть.
 
-Цель: переложить ответственность за **тактику** на LLM. Код оставляет за
-собой только **безопасность капитала** (то, что нельзя нарушить даже на
-самом сильном убеждении).
+Параллельно — закрыть Этап 2 плана v0.13 (self-feedback по calibration
+данным confidence ↔ realised PnL).
 
-## 2. Принцип разделения: HARD vs SOFT
+## 2. Принципы
 
-### HARD — остаётся в коде (capital safety)
+- **Без изменения стратегии.** Старые правила и триггеры на месте.
+  Новые сигналы — это пища для CoT LLM, не новые механические
+  правила входа/выхода.
+- **Бесплатные источники.** Только Bybit endpoint'ы, никаких
+  Glassnode/Twitter/Nansen ($30-300/мес — не оправдано на $500 demo).
+- **Lesson learned (v0.4–v0.5 rollback i1-i6, 2026-05-11):** если
+  сигнал упоминается в промпте, он ДОЛЖЕН реально передаваться в
+  market context, иначе LLM начнёт галлюцинировать значения. Каждая
+  новая фича = (1) data fetch + (2) формат в `format_context_for_*`
+  + (3) упоминание в промпте + (4) unit-тест что данные действительно
+  доходят. Иначе не мержим.
+- **Sample-size правило** (`.cursor/rules/sample-size.mdc`): tune /
+  rollback фичи разрешено только после ≥100 сделок или ≥2 недель
+  данных и p-value < 0.05. До этого — наблюдаем, не подкручиваем.
+- **No-data-fitting** (`.cursor/rules/no-data-fitting.mdc`): пороги
+  интерпретации сигналов (что считать «extreme L/S ratio»,
+  «persistent funding bias») — из канонической литературы / Bybit
+  research, не из интуиции и не подгонкой под последние N сделок.
+- **Каждая фича = отдельный коммит** + отдельная неделя наблюдения,
+  чтобы можно было точно атрибутировать impact и при необходимости
+  атомарно откатить (revert конкретного коммита).
 
-| Что | Где сейчас | После изменений |
-|---|---|---|
-| Max 3 одновременных позиций | `KillSwitch.check_can_open_position` | без изменений |
-| Max leverage 5x | `KillSwitch` | без изменений |
-| Risk per trade ≤ $10 | `executor._apply_open` qty rounding + reject | без изменений |
-| Daily loss limit $50 | `KillSwitch` | без изменений |
-| Total loss limit $200 | `KillSwitch` | без изменений |
-| Allowed symbols whitelist | `parse_action` | без изменений |
-| Direction check (SL/TP) | `executor._apply_open` | без изменений |
-| **R:R ≥ 1.5** | **только в промпте (soft)** | **перенести в `executor._apply_open` (hard)** |
+## 3. Предложения по приоритету ROI
 
-R:R — единственное изменение в коде. Если LLM попытается открыть с R:R<1.5,
-executor отклонит до отправки на биржу, в БД попадёт запись с error. Это
-**математическая невозможность бить рынок с положительным edge** при низком
-R:R на длинной выборке — это не «опыт трейдера», это арифметика expectancy.
+### Step 1: Long/Short ratio (Bybit `get_long_short_ratio`)
 
-### SOFT — отдаётся LLM (тактические решения)
+**Что добавляем:** retail-positioning ratio (`buyRatio`/`sellRatio`)
+для каждого символа в полном цикле.
 
-| Что | Сейчас в промпте | Цель |
-|---|---|---|
-| Counter-trend rules | «ONLY when ALL THREE: RSI≤25 + BB touch + news catalyst» | guidance: «counter-trend takes stronger evidence than trend-aligned — your judgement» |
-| RSI пороги для входа | «trend-aligned RSI<30/>70, counter-trend RSI≤25/≥75» | информационные лейблы `[OVERSOLD]`/`[EXTREME OVERSOLD]` остаются, но НЕ как rule |
-| Need 2+ confirmations | mandatory rule | guidance: «articulate your edge in 1-2 lines; if you can't, hold» |
-| Trend confirmation prefer | «prefer trades aligned with 4H trend» | guidance: «4H trend is your default direction; counter-trend needs more conviction» |
-| Exit triggers 1/2/3/4 | формальный чек-лист, cite-list обязателен | guidance: «here's how experienced traders think about early exits» |
-| Entry quality 2+ confirmations | mandatory | LLM decides |
-| «HOLD is always safe» | категорично | оставить как «HOLD is a valid choice», не «is safe» |
+**Источник:** Bybit V5 endpoint `/v5/market/account-ratio`. Free.
+Параметры: `category=linear`, `symbol`, `period=4h` (≈ наш 4H
+horizon). Возвращает `buyRatio` (0–1) и `sellRatio` (0–1).
 
-## 3. Конкретное изменение в коде
+**Каноническая интерпретация (Bybit Research 2024 + Coinglass 2026):**
+- `buyRatio ≥ 0.65` AND price падает 24h → классический **long-squeeze
+  setup**, потенциал contrarian-short если есть второй сигнал.
+- `buyRatio ≤ 0.35` AND price растёт 24h → **short-squeeze setup**,
+  contrarian-long потенциал.
+- `0.40–0.60` — нейтральная зона, не интерпретируем.
 
-### 3.1 `src/ai_trader/trading/executor.py` — добавить R:R hard-check
+**Формат в контексте:**
+`SYMBOL: L/S ratio 4h = 0.71 [retail long extreme — contrarian short risk]`
 
-Внутри `_apply_open` после direction-check добавить:
+**Где интерпретация записана:** в `SYSTEM_PROMPT` появится 2-3 строки
+«How to use L/S ratio» (с явными порогами), и в `EXIT MANAGEMENT
+trigger 3 ADVERSE NEW EVIDENCE` — добавим один bullet «L/S ratio
+flipped against position from extreme zone».
 
-```python
-# R:R hard-check — capital protection invariant, не trader's discretion.
-# При длинной выборке низкий R:R математически не даёт positive expectancy.
-risk_dist = abs(price - sl_price)
-reward_dist = abs(tp_price - price)
-if risk_dist <= 0 or reward_dist / risk_dist < 1.5:
-    rr = (reward_dist / risk_dist) if risk_dist > 0 else 0
-    return ApplyResult(
-        executed=False, summary="",
-        error=f"R:R {rr:.2f} < 1.5 hard limit (TP {tp_price}, price {price}, SL {sl_price})",
-    )
-```
+**Почему НЕ механический триггер:** мы уже откачивали i1-i6 в
+2026-05-11 из-за галлюцинаций. На этот раз — только context-add для
+LLM CoT, без обязательной интерпретации.
 
-Тест:
-```python
-class TestRrHardCheck:
-    def test_reject_rr_below_1_5(self): ...  # Buy, R:R=1.2 → reject
-    def test_accept_rr_exactly_1_5(self): ... # Buy, R:R=1.5 → accept
-    def test_reject_rr_below_1_5_sell(self): ... # Sell
-```
+**Объём:**
+- `src/ai_trader/trading/client.py`: метод `get_long_short_ratio(symbol, period)`.
+- `src/ai_trader/trading/context.py`: дотягиваем в `collect_market_context`
+  (только full cycle, не review — review-цикл lite).
+- `src/ai_trader/llm/prompts.py`: 3-5 строк описания в `WHAT YOU SEE` +
+  `MARKET CONTEXT` секциях.
+- Тесты: 4-6 шт. (data parsing / extreme labels / включение в context /
+  отсутствие галлюцинаций когда API вернул None).
 
-### 3.2 `src/ai_trader/llm/prompts.py` — переписать `SYSTEM_PROMPT`
+**Время:** 2-3 часа.
 
-Новая структура (черновик):
-
-```
-You are a senior discretionary crypto perpetual-futures trader with 10+ years
-of experience trading BTC, ETH, BNB, XRP, DOGE. You read price action,
-multi-timeframe indicators, funding, and news flow — you don't follow checklists.
-
-INFRASTRUCTURE LIMITS (the bot enforces these — you cannot bypass them):
-- Maximum 3 simultaneous open positions.
-- Maximum 5x leverage per position.
-- Maximum $10 risk per trade (|entry-SL| * qty ≤ $10).
-- Maximum $50 daily realised loss / $200 total realised loss.
-- R:R must be ≥ 1.5 — if your idea has R:R < 1.5, the bot will reject it;
-  return HOLD instead of forcing a bad geometry.
-- Allowed pairs: BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, DOGEUSDT.
-
-DATA YOU SEE EACH CYCLE:
-- 24h price change, funding rate (with band label).
-- Last 12 hourly closes, 24h range.
-- 1H & 4H indicators: RSI(14), MACD(12/26/9), ATR(14), EMA20/50, Bollinger(20,2).
-- Crypto news headlines (when available, RSS, last 6h).
-- Your open positions with pre-computed peak_pnl_r / current_pnl_r in R-units.
-
-WHAT WE EXPECT FROM YOU:
-- Use the data fully — multi-timeframe alignment, volatility regime, funding
-  positioning, news context, R-units on open positions.
-- Make decisions like an experienced trader, not by checklist. RSI 32 in a
-  bear market isn't extreme — you know that. RSI 28 with a textbook lower BB
-  touch and a bullish catalyst is a setup — you know that too. Use judgement.
-- Counter-trend trades require more conviction than trend-aligned trades —
-  the bar for «I'm fading this move» is higher than «I'm joining this move».
-  How much higher is your call.
-- Be honest about uncertainty. If you don't see an edge, HOLD. If you see
-  one but it's borderline, smaller size or HOLD is fine.
-
-ANALYSIS COMMENTARY (3-7 short lines max):
-Briefly cite what you see (trend, volatility, sentiment, open positions
-status, the specific setup or invalidation). Don't follow a fixed template —
-just convey your read of the market in compact prose.
-
-DECISION JSON (single, last in response):
-{ "action": "open", ... } | { "action": "close", ... } | { "action": "hold", ... }
-[same schema as before]
-
-REMINDER: this is real money on a 14-day forward-test. Bad trades compound
-quickly at 2% risk. Patience and edge come first; activity for activity's
-sake is the enemy.
-```
-
-Размер: ~50 строк вместо текущих ~280.
-
-### 3.3 `SYSTEM_PROMPT_REVIEW` — аналогично сжать
-
-Сейчас review-prompt тоже жёстко-чек-лист'ный. Цель: «as an experienced
-trader, briefly assess each open position — is the original idea still
-working? If not, close. If yes, hold. Use peak/current R-units, 1H
-indicators and funding as your inputs. No new opens this cycle.»
-
-### 3.4 BUILDLOG запись
-
-Полный BUILDLOG-блок с пунктом «изменение стратегии (не bug-fix)» и
-обоснованием — переход к LLM-driven discretion.
-
-## 4. Риски и митигации
-
-| Риск | Мониторинг | Митигация |
-|---|---|---|
-| LLM торгует чаще и хуже без жёстких правил | Считать open-decisions / sutki, сравнивать WR/PF до и после | Если WR падает >10% при n≥30 — вернуть часть rule-based ограничений |
-| LLM игнорирует R:R и спамит low-quality entries | Логировать reject'ы по R:R-hard в БД | hard-reject уже в коде — депозит защищён |
-| LLM «галлюцинирует» данные (как было с VWAP/L-S) | Promp clean-up в v0.12 уже исключил это; явно сказано «use ONLY data shown» | + regex-тест на forbidden fragments сохраняется |
-| LLM начинает counter-trend «по интуиции» в downtrend | Сравнить % counter-trend trades и их PnL до/после | Если counter-trend WR < trend-aligned WR на ≥15% при n≥30 — вернуть rule про trend-alignment |
-
-## 5. Что **не должно** делаться в Шаге 1
-
-- Не добавлять новые данные (VWAP / OI / L-S / F&G / orderflow) — это **Шаг 2**, отдельный проект.
-- Не менять capital limits ($10/$50/$200/3 pos/5x lev).
-- Не менять polling intervals (15min full / 5min review).
-- Не менять список pairs.
-- Не менять model (deepseek-v4-flash).
-
-Цель Шага 1: измерить только эффект **смены стиля промпта** при одинаковом
-data-окружении.
-
-## 6. Шаг 2 (позже, отдельная PR)
-
-После 1-2 недель Шага 1 и оценки результата — добавить в контекст реальные
-2026-сигналы которых сейчас нет:
-
-- **VWAP** — реализовать в `indicators.py` (rolling 20-bar or session VWAP).
-- **L/S ratio** — через `bybit.get_long_short_ratio`.
-- **OI delta** — через `bybit.get_open_interest` (24h % change).
-- **Funding history** — через `get_funding_rate_history` (текущая ставка vs avg за 24h).
-- **F&G index** — через alternative.me API (1 запрос/час).
-
-Это даёт «опытному трейдеру» инструменты институционального уровня которые
-он сейчас не имеет.
-
-## 7. Реализация (когда даст добро)
-
-Чек-лист порядка действий:
-
-- [ ] Создать ветку `feat/discretionary-trader` от текущей main (post-v0.12).
-- [ ] `executor.py`: добавить R:R hard-check + 3 теста.
-- [ ] `prompts.py`: переписать `SYSTEM_PROMPT` (~50 строк) и
-      `SYSTEM_PROMPT_REVIEW` (~30 строк).
-- [ ] Обновить `build_user_prompt` и `build_user_prompt_review` если
-      изменится структура commentary.
-- [ ] Обновить существующие тесты которые проверяют конкретные фразы
-      «MUST / ONLY / ALL THREE» — заменить на новые ожидания (что промпт
-      содержит «infrastructure limits», «senior discretionary», «R:R must
-      be ≥ 1.5», и т.д.).
-- [ ] Удалить regex-тесты на жёсткие фразы; оставить regex-тест на
-      forbidden fragments (VWAP/F&G/OI/etc — не должны вернуться).
-- [ ] BUILDLOG_AI_TRADER.md: запись v0.13 + явное предупреждение о
-      smene strategy.
-- [ ] Локальный pytest зелёный.
-- [ ] Деплой в ветку через `--no-deps --build ai-trader` НЕ на VPS-main,
-      а только локально / в отдельный контейнер если есть. ИЛИ
-      merge в main + наблюдение.
-- [ ] Метрики до/после: open/cycle, close-early/cycle, WR, PF, средний R.
-
-## 8. Как откатиться
-
-Так как это изменение стратегии (не bug-fix), фиксируем baseline до v0.13
-и держим возможность revert:
-
-- Создать тег `pre-discretionary-v0.12` на текущем main коммите
-  (`af8de1c` после v0.12).
-- При плохих результатах: `git revert <merge-commit>` или
-  `git reset --hard pre-discretionary-v0.12`.
+**Риск:** **средний.** Прецедент отката i1-i6 → mitigation = (a) явный
+test что данные передаются в промпт, (b) graceful degrade если API
+endpoint молчит (label `[L/S unavailable]`, не упоминать в выводах).
 
 ---
 
-## Приложение A. Текущая статистика для baseline
+### Step 2: Расширенная funding history (Bybit `get_funding_rate_history`)
 
-На момент создания этого документа (после v0.12 deploy 2026-05-12 ~16:00 UTC):
+**Что добавляем:** последние 8 funding periods (Bybit funding каждые
+8 часов = ~2.5 суток истории) для каждого символа.
 
-- **49 последних open-decisions** (период 2026-05-07 → 2026-05-12):
-  - ~28 опирались на галлюцинированные signals (VWAP / retail L-S / OI /
-    F&G / orderbook) — этих данных в контексте никогда не было.
-  - ~6 trend-aligned (4H в направлении entry).
-  - ~3 counter-trend с реальным RSI extreme + BB touch.
-  - ~12 counter-trend с RSI 26-34 («near oversold») — слабый сетап.
+**Источник:** Bybit V5 `/v5/market/funding/history`. Free.
+Параметры: `category=linear`, `symbol`, `limit=8`.
 
-- **Open positions @ deploy**: 1 (XRPUSDT id=новый, after id=58 −$4.51 closed).
+**Каноническая интерпретация** (Lambda Finance 2026 funding bands,
+уже есть в нашем v0.3 промпте):
+- Текущее значение — как сейчас.
+- НОВОЕ: **persistent bias** — «funding был positive (≥0.01%) в
+  N из 8 периодов». N ≥ 6 = «sustained bullish positioning» →
+  накопленный squeeze risk (Bybit Research 2024, BBX Trade Mgmt 2026).
 
-Эти числа — точка отсчёта для оценки Шага 1.
+**Формат:**
+`SYMBOL: funding=+0.012% [mild lean: longs paying] | history 8p: +6 / -1 / 0=1 → persistent positive bias`
 
-## Приложение B. Цитаты пользователя (мотивация)
+**Зачем:** одиночное значение funding = слабый signal; **persistent**
+bias на 6/8 периодов — это уже накопленная фьючерсная очередь, которая
+исторически коррелирует со squeeze risk на дистанции 24-48 часов.
 
-- «у меня есть ощущение что бот заходит в позицию с неактуальными данными».
-- «нужно изучить нашего бота и всю его логику, у меня есть ощущение что где
-  то есть противоречия которые вводят бота в заблуждения».
-- «я хочу создать опытного трейдера из LLM а не бота который у него
-  советуется».
-- «давай посмотрим что будет делать с текущими правками 24 часа».
+**Объём:**
+- `client.py`: метод `get_funding_history(symbol, limit=8)`.
+- `context.py`: один формат-блок в snapshot.
+- `prompts.py`: расширение `MARKET CONTEXT → Funding rate framework`
+  абзаца, 4-5 строк про persistent bias.
+- Тесты: 3-4 шт. (history fetch / persistent label / graceful
+  degrade).
+
+**Время:** 1-2 часа.
+
+**Риск:** низкий. Funding rate уже есть в контексте, добавляем только
+расширенную history. Не вводим новых триггеров.
+
+---
+
+### Step 3: Calibration self-feedback (Этап 2 плана v0.13)
+
+**Что добавляем:** агрегированная статистика последних 10-20
+закрытых сделок в user_prompt — «свой track record» для LLM.
+
+**Источник:** локальная БД `positions` (уже есть с v0.13 поля
+`confidence`, `invalidation_condition`).
+
+**Формат:**
+```
+YOUR RECENT PERFORMANCE (last 20 closed trades):
+- Win rate: 60% (12W / 8L)
+- Avg confidence on wins: 0.68
+- Avg confidence on losses: 0.61
+- Best invalidation cite rate: 70% (14/20 closed for invalidation, not SL/TP)
+- Realised PnL: +$12.40 (avg R = +0.31 per trade)
+```
+
+**Зачем:** Nof1 называет это **cumulative metrics in prompt** — LLM
+видит свой реальный track record и начинает корректировать
+overconfidence. Mechanically free, 1 SQL query на цикл.
+
+**Когда включать:** после **≥10 закрытых сделок с v0.13** (т.е. после
+наблюдения, когда есть данные). До этого блок выглядел бы как
+`(insufficient data — collecting)`.
+
+**Объём:**
+- `state/db.py`: метод `get_recent_performance_stats(limit=20)`.
+- `trading/context.py`: вставка блока в `collect_market_context`.
+- `prompts.py`: упоминание блока в `WHAT YOU SEE EACH CYCLE` +
+  один абзац как использовать («если ваш avg confidence на losses
+  > 0.65, вы overconfident — снижайте по умолчанию»).
+- Тесты: 4-5 шт. (SQL aggregation / format / graceful degrade с
+  малой выборкой / round-trip с v0.13 полями).
+
+**Время:** 2-3 часа.
+
+**Риск:** низкий. БД-only, без новых API вызовов.
+
+**Sample-size caveat:** статистика на ≥10 сделок ≠ статистически
+значимая. Это **psychological anchor** для LLM, не statistical truth.
+Промпт должен это явно признавать (Nof1 формулировка: «for
+self-reflection, not statistical inference»).
+
+---
+
+### Step 4 (опционально): Orderbook bid-ask imbalance (Bybit `get_orderbook`)
+
+**Что добавляем:** top-5 уровней bid/ask depth + spread в bps.
+
+**Источник:** Bybit V5 `/v5/market/orderbook`. Free.
+Параметры: `category=linear`, `symbol`, `limit=25`. Суммируем
+объём топ-5 bids и топ-5 asks, считаем imbalance = `(B-A)/(B+A)`.
+
+**Каноническая интерпретация:**
+- `imbalance > +0.4` = bids dominate → краткосрочный buy pressure.
+- `imbalance < -0.4` = asks dominate → краткосрочный sell pressure.
+- Spread > 5 bps = тонкая ликвидность, осторожнее с size.
+
+**Формат:**
+`SYMBOL: book imbalance top-5 = +0.34 [bids dominate], spread = 1.2 bps`
+
+**Зачем:** микро-структурный signal на масштабе минут — комплементарен
+1H/4H барам.
+
+**Caveat:** intraday signal, актуален на минутах, не часах. Наш цикл
+5-15 мин — на границе полезности. Поэтому это step **4 (опционально)**:
+включаем только если шаги 1-3 показали измеримый lift, иначе
+overhead не оправдан.
+
+**Время:** 2 часа.
+
+**Риск:** средний. Микроструктурные данные шумные, можно
+галлюцинировать «sell pressure» из 1-discrepancy snapshot.
+Mitigation = брать **3 последовательных снапшота** с интервалом 30с
+для стабильности, либо вообще откладывать до step 5.
+
+## 4. Что НЕ предлагается и почему
+
+| Идея | Почему НЕТ |
+|---|---|
+| On-chain (Glassnode/Nansen) | $30-300/мес. Polluted для 15-минутного intraday. ROI на $500 demo ≈ 0 |
+| Twitter/X sentiment | Twitter API ≥ $100/мес. RSS news уже даёт narrative |
+| CCXT вместо pybit | Рефакторинг ради рефакторинга. Регресс-риск без upside |
+| WebSocket вместо REST | HFT-инструмент. На 5-15 мин циклах REST достаточен |
+| Multi-agent (Analyst→Risk→Executor) | Overengineering. Nof1 побеждает в Alpha Arena одним LLM. 3-5× API cost за маржинальный gain |
+| FreqAI / классический ML | **Другая парадигма** (replace LLM). Это отдельный бот, не правка `ai_trader` |
+| Retraining LLM | LLM = foundation model, не дотренировывается user'ом. Эквивалент = step 3 (calibration self-feedback) |
+| Дополнительные пары (SOL/ADA/AVAX...) | Allowed pairs (BTC/ETH/BNB/XRP/DOGE) фиксированы стратегией. Расширять — отдельное решение со sample-size validation |
+| Liquidation heatmap / OI delta | Возможно в будущем, но Bybit `get_open_interest` уже один раз провалился (i1-i6 rollback). Отложить до пост-Step 3 |
+
+## 5. Implementation order и timeline
+
+| Шаг | Когда | Условие старта | Длительность | Окно наблюдения |
+|---|---|---|---|---|
+| **0. Наблюдение v0.13 baseline** | now → +7 дней | v0.13 deployed | 7 дней | ≥10 закрытых сделок с confidence/inv/risk_usd |
+| 1. L/S ratio | после step 0 | sample достаточен | 0.5 дня | 7 дней |
+| 2. Funding history | после step 1 | step 1 не сломал ничего | 0.5 дня | 7 дней |
+| 3. Calibration feedback | после step 2 | ≥20 closed trades | 0.5-1 день | 14 дней |
+| 4. Orderbook (опц.) | после step 3 | steps 1-3 дали измеримый lift | 0.5 дня | 14 дней |
+
+**Total elapsed:** ~5-6 недель (1 шаг + 1 неделя наблюдения = ~неделя
+на итерацию). Это features-velocity ниже чем «всё за один спринт», но
+именно так выглядит data-driven development без curve-fitting.
+
+## 6. Acceptance criteria (per step)
+
+Каждый шаг считается **готовым к мержу** только когда:
+
+1. Pytest зелёный (873/873 + новые тесты на этот шаг).
+2. Unit-тест на «данные реально передаются в промпт» (защита от
+   i1-i6 рецидива).
+3. Запись в `BUILDLOG_AI_TRADER.md` с (a) источником интерпретации,
+   (b) формулировкой в промпте, (c) запросом deploy и (d) первой
+   проверкой контейнера.
+4. Селективный rebuild только `ai-trader` контейнера
+   (`docker compose up -d --no-deps --build ai-trader`) —
+   не трогаем bybit-bot / advisor / ai-arena (правило
+   `deploy-vps.mdc`).
+5. Telegram-уведомление о первом цикле с новым сигналом для
+   verification.
+
+Каждый шаг считается **успешным** если:
+
+1. После недели наблюдения нет регрессий по WR/avg-R.
+2. LLM в commentary явно цитирует новый сигнал хотя бы раз (значит
+   данные доходят, не галлюцинируются).
+3. Нет stuck-states или прерываний цикла из-за новых API вызовов.
+4. p-value сравнения PnL до/после > 0.05 — НЕ значит фича плохая,
+   значит выборки малой; продолжаем.
+
+## 7. Risk mitigation (lessons from v0.4-v0.5 rollback)
+
+В мае 2026 мы откатили i1-i6 (OI / F&G / L-S / liquidations / DVOL)
+потому что:
+- Сигналы упоминались в промпте, но **не** передавались в
+  `format_context_for_prompt` → LLM галлюцинировал.
+- Слишком много новых полей одним коммитом → невозможно
+  атрибутировать impact.
+
+На этот раз:
+
+- **Один сигнал = один коммит.** Atomic-rollback возможен.
+- **Test-first:** unit-тест проверяет что строка с новым сигналом
+  присутствует в `format_context_for_prompt` output до того как
+  упомянуть это в `SYSTEM_PROMPT`.
+- **Graceful degrade:** если Bybit endpoint вернул `None` —
+  label `[L/S unavailable]`, и в промпте disclaimer «если сигнал
+  отсутствует в контексте — не используй».
+- **Sample-size честно:** делаем не «хочется быстрее», а «как надо
+  по правилу».
+
+## 8. Out of scope (не делаем в рамках этого proposal)
+
+- Multi-agent split (Analyst / Risk / Executor) — отдельный proposal
+  если когда-нибудь понадобится.
+- Замена DeepSeek-V4-flash на V4-Pro — параллельный эксперимент
+  через `ai_arena`, не трогаем `ai_trader` модель.
+- Real-money переход — отдельный proposal `MIGRATION_AI_TRADER_TO_REAL_MONEY.md`
+  (которого пока нет; аналог для `ai_arena` уже существует —
+  `MIGRATION_AI_ARENA_TO_REAL_MONEY.md`).
+- Изменение allowed pairs или risk cap 2% — стратегические решения,
+  не data layer.
+
+## 9. Связанные документы
+
+- `BUILDLOG_AI_TRADER.md` — история изменений, включая 2026-05-18 v0.13
+  и предыдущий rollback i1-i6.
+- `AI_TRADER_PROPOSAL_ALPHA_ARENA.md` — план полного перехода на
+  Nof1-clone (другой бот, не пересекается).
+- `.cursor/rules/sample-size.mdc` — пороги для tune/rollback.
+- `.cursor/rules/no-data-fitting.mdc` — research как источник
+  правды для параметров.
+- `.cursor/rules/strategy-guard.mdc` — какие изменения требуют
+  research-ссылки vs simple bug-fix.
+- `.cursor/rules/deploy-vps.mdc` — селективный rebuild для
+  изоляции от других ботов.

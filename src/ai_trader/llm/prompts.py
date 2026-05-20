@@ -112,7 +112,16 @@ close|hold, новые поля не нужны). Использование inv
 """
 from __future__ import annotations
 
-SYSTEM_PROMPT = """\
+from ai_trader.config.settings import DEFAULT_AI_SYMBOLS, AiTraderSettings
+
+# Placeholder ``__ALLOWED_PAIRS__`` рендерится в ``build_system_prompt(settings)``
+# по списку из ``settings.symbols``. SYSTEM_PROMPT (default render) сохранён
+# для backward-compat: тесты обращаются к нему как к константе и проверяют
+# наличие неизменных секций (CONFIDENCE CALIBRATION / PRE-REGISTERED
+# INVALIDATION / COMMON PITFALLS / PEAK-DRAWDOWN). Для real-use в main.py
+# использовать build_system_prompt(settings) — он подставит АКТУАЛЬНЫЙ
+# список монет из .env (AI_TRADER_SYMBOLS).
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are an experienced autonomous crypto perpetual-futures trader on Bybit.
 You combine multi-timeframe technical analysis, recent news flow, and
 funding/sentiment signals to make decisions. You think like a patient
@@ -131,7 +140,7 @@ CAPITAL RULES (hard constraints):
   If you can't find a setup with R:R >= 1.5, return action="hold".
 
 ALLOWED PAIRS (only these):
-- BTCUSDT, ETHUSDT, BNBUSDT, XRPUSDT, DOGEUSDT.
+- __ALLOWED_PAIRS__
 
 WHAT YOU SEE EACH CYCLE:
 - 24h price change and funding rate per symbol.
@@ -403,6 +412,34 @@ CRITICAL CONSTRAINTS:
 Remember: this is a 14-day experiment with $500 virtual capital. Bad
 trades compound; HOLD is always safe.
 """
+
+
+def _render_allowed_pairs(symbols: tuple[str, ...]) -> str:
+    """Format tuple of symbols в строку для подстановки в промпт.
+
+    Пример: ('LTCUSDT','ATOMUSDT','BTCUSDT') -> 'LTCUSDT, ATOMUSDT, BTCUSDT.'
+    """
+    return ", ".join(symbols) + "."
+
+
+def build_system_prompt(settings: AiTraderSettings) -> str:
+    """Render SYSTEM_PROMPT с актуальным whitelist пар из ``settings.symbols``.
+
+    Используется в main.py / executor.py — single source of truth для
+    списка разрешённых символов: ``.env`` (AI_TRADER_SYMBOLS) → settings →
+    промпт + парсер. Изменение whitelist в одном месте, нет рассинхрона.
+    """
+    return _SYSTEM_PROMPT_TEMPLATE.replace(
+        "__ALLOWED_PAIRS__", _render_allowed_pairs(settings.symbols)
+    )
+
+
+# Backward-compat: SYSTEM_PROMPT — default render с DEFAULT_AI_SYMBOLS.
+# Использовать ТОЛЬКО в тестах / при отсутствии settings (например docs).
+# Для real-use в LLM call — build_system_prompt(settings).
+SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace(
+    "__ALLOWED_PAIRS__", _render_allowed_pairs(DEFAULT_AI_SYMBOLS)
+)
 
 
 def build_user_prompt(market_context: str) -> str:

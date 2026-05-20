@@ -9,8 +9,11 @@
 Стратегия:
 - Кэш в памяти на 10 минут (cycle 15 минут — 1-2 fetch на цикл максимум).
 - Парсинг через `feedparser` (стандарт для RSS/Atom).
-- Фильтр по символам: ищем кошчевые слова в title/summary
-  (BTC/Bitcoin, ETH/Ethereum, BNB, XRP/Ripple, DOGE/Dogecoin).
+- Фильтр по символам: ищем ключевые слова в title/summary.
+  Маппинг — SYMBOL_KEYWORDS dict ниже. Текущий whitelist v0.14
+  (LTC/ATOM/BTC/SUI/LINK + историч. ETH/BNB/XRP/DOGE для backward
+  compat при переключении). Если монета не в SYMBOL_KEYWORDS, она
+  получит только GENERIC-новости.
 - Дедупликация по URL.
 - Top-N (default 8) свежих за последние N часов (default 6h).
 """
@@ -38,6 +41,15 @@ SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "BNBUSDT": ("binance coin", "bnb", "binance "),
     "XRPUSDT": ("xrp", "ripple"),
     "DOGEUSDT": ("dogecoin", "doge"),
+    # 2026-05-20: добавлены пары для нового whitelist (v0.14).
+    # Без этих ключей `filter_for_symbols` не подхватит специфичные новости
+    # по монете и она получит только GENERIC-новости (макро/Fed/ETF) —
+    # это потеря context для LLM. Ключи проверены вручную против
+    # CoinDesk/CoinTelegraph/Decrypt typical headline patterns.
+    "LTCUSDT": ("litecoin", "ltc", "charlie lee", "mweb"),
+    "ATOMUSDT": ("cosmos", "atom", "ibc ", "tendermint", "interchain"),
+    "SUIUSDT": ("sui ", "sui network", "mysten", "move language"),
+    "LINKUSDT": ("chainlink", "link ", "sergey nazarov", "ccip", "oracle network"),
 }
 
 # Generic crypto keywords — статья про "crypto market" релевантна всем.

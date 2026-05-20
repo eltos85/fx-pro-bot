@@ -100,6 +100,14 @@ services:
       - ./data:/data
 
   bybit-bot:
+    # 2026-05-20: ОТКЛЮЧЁН по решению пользователя.
+    # API stat за 30д: 278 trades, WR 47%, PnL −$274.29 (sample-size n>>100,
+    # statistical significance достаточная). Kept code intact — можно
+    # вернуть через `docker compose --profile disabled up -d bybit-bot`,
+    # но без флага profiles — контейнер не поднимается.
+    # См. BUILDLOG_AI_TRADER.md 2026-05-20 «v0.14 trader-discretion override».
+    profiles:
+      - disabled
     build:
       context: .
       dockerfile: Dockerfile.bybit
@@ -183,7 +191,12 @@ services:
       # Эксперимент 14 дней. ВСЕ параметры заморожены — менять = curve-fitting.
       AI_TRADER_POLL_INTERVAL_SEC: ${AI_TRADER_POLL_INTERVAL_SEC:-900}
       AI_TRADER_VIRTUAL_CAPITAL: ${AI_TRADER_VIRTUAL_CAPITAL:-500}
-      AI_TRADER_SYMBOLS: ${AI_TRADER_SYMBOLS:-BTCUSDT,ETHUSDT,BNBUSDT,XRPUSDT,DOGEUSDT}
+      # 2026-05-20: whitelist пар обновлён по результатам 30д API stats.
+      # SYSTEM_PROMPT теперь template-driven — список монет берётся из
+      # settings.symbols (build_system_prompt(settings)), single source
+      # of truth = .env (AI_TRADER_SYMBOLS). Fallback ниже совпадает с
+      # текущим .env.
+      AI_TRADER_SYMBOLS: ${AI_TRADER_SYMBOLS:-LTCUSDT,ATOMUSDT,BTCUSDT,SUIUSDT,LINKUSDT}
       # Killswitch (v0.3, 2%-риск): согласно AUDIT_2026.md P1, переход на
       # mainstream 2026 risk per trade 1–2% (KuCoin Risk Mgmt 2026, Atlas Peak
       # Research, Hyper-Quant). При 2% риска = $10 макс на сделку × 5 = $50/день.
@@ -210,8 +223,9 @@ services:
       # Включать в LIVE только после проверки первых 1-2 циклов под наблюдением.
       AI_TRADER_TRADING_ENABLED: ${AI_TRADER_TRADING_ENABLED:-false}
       # News (Wave 3): RSS-агрегатор CoinDesk/CoinTelegraph/Decrypt, без auth.
-      # Кэш в памяти 10 мин, фильтр по символам (BTC/ETH/BNB/XRP/DOGE) +
-      # generic-keywords (ETF, Fed, regulation). Top-N свежих за last_age_hours.
+      # Кэш в памяти 10 мин, фильтр по символам (см. SYMBOL_KEYWORDS в
+      # src/ai_trader/news/rss.py) + generic-keywords (ETF, Fed, regulation).
+      # Top-N свежих за last_age_hours.
       AI_TRADER_NEWS_ENABLED: ${AI_TRADER_NEWS_ENABLED:-true}
       AI_TRADER_NEWS_MAX_AGE_HOURS: ${AI_TRADER_NEWS_MAX_AGE_HOURS:-6}
       AI_TRADER_NEWS_MAX_ITEMS: ${AI_TRADER_NEWS_MAX_ITEMS:-8}
