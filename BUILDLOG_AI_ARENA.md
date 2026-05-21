@@ -18,6 +18,98 @@
 
 ## 2026-05-21
 
+### v2.y user-approved exception: Performance Self-Reflection by Leverage Tier
+
+**Контекст.** После v2.x bug-fix (Mid prices = OHLC4 + scaled_cash unclamped)
+ai-arena всё ещё уверенно торгует в минус. Ключевой паттерн из аудита:
+
+| Tier (gist mapping) | n  | WR  | sum PnL    |
+|---------------------|----|-----|------------|
+| 1-3x (low conv)     | 12 | 42% | +$30.05    |
+| 4-8x (medium conv)  | 13 | 23% | −$348.40   |
+| 9-20x (high conv)   | 0  | —   | —          |
+
+LLM показывает явную miscalibration: при low-conviction (1-3x) — net positive,
+при medium-conviction (4-8x) — массовая просадка. Канон gist'а
+(confidence→leverage mapping L100-101) предполагал что high-conviction
+сделки лучше low-conviction. Эмпирически — наоборот.
+
+**Что сделано (по явному решению пользователя «сделай одно исключение,
+я разрешил»):**
+
+1. `AiArenaStore.get_pnl_by_leverage_tier()` — агрегат closed positions
+   по 3 leverage-tier'ам gist'а (1-3x / 4-8x / 9-20x). Возвращает
+   per-tier `n_trades / n_wins / sum_pnl / avg_pnl`. Источник
+   `realized_pnl_usd` тот же, что для cumulative Sharpe и
+   total_return_pct (закрытые позиции с не-NULL PnL).
+2. `_format_leverage_tier_block` в `prompts.py` — рендерит данные
+   в формате:
+
+   ```
+   - Performance by Leverage Tier (cumulative since experiment start):
+     - 1-3x: n=12, wins=5 (42%), avg_pnl=+$2.50, sum_pnl=+$30.05
+     - 4-8x: n=13, wins=3 (23%), avg_pnl=-$26.80, sum_pnl=-$348.40
+     - 9-20x: n=0 (no data)
+   ```
+
+   При `leverage_stats=None` или всех нулевых tier'ах →
+   `(no closed trades yet — insufficient history)`.
+3. `build_user_prompt(..., leverage_stats=...)` принимает новый
+   опциональный параметр (default `None` для backward compat в тестах).
+   Блок встроен в секцию **Performance Metrics** между Sharpe и
+   Account Status — строго в существующую performance-feedback зону.
+4. `app/main.py` подтягивает `store.get_pnl_by_leverage_tier()` каждый
+   цикл и пробрасывает в `build_user_prompt`. Кэширования нет —
+   данные пересчитываются заново после каждого reconcile.
+
+**Семантика — почему это допустимо:**
+
+- Это **data-driven feedback**, не «полезный совет». Цифры берутся из
+  той же realized_pnl что Sharpe / Total Return — те же поля БД.
+- Аналог cumulative Sharpe — тот же mechanism (бот видит свою
+  историю), только разбитый по другому измерению (leverage вместо
+  агрегата).
+- LLM сам интерпретирует и сам решает, не директива «не делай 4-8x».
+  В прошлой сессии Nof1 такая же self-feedback механика реализована
+  через cumulative_sharpe и total_return_pct (gist L376-379).
+- Совместимо со stateless design: `leverage_stats` пересчитывается
+  каждый цикл из БД, conversation history не нужна.
+
+**Что НЕ изменено:**
+- SYSTEM_PROMPT — ни байта.
+- Output JSON schema — без изменений.
+- Action space — без изменений.
+- Никаких hard-cap'ов leverage server-side. Только feedback —
+  decision остаётся LLM'у.
+
+**Правило обновлено:** `.cursor/rules/ai-arena-sources.mdc` теперь
+содержит раздел «Допустимые исключения по решению пользователя» с
+точной цитатой реплики и списком acceptance criteria.
+
+**Acceptance criteria (n=180 для sample-size:**
+- Через 7 дней (примерно 5-7 закрытых сделок в день) — повторить
+  `collect_bybit_3bots_stats.py` с per-leverage breakdown.
+- Если LLM начнёт смещаться к 1-3x на основе видимой негативной
+  истории 4-8x → гипотеза подтверждается, оставляем.
+- Если no change или ухудшение → обсудить переформулировку блока
+  (per-symbol дробление, скользящее окно, hide tier с n<3) или
+  откат.
+
+**Files:**
+- `src/ai_arena/state/db.py` — `get_pnl_by_leverage_tier`
+- `src/ai_arena/llm/prompts.py` — `_format_leverage_tier_block`,
+  обновлённый `build_user_prompt`
+- `src/ai_arena/app/main.py` — proxying leverage_stats
+- `.cursor/rules/ai-arena-sources.mdc` — раздел «Допустимые исключения»
+- `tests/test_ai_arena_leverage_tier_feedback.py` — 15 новых тестов
+  (агрегация / форматирование / интеграция / backward compat)
+
+**Sample-size guard.** Текущая выборка n=12 (1-3x) и n=13 (4-8x) —
+ниже порога `sample-size.mdc` для disable/enable решений
+(минимум 100 сделок). Поэтому LLM не получает рекомендацию
+«не делай 4-8x» — только сами цифры. Решение «менять или не менять
+поведение» — на стороне LLM, не правила.
+
 ### v2.x bug-fix: «Mid prices» = OHLC4 (вместо close) + scaled_cash без clamp до 0
 
 **Контекст.** За 30-day API-stat ai-arena показал WR 20% / PnL −$1840.65

@@ -667,3 +667,68 @@ class AiArenaStore:
                 """
             ).fetchone()
         return (int(row[0]) if row else 0, int(row[1]) if row else 0)
+
+    # ─── Performance Self-Reflection by Leverage Tier ────────────────────
+    #
+    # v2.y user-approved exception (2026-05-21): см. правило
+    # `ai-arena-sources.mdc` § «Допустимые исключения по решению пользователя».
+    #
+    # Aggregate cumulative PnL и win-rate, разбитые по leverage-tier из
+    # gist confidence→leverage mapping (gist L100-101):
+    #   - low conviction:    confidence 0.30-0.50 → leverage 1-3x
+    #   - medium conviction: confidence 0.50-0.70 → leverage 4-8x
+    #   - high conviction:   confidence 0.70-1.00 → leverage 9-20x
+    #
+    # Используется в `build_user_prompt` как calibration self-feedback,
+    # аналог cumulative Sharpe/total_return_pct (но per-tier).
+
+    LEVERAGE_TIERS: tuple[tuple[str, int, int], ...] = (
+        ("1-3x", 1, 3),
+        ("4-8x", 4, 8),
+        ("9-20x", 9, 20),
+    )
+
+    def get_pnl_by_leverage_tier(self) -> list[dict[str, Any]]:
+        """Cumulative per-tier stats для closed positions с realized_pnl != NULL.
+
+        Возвращает list of 3 dicts (один per tier) в порядке LEVERAGE_TIERS.
+        Каждый dict: ``{label, lev_min, lev_max, n_trades, n_wins, sum_pnl, avg_pnl}``.
+        Если в tier нет ни одной закрытой сделки — n_trades=0, остальные 0.0.
+
+        Stateless: запрос против БД на каждом цикле (cycle = 180s, нагрузка
+        пренебрежимая). Не кэшируется — иначе после reconcile-ев данные
+        могут отстать. Sample-size guard внутри `build_user_prompt` —
+        здесь возвращаем всё как есть.
+        """
+        result: list[dict[str, Any]] = []
+        with self._conn() as c:
+            for label, lo, hi in self.LEVERAGE_TIERS:
+                row = c.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS n,
+                        COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                        COALESCE(SUM(realized_pnl_usd), 0) AS sum_pnl
+                    FROM positions
+                    WHERE closed_at IS NOT NULL
+                      AND realized_pnl_usd IS NOT NULL
+                      AND leverage BETWEEN ? AND ?
+                    """,
+                    (lo, hi),
+                ).fetchone()
+                n = int(row[0]) if row else 0
+                wins = int(row[1]) if row else 0
+                sum_pnl = float(row[2]) if row else 0.0
+                avg_pnl = (sum_pnl / n) if n > 0 else 0.0
+                result.append(
+                    {
+                        "label": label,
+                        "lev_min": lo,
+                        "lev_max": hi,
+                        "n_trades": n,
+                        "n_wins": wins,
+                        "sum_pnl": sum_pnl,
+                        "avg_pnl": avg_pnl,
+                    }
+                )
+        return result

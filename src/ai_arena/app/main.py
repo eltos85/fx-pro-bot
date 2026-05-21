@@ -229,6 +229,10 @@ def _run_cycle(
     )
 
     system_prompt = build_system_prompt(settings)
+    # v2.y user-approved exception (2026-05-21): per-leverage-tier
+    # performance self-reflection. См. правило ai-arena-sources.mdc
+    # § «Допустимые исключения по решению пользователя» и BUILDLOG_AI_ARENA.md.
+    leverage_stats = store.get_pnl_by_leverage_tier()
     user_prompt = build_user_prompt(
         minutes_elapsed=minutes_elapsed,
         per_symbol_blocks=format_per_symbol_blocks(ctx),
@@ -237,6 +241,7 @@ def _run_cycle(
         cash=scaled_cash,
         equity=scaled_equity,
         open_positions_block=open_pos_block,
+        leverage_stats=leverage_stats,
     )
 
     log.info(
