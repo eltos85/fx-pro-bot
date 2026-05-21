@@ -27,6 +27,7 @@ import time
 from datetime import UTC, datetime
 
 from ai_arena.analysis.sharpe import cumulative_sharpe
+from ai_arena.app.scaling import compute_scaled_account
 from ai_arena.config.settings import AiArenaSettings
 from ai_arena.llm.client import DeepSeekArenaClient
 from ai_arena.llm.prompts import build_system_prompt, build_user_prompt
@@ -220,20 +221,12 @@ def _run_cycle(
     # 1-в-1 (а не делится на divisor — это давало некорректное
     # «+$0.15 за реальную +$7.32 прибыль»).
     real_at_start = _get_or_init_real_anchor(store, ctx.real_equity_usd)
-    cumulative_real_pnl = ctx.real_equity_usd - real_at_start
-    scaled_equity = settings.virtual_capital_usd + cumulative_real_pnl
-    # cash на стороне Bybit за вычетом «скрытой» части real_at_start
-    # (которая не должна быть видна LLM как доступная). Если real_avail
-    # = real_equity (нет открытых), то scaled_cash = scaled_equity.
-    scaled_cash = ctx.available_cash_usd - (real_at_start - settings.virtual_capital_usd)
-    if scaled_cash < 0:
-        # Защита: когда позиции лочат больше чем sandbox-cash, обнуляем
-        # (LLM не должен видеть отрицательный cash — формат source).
-        scaled_cash = 0.0
-
-    # total_return_pct = % изменения sandbox-equity от virtual_capital
-    # (cumulative с момента старта, 1-в-1 с Nof1 Season 1).
-    total_return_pct = (cumulative_real_pnl / settings.virtual_capital_usd) * 100
+    scaled_equity, scaled_cash, total_return_pct = compute_scaled_account(
+        real_equity_now=ctx.real_equity_usd,
+        real_at_start=real_at_start,
+        real_available_cash=ctx.available_cash_usd,
+        virtual_capital_usd=settings.virtual_capital_usd,
+    )
 
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(
@@ -253,7 +246,7 @@ def _run_cycle(
         ctx.real_equity_usd,
         real_at_start,
         scaled_equity,
-        cumulative_real_pnl,
+        ctx.real_equity_usd - real_at_start,
         total_return_pct,
         f"{sharpe:.3f}" if sharpe is not None else "n/a",
         minutes_elapsed,

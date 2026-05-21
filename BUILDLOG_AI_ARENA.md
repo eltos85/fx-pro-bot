@@ -16,6 +16,163 @@
 
 ---
 
+## 2026-05-21
+
+### v2.x bug-fix: «Mid prices» = OHLC4 (вместо close) + scaled_cash без clamp до 0
+
+**Контекст.** За 30-day API-stat ai-arena показал WR 20% / PnL −$1840.65
+на n=219 trades (sample-size порог пройден). За 2 дня после v0.14
+(20-21 мая): WR 21%, PnL −$644 на n=24. Persistent сигнал — что-то
+системно не так. Запросили full audit реализации vs gist + tech post.
+
+Аудит нашёл **2 confirmed bugs** в передаче данных, оба чинятся как
+compliance с правилом `.cursor/rules/ai-arena-sources.mdc` (не как
+отклонение от source). Подняты при extended Bybit↔Hyperliquid mapping.
+
+### Bug 1: «Mid prices» в intraday array = close prices
+
+**Симптом.** В user prompt каждый цикл выводит:
+
+```
+**Intraday Series (3-minute intervals, oldest → latest):**
+
+Mid prices: [77445.2, 77432.1, ...]
+```
+
+Лейбл `Mid prices:` соответствует gist L361 (`Mid prices: [{btc_prices_3m}]`),
+но в массиве — **close prices** 3-минутных свечей (`indicators.py:
+build_intraday_snapshot`, raw `bars_closes[-take_n:]`). LLM думает что
+видит mid (как у Nof1/Hyperliquid), фактически получает close.
+
+**Семантическая разница close vs mid:**
+- close = цена последней сделки в баре (привязана к direction last taker)
+- mid = (bid+ask)/2 в момент close (нейтральный к direction)
+
+Для волатильных активов на 3m TF разница может быть 0.05-0.20% — на 5x
+leverage это уже заметный data-noise для индикаторов уровня RSI/MACD,
+которые LLM использует для entry/exit.
+
+**Фикс.** OHLC4 = `(open + high + low + close) / 4` — каноническая
+«typical bar price», ближайшая аппроксимация mid за период бара (без
+доступа к tick-by-tick orderbook, которого Bybit klines не отдают).
+Эта аппроксимация — **расширение** разрешённого правилом «Bybit ↔
+Hyperliquid маппинг» (правило L107-119: `lastPrice вместо mid-price`
+для snapshot price; теперь ту же логику применяем к intraday array,
+потому что Bybit V5 klines не дают per-bar mid в одном поле).
+
+**Что важно сохранено:**
+- Лейбл `Mid prices:` не меняется (1-в-1 с gist L361 — текст source
+  неприкосновенен по правилу L103-105 «strict 1-в-1»).
+- Индикаторы (RSI/MACD/EMA/ATR) **по-прежнему считаются на close**-
+  prices — это финансово-математический канон. Только массив
+  `prices` для display = OHLC4.
+- В `build_intraday_snapshot` добавлен опциональный параметр
+  `display_prices: list[float] | None = None` (backward compat: если
+  None — fallback к bars_closes, как было).
+
+### Bug 2: `scaled_cash` clamp `< 0 → 0` (отсебятина не из правила)
+
+**Симптом.** `main.py` линии 229-232 (до фикса):
+
+```python
+scaled_cash = ctx.available_cash_usd - (real_at_start - settings.virtual_capital_usd)
+if scaled_cash < 0:
+    scaled_cash = 0.0
+```
+
+Когда margin использован > virtual_capital, LLM видел `Available Cash:
+$0.00` и канон-формула из source (gist § Position Sizing):
+
+```
+Position Size (USD) = Available Cash × Leverage × Allocation %
+```
+
+обнулялась → невозможно открыть новые позиции даже когда margin реально
+доступен через `equity = cash + unrealized`. Это блокировало capability
+LLM пирамидизировать прибыльные сделки или диверсифицировать в overlevered
+state.
+
+**Правило `ai-arena-sources.mdc` L130-133** прямо фиксирует формулу:
+
+```
+scaled_cash = real_available_cash − (real_equity_anchor − virtual_capital_usd)
+```
+
+— **без clamp**. Clamp `< 0 → 0` был наша отсебятина (по комментарию в
+коде «защита: LLM не должен видеть отрицательный cash — формат source»).
+
+**Фикс.** Убрать clamp. `scaled_cash` показывается как есть (может быть
+отрицательным при overleveraged state) — это **намеренный сигнал** LLM
+«нет свободного margin под новые позиции», ровно то что должно быть в
+этой ситуации. Если scaled_cash отрицательный, формула sizing даёт
+отрицательную Position Size → LLM не открывает новую позицию (правильное
+поведение).
+
+**Refactoring**: формула вынесена в pure-функцию
+`src/ai_arena/app/scaling.py::compute_scaled_account` — это даёт:
+1. Тестируемость без зависимости от `anthropic` (main.py подтягивает
+   DeepSeekArenaClient → anthropic, не нужно для формулы).
+2. Single source of truth — формула в одном месте.
+
+### Что НЕ изменено (намеренно)
+
+- **SYSTEM_PROMPT текст** — 12 секций gist, ни байта не тронуто.
+- **JSON output schema** — `signal/coin/quantity/leverage/...` 1-в-1.
+- **Asset universe** — BTC/ETH/SOL/BNB/DOGE/XRP, тот же порядок.
+- **Action space** — `buy_to_enter | sell_to_enter | hold | close`.
+- **Cumulative Sharpe / total_return_pct** — без rolling-окна.
+- **Risk-management** на стороне LLM (без server-side caps).
+- **Leverage cap 1-20x** — guidance в промпте, не hard cap.
+
+Решение **не добавлять leverage warning** в промпт, хотя API-stats
+показали персистентную убыточность 5x+ leverage (n=13, sum −$348).
+Добавление calibration self-feedback нарушит правило L102-105 «полезные
+подсказки = ЗАПРЕЩЕНО, переформулировки текста source = ЗАПРЕЩЕНО».
+Если в дальнейшем понадобится — нужно сначала обновить правило
+с research-обоснованием (research feedback loop как разрешённый
+adaptation), потом править промпт. Решение зафиксировано как открытое
+к обсуждению.
+
+### Файлы
+
+- `src/ai_arena/analysis/indicators.py` — `build_intraday_snapshot`
+  принимает `display_prices` параметр.
+- `src/ai_arena/trading/context.py` — передаёт `ohlc4_prices` в
+  `build_intraday_snapshot`.
+- `src/ai_arena/app/scaling.py` — **новый файл** с pure-функцией
+  `compute_scaled_account` (вынесена из main.py).
+- `src/ai_arena/app/main.py` — использует `compute_scaled_account`,
+  inline-формула + clamp удалены.
+- `tests/test_ai_arena_indicators.py` — 3 новых теста на `display_prices`.
+- `tests/test_ai_arena_scaled_account.py` — **новый файл** с 11
+  тестами на формулу + регрессионный тест против clamp возврата.
+
+### Тесты
+
+`pytest` → 894 passed, 0 lint errors. Новые тесты:
+- `TestSnapshotBuilders::test_intraday_display_prices_override_used_for_prices`
+- `TestSnapshotBuilders::test_intraday_no_display_prices_falls_back_to_closes`
+- `TestSnapshotBuilders::test_intraday_display_prices_short_history_pads_zeros`
+- `TestComputeScaledAccountFormula` (3 теста)
+- `TestScaledCashNoClamp` (3 теста)
+- `TestEdgeCases` (3 теста)
+- `TestNoSilentClampRegression` (3 параметризованных теста — защита
+  от случайного возврата clamp в будущем).
+
+### Ожидание
+
+Не делаем выводов о «стало лучше» из 2-3 дней наблюдения post-fix
+(sample-size). Через 7 дней повторить `scripts/collect_bybit_3bots_stats.py`
+и сравнить per-symbol per-leverage stats. Гипотеза:
+- OHLC4 vs close может уменьшить shortfall на entries (data integrity).
+- Снятие cash clamp может позволить ai-arena открывать позиции в
+  overleveraged state, когда у него уже есть прибыльные позиции
+  (раньше блокировалось).
+Никаких числовых обещаний — sample n=219 показал 20% WR за 30 дней,
+для подтверждения изменения нужен сопоставимый sample post-fix.
+
+---
+
 ## 2026-05-19
 
 ### reset(ai-arena): эксперимент v1 → v2 (virtual $1000 → $10000, match Nof1 source)

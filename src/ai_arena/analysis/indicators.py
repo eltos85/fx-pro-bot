@@ -246,15 +246,37 @@ def _last_n(series: list[float | None], n: int) -> list[float | None]:
 
 
 def build_intraday_snapshot(
-    bars_closes: list[float], take_n: int = 10
+    bars_closes: list[float],
+    take_n: int = 10,
+    display_prices: list[float] | None = None,
 ) -> IntradaySnapshot:
-    """3-минутный layout Nof1: prices/EMA20/MACD/RSI(7)/RSI(14), последние 10."""
+    """3-минутный layout Nof1: prices/EMA20/MACD/RSI(7)/RSI(14), последние 10.
+
+    Параметр ``display_prices`` (опциональный) — массив цен для отображения
+    в prompt (label «Mid prices» из gist L361). Если None — fallback к
+    ``bars_closes`` (legacy / тесты). Это разделение нужно потому что:
+
+    - Индикаторы (RSI/MACD/EMA) **канонически** считаются на close-prices —
+      это инвариант финансовой математики и gist'а.
+    - А «Mid prices» в gist — это intraday mid от Hyperliquid orderbook.
+      У Bybit нет per-bar mid (klines дают только OHLC), поэтому делаем
+      OHLC4 ≈ (O+H+L+C)/4 как самую близкую аппроксимацию mid за период.
+      Этот mapping — расширение «lastPrice вместо mid-price» из правила
+      ai-arena-sources.mdc § «Bybit ↔ Hyperliquid маппинг», на массив
+      intraday цен. Подробности в BUILDLOG_AI_ARENA.md (v2.x bug-fix).
+
+    Иначе (если бы передавали close в массив с label «Mid prices») LLM
+    видел бы close-prices под label «Mid», что — semantic data integrity
+    bug (close ≠ mid; close — это последняя сделка в баре, mid — середина
+    bid/ask вне зависимости от направления тейкера).
+    """
     ema20 = _ema_series(bars_closes, 20)
     macd_line, _, _ = macd_series(bars_closes)
     r7 = rsi_series(bars_closes, 7)
     r14 = rsi_series(bars_closes, 14)
-    prices_last = bars_closes[-take_n:] if len(bars_closes) >= take_n else (
-        [0.0] * (take_n - len(bars_closes)) + bars_closes
+    prices_source = display_prices if display_prices is not None else bars_closes
+    prices_last = prices_source[-take_n:] if len(prices_source) >= take_n else (
+        [0.0] * (take_n - len(prices_source)) + list(prices_source)
     )
     return IntradaySnapshot(
         prices=prices_last,

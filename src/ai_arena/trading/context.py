@@ -102,7 +102,19 @@ def collect_market_context(
 
         intraday = None
         if len(bars_3m) >= 27:  # need ≥ slow(26) + 1 для MACD; берём с запасом
-            intraday = build_intraday_snapshot([b.close for b in bars_3m], take_n=10)
+            # OHLC4 = (O+H+L+C)/4 — каноническая «typical bar price»,
+            # ближайшая аппроксимация mid-price за период бара. Используется
+            # ТОЛЬКО для display массива «Mid prices» (gist L361). Индикаторы
+            # (RSI/MACD/EMA) остаются на close-prices — финансово-математический
+            # инвариант. Подробности в BUILDLOG_AI_ARENA.md (v2.x bug-fix).
+            ohlc4_prices = [
+                (b.open + b.high + b.low + b.close) / 4.0 for b in bars_3m
+            ]
+            intraday = build_intraday_snapshot(
+                [b.close for b in bars_3m],
+                take_n=10,
+                display_prices=ohlc4_prices,
+            )
 
         longer = None
         if len(bars_4h) >= 50:  # need ≥ EMA50

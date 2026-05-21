@@ -150,6 +150,37 @@ class TestSnapshotBuilders:
         # MACD требует ≥35 точек — на 15 быть None
         assert all(v is None for v in snap.macd)
 
+    def test_intraday_display_prices_override_used_for_prices(self):
+        """v2.x bug-fix: ``display_prices`` (OHLC4) подставляется в ``prices``,
+        индикаторы продолжают считаться по close (canonical)."""
+        closes = [100.0 + i * 0.1 for i in range(50)]
+        ohlc4 = [c + 0.05 for c in closes]  # имитация OHLC4 ≈ close + 0.05
+        snap = build_intraday_snapshot(closes, take_n=10, display_prices=ohlc4)
+        # display prices — это OHLC4, не closes
+        assert snap.prices == ohlc4[-10:]
+        # индикаторы РАВНЫ тем что были бы без display_prices (canonical close-base)
+        snap_close = build_intraday_snapshot(closes, take_n=10)
+        assert snap.ema20 == snap_close.ema20
+        assert snap.macd == snap_close.macd
+        assert snap.rsi7 == snap_close.rsi7
+        assert snap.rsi14 == snap_close.rsi14
+
+    def test_intraday_no_display_prices_falls_back_to_closes(self):
+        """Backward compat: если display_prices не передан — prices=closes."""
+        closes = [100.0 + i * 0.1 for i in range(50)]
+        snap = build_intraday_snapshot(closes, take_n=10)  # без display_prices
+        assert snap.prices == closes[-10:]
+
+    def test_intraday_display_prices_short_history_pads_zeros(self):
+        """display_prices короче take_n — pad-нулями слева, как fallback."""
+        closes = [100.0 + i * 0.1 for i in range(50)]
+        ohlc4_short = [200.0, 201.0, 202.0]  # длина 3
+        snap = build_intraday_snapshot(closes, take_n=10, display_prices=ohlc4_short)
+        # длина prices == 10, последние 3 = ohlc4_short, первые 7 = 0.0
+        assert len(snap.prices) == 10
+        assert snap.prices[-3:] == [200.0, 201.0, 202.0]
+        assert snap.prices[:7] == [0.0] * 7
+
     def test_longer_term_snapshot(self):
         n = 60
         highs = [100.0 + i * 0.5 for i in range(n)]
