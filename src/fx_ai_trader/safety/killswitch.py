@@ -42,6 +42,16 @@ class KillSwitchConfig:
     max_total_loss_usd: float
     max_open_positions: int
     max_positions_per_symbol: int
+    # Per-symbol override: NG=F → 1 позиция (vs 3 у gold/oil). См.
+    # config/settings.py docstring и BUILDLOG NG enhancement v1.2.
+    per_symbol_max_positions: dict[str, int] | None = None
+
+    def get_max_positions_for(self, symbol: str) -> int:
+        if self.per_symbol_max_positions:
+            cap = self.per_symbol_max_positions.get(symbol)
+            if cap is not None:
+                return min(cap, self.max_positions_per_symbol)
+        return self.max_positions_per_symbol
 
 
 @dataclass
@@ -110,12 +120,19 @@ class KillSwitch:
             )
 
         same_symbol = [p for p in open_positions if p.symbol == symbol]
-        if len(same_symbol) >= self.config.max_positions_per_symbol:
+        symbol_cap = self.config.get_max_positions_for(symbol)
+        if len(same_symbol) >= symbol_cap:
             return CheckResult(
                 allowed=False,
                 reason=(
                     f"max positions per symbol ({symbol}): "
-                    f"{len(same_symbol)}/{self.config.max_positions_per_symbol}"
+                    f"{len(same_symbol)}/{symbol_cap}"
+                    + (
+                        f" (per-symbol override; default "
+                        f"{self.config.max_positions_per_symbol})"
+                        if symbol_cap != self.config.max_positions_per_symbol
+                        else ""
+                    )
                 ),
             )
 

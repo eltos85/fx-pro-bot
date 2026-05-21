@@ -163,6 +163,35 @@ class AiFxTraderSettings(BaseSettings):
     max_lot_size: float = Field(
         default=0.50, validation_alias="AI_FX_TRADER_MAX_LOT_SIZE"
     )
+    # Per-symbol overrides ниже общих ограничений. JSON-словарь через ENV.
+    # Цель — снизить экспозицию по конкретному инструменту без отключения.
+    # Применение (NG=F): по правилу sample-size.mdc после 11 NG-трейдов
+    # (WR 18%, BUY-bias 11/11) уменьшаем максимальный размер до 0.25 и
+    # одновременно к одной открытой NG-позиции. BZ=F и XAUUSD продолжают
+    # работать на стандартных 0.50 / 3.
+    # См. BUILDLOG_AI_FX_TRADER v1.2 (NG enhancement).
+    per_symbol_max_lot_size: dict[str, float] = Field(
+        default_factory=lambda: {"NG=F": 0.25},
+        validation_alias="AI_FX_TRADER_PER_SYMBOL_MAX_LOT_SIZE",
+    )
+    per_symbol_max_positions: dict[str, int] = Field(
+        default_factory=lambda: {"NG=F": 1},
+        validation_alias="AI_FX_TRADER_PER_SYMBOL_MAX_POSITIONS",
+    )
+
+    def effective_max_lot_size(self, symbol: str) -> float:
+        """Per-symbol max lot size с fallback к общему лимиту."""
+        cap = self.per_symbol_max_lot_size.get(symbol)
+        if cap is None:
+            return self.max_lot_size
+        return min(cap, self.max_lot_size)
+
+    def effective_max_positions_per_symbol(self, symbol: str) -> int:
+        """Per-symbol position cap с fallback к общему лимиту."""
+        cap = self.per_symbol_max_positions.get(symbol)
+        if cap is None:
+            return self.max_positions_per_symbol
+        return min(cap, self.max_positions_per_symbol)
 
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_FX_TRADER_DATA_DIR")

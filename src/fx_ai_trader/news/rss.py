@@ -73,19 +73,45 @@ OIL_KEYWORDS = (
 # Газ-keywords подобраны по research-источникам (см. prompts.py): EIA
 # Weekly NatGas Storage Report, NOAA HDD/CDD outlooks, LNG export news,
 # Henry Hub vs TTF spread, Baker Hughes rig count.
+# Расширение 2026-05-21 (BUILDLOG NG enhancement v1.2): добавлены
+# basin names (Marcellus, Permian, Haynesville), terminal names
+# (Cameron, Freeport, Cove Point, Elba Island, Calcasieu Pass), basis
+# hubs (Waha, Algonquin), industry analysts (Reuters Kemp, S&P Platts).
+# Цель: расширить охват источников после post-mortem 11 NG-трейдов
+# (WR 18%, 9/11 BUY на одной сессии 20.05).
 GAS_KEYWORDS = (
     "natural gas", "nat gas", "nat-gas", " gas ", "lng",
-    "henry hub", "ttf", "title transfer facility",
+    "henry hub", "ttf", "title transfer facility", "dutch ttf",
+    "european gas", "us-eu spread", "asia jkm", "jkm price",
+    # LNG terminals (Bcf/d feedgas — Bloomberg/Reuters track these daily).
     "freeport lng", "sabine pass", "corpus christi",
-    "cheniere", "venture global",
+    "cameron lng", "cove point", "elba island", "calcasieu pass",
+    "plaquemines lng", "rio grande lng",
+    "cheniere", "venture global", "next decade", "tellurian",
+    # Basins (production-side news).
+    "marcellus", "appalachia", "haynesville", "permian", "eagle ford",
+    "barnett", "utica",
+    # Basis hubs (regional Henry Hub vs cash differentials).
+    "waha", "algonquin", "transco zone", "michcon",
+    # Storage cycle.
     "storage report", "storage build", "storage draw",
     "working gas in storage", "ng storage", "natgas storage",
+    "injection season", "withdrawal season",
+    # Weather drivers.
     "hdd", "cdd", "heating degree", "cooling degree",
     "cold snap", "heatwave", "heat wave", "polar vortex",
-    "noaa", "weather forecast", "winter outlook",
-    "pipeline outage", "gas pipeline",
+    "arctic blast", "warm winter", "mild winter",
+    "noaa", "weather forecast", "winter outlook", "summer outlook",
+    "cpc outlook", "6-10 day", "8-14 day",
+    # Pipeline / outage.
+    "pipeline outage", "gas pipeline", "force majeure",
+    "compressor station", "feedgas",
+    # Supply-side.
     "rig count", "baker hughes",
-    "feedgas", "feed gas", "lng exports", "lng cargo",
+    "feed gas", "lng exports", "lng cargo", "lng cargoes",
+    "associated gas", "dry gas production",
+    # Industry analysts often cited in NG.
+    "john kemp", "jkempenergy", "spglobal natgas",
 )
 
 

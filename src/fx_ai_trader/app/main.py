@@ -26,6 +26,7 @@ from fx_ai_trader.llm.prompts import (
 )
 from fx_ai_trader.news.eia import EiaProvider
 from fx_ai_trader.news.rss import CommodityRssNewsProvider
+from fx_ai_trader.news.weather import NoaaOutlookProvider
 from fx_ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from fx_ai_trader.state.db import AiFxTraderStore
 from fx_ai_trader.trading.client_adapter import CTraderFxAdapter
@@ -137,6 +138,7 @@ def run() -> None:
             max_total_loss_usd=settings.max_total_loss_usd,
             max_open_positions=settings.max_open_positions,
             max_positions_per_symbol=settings.max_positions_per_symbol,
+            per_symbol_max_positions=dict(settings.per_symbol_max_positions),
         ),
         store,
     )
@@ -152,6 +154,11 @@ def run() -> None:
         api_key=settings.eia_api_key,
         cache_ttl_sec=settings.eia_cache_ttl_sec,
     )
+    # NOAA CPC outlook нужен ТОЛЬКО если в symbols есть NG=F. Включаем
+    # только в этом случае, чтобы не тратить HTTP-запросы.
+    noaa_provider: NoaaOutlookProvider | None = None
+    if "NG=F" in settings.symbols:
+        noaa_provider = NoaaOutlookProvider(cache_ttl_sec=21600)
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -169,7 +176,7 @@ def run() -> None:
             try:
                 _run_full_cycle(
                     cycle, settings, store, adapter, llm, killswitch,
-                    news_provider, eia_provider,
+                    news_provider, eia_provider, noaa_provider,
                 )
             except Exception:
                 log.exception("Full cycle %d crashed (продолжаю)", cycle)
@@ -200,6 +207,7 @@ def _run_full_cycle(
     killswitch: KillSwitch,
     news_provider: CommodityRssNewsProvider | None,
     eia_provider: EiaProvider,
+    noaa_provider: NoaaOutlookProvider | None,
 ) -> None:
     log.info("─── Full cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
 
@@ -225,14 +233,16 @@ def _run_full_cycle(
     ctx = collect_market_context(
         adapter, store, settings.symbols, settings.virtual_capital_usd,
         news_provider=news_provider, eia_provider=eia_provider,
+        noaa_provider=noaa_provider,
     )
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
 
     log.info(
-        "LLM call (full): positions=%d news_total=%d eia=%s",
+        "LLM call (full): positions=%d news_total=%d eia=%s noaa=%s",
         len(ctx.open_positions),
         sum(len(v) for v in ctx.news_per_symbol.values()),
         "YES" if ctx.eia_block_text else "no",
+        "YES" if ctx.noaa_block_text else "no",
     )
     resp = llm.ask(SYSTEM_PROMPT, user_prompt)
     store.add_api_cost(resp.cost_usd)

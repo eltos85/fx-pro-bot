@@ -1115,3 +1115,225 @@ class TestBrokerReconcile:
         # успешного LLM-close, не recovery)
         assert row[2] == "mean-rev"
         assert "net:" in result.summary  # формат summary включает breakdown
+
+
+# ─── NG-enhancement v1.2: NOAA weather + EIA STEO + per-symbol limits ────
+
+
+class TestNoaaOutlookProvider:
+    """NOAA CPC weather discussion parsing.
+
+    Источник: NOAA CPC fxus06.html (см. news/weather.py docstring).
+    Тесты на parser изолированно — без сети, через mock HTML.
+    """
+
+    def test_extract_discussion_finds_section(self):
+        from fx_ai_trader.news.weather import NoaaOutlookProvider
+
+        html = (
+            "<html><body><table><tr><td>nav</td></tr>"
+            "<tr><td>Prognostic Discussion for 6 to 10 and 8 to 14 day outlooks"
+            "  NWS Climate Prediction Center 6-10 DAY OUTLOOK FOR MAY 26 - 30 "
+            "2026 Above normal temperatures across the Upper Mississippi Valley. "
+            "8-14 DAY OUTLOOK FOR MAY 28 - JUN 03, 2026 Anomalous ridging over "
+            "east-central Canada supports above normal temperatures. "
+            "FORECAST CONFIDENCE FOR THE 8-14 DAY PERIOD: Average."
+            "</td></tr></table></body></html>"
+        )
+        p = NoaaOutlookProvider()
+        text = p._extract_discussion(html)
+        assert "6-10 DAY OUTLOOK" in text
+        assert "8-14 DAY OUTLOOK" in text
+        assert "Mississippi Valley" in text
+        assert "FORECAST CONFIDENCE" not in text  # отрезано end-marker'ом
+
+    def test_extract_discussion_returns_empty_for_unrelated_html(self):
+        from fx_ai_trader.news.weather import NoaaOutlookProvider
+
+        html = "<html><body>Service maintenance</body></html>"
+        p = NoaaOutlookProvider()
+        assert p._extract_discussion(html) == ""
+
+    def test_format_noaa_snapshot_with_data(self):
+        from fx_ai_trader.news.weather import (
+            NoaaOutlookSnapshot,
+            format_noaa_snapshot,
+        )
+
+        snap = NoaaOutlookSnapshot(
+            discussion_text="6-10 DAY OUTLOOK: above-normal temps in Upper MS.",
+            fetched_at_utc="2026-05-21T10:00:00+00:00",
+        )
+        out = format_noaa_snapshot(snap)
+        assert out is not None
+        assert "NOAA CPC" in out
+        assert "above-normal" in out
+        assert "2026-05-21" in out
+
+    def test_format_noaa_snapshot_none(self):
+        from fx_ai_trader.news.weather import format_noaa_snapshot
+
+        assert format_noaa_snapshot(None) is None
+
+
+class TestEiaSteoFormatting:
+    """EIA STEO forecast (HH price, production, exports) форматирование
+    в prompt-блок. Тесты на функцию форматтера изолированно."""
+
+    def test_format_includes_steo_block_when_data_present(self):
+        from fx_ai_trader.news.eia import (
+            EiaSnapshot,
+            SteoForecast,
+            format_eia_snapshot,
+        )
+
+        snap = EiaSnapshot(
+            crude_stocks_kbarrels=None,
+            crude_stocks_change_kbarrels=None,
+            crude_stocks_date=None,
+            refinery_util_pct=None,
+            refinery_util_date=None,
+            spr_kbarrels=None,
+            spr_date=None,
+            steo_hh_price=SteoForecast(
+                series_id="NGHHMCF",
+                description="Henry Hub Spot Price",
+                unit="dollars per thousand cubic feet",
+                points=[("2026-06", 3.01), ("2026-07", 3.14), ("2026-08", 3.34)],
+            ),
+        )
+        out = format_eia_snapshot(snap)
+        assert out is not None
+        assert "STEO forecast" in out
+        assert "2026-06=3.01" in out
+        assert "2026-07=3.14" in out
+
+    def test_format_skips_steo_block_when_empty(self):
+        from fx_ai_trader.news.eia import EiaSnapshot, format_eia_snapshot
+
+        snap = EiaSnapshot(
+            crude_stocks_kbarrels=None,
+            crude_stocks_change_kbarrels=None,
+            crude_stocks_date=None,
+            refinery_util_pct=None,
+            refinery_util_date=None,
+            spr_kbarrels=None,
+            spr_date=None,
+        )
+        assert format_eia_snapshot(snap) is None
+
+    def test_format_combines_storage_and_steo(self):
+        from fx_ai_trader.news.eia import (
+            EiaSnapshot,
+            SteoForecast,
+            format_eia_snapshot,
+        )
+
+        snap = EiaSnapshot(
+            crude_stocks_kbarrels=None,
+            crude_stocks_change_kbarrels=None,
+            crude_stocks_date=None,
+            refinery_util_pct=None,
+            refinery_util_date=None,
+            spr_kbarrels=None,
+            spr_date=None,
+            ng_storage_bcf=2500.0,
+            ng_storage_change_bcf=+95.0,
+            ng_storage_date="2026-05-16",
+            steo_ng_exports=SteoForecast(
+                series_id="NGEXPUS",
+                description="NG Exports",
+                unit="Bcf/d",
+                points=[("2026-06", 25.5), ("2026-07", 26.0)],
+            ),
+        )
+        out = format_eia_snapshot(snap)
+        assert out is not None
+        assert "Working gas in storage" in out
+        assert "+95 Bcf build" in out
+        assert "exports forecast" in out
+        assert "2026-06=25.5" in out
+
+
+class TestPerSymbolLimits:
+    """Per-symbol overrides для NG=F (max_lot=0.25, max_pos=1).
+
+    Цель: уменьшить экспозицию по NG не отключая инструмент. По правилу
+    sample-size.mdc ("Если риск критичный — уменьшить размер позиции,
+    не отключать"). См. BUILDLOG v1.2 NG enhancement.
+    """
+
+    def test_settings_effective_max_lot_size_default(self):
+        from fx_ai_trader.config.settings import AiFxTraderSettings
+
+        s = AiFxTraderSettings()
+        assert s.effective_max_lot_size("XAUUSD") == 0.50
+        assert s.effective_max_lot_size("BZ=F") == 0.50
+
+    def test_settings_effective_max_lot_size_ng_override(self):
+        from fx_ai_trader.config.settings import AiFxTraderSettings
+
+        s = AiFxTraderSettings()
+        assert s.effective_max_lot_size("NG=F") == 0.25
+
+    def test_settings_effective_max_positions_default(self):
+        from fx_ai_trader.config.settings import AiFxTraderSettings
+
+        s = AiFxTraderSettings()
+        assert s.effective_max_positions_per_symbol("XAUUSD") == 3
+        assert s.effective_max_positions_per_symbol("BZ=F") == 3
+
+    def test_settings_effective_max_positions_ng_override(self):
+        from fx_ai_trader.config.settings import AiFxTraderSettings
+
+        s = AiFxTraderSettings()
+        assert s.effective_max_positions_per_symbol("NG=F") == 1
+
+    def test_killswitch_per_symbol_ng_blocks_after_one(
+        self, store: AiFxTraderStore,
+    ):
+        """NG=F → 1 позиция максимум, вторая блокируется per-symbol cap."""
+        ks = KillSwitch(
+            KillSwitchConfig(
+                max_daily_loss_usd=150.0,
+                max_total_loss_usd=300.0,
+                max_open_positions=3,
+                max_positions_per_symbol=3,
+                per_symbol_max_positions={"NG=F": 1},
+            ),
+            store,
+        )
+        store.open_position(
+            symbol="NG=F", side="BUY", volume_lots=0.01,
+            entry_price=3.10, sl_price=3.00, tp_price=3.20,
+            broker_position_id=None, broker_order_label="ai-fx-trader",
+            llm_reason="t", is_paper=True,
+        )
+        res = ks.check_can_open_position(symbol="NG=F", side="BUY")
+        assert not res.allowed
+        assert "max positions per symbol (NG=F)" in res.reason
+        assert "per-symbol override" in res.reason
+
+    def test_killswitch_per_symbol_other_symbols_unaffected(
+        self, store: AiFxTraderStore,
+    ):
+        """XAUUSD/BZ=F не задеты override — продолжают использовать default=3."""
+        ks = KillSwitch(
+            KillSwitchConfig(
+                max_daily_loss_usd=150.0,
+                max_total_loss_usd=300.0,
+                max_open_positions=3,
+                max_positions_per_symbol=3,
+                per_symbol_max_positions={"NG=F": 1},
+            ),
+            store,
+        )
+        for i in range(2):
+            store.open_position(
+                symbol="XAUUSD", side="BUY", volume_lots=0.01,
+                entry_price=2390 + i, sl_price=2380, tp_price=2410,
+                broker_position_id=None, broker_order_label="ai-fx-trader",
+                llm_reason="t", is_paper=True,
+            )
+        res = ks.check_can_open_position(symbol="XAUUSD", side="BUY")
+        assert res.allowed

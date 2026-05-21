@@ -50,7 +50,28 @@ _SERIES_REFINERY_UTIL = "PET.WGIRIUS2.W"
 _SERIES_SPR = "PET.WCSSTUS1.W"
 _SERIES_NG_STORAGE = "NG.NW2_EPG0_SWO_R48_BCF.W"
 
+# STEO forecast series (monthly, 18-month forward). Endpoint /v2/steo/data.
+# Подтверждено live-запросом 2026-05-20 (см. BUILDLOG 2026-05-21).
+# - NGHHMCF: Henry Hub Spot Price forecast ($/mcf)
+# - NGPRPUS: Dry Natural Gas Production (Bcf/d)
+# - NGEXPUS: Total Gross Exports (LNG + pipeline, Bcf/d)
+_STEO_HH_PRICE = "NGHHMCF"
+_STEO_NG_PRODUCTION = "NGPRPUS"
+_STEO_NG_EXPORTS = "NGEXPUS"
+
 _BASE_URL = "https://api.eia.gov/v2"
+
+
+@dataclass
+class SteoForecast:
+    """Один STEO ряд forecast: список точек (period, value) на 3-6м вперёд."""
+
+    series_id: str
+    description: str
+    unit: str
+    # Список (period 'YYYY-MM', value) sorted asc по period (от ближайшего
+    # месяца к дальнему). Обычно 6 точек = полгода forecast.
+    points: list[tuple[str, float]]
 
 
 @dataclass
@@ -67,6 +88,11 @@ class EiaSnapshot:
     ng_storage_bcf: float | None = None
     ng_storage_change_bcf: float | None = None
     ng_storage_date: str | None = None
+    # STEO forecast (monthly, 18-month forward). У нас тянем по 6 точек
+    # для каждого ряда. None если не получили.
+    steo_hh_price: SteoForecast | None = None
+    steo_ng_production: SteoForecast | None = None
+    steo_ng_exports: SteoForecast | None = None
 
 
 class EiaProvider:
@@ -115,6 +141,12 @@ class EiaProvider:
             log.exception("EIA NG storage fetch failed (продолжаю без газ-блока)")
             ng_data = []
 
+        # STEO forecast (3 ряда). Best-effort: каждый ряд независимо
+        # ловит исключения, не валит весь snapshot.
+        hh_forecast = self._fetch_steo_forecast(_STEO_HH_PRICE)
+        prod_forecast = self._fetch_steo_forecast(_STEO_NG_PRODUCTION)
+        exp_forecast = self._fetch_steo_forecast(_STEO_NG_EXPORTS)
+
         cs_value = cs_change = cs_date = None
         if stocks_data:
             cs_value = stocks_data[0][1]
@@ -150,6 +182,65 @@ class EiaProvider:
             ng_storage_bcf=ng_value,
             ng_storage_change_bcf=ng_change,
             ng_storage_date=ng_date,
+            steo_hh_price=hh_forecast,
+            steo_ng_production=prod_forecast,
+            steo_ng_exports=exp_forecast,
+        )
+
+    def _fetch_steo_forecast(
+        self,
+        series_id: str,
+        n_points: int = 6,
+    ) -> SteoForecast | None:
+        """Тянет следующие ``n_points`` месячных STEO-точек (forecast forward).
+
+        Endpoint /v2/steo/data содержит **historic + forecast** в одном
+        series (total~370 точек). Чтобы получить только ближайшие
+        6 месяцев forecast, фильтруем по ``start`` = current month
+        (YYYY-MM) и сортируем asc.
+        """
+        from datetime import datetime, timezone
+        start_period = datetime.now(timezone.utc).strftime("%Y-%m")
+        url = f"{_BASE_URL}/steo/data"
+        params = {
+            "api_key": self._api_key,
+            "frequency": "monthly",
+            "data[0]": "value",
+            "facets[seriesId][]": series_id,
+            "sort[0][column]": "period",
+            "sort[0][direction]": "asc",
+            "start": start_period,
+            "length": n_points,
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=self._timeout)
+            resp.raise_for_status()
+        except Exception:
+            log.exception("EIA STEO fetch failed для %s", series_id)
+            return None
+        payload = resp.json()
+        rows = payload.get("response", {}).get("data") or []
+        if not rows:
+            return None
+        description = ""
+        unit = ""
+        pts: list[tuple[str, float]] = []
+        for row in rows:
+            try:
+                period = str(row.get("period", ""))
+                value = float(row.get("value", "0") or 0)
+            except (TypeError, ValueError):
+                continue
+            if period:
+                pts.append((period, value))
+            description = str(row.get("seriesDescription", description))
+            unit = str(row.get("unit", unit))
+        pts.sort(key=lambda x: x[0])
+        return SteoForecast(
+            series_id=series_id,
+            description=description,
+            unit=unit,
+            points=pts,
         )
 
     def _fetch_latest_two(self, series_id: str) -> list[tuple[str, float]]:
@@ -226,6 +317,30 @@ def format_eia_snapshot(snap: EiaSnapshot | None) -> str | None:
             f"{change_note} as of {snap.ng_storage_date or '?'}"
         )
 
+    steo_gas_lines: list[str] = []
+    if snap.steo_hh_price and snap.steo_hh_price.points:
+        forecasts = ", ".join(
+            f"{p}={v:.2f}" for p, v in snap.steo_hh_price.points
+        )
+        steo_gas_lines.append(
+            f"Henry Hub spot price forecast ($/mcf, monthly): {forecasts}"
+        )
+    if snap.steo_ng_production and snap.steo_ng_production.points:
+        forecasts = ", ".join(
+            f"{p}={v:.1f}" for p, v in snap.steo_ng_production.points
+        )
+        steo_gas_lines.append(
+            f"US dry natural gas production forecast (Bcf/d, monthly): {forecasts}"
+        )
+    if snap.steo_ng_exports and snap.steo_ng_exports.points:
+        forecasts = ", ".join(
+            f"{p}={v:.1f}" for p, v in snap.steo_ng_exports.points
+        )
+        steo_gas_lines.append(
+            f"US natural gas total gross exports forecast (LNG+pipeline, Bcf/d, monthly): "
+            f"{forecasts}"
+        )
+
     blocks: list[str] = []
     if petroleum_lines:
         blocks.append(
@@ -236,6 +351,15 @@ def format_eia_snapshot(snap: EiaSnapshot | None) -> str | None:
     if gas_lines:
         blocks.append(
             "\n".join(["EIA Weekly Natural Gas (Thursday update):"] + gas_lines)
+        )
+    if steo_gas_lines:
+        blocks.append(
+            "\n".join(
+                [
+                    "EIA STEO forecast (Short-Term Energy Outlook, 18-month forward):",
+                ]
+                + steo_gas_lines
+            )
         )
     if not blocks:
         return None

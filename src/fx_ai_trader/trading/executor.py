@@ -543,14 +543,24 @@ def _apply_open(
         )
 
     # Round lot к step и clamp к max_lot_size + min_volume.
+    # Per-symbol override (NG=F → 0.25) учитываем здесь — broker safety
+    # floor с уменьшенной экспозицией. См. settings.effective_max_lot_size.
     step_lots = info.step_volume / info.contract_size if info.contract_size else 0.01
     volume_lots = _round_to_step(volume_lots, step_lots)
-    if volume_lots > settings.max_lot_size:
-        log.info(
-            "FX-AI clamp: volume_lots %.4f → MAX_LOT_SIZE %.2f",
-            volume_lots, settings.max_lot_size,
-        )
-        volume_lots = settings.max_lot_size
+    eff_max_lot = settings.effective_max_lot_size(m.symbol)
+    if volume_lots > eff_max_lot:
+        if eff_max_lot != settings.max_lot_size:
+            log.info(
+                "FX-AI clamp (per-symbol %s): volume_lots %.4f → %.2f "
+                "(global cap %.2f)",
+                m.symbol, volume_lots, eff_max_lot, settings.max_lot_size,
+            )
+        else:
+            log.info(
+                "FX-AI clamp: volume_lots %.4f → MAX_LOT_SIZE %.2f",
+                volume_lots, eff_max_lot,
+            )
+        volume_lots = eff_max_lot
         volume_lots = _round_to_step(volume_lots, step_lots)
     if volume_lots <= 0:
         return ApplyResult(executed=False, summary="", error="volume_lots <= 0 после rounding")

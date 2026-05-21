@@ -1,5 +1,186 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-21 — feat(NG): NOAA + EIA STEO + расширенные RSS keywords + per-symbol limits для NG=F (v1.2 NG enhancement)
+
+`коммит при deploy`
+
+### Триггер: 11 NG=F live-трейдов, WR 18%, net −$29.01
+
+С момента включения NG=F (2026-05-18 ночь, BUILDLOG ниже) fx-ai-trader
+сделал **11 live-сделок по NG**, **все BUY**. Wins 2 (+$2.60), losses 9
+(−$31.61). **9 убыточных** открыты подряд 20 мая в одной торговой
+сессии — mean-reversion long на трендовом downtrend'е (все exit reasons
+вариации «MACD bearish, price below EMA20/lower BB, mean-reversion
+invalidated»). По выборке n=11 ещё не дотягиваем до порога
+`sample-size.mdc` (≥100 сделок) → инструмент **не отключаем**.
+
+### Корневая причина (нашёл аудитом): EIA API key отсутствовал в .env
+
+`grep eia /root/fx-pro-bot/.env → no eia line`. С момента деплоя
+fx-ai-trader 2026-05-13 переменная `AI_FX_TRADER_EIA_API_KEY` **никогда
+не была установлена**. В логах при старте: `EIA: OFF`. То есть весь
+70-строчный NG framework в промпте (EIA Weekly Storage, Henry Hub
+forecast, dry production, LNG exports — «follow религиозно») —
+**LLM никогда этих данных не видел**. Бот работал только на RSS news +
+цены + sentiment.
+
+Файлы и интернет-источники (Aegis Factor Matrix, NatGas Central, NGI
+LNG Data Suite, EIA STEO) подтверждают: для NG=F intraday минимум 5
+источников необходимы — Storage / Weather (HDD/CDD) / LNG feedgas /
+Production / Rig count. У нас работал только Storage (RSS news), и то
+без EIA-числовой подписки.
+
+### Изменения
+
+#### 1. EIA API key добавлен в .env на VPS (`/root/fx-pro-bot/.env`)
+
+```
+AI_FX_TRADER_EIA_API_KEY=<key>
+```
+
+После перезапуска контейнера EIA snapshot activates → LLM получает
+Weekly Petroleum + Weekly NG Storage в каждом full cycle (15 мин).
+
+#### 2. EIA модуль расширен: STEO forecast (`src/fx_ai_trader/news/eia.py`)
+
+Добавлены 3 STEO-серии (monthly, 18-month forward):
+- `NGHHMCF`: Henry Hub spot price forecast ($/mcf)
+- `NGPRPUS`: US dry natural gas production (Bcf/d)
+- `NGEXPUS`: US natural gas total gross exports (Bcf/d, LNG+pipeline)
+
+Endpoint `/v2/steo/data` с фильтром `start=<current YYYY-MM>` +
+`sort asc + length=6` даёт 6 ближайших месяцев forecast. Best-effort:
+каждая серия независимо ловит исключения. `format_eia_snapshot`
+расширен новым блоком «EIA STEO forecast».
+
+**Live-проверка (2026-05-21 08:10 UTC):**
+- HH price forecast: $2.90 (май) → $3.22 (октябрь) — лёгкий up-trend
+- Production: 110.2 → 111.3 Bcf/d (расширение → bearish overhang)
+- Exports: 26.9 → 26.2 Bcf/d (~stable, лёгкое снижение)
+- Storage actual: 2290 Bcf (+85 Bcf build) on 2026-05-08
+
+#### 3. Новый модуль NOAA CPC outlook (`src/fx_ai_trader/news/weather.py`)
+
+`NoaaOutlookProvider` тянет prognostic discussion с
+`https://www.cpc.ncep.noaa.gov/products/predictions/6-10_day/fxus06.html`.
+HTML-strip + extract по маркерам «Prognostic Discussion» …
+«FORECAST CONFIDENCE FOR THE 8-14 DAY PERIOD». Cache TTL 6 часов
+(CPC publishes 15:00-16:00 ET ежедневно). Защищено try/except — на
+fail возвращает кэш или None. Без API-ключа.
+
+**Live-проверка:** discussion ~6190 chars, валиден формат. Сегодня:
+above-normal temps Upper MS Valley/Great Lakes >80% confidence,
+below-normal West, ridging east-central Canada.
+
+#### 4. Расширение GAS_KEYWORDS (`src/fx_ai_trader/news/rss.py`)
+
+С 18 keywords до 60+. Добавлены:
+- LNG terminals: Cameron LNG, Cove Point, Elba Island, Calcasieu Pass,
+  Plaquemines, Rio Grande
+- Basins: Marcellus, Appalachia, Haynesville, Permian, Eagle Ford,
+  Barnett, Utica
+- Basis hubs: Waha, Algonquin, Transco zone, Michcon
+- Storage cycle: injection season, withdrawal season
+- Weather: arctic blast, warm/mild winter, CPC outlook, 6-10 day
+- TTF/JKM: dutch ttf, european gas, asia jkm
+- Production: associated gas, dry gas production
+- Industry analysts: John Kemp, JKempEnergy, S&P Global natgas
+
+#### 5. Per-symbol limits для NG=F (`config/settings.py`, `safety/killswitch.py`, `trading/executor.py`)
+
+По правилу `sample-size.mdc`: «Если риск критичный — уменьшить размер
+позиции (position_size), не отключать». Без подгонки thresholds,
+без отключения инструмента.
+
+- `per_symbol_max_lot_size: dict[str, float] = {"NG=F": 0.25}`
+  (override общего 0.50 для NG)
+- `per_symbol_max_positions: dict[str, int] = {"NG=F": 1}`
+  (override общего 3 для NG — одна позиция на инструмент в каждый
+  момент, защита от revenge-trading серий как 9 проигрышей подряд 20.05)
+- Хелперы `settings.effective_max_lot_size(symbol)` и
+  `effective_max_positions_per_symbol(symbol)` — fallback к общим
+  лимитам если нет override
+- KillSwitch использует `get_max_positions_for(symbol)` — в reason
+  пишет «(per-symbol override; default 3)» для аудита
+- Executor применяет `effective_max_lot_size` в clamp-секции с
+  отдельным INFO-логом «FX-AI clamp (per-symbol NG=F): ...»
+
+XAUUSD / BZ=F не задеты.
+
+#### 6. Wiring data sources в context (`trading/context.py`, `app/main.py`)
+
+- `MarketContext` получил поле `noaa_block_text: str | None`
+- `collect_market_context` принимает `noaa_provider` и вызывает только
+  если `NG=F in symbols` (экономия HTTP)
+- EIA вызывается теперь и для NG=F (раньше только BZ=F/CL=F)
+- `_run_full_cycle` логирует `noaa=YES/no` рядом с `eia=YES/no`
+- `format_context_for_prompt` добавляет два секции в prompt_user:
+  «=== EIA MACRO (oil + gas: Weekly + STEO forecast) ===»
+  «=== NOAA CPC WEATHER OUTLOOK (key NG=F driver: HDD/CDD demand) ===»
+
+### Что НЕ менялось (по правилам)
+
+- **Промпт стратегии не трогали** — NG framework уже подробный, без
+  изменения thresholds (по `no-data-fitting.mdc`).
+- **Sentiment/uncertainty gates не трогали** — `n=11` << 100 (по
+  `sample-size.mdc`).
+- **NG=F не отключали** — по тому же правилу. Только уменьшение
+  размера и количества (явное разрешение в правиле).
+- **Advisor / fx-ai-trader other strategies** — не задеты.
+
+### Тесты (`tests/test_fx_ai_trader.py`)
+
+Добавлены 11 новых:
+- `TestNoaaOutlookProvider`: parse HTML с/без discussion, format с/без
+  snapshot
+- `TestEiaSteoFormatting`: STEO block presence, fallback, combine с
+  storage
+- `TestPerSymbolLimits`: effective_max_lot_size/positions для всех
+  трёх инструментов; killswitch NG=F блокирует после 1 позиции;
+  XAUUSD/BZ=F не задеты
+
+Полный suite: **928 tests passed, 0 failed**.
+
+### Ожидание после деплоя
+
+LLM в каждом full-cycle теперь видит:
+1. EIA Weekly Petroleum (oil block, существующее)
+2. EIA Weekly NG Storage (Bcf + week-on-week change) — **впервые**
+3. EIA STEO 6-month forecast (HH price + production + exports) — **впервые**
+4. NOAA CPC 6-10 / 8-14 day prognostic discussion — **впервые**
+5. RSS news по 60+ gas-keywords (раньше 18)
+6. По NG: размер ≤0.25 lot, ≤1 одновременная позиция
+
+Stat-baseline: продолжаем сбор статистики до n≥100 NG-трейдов перед
+любыми изменениями торговой логики. Решение об отключении или сдвиге
+порогов — **только** при достижении выборки + p-value <0.05.
+
+### Файлы
+
+- `src/fx_ai_trader/news/weather.py` (NEW)
+- `src/fx_ai_trader/news/eia.py` (STEO support)
+- `src/fx_ai_trader/news/rss.py` (расширение keywords)
+- `src/fx_ai_trader/config/settings.py` (per-symbol overrides)
+- `src/fx_ai_trader/safety/killswitch.py` (get_max_positions_for)
+- `src/fx_ai_trader/trading/executor.py` (effective_max_lot_size)
+- `src/fx_ai_trader/trading/context.py` (NOAA + EIA NG wiring)
+- `src/fx_ai_trader/app/main.py` (NoaaOutlookProvider init)
+- `tests/test_fx_ai_trader.py` (+11 тестов)
+- VPS `.env`: `AI_FX_TRADER_EIA_API_KEY=<set>`
+
+### Известные ограничения (вне scope)
+
+- **Refinery utilization series возвращает 16642%** — pre-existing bug
+  в `_SERIES_REFINERY_UTIL = "PET.WGIRIUS2.W"` (это не utilization rate,
+  а gross inputs barrels per day). Не задевает NG-функционал, исправим
+  отдельно когда понадобится для oil.
+- **HDDPUS/CDDPUS не доступны через `/v2/steo/data`** — это weather
+  sub-endpoint EIA, требует другой path. NOAA discussion полностью
+  компенсирует — текстовое описание HDD/CDD prognosis на 6-10/8-14
+  дней по регионам US.
+
+---
+
 ## 2026-05-20 (день, 06:30 UTC) — fix(PnL): broker NET вместо gross в БД + backfill + post-mortem 4 убыточных + удаление fx-ai-trend + возврат Advisor
 
 `коммит при deploy`

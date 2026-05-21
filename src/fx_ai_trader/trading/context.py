@@ -23,6 +23,7 @@ from fx_ai_trader.analysis.indicators import (
 )
 from fx_ai_trader.news.eia import EiaProvider, format_eia_snapshot
 from fx_ai_trader.news.rss import CommodityRssNewsProvider, NewsItem
+from fx_ai_trader.news.weather import NoaaOutlookProvider, format_noaa_snapshot
 from fx_ai_trader.state.db import AiFxPosition, AiFxTraderStore
 from fx_ai_trader.trading.client_adapter import Bar, CTraderFxAdapter
 
@@ -47,6 +48,9 @@ class MarketContext:
     virtual_capital_usd: float
     news_per_symbol: dict[str, list[NewsItem]] = field(default_factory=dict)
     eia_block_text: str | None = None
+    # NOAA CPC 6-10 / 8-14 day outlook prognostic discussion (для NG=F).
+    # См. BUILDLOG NG enhancement v1.2 от 2026-05-21.
+    noaa_block_text: str | None = None
 
 
 def _price_change_pct_24h(bars_1h: list[Bar]) -> float | None:
@@ -68,6 +72,7 @@ def collect_market_context(
     *,
     news_provider: CommodityRssNewsProvider | None = None,
     eia_provider: EiaProvider | None = None,
+    noaa_provider: NoaaOutlookProvider | None = None,
 ) -> MarketContext:
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
@@ -109,13 +114,23 @@ def collect_market_context(
 
     eia_block: str | None = None
     if eia_provider is not None and eia_provider.enabled:
-        # EIA только для oil — пропускаем если в symbols нет BZ=F/USOIL.
-        if any(s in ("BZ=F", "CL=F") for s in symbols):
+        # EIA нужен и для oil (petroleum block), и для gas (NG storage +
+        # STEO forecast). С 2026-05-21 пропускаем только если ни одного
+        # энергетического инструмента в symbols.
+        if any(s in ("BZ=F", "CL=F", "NG=F") for s in symbols):
             try:
                 snap = eia_provider.get_snapshot()
                 eia_block = format_eia_snapshot(snap)
             except Exception:
                 log.exception("eia_provider failed (продолжаю без EIA)")
+
+    noaa_block: str | None = None
+    if noaa_provider is not None and "NG=F" in symbols:
+        try:
+            noaa_snap = noaa_provider.get_snapshot()
+            noaa_block = format_noaa_snapshot(noaa_snap)
+        except Exception:
+            log.exception("noaa_provider failed (продолжаю без NOAA)")
 
     return MarketContext(
         snapshots=snapshots,
@@ -123,6 +138,7 @@ def collect_market_context(
         virtual_capital_usd=virtual_capital_usd,
         news_per_symbol=news,
         eia_block_text=eia_block,
+        noaa_block_text=noaa_block,
     )
 
 
@@ -177,8 +193,15 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
     parts.append("")
 
     if ctx.eia_block_text:
-        parts.append("=== EIA MACRO (oil) ===")
+        parts.append("=== EIA MACRO (oil + gas: Weekly + STEO forecast) ===")
         parts.append(ctx.eia_block_text)
+        parts.append("")
+
+    if ctx.noaa_block_text:
+        parts.append(
+            "=== NOAA CPC WEATHER OUTLOOK (key NG=F driver: HDD/CDD demand) ==="
+        )
+        parts.append(ctx.noaa_block_text)
         parts.append("")
 
     if any(items for items in ctx.news_per_symbol.values()):
