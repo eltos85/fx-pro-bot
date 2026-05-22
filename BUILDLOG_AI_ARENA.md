@@ -18,6 +18,84 @@
 
 ## 2026-05-22
 
+### v2.z2 user-approved exception #3: Cycle interval 180→600s
+
+**Контекст.** В рамках того же решения пользователя «B + C + D» —
+правка D (cycle 180→600s) после v2.z1 (B). Этот entry — про D.
+
+**Обоснование (post-v2.y observed данные):**
+
+На 9 trades после v2.y deploy средний holding period:
+
+| #  | Symbol  | Lifetime | Pattern                                |
+|----|---------|----------|----------------------------------------|
+| 26 | XRP     | 19 мин   | RSI(7)=29 oversold → "nearing invalid" |
+| 30 | SOL     | 78 мин   | EMA20 support → передумал на 3-min noise |
+| 33 | SOL     | 28 мин   | EMA20 support → "position is b…"       |
+
+LLM реагирует на каждое 3-минутное микро-движение цены и закрывает
+позиции до того как setup развернётся. Cycle 600s даёт 10-минутный
+«cool-off period» между decisions.
+
+**Что изменено:**
+- `src/ai_arena/config/settings.py`: `poll_interval_sec` default
+  `180 → 600` (с подробным комментарием обоснования).
+- `docker-compose.yml`: `${AI_ARENA_POLL_INTERVAL_SEC:-180} → :-600`.
+- `.env.example`: комментарий и default 600.
+- `src/ai_arena/app/main.py` docstring: «default 180 сек» → «default
+  600 сек, v2.z2».
+- `src/ai_arena/state/db.py` docstring `get_pnl_by_leverage_tier`:
+  «cycle = 180s» → «cycle = 600s в v2.z2».
+- `tests/test_ai_arena_source_compliance.py::test_decision_frequency_exact`
+  — обновлён комментарий, assertion **не менялся** (SYSTEM_PROMPT
+  остаётся 1-в-1 с canonical gist).
+
+**Что НЕ изменено (важно для compliance):**
+- **SYSTEM_PROMPT** — без изменений. Фраза `Decision Frequency:
+  Every 2-3 minutes` остаётся 1-в-1 с canonical gist L76. Это
+  информативная характеристика mid-to-low frequency, LLM не делает
+  на ней числовых вычислений (нет формул вида «if cycle==180 then…»).
+  Каждый цикл LLM получает свежий полный snapshot всех индикаторов,
+  и его decision строится на абсолютных значениях этих индикаторов
+  в момент вызова, а не на оценке частоты.
+- **USER_PROMPT** — без изменений. `minutes_elapsed` всё ещё с момента
+  старта эксперимента, как в gist'е.
+- **Output JSON schema** — без изменений.
+- **Action space** — без изменений.
+
+**Откат:** `AI_ARENA_POLL_INTERVAL_SEC=180` env var в compose
+(работает без rebuild — только перезапуск контейнера).
+
+**Side-effects (помимо основного):**
+- API costs: cycle 600s vs 180s = в 3.3 раза меньше LLM-вызовов.
+  На 30-day forward-test это ~$15 → ~$5 при цене DeepSeek.
+- Bybit rate-limits: запас прочности увеличивается (на cycle 600s
+  мы значительно ниже public/private rate-limit'ов).
+
+**Правило обновлено:** `.cursor/rules/ai-arena-sources.mdc` теперь
+содержит исключение #3 «2026-05-22 — Cycle interval 180→600s» с
+полным обоснованием и acceptance criteria.
+
+**Acceptance criteria:**
+- Через 7 дней или ≥30 сделок при cycle=600s — повторить аудит
+  «положенный holding period vs realised holding period».
+- Если средний `closed_at - opened_at` вырастет с текущих 30-90 мин
+  до >60 мин — гипотеза подтверждается.
+- Если результат не улучшится → обсудить cycle=900s/1800s или возврат.
+
+**Files:**
+- `src/ai_arena/config/settings.py`
+- `src/ai_arena/app/main.py`
+- `src/ai_arena/state/db.py` (docstring update)
+- `docker-compose.yml`
+- `.env.example`
+- `.cursor/rules/ai-arena-sources.mdc` — исключение #3
+- `tests/test_ai_arena_source_compliance.py` (комментарий update)
+
+**Деплой:** локальный commit, не пушу до команды пользователя.
+
+---
+
 ### v2.z1 user-approved exception #2: Performance Self-Reflection by Symbol
 
 **Контекст.** Через 17 часов после v2.y deploy ai-arena показал

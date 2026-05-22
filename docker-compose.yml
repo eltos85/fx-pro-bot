@@ -337,7 +337,10 @@ services:
       # .cursor/rules/ai-arena-sources.mdc (источники: nof1.ai TechPost1
       # + gist nof1-prompt.md). Любые правки — только из этих двух
       # источников + лог в BUILDLOG_AI_ARENA.md.
-      AI_ARENA_POLL_INTERVAL_SEC: ${AI_ARENA_POLL_INTERVAL_SEC:-180}
+      # v2.z2: cycle 600s (10 мин), deviation от gist'овых 180s.
+      # Обоснование: 1 модель vs Nof1 4 модели, observed re-decision noise
+      # на 3-минутных свечах. Полный лог — ai-arena-sources.mdc исключение #3.
+      AI_ARENA_POLL_INTERVAL_SEC: ${AI_ARENA_POLL_INTERVAL_SEC:-600}
       # Sandbox capital для LLM. ЕДИНСТВЕННОЕ обоснованное отклонение
       # от Nof1 ($10k у source). У нас бот видит $1000 «начального
       # капитала», и реальный Bybit PnL прибавляется/вычитается 1-в-1

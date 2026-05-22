@@ -1,9 +1,9 @@
-"""AI Arena main loop — Single 3-min cycle (Nof1 7-node loop).
+"""AI Arena main loop — Single cycle (Nof1 7-node loop).
 
 Архитектура (см. правило `.cursor/rules/ai-arena-sources.mdc` и
 AI_TRADER_PROPOSAL_ALPHA_ARENA.md §4.1):
 
-1. Heartbeat trigger    — каждые `poll_interval_sec` (default 180 сек)
+1. Heartbeat trigger    — каждые `poll_interval_sec` (default 600 сек, v2.z2)
 2. Account snapshot     — equity, available cash, total return, minutes_elapsed
 3. Compute Sharpe       — rolling 14d из equity_snapshots
 4. Reconcile positions  — закрытые на бирже (SL/TP/manual) → БД + push

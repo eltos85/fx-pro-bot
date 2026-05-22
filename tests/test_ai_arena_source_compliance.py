@@ -81,8 +81,13 @@ class TestTradingEnvironmentSource:
 
     def test_decision_frequency_exact(self):
         # gist L76: `**Decision Frequency**: Every 2-3 minutes (mid-to-low frequency trading)`
-        # Дословно «2-3» — описание характера mid-to-low frequency, не
-        # точная конфигурация (наш poll_interval=180s попадает в диапазон).
+        # SYSTEM_PROMPT остаётся 1-в-1 с canonical gist (синтаксис source).
+        # Реальный poll_interval может отличаться от «2-3 minutes» — у нас
+        # с v2.z2 (2026-05-22) cycle = 600s. SYSTEM_PROMPT не менялся,
+        # потому что LLM не делает на этой фразе числовых вычислений
+        # (информативная характеристика mid-to-low frequency). Решение
+        # зафиксировано в `.cursor/rules/ai-arena-sources.mdc` §
+        # «Допустимые исключения» исключение #3 и BUILDLOG_AI_ARENA.md.
         sp = _sp()
         assert "**Decision Frequency**: Every 2-3 minutes (mid-to-low frequency trading)" in sp
 

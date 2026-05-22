@@ -93,10 +93,21 @@ class AiArenaSettings(BaseSettings):
         default=",".join(DEFAULT_ARENA_SYMBOLS),
         validation_alias="AI_ARENA_SYMBOLS",
     )
-    # Nof1: «Decision Frequency: Every 2-3 minutes». Стартуем с 3 мин.
-    # Увеличить до 300 если упрёмся в latency LLM или Bybit rate-limits.
+    # v2.z2 user-approved exception #3 (2026-05-22): cycle 180→600s.
+    # Nof1 SYSTEM_PROMPT canonical: «Decision Frequency: Every 2-3 minutes»
+    # — оставляем 1-в-1 (синтаксис gist'а, LLM не использует это для
+    # числовых вычислений). Реальный poll_interval = **600s (10 мин)** —
+    # обоснование в `.cursor/rules/ai-arena-sources.mdc` § «Допустимые
+    # исключения» (исключение #3). Bybit/Hyperliquid difference: Nof1
+    # запускал 4 модели параллельно (gpt-5/grok/deepseek/qwen) на 180s
+    # heartbeat ради сравнения throughput; у нас 1 модель в forward-test,
+    # дешевле/качественнее с расширенным cycle. Также post-v2.y observed:
+    # LLM открывает позицию → закрывает через 30-90 мин по «передумал»
+    # на 3-минутном noise. Cycle 600s даёт reasoning больше времени на
+    # формирование setup'а и снижает re-decision-frequency.
+    # Возврат к 180 — установить `AI_ARENA_POLL_INTERVAL_SEC=180`.
     poll_interval_sec: int = Field(
-        default=180, validation_alias="AI_ARENA_POLL_INTERVAL_SEC"
+        default=600, validation_alias="AI_ARENA_POLL_INTERVAL_SEC"
     )
 
     # Виртуальный капитал — sandbox-обманка для LLM. Единственное

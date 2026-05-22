@@ -747,8 +747,8 @@ class AiArenaStore:
         Каждый dict: ``{label, lev_min, lev_max, n_trades, n_wins, sum_pnl, avg_pnl}``.
         Если в tier нет ни одной закрытой сделки — n_trades=0, остальные 0.0.
 
-        Stateless: запрос против БД на каждом цикле (cycle = 180s, нагрузка
-        пренебрежимая). Не кэшируется — иначе после reconcile-ев данные
+        Stateless: запрос против БД на каждом цикле (cycle = 600s в v2.z2,
+        нагрузка тем более пренебрежимая). Не кэшируется — иначе после reconcile-ев данные
         могут отстать. Sample-size guard внутри `build_user_prompt` —
         здесь возвращаем всё как есть.
         """
