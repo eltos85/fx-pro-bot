@@ -688,6 +688,58 @@ class AiArenaStore:
         ("9-20x", 9, 20),
     )
 
+    def get_pnl_by_symbol(self, symbols: list[str]) -> list[dict[str, Any]]:
+        """Cumulative per-symbol stats для closed positions с realized_pnl != NULL.
+
+        v2.z1 user-approved exception (2026-05-22): см. правило
+        ``ai-arena-sources.mdc`` § «Допустимые исключения по решению
+        пользователя» (2-е исключение, после v2.y leverage tier).
+
+        Аналог ``get_pnl_by_leverage_tier`` — та же realized_pnl, разбивка
+        по другому измерению (symbol). Цель: LLM видит, что **именно SOL**
+        для него токсичен (4/4 losses, sum −$208), а не «бот плохо работает
+        в общем». Per-symbol — это естественное второе измерение калибровки
+        вдоль уже разрешённого канона feedback.
+
+        Возвращает list of dicts (порядок — `symbols` argument, обычно
+        ``settings.symbols`` в alphabetical/insertion order). Ни один
+        symbol из whitelist не пропускается, даже если по нему 0 closed
+        trades — `n_trades=0` явно показывает «не торговали» вместо
+        пропуска (как в leverage tier 9-20x: n=0).
+
+        Каждый dict: ``{symbol, n_trades, n_wins, sum_pnl, avg_pnl}``.
+        """
+        result: list[dict[str, Any]] = []
+        with self._conn() as c:
+            for symbol in symbols:
+                row = c.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS n,
+                        COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                        COALESCE(SUM(realized_pnl_usd), 0) AS sum_pnl
+                    FROM positions
+                    WHERE closed_at IS NOT NULL
+                      AND realized_pnl_usd IS NOT NULL
+                      AND symbol = ?
+                    """,
+                    (symbol,),
+                ).fetchone()
+                n = int(row[0]) if row else 0
+                wins = int(row[1]) if row else 0
+                sum_pnl = float(row[2]) if row else 0.0
+                avg_pnl = (sum_pnl / n) if n > 0 else 0.0
+                result.append(
+                    {
+                        "symbol": symbol,
+                        "n_trades": n,
+                        "n_wins": wins,
+                        "sum_pnl": sum_pnl,
+                        "avg_pnl": avg_pnl,
+                    }
+                )
+        return result
+
     def get_pnl_by_leverage_tier(self) -> list[dict[str, Any]]:
         """Cumulative per-tier stats для closed positions с realized_pnl != NULL.
 

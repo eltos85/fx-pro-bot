@@ -17,7 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from ai_arena.llm.prompts import _format_leverage_tier_block, build_user_prompt
+from ai_arena.llm.prompts import (
+    _format_leverage_tier_block,
+    _format_symbol_stats_block,
+    build_user_prompt,
+)
 from ai_arena.state.db import AiArenaStore
 
 
@@ -271,3 +275,191 @@ class TestUserPromptIntegration:
         )
         assert "Performance by Leverage Tier" in out
         assert "insufficient history" in out
+
+
+# ─── v2.z1 tests: get_pnl_by_symbol ──────────────────────────────────────────
+
+
+WHITELIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "XRPUSDT"]
+
+
+class TestPnlBySymbolAggregation:
+    def test_empty_store_returns_all_zero_per_symbol(self, tmp_path):
+        store = _new_store(tmp_path)
+        result = store.get_pnl_by_symbol(WHITELIST)
+        assert len(result) == 6
+        assert [s["symbol"] for s in result] == WHITELIST
+        for s in result:
+            assert s["n_trades"] == 0
+            assert s["n_wins"] == 0
+            assert s["sum_pnl"] == 0.0
+            assert s["avg_pnl"] == 0.0
+
+    def test_only_traded_symbols_aggregate_others_zero(self, tmp_path):
+        store = _new_store(tmp_path)
+        _open_and_close(store, leverage=3, realized_pnl=10.0, symbol="SOLUSDT")
+        _open_and_close(store, leverage=3, realized_pnl=-50.0, symbol="SOLUSDT")
+        _open_and_close(store, leverage=2, realized_pnl=5.0, symbol="BTCUSDT")
+
+        result = store.get_pnl_by_symbol(WHITELIST)
+        sol = next(s for s in result if s["symbol"] == "SOLUSDT")
+        btc = next(s for s in result if s["symbol"] == "BTCUSDT")
+        eth = next(s for s in result if s["symbol"] == "ETHUSDT")
+
+        assert sol["n_trades"] == 2
+        assert sol["n_wins"] == 1
+        assert sol["sum_pnl"] == pytest.approx(-40.0)
+        assert sol["avg_pnl"] == pytest.approx(-20.0)
+
+        assert btc["n_trades"] == 1
+        assert btc["n_wins"] == 1
+        assert btc["sum_pnl"] == pytest.approx(5.0)
+
+        assert eth["n_trades"] == 0  # не торговали
+
+    def test_open_positions_excluded(self, tmp_path):
+        store = _new_store(tmp_path)
+        store.open_position(
+            symbol="SOLUSDT", side="Buy", qty=1.0, entry_price=87.0,
+            sl_price=86.0, tp_price=88.0, leverage=3,
+            order_link_id="arena_open_sol", llm_justification="x",
+            confidence=0.5, invalidation_condition="x", risk_usd=10.0,
+        )
+        _open_and_close(store, leverage=3, realized_pnl=15.0, symbol="SOLUSDT")
+        sol = next(
+            s for s in store.get_pnl_by_symbol(WHITELIST) if s["symbol"] == "SOLUSDT"
+        )
+        assert sol["n_trades"] == 1
+        assert sol["sum_pnl"] == pytest.approx(15.0)
+
+    def test_unknown_symbol_in_whitelist_returns_zero(self, tmp_path):
+        store = _new_store(tmp_path)
+        _open_and_close(store, leverage=3, realized_pnl=10.0, symbol="SOLUSDT")
+        # Передаём whitelist с символом, которого нет в БД — должна вернуться
+        # запись с n_trades=0, не KeyError.
+        result = store.get_pnl_by_symbol(["NEWCOIN"])
+        assert len(result) == 1
+        assert result[0]["symbol"] == "NEWCOIN"
+        assert result[0]["n_trades"] == 0
+
+    def test_order_matches_input_argument(self, tmp_path):
+        """Порядок результата = порядок symbols-аргумента (insertion-stable)."""
+        store = _new_store(tmp_path)
+        custom_order = ["SOLUSDT", "BTCUSDT", "DOGEUSDT"]
+        result = store.get_pnl_by_symbol(custom_order)
+        assert [s["symbol"] for s in result] == custom_order
+
+
+# ─── v2.z1 tests: _format_symbol_stats_block ────────────────────────────────
+
+
+class TestFormatSymbolStatsBlock:
+    def test_none_returns_insufficient_history(self):
+        assert "insufficient history" in _format_symbol_stats_block(None)
+
+    def test_all_zero_symbols_return_insufficient_history(self):
+        empty = [
+            {"symbol": s, "n_trades": 0, "n_wins": 0,
+             "sum_pnl": 0.0, "avg_pnl": 0.0}
+            for s in WHITELIST
+        ]
+        assert "insufficient history" in _format_symbol_stats_block(empty)
+
+    def test_partial_traded_shows_per_symbol_breakdown(self):
+        stats = [
+            {"symbol": "BTCUSDT", "n_trades": 8, "n_wins": 2,
+             "sum_pnl": -45.20, "avg_pnl": -5.65},
+            {"symbol": "SOLUSDT", "n_trades": 18, "n_wins": 4,
+             "sum_pnl": -478.60, "avg_pnl": -26.59},
+            {"symbol": "ETHUSDT", "n_trades": 0, "n_wins": 0,
+             "sum_pnl": 0.0, "avg_pnl": 0.0},
+        ]
+        out = _format_symbol_stats_block(stats)
+        assert "BTCUSDT: n=8" in out
+        assert "SOLUSDT: n=18" in out
+        assert "wins=4 (22%)" in out
+        assert "-$478.60" in out
+        assert "ETHUSDT: n=0 (no data)" in out
+
+    def test_format_uses_signed_pnl(self):
+        stats = [
+            {"symbol": "ETHUSDT", "n_trades": 1, "n_wins": 1,
+             "sum_pnl": 100.0, "avg_pnl": 100.0},
+        ]
+        out = _format_symbol_stats_block(stats)
+        assert "+$100.00" in out
+
+
+# ─── v2.z1 tests: build_user_prompt с symbol_stats ──────────────────────────
+
+
+class TestUserPromptSymbolStatsIntegration:
+    def _build(self, symbol_stats=None, leverage_stats=None) -> str:
+        return build_user_prompt(
+            minutes_elapsed=180,
+            per_symbol_blocks="### ALL DATA\n(test)",
+            total_return_pct=-3.5,
+            sharpe=-0.05,
+            cash=9500.0,
+            equity=9650.0,
+            open_positions_block="[]",
+            leverage_stats=leverage_stats,
+            symbol_stats=symbol_stats,
+        )
+
+    def test_prompt_contains_performance_by_symbol_section(self):
+        out = self._build()
+        assert "Performance by Symbol" in out
+        assert "cumulative since experiment start" in out
+
+    def test_prompt_with_none_symbol_stats_shows_insufficient_history(self):
+        out = self._build(symbol_stats=None)
+        # 2 секции с такой формулировкой (leverage и symbol) → должно быть оба
+        assert out.count("insufficient history") == 2
+
+    def test_prompt_with_real_symbol_stats_shows_per_symbol_lines(self):
+        symbol_stats = [
+            {"symbol": "BTCUSDT", "n_trades": 8, "n_wins": 2,
+             "sum_pnl": -45.20, "avg_pnl": -5.65},
+            {"symbol": "SOLUSDT", "n_trades": 18, "n_wins": 4,
+             "sum_pnl": -478.60, "avg_pnl": -26.59},
+            {"symbol": "ETHUSDT", "n_trades": 0, "n_wins": 0,
+             "sum_pnl": 0.0, "avg_pnl": 0.0},
+        ]
+        out = self._build(symbol_stats=symbol_stats)
+        assert "BTCUSDT: n=8" in out
+        assert "SOLUSDT: n=18" in out
+        assert "ETHUSDT: n=0" in out
+
+    def test_symbol_block_appears_after_leverage_block(self):
+        leverage_stats = [
+            {"label": "1-3x", "lev_min": 1, "lev_max": 3,
+             "n_trades": 5, "n_wins": 2, "sum_pnl": -10.0, "avg_pnl": -2.0},
+            {"label": "4-8x", "lev_min": 4, "lev_max": 8,
+             "n_trades": 0, "n_wins": 0, "sum_pnl": 0.0, "avg_pnl": 0.0},
+            {"label": "9-20x", "lev_min": 9, "lev_max": 20,
+             "n_trades": 0, "n_wins": 0, "sum_pnl": 0.0, "avg_pnl": 0.0},
+        ]
+        symbol_stats = [
+            {"symbol": "BTCUSDT", "n_trades": 5, "n_wins": 2,
+             "sum_pnl": -10.0, "avg_pnl": -2.0},
+        ]
+        out = self._build(symbol_stats=symbol_stats, leverage_stats=leverage_stats)
+        lev_idx = out.find("Performance by Leverage Tier")
+        sym_idx = out.find("Performance by Symbol")
+        acc_idx = out.find("**Account Status:**")
+        assert lev_idx < sym_idx < acc_idx
+
+    def test_prompt_default_arg_works_for_backward_compat_symbol(self):
+        """Когда symbol_stats=None — секция Performance by Symbol есть,
+        но содержит «insufficient history». Старые тесты не сломаются."""
+        out = build_user_prompt(
+            minutes_elapsed=60,
+            per_symbol_blocks="x",
+            total_return_pct=0.0,
+            sharpe=None,
+            cash=1000.0,
+            equity=1000.0,
+            open_positions_block="[]",
+        )
+        assert "Performance by Symbol" in out

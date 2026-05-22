@@ -359,6 +359,44 @@ def _format_leverage_tier_block(
     return "\n".join(lines)
 
 
+def _format_symbol_stats_block(symbol_stats: list[dict] | None) -> str:
+    """Performance Self-Reflection by Symbol (v2.z1 user-approved exception).
+
+    Source: правило ``ai-arena-sources.mdc`` § «Допустимые исключения по
+    решению пользователя» (2-е исключение, 2026-05-22).
+
+    Аналогично leverage tier (v2.y) — LLM видит cumulative realized PnL,
+    разбитый по другому измерению (symbol). Это **data-driven feedback**,
+    не директива «не торгуй SOL». LLM сам интерпретирует и сам решает.
+
+    Если ``symbol_stats=None`` или все символы с `n_trades=0` —
+    «(no closed trades yet — insufficient history)».
+    """
+    if not symbol_stats:
+        return "(no closed trades yet — insufficient history)"
+    non_empty = [s for s in symbol_stats if s.get("n_trades", 0) > 0]
+    if not non_empty:
+        return "(no closed trades yet — insufficient history)"
+
+    def _signed_usd(value: float) -> str:
+        sign = "+" if value >= 0 else "-"
+        return f"{sign}${abs(value):.2f}"
+
+    lines: list[str] = []
+    for s in symbol_stats:
+        n = s.get("n_trades", 0)
+        if n == 0:
+            lines.append(f"  - {s['symbol']}: n=0 (no data)")
+            continue
+        wr_pct = (s["n_wins"] / n) * 100.0
+        lines.append(
+            f"  - {s['symbol']}: n={n}, wins={s['n_wins']} ({wr_pct:.0f}%), "
+            f"avg_pnl={_signed_usd(s['avg_pnl'])}, "
+            f"sum_pnl={_signed_usd(s['sum_pnl'])}"
+        )
+    return "\n".join(lines)
+
+
 def build_user_prompt(
     *,
     minutes_elapsed: int,
@@ -369,6 +407,7 @@ def build_user_prompt(
     equity: float,
     open_positions_block: str,
     leverage_stats: list[dict] | None = None,
+    symbol_stats: list[dict] | None = None,
 ) -> str:
     """USER_PROMPT 1-в-1 по gist § User Prompt 完整逆向.
 
@@ -386,9 +425,16 @@ def build_user_prompt(
     tier'ам gist'а (1-3x/4-8x/9-20x). См. правило ai-arena-sources.mdc
     § «Допустимые исключения по решению пользователя» (2026-05-21) и
     BUILDLOG_AI_ARENA.md v2.y entry.
+
+    ``symbol_stats`` (опциональный, default None): list[dict] из
+    ``AiArenaStore.get_pnl_by_symbol(settings.symbols)``. Аналог
+    leverage_stats, разбивка по другому измерению (symbol). См. правило
+    ai-arena-sources.mdc § «Допустимые исключения по решению пользователя»
+    (исключение #2, 2026-05-22) и BUILDLOG_AI_ARENA.md v2.z1 entry.
     """
     sharpe_str = f"{sharpe:.3f}" if sharpe is not None else "n/a (insufficient history)"
     leverage_tier_block = _format_leverage_tier_block(leverage_stats)
+    symbol_stats_block = _format_symbol_stats_block(symbol_stats)
     return f"""It has been {minutes_elapsed} minutes since you started trading.
 
 Below, we are providing you with a variety of state data, price data, and predictive signals so you can discover alpha. Below that is your current account information, value, performance, positions, etc.
@@ -412,6 +458,8 @@ Below, we are providing you with a variety of state data, price data, and predic
 - Sharpe Ratio: {sharpe_str}
 - Performance by Leverage Tier (cumulative since experiment start):
 {leverage_tier_block}
+- Performance by Symbol (cumulative since experiment start):
+{symbol_stats_block}
 
 **Account Status:**
 - Available Cash: ${cash:.2f}

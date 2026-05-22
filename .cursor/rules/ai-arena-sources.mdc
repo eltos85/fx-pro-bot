@@ -103,6 +103,65 @@ Hyperliquid), а явные решения пользователя добави
 2. Запись в `BUILDLOG_AI_ARENA.md` с датой, обоснованием, evidence.
 3. Возможность отключения через флаг или удаления (без поломки логики).
 
+### 2026-05-22 — Performance Self-Reflection by Symbol (исключение #2)
+
+**Решение пользователя:** на вопрос «что делать с продолжающимися крупными
+убытками после v2.y?» пользователь выбрал опцию B (per-symbol feedback)
+вместе с C (notional cap) и D (cycle 180→600s). Этот раздел — про B.
+
+**Контекст.** v2.y дал measurable shift в hold-rate (94.5% за 17ч), но
+WR по 9 сделкам после v2.y остался 44%, net −$287. Аудит per-symbol
+показал что **SOLUSDT 4/4 losses, sum −$208** — токсичный конкретно для
+DeepSeek-V4-flash символ, но в leverage tier этого не видно.
+
+**Что добавлено в USER_PROMPT** (секция «Performance Metrics», после
+Performance by Leverage Tier и до Account Status):
+
+```
+- Performance by Symbol (cumulative since experiment start):
+  - BTCUSDT: n=8,  wins=2 (25%),  avg_pnl=-$5.65,  sum_pnl=-$45.20
+  - ETHUSDT: n=4,  wins=2 (50%),  avg_pnl=+$3.03,  sum_pnl=+$12.10
+  - SOLUSDT: n=18, wins=4 (22%),  avg_pnl=-$26.59, sum_pnl=-$478.60
+  - BNBUSDT: n=2,  wins=0 (0%),   avg_pnl=-$39.20, sum_pnl=-$78.40
+  - DOGEUSDT: n=2, wins=1 (50%),  avg_pnl=+$4.15,  sum_pnl=+$8.30
+  - XRPUSDT: n=4,  wins=2 (50%),  avg_pnl=-$7.53,  sum_pnl=-$30.10
+```
+
+Порядок — `settings.symbols` (insertion order). Каждый символ из
+whitelist показывается, даже если `n_trades=0` (явный сигнал «не
+торговали», не пропуск).
+
+**Семантика:** **второе измерение того же calibration self-feedback**
+что и v2.y. Та же realized_pnl, разбивка по `symbol` вместо `leverage`.
+LLM сам решает, как интерпретировать (избегать SOL, удвоить ETH, и т.д.).
+Никаких hard-блокировок символов — это data-driven feedback, не директива.
+
+**Почему это допустимо:**
+- Точно тот же mechanism что v2.y, новая axis. Реальные realized_pnl,
+  не статичный текст.
+- Не конфликтует с canonical Nof1 sources: в gist символ-специфичная
+  feedback не запрещена, просто не реализована (Nof1 запускал 4 модели
+  в short experiment, у нас 1 модель в forward-test).
+- Stateless: пересчитывается из БД каждый цикл, не требует conversation
+  history.
+
+**Что НЕ изменено:**
+- SYSTEM_PROMPT — без изменений.
+- Output JSON schema — без изменений.
+- Action space — без изменений.
+- Whitelist символов в коде — без изменений.
+
+**Откат:** удалить параметр `symbol_stats` из `build_user_prompt(...)`
+вызова в `main.py`. Метод `get_pnl_by_symbol` останется как read-only API.
+
+**Acceptance criteria:**
+- Через 7 дней или ≥30 новых сделок повторить аудит.
+- Если LLM начнёт реже открывать SOLUSDT (или другой токсичный символ
+  в текущем view) — гипотеза подтверждается.
+- Если SOL-trades продолжатся в том же темпе или вырастут — гипотеза
+  не работает, обсудить откат либо ужесточение (символ-blacklist в
+  коде, но это уже не feedback, а discipline).
+
 ### 2026-05-21 — Performance Self-Reflection by Leverage Tier
 
 **Решение пользователя:** «сделай одно исключение, я разрешил»

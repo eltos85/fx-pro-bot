@@ -16,6 +16,105 @@
 
 ---
 
+## 2026-05-22
+
+### v2.z1 user-approved exception #2: Performance Self-Reflection by Symbol
+
+**Контекст.** Через 17 часов после v2.y deploy ai-arena показал
+measurable shift в hold-rate (94.5% за 17ч), но **9 trades net −$287**:
+
+| День       | n  | WR    | PnL      | avg_lev | Worst    |
+|------------|----|-------|----------|---------|----------|
+| 2026-05-21 | 10 | 30.0% | −$435.02 | 4.4x    | −$169.51 |
+| 2026-05-22 | 2  | 50.0% | −$82.58  | 4.0x    | −$90.37  |
+
+**Per-symbol audit показал что леверидж не главная проблема:**
+
+| Symbol  | Period | n | WR  | sum_pnl  | Note            |
+|---------|--------|---|-----|----------|-----------------|
+| SOLUSDT | post-v2.y | 4 | 0%  | −$208.07 | Все 4 — лонги после oversold-RSI |
+| BNBUSDT | post-v2.y | 1 | 0%  | −$38.78  |  |
+| XRPUSDT | post-v2.y | 2 | 50% | −$57.27  |  |
+| BTCUSDT | post-v2.y | 1 | 100%| +$5.10   |  |
+| DOGEUSDT| post-v2.y | 1 | 100%| +$7.79   |  |
+
+SOLUSDT — токсичный для DeepSeek-V4-flash символ конкретно сейчас.
+В v2.y leverage-tier feedback это не видно: оба tier'а 1-3x и 4-8x в
+минусе, LLM ушёл в hold вместо переключения на менее-токсичные
+символы.
+
+**Что сделано (по явному решению пользователя «вариант B + C + D»):**
+
+1. `AiArenaStore.get_pnl_by_symbol(symbols)` — агрегат closed
+   positions per-symbol. Аналог `get_pnl_by_leverage_tier`, разбивка
+   по `symbol` вместо `leverage`. Принимает whitelist symbols (обычно
+   `settings.symbols`). Возвращает list[dict] с n / wins / sum / avg
+   per-symbol, в том же порядке что входной аргумент.
+2. `_format_symbol_stats_block` в `prompts.py` — формат:
+
+   ```
+   - Performance by Symbol (cumulative since experiment start):
+     - BTCUSDT: n=8,  wins=2 (25%),  avg_pnl=-$5.65,  sum_pnl=-$45.20
+     - SOLUSDT: n=18, wins=4 (22%),  avg_pnl=-$26.59, sum_pnl=-$478.60
+     - ETHUSDT: n=0 (no data)
+     ...
+   ```
+
+   Каждый символ из `settings.symbols` показывается, даже если
+   `n_trades=0` (явный сигнал «не торговали», не пропуск).
+3. `build_user_prompt(..., symbol_stats=...)` — новый опциональный
+   параметр (default `None`). Блок встроен в Performance Metrics между
+   `Performance by Leverage Tier` и `Account Status`.
+4. `app/main.py` подтягивает `store.get_pnl_by_symbol(settings.symbols)`
+   каждый цикл и пробрасывает в `build_user_prompt`.
+
+**Семантика — почему это допустимо:**
+
+- Это **второе измерение** того же calibration self-feedback что v2.y.
+  Одна и та же realized_pnl, разбивка по другому axis (symbol).
+- Не директива «не торгуй SOL» — LLM сам интерпретирует и сам решает.
+  Никаких hard-блокировок символов в коде.
+- Stateless и stateless-coherent: пересчёт каждый цикл из БД,
+  conversation history не нужна.
+
+**Что НЕ изменено:**
+- SYSTEM_PROMPT — без изменений.
+- Output JSON schema — без изменений.
+- Action space — без изменений.
+- Whitelist symbols в коде / .env — без изменений.
+
+**Правило обновлено:** `.cursor/rules/ai-arena-sources.mdc` теперь
+содержит исключение #2 «2026-05-22 — Performance Self-Reflection by
+Symbol» с цитатой пользовательского решения и acceptance criteria.
+
+**Acceptance criteria:**
+- Через 7 дней или ≥30 новых сделок — повторить
+  `collect_bybit_3bots_stats.py` per-symbol.
+- Если LLM начнёт реже открывать SOLUSDT (или другие токсичные
+  в текущем view) — гипотеза подтверждается.
+- Если SOL-trades продолжатся в том же темпе → обсудить
+  symbol-blacklist в коде (но это уже не feedback, а discipline).
+
+**Files:**
+- `src/ai_arena/state/db.py` — `get_pnl_by_symbol`
+- `src/ai_arena/llm/prompts.py` — `_format_symbol_stats_block`,
+  параметр `symbol_stats` в `build_user_prompt`
+- `src/ai_arena/app/main.py` — proxying `symbol_stats`
+- `.cursor/rules/ai-arena-sources.mdc` — исключение #2
+- `tests/test_ai_arena_leverage_tier_feedback.py` — 14 новых тестов
+  (агрегация / форматирование / интеграция / backward compat)
+
+**Sample-size guard.** Текущая выборка после v2.y — n=9 closed
+trades. Это значительно ниже порога `sample-size.mdc` (≥100).
+Поэтому LLM получает только цифры, без рекомендаций «не торгуй
+символ X». Решение — на стороне LLM.
+
+**Деплой:** локальный commit, не пушу до явной команды пользователя.
+План: 3 commit'а (v2.z1 / v2.z2 / v2.z3) выкладываются по очереди
+по запросу пользователя.
+
+---
+
 ## 2026-05-21
 
 ### v2.y user-approved exception: Performance Self-Reflection by Leverage Tier

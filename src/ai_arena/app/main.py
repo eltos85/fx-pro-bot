@@ -233,6 +233,11 @@ def _run_cycle(
     # performance self-reflection. См. правило ai-arena-sources.mdc
     # § «Допустимые исключения по решению пользователя» и BUILDLOG_AI_ARENA.md.
     leverage_stats = store.get_pnl_by_leverage_tier()
+    # v2.z1 user-approved exception (2026-05-22): per-symbol performance
+    # self-reflection. Аналог leverage_stats, разбивка по другому измерению.
+    # См. правило ai-arena-sources.mdc § «Допустимые исключения» (исключение #2)
+    # и BUILDLOG_AI_ARENA.md v2.z1 entry.
+    symbol_stats = store.get_pnl_by_symbol(settings.symbols)
     user_prompt = build_user_prompt(
         minutes_elapsed=minutes_elapsed,
         per_symbol_blocks=format_per_symbol_blocks(ctx),
@@ -242,6 +247,7 @@ def _run_cycle(
         equity=scaled_equity,
         open_positions_block=open_pos_block,
         leverage_stats=leverage_stats,
+        symbol_stats=symbol_stats,
     )
 
     log.info(
