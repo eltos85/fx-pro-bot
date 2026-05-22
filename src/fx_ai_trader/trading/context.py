@@ -21,7 +21,7 @@ from fx_ai_trader.analysis.indicators import (
     compute_snapshot,
     format_snapshot,
 )
-from fx_ai_trader.news.eia import EiaProvider, format_eia_snapshot
+from fx_ai_trader.news.eia import EiaProvider, format_eia_by_symbol
 from fx_ai_trader.news.rss import CommodityRssNewsProvider, NewsItem
 from fx_ai_trader.news.weather import NoaaOutlookProvider, format_noaa_snapshot
 from fx_ai_trader.state.db import AiFxPosition, AiFxTraderStore
@@ -47,10 +47,11 @@ class MarketContext:
     open_positions: list[AiFxPosition]
     virtual_capital_usd: float
     news_per_symbol: dict[str, list[NewsItem]] = field(default_factory=dict)
-    eia_block_text: str | None = None
-    # NOAA CPC 6-10 / 8-14 day outlook prognostic discussion (для NG=F).
-    # См. BUILDLOG NG enhancement v1.2 от 2026-05-21.
-    noaa_block_text: str | None = None
+    # Per-symbol macro blocks (BUILDLOG 2026-05-22 — изоляция macro между
+    # инструментами): {'BZ=F': 'EIA Weekly Petroleum: ...', 'NG=F': 'EIA
+    # Weekly NG + STEO + NOAA discussion: ...'}. XAUUSD обычно пустой
+    # ключ (нет EIA-релевантного macro для gold).
+    macro_per_symbol: dict[str, str] = field(default_factory=dict)
 
 
 def _price_change_pct_24h(bars_1h: list[Bar]) -> float | None:
@@ -112,23 +113,31 @@ def collect_market_context(
             log.exception("news_provider failed (продолжаю без новостей)")
             news = {}
 
-    eia_block: str | None = None
+    macro_per_symbol: dict[str, str] = {}
     if eia_provider is not None and eia_provider.enabled:
-        # EIA нужен и для oil (petroleum block), и для gas (NG storage +
-        # STEO forecast). С 2026-05-21 пропускаем только если ни одного
-        # энергетического инструмента в symbols.
+        # EIA per-symbol routing (BUILDLOG 2026-05-22): petroleum block
+        # уходит в BZ=F, NG storage + STEO — в NG=F. XAUUSD не получает.
         if any(s in ("BZ=F", "CL=F", "NG=F") for s in symbols):
             try:
                 snap = eia_provider.get_snapshot()
-                eia_block = format_eia_snapshot(snap)
+                eia_blocks = format_eia_by_symbol(snap)
+                for sym, block in eia_blocks.items():
+                    if sym in symbols:
+                        macro_per_symbol[sym] = block
             except Exception:
                 log.exception("eia_provider failed (продолжаю без EIA)")
 
-    noaa_block: str | None = None
     if noaa_provider is not None and "NG=F" in symbols:
         try:
             noaa_snap = noaa_provider.get_snapshot()
             noaa_block = format_noaa_snapshot(noaa_snap)
+            if noaa_block:
+                # NOAA — drivers ТОЛЬКО для NG=F (HDD/CDD demand).
+                # Прикрепляем к NG=F macro (если уже есть EIA — конкатенируем).
+                existing = macro_per_symbol.get("NG=F", "")
+                macro_per_symbol["NG=F"] = (
+                    f"{existing}\n\n{noaa_block}" if existing else noaa_block
+                )
         except Exception:
             log.exception("noaa_provider failed (продолжаю без NOAA)")
 
@@ -137,8 +146,7 @@ def collect_market_context(
         open_positions=store.get_open_positions(),
         virtual_capital_usd=virtual_capital_usd,
         news_per_symbol=news,
-        eia_block_text=eia_block,
-        noaa_block_text=noaa_block,
+        macro_per_symbol=macro_per_symbol,
     )
 
 
@@ -192,16 +200,18 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
     parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
     parts.append("")
 
-    if ctx.eia_block_text:
-        parts.append("=== EIA MACRO (oil + gas: Weekly + STEO forecast) ===")
-        parts.append(ctx.eia_block_text)
-        parts.append("")
-
-    if ctx.noaa_block_text:
+    # Per-symbol macro (с 2026-05-22): EIA + NOAA маршрутизированы по
+    # инструментам, чтобы LLM не смешивал oil/gas/gold macro.
+    if ctx.macro_per_symbol:
         parts.append(
-            "=== NOAA CPC WEATHER OUTLOOK (key NG=F driver: HDD/CDD demand) ==="
+            "=== PER-SYMBOL MACRO CONTEXT (each block ONLY applies to "
+            "the labelled symbol — do NOT cross-apply) ==="
         )
-        parts.append(ctx.noaa_block_text)
+        for sym, block in ctx.macro_per_symbol.items():
+            if not block:
+                continue
+            parts.append(f"\n[{sym}] macro:")
+            parts.append(block)
         parts.append("")
 
     if any(items for items in ctx.news_per_symbol.values()):

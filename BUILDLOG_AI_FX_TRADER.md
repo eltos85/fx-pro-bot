@@ -1,5 +1,167 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-22 — feat(cross-contamination fix): per-symbol macro routing + word-boundary classifier + exclude rules
+
+`коммит при deploy`
+
+### Триггер: гипотеза пользователя «ИИ путает данные между ресурсами»
+
+Запрос: «возможно при принятии решений ИИ путает данные между ресурсами,
+то есть золото с газом и нефтью и наоборот».
+
+Diagnostic в 3 измерениях:
+1. **Структура prompt** — данные price/indicators изолированы через
+   явные `[XAUUSD]` / `[BZ=F]` / `[NG=F]` теги. **Cross-pollution
+   архитектурно невозможна** ✅.
+2. **News filtering** — на 12 RSS items нашёл **17% контаминации**:
+   - `[XAUUSD, BZ=F]` «Geologic Hydrogen Could Produce Clean Fuel»
+   - `[BZ=F, NG=F]` «India Explores Alternative Energy Amid Oil Supply
+     Shock»
+3. **LLM reasoning на 25 live-трейдах** — атрибуция драйверов
+   **корректная** (gold = yields/Fed/DXY, oil = Hormuz/OPEC, gas =
+   LNG/NOAA). **0/25 trades** с реальной путаницей ✅.
+
+Однако обнаружены **три механические утечки**:
+
+1. **`eia` в OIL_KEYWORDS** — substring ловил «EIA: Natural Gas
+   Storage Report» → попадало в [BZ=F] bucket.
+2. **`goldman` substring** — «gold» substring в "Goldman Sachs"
+   ловил **каждую** Goldman oil/OPEC-news в [XAUUSD] bucket. Это
+   огромная утечка (Goldman публикует oil/macro ежедневно).
+3. **`biogas` / `boiler` substring** — потенциальные false positives
+   через "gas" в "biogas" и "oil" в "boiler".
+
+### Изменения
+
+#### 1. Word-boundary classifier (`src/fx_ai_trader/news/rss.py`)
+
+Новая функция `_matches_keyword(keyword, text)`:
+- Multi-word phrase (содержит пробел) → substring match как раньше
+- Single word → `\b{keyword}\b` regex (word-boundary)
+
+Результат:
+- `"gold"` НЕ матчит «Goldman»/«Goldilocks»/«Marigold»
+- `"oil"` НЕ матчит «Boiler»/«Toiletries»
+- `"gas"` НЕ матчит «Biogas»/«Gasoline» (gasoline отдельный keyword
+  если нужен)
+- `"natural gas"`, `"strait of hormuz"` — fraz, substring как раньше
+
+#### 2. Узкий EIA keyword в OIL (`OIL_KEYWORDS` в rss.py)
+
+Удалён голый `"eia"` и `"api report"`. Заменены на конкретные фразы:
+- `"eia crude"`, `"eia weekly petroleum"`
+- `"crude inventory"`, `"crude inventories"`, `"crude stocks"`
+- `"api crude"`
+
+Гарантирует что EIA gas-news НЕ попадёт в OIL bucket даже без
+exclude-rule.
+
+#### 3. Exclude-keywords per symbol (`SYMBOL_EXCLUDE_KEYWORDS`)
+
+Двухэтапная фильтрация (INCLUDE + EXCLUDE):
+
+- **GOLD_EXCLUDE**: natural gas / lng / henry hub / crude oil /
+  brent / wti / opec. Если в text есть gas/oil термины — не в gold.
+- **OIL_EXCLUDE**: natural gas storage / ng storage / henry hub /
+  lng cargo / lng feedgas / feedgas / noaa / cpc outlook / hdd / cdd /
+  heating degree / cooling degree. Weather и gas-specific phrases
+  отсекают gas news из oil bucket.
+- **GAS_EXCLUDE**: crude oil / crude inventory / brent / wti /
+  petroleum / opec / strait of hormuz / houthi / red sea. Oil-specific
+  phrases отсекают oil news из gas bucket.
+
+#### 4. Per-symbol macro routing (`news/eia.py`, `trading/context.py`)
+
+`format_eia_by_symbol(snap)` возвращает `dict[symbol, block_text]`:
+- `BZ=F` ← EIA Weekly Petroleum (crude stocks, refinery, SPR)
+- `NG=F` ← EIA Weekly NG storage + STEO forecast (HH price, production,
+  exports) + NOAA discussion (HDD/CDD outlook)
+- `XAUUSD` ← пусто (нет EIA-релевантного macro для gold)
+
+`MarketContext.macro_per_symbol: dict[str, str]` заменяет глобальные
+`eia_block_text` / `noaa_block_text`. `format_context_for_prompt`
+печатает новую секцию:
+
+```
+=== PER-SYMBOL MACRO CONTEXT (each block ONLY applies to the
+labelled symbol — do NOT cross-apply) ===
+
+[BZ=F] macro:
+EIA Weekly Petroleum (Wednesday update):
+Crude oil stocks: 445013k barrels (-7863k vs prev week) ...
+
+[NG=F] macro:
+EIA Weekly Natural Gas (Thursday update) + STEO 18m forecast:
+Working gas in storage (Lower 48): 2290 Bcf (+85 Bcf build) ...
+Henry Hub spot price forecast ($/mcf, monthly): 2026-06=3.04 ...
+NOAA CPC 6-10 / 8-14 day Prognostic Discussion (fetched 2026-05-22 ...):
+...
+```
+
+LLM физически **не может** перепутать какой EIA-блок к какому
+инструменту — каждый помечен `[SYMBOL]` тегом.
+
+#### 5. Логирование (`app/main.py`)
+
+`LLM call (full): positions=X news_total=Y macro_symbols=BZ=F,NG=F` —
+заменено старое `eia=YES noaa=YES`. Видно какие именно инструменты
+получили macro в данном цикле.
+
+### Тесты (`tests/test_fx_ai_trader.py`)
+
+Добавлены **10 новых тестов**:
+- `test_news_no_cross_contamination_eia_gas_to_oil` — gas EIA не в OIL
+- `test_news_oil_news_blocked_from_gas_bucket` — oil не в NG
+- `test_news_gold_news_pure` / `test_news_pure_oil_news_isolated` /
+  `test_news_pure_gas_news_isolated` — изоляция чистых сигналов
+- `test_news_word_boundary_goldman_not_gold` — Goldman ≠ gold (но
+  legit gold-news через other keywords проходят)
+- `test_news_word_boundary_biogas_not_gas` — biogas ≠ gas
+- `test_news_word_boundary_boiler_not_oil` — boiler ≠ oil
+- `test_format_eia_by_symbol_routes_petroleum_to_oil` — Petroleum
+  только в BZ=F
+- `test_format_eia_by_symbol_routes_ng_to_gas_only` — NG storage +
+  STEO только в NG=F
+
+Полный suite: **997 tests passed** (+10 новых).
+
+### Live-проверка classifier (8 тестов, все ок)
+
+```
+[oil]  Goldman: oil stockpiles falling, Hormuz at 5%        → BZ=F
+[gold] Goldman Sachs cuts gold price forecast for 2026      → XAUUSD
+[gold] Goldman: gold rally extends as DXY weakens           → XAUUSD
+[gas]  EIA: Natural Gas Storage Report shows +85 Bcf build  → NG=F
+[oil]  OPEC+ ramps oil output as Hormuz tensions ease       → BZ=F
+[gold] Fed hawkish, real yields surge, dollar climbs        → XAUUSD
+[gas]  NOAA 6-10 day outlook above-normal temps, HDD declining → NG=F
+[gas]  Henry Hub spot, Marcellus production at record       → NG=F
+[none] Biogas plant opens in Texas                          → []
+[oil]  Boiler manufacturer reports record quarter           → []
+       (boiler ≠ oil substring; нет других oil keywords → пусто)
+```
+
+### Что НЕ менялось
+
+- **Промпт стратегии** не трогали
+- **Sentiment / uncertainty gates** не трогали
+- **Per-symbol risk limits NG=F** (max_lot=0.25 + max_pos=1) — остались
+- **EIA / NOAA провайдеры**: без изменений, только новый format-функция
+
+### Файлы
+
+- `src/fx_ai_trader/news/rss.py`: word-boundary classifier, узкий
+  EIA keyword, SYMBOL_EXCLUDE_KEYWORDS, GOLD/OIL/GAS_EXCLUDE
+- `src/fx_ai_trader/news/eia.py`: `format_eia_by_symbol()` функция,
+  `format_eia_snapshot` deprecated
+- `src/fx_ai_trader/trading/context.py`: `macro_per_symbol` поле в
+  `MarketContext`, per-symbol routing в `collect_market_context`,
+  «PER-SYMBOL MACRO CONTEXT» секция в `format_context_for_prompt`
+- `src/fx_ai_trader/app/main.py`: новый формат логирования
+- `tests/test_fx_ai_trader.py`: 10 новых тестов
+
+---
+
 ## 2026-05-21 — feat(NG): NOAA + EIA STEO + расширенные RSS keywords + per-symbol limits для NG=F (v1.2 NG enhancement)
 
 `коммит при deploy`

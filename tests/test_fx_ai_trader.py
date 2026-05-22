@@ -1314,6 +1314,144 @@ class TestPerSymbolLimits:
         assert "max positions per symbol (NG=F)" in res.reason
         assert "per-symbol override" in res.reason
 
+    def test_news_no_cross_contamination_eia_gas_to_oil(self):
+        """Утечка 'EIA: Natural Gas Storage Report' → OIL bucket устранена.
+
+        До 2026-05-22 ключ 'eia' в OIL_KEYWORDS ловил любые EIA-новости,
+        включая gas storage. После: gas-news НЕ попадает в OIL bucket.
+        См. BUILDLOG.md 2026-05-22 (gypothesis-проверка).
+        """
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        # Чистая gas news про EIA Storage Report
+        text = "eia natural gas storage report shows +85 bcf build for week"
+        out = _classify_symbols(text, ["XAUUSD", "BZ=F", "NG=F"])
+        assert "NG=F" in out
+        assert "BZ=F" not in out, (
+            f"EIA gas storage news не должна попадать в OIL bucket, got {out}"
+        )
+
+    def test_news_oil_news_blocked_from_gas_bucket(self):
+        """OPEC/Brent/crude news не должна попадать в NG=F через 'gas' substring."""
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        # «India explores alternative energy amid oil supply shock» — раньше
+        # попадало и в BZ=F и в NG=F (через "lng"/"natural gas" в summary).
+        # После добавления GAS_EXCLUDE для 'crude oil'/'opec' — отсекается.
+        text = "opec+ ramps crude oil output amid hormuz tensions"
+        out = _classify_symbols(text, ["XAUUSD", "BZ=F", "NG=F"])
+        assert "BZ=F" in out
+        assert "NG=F" not in out
+
+    def test_news_gold_news_pure(self):
+        """Pure gold drivers — не попадают в OIL/GAS."""
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        text = "fed hawkish, real yields surge, dollar dxy climbs"
+        out = _classify_symbols(text, ["XAUUSD", "BZ=F", "NG=F"])
+        assert out == ["XAUUSD"], f"Expected only XAUUSD, got {out}"
+
+    def test_news_pure_oil_news_isolated(self):
+        """Pure oil drivers — не попадают в GOLD/GAS."""
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        text = "brent crude rallies as opec extends supply cuts, eia crude draw"
+        out = _classify_symbols(text, ["XAUUSD", "BZ=F", "NG=F"])
+        assert out == ["BZ=F"], f"Expected only BZ=F, got {out}"
+
+    def test_news_pure_gas_news_isolated(self):
+        """Pure gas drivers — не попадают в GOLD/OIL."""
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        text = "noaa 6-10 day outlook hdd above normal, henry hub rallies"
+        out = _classify_symbols(text, ["XAUUSD", "BZ=F", "NG=F"])
+        assert out == ["NG=F"], f"Expected only NG=F, got {out}"
+
+    def test_news_word_boundary_goldman_not_gold(self):
+        """Goldman ≠ gold (substring false positive устранён через word-boundary).
+
+        До 2026-05-22: substring match ловил «Goldman» в XAUUSD bucket
+        через «gold». После: \\b regex word-boundary, «Goldman» НЕ матчит
+        «gold», но «gold» в «gold rally» / «gold price» матчит как
+        ожидается.
+        """
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        # Goldman + чистая oil thesis = только BZ=F
+        oil_text = "goldman: oil stockpiles falling, hormuz at 5 percent"
+        assert _classify_symbols(oil_text, ["XAUUSD", "BZ=F", "NG=F"]) == ["BZ=F"]
+
+        # Goldman + legitimate gold drivers = всё ещё XAUUSD
+        gold_text = "goldman cuts gold forecast, fed dovish, real yields falling"
+        assert _classify_symbols(gold_text, ["XAUUSD", "BZ=F", "NG=F"]) == ["XAUUSD"]
+
+    def test_news_word_boundary_biogas_not_gas(self):
+        """biogas ≠ gas (substring false positive)."""
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        text = "biogas plant opens in texas"
+        out = _classify_symbols(text, ["XAUUSD", "BZ=F", "NG=F"])
+        assert out == [], f"Expected empty, got {out}"
+
+    def test_news_word_boundary_boiler_not_oil(self):
+        """boiler ≠ oil (substring false positive)."""
+        from fx_ai_trader.news.rss import _classify_symbols
+
+        # Только 'boiler' без других oil-keywords → пустой bucket.
+        text = "boiler manufacturer reports record quarter"
+        out = _classify_symbols(text, ["XAUUSD", "BZ=F", "NG=F"])
+        assert out == [], f"Expected empty (boiler ≠ oil), got {out}"
+
+    def test_format_eia_by_symbol_routes_petroleum_to_oil(self):
+        """EIA Petroleum block routes to BZ=F only, NOT to NG=F or XAUUSD."""
+        from fx_ai_trader.news.eia import EiaSnapshot, format_eia_by_symbol
+
+        snap = EiaSnapshot(
+            crude_stocks_kbarrels=445000.0,
+            crude_stocks_change_kbarrels=-7800.0,
+            crude_stocks_date="2026-05-15",
+            refinery_util_pct=None,
+            refinery_util_date=None,
+            spr_kbarrels=None,
+            spr_date=None,
+        )
+        out = format_eia_by_symbol(snap)
+        assert "BZ=F" in out
+        assert "Crude oil stocks" in out["BZ=F"]
+        assert "NG=F" not in out
+        assert "XAUUSD" not in out
+
+    def test_format_eia_by_symbol_routes_ng_to_gas_only(self):
+        """NG storage + STEO routes to NG=F only."""
+        from fx_ai_trader.news.eia import (
+            EiaSnapshot,
+            SteoForecast,
+            format_eia_by_symbol,
+        )
+
+        snap = EiaSnapshot(
+            crude_stocks_kbarrels=None,
+            crude_stocks_change_kbarrels=None,
+            crude_stocks_date=None,
+            refinery_util_pct=None,
+            refinery_util_date=None,
+            spr_kbarrels=None,
+            spr_date=None,
+            ng_storage_bcf=2290.0,
+            ng_storage_change_bcf=+85.0,
+            ng_storage_date="2026-05-08",
+            steo_hh_price=SteoForecast(
+                series_id="NGHHMCF", description="HH", unit="$/mcf",
+                points=[("2026-06", 3.04)],
+            ),
+        )
+        out = format_eia_by_symbol(snap)
+        assert "NG=F" in out
+        assert "Working gas in storage" in out["NG=F"]
+        assert "Henry Hub spot price forecast" in out["NG=F"]
+        assert "BZ=F" not in out
+        assert "XAUUSD" not in out
+
     def test_killswitch_per_symbol_other_symbols_unaffected(
         self, store: AiFxTraderStore,
     ):

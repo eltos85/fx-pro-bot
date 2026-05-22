@@ -273,11 +273,98 @@ class EiaProvider:
         return out
 
 
-def format_eia_snapshot(snap: EiaSnapshot | None) -> str | None:
-    """Превращает EiaSnapshot в краткий human-readable блок для LLM-context.
+def format_eia_by_symbol(snap: EiaSnapshot | None) -> dict[str, str]:
+    """Per-symbol routing EIA данных (BUILDLOG 2026-05-22 — изоляция macro).
 
-    Возвращает ``None`` если данных нет (тогда блок пропускается в
-    context-builder).
+    Возвращает ``{symbol: text_block}`` только для тех символов, для
+    которых есть данные. Возможные ключи:
+    - ``"BZ=F"`` — EIA Weekly Petroleum (crude stocks, refinery, SPR)
+    - ``"NG=F"`` — EIA Weekly Natural Gas + STEO forecast (HH price,
+      production, exports)
+
+    XAUUSD не получает EIA: для золота релевантны DXY/Fed/yields, EIA
+    их не отдаёт.
+    """
+    if snap is None:
+        return {}
+    out: dict[str, str] = {}
+
+    petroleum_lines: list[str] = []
+    if snap.crude_stocks_kbarrels is not None:
+        change_note = ""
+        if snap.crude_stocks_change_kbarrels is not None:
+            sign = "+" if snap.crude_stocks_change_kbarrels >= 0 else ""
+            change_note = (
+                f" ({sign}{snap.crude_stocks_change_kbarrels:.0f}k vs prev week)"
+            )
+        petroleum_lines.append(
+            f"Crude oil stocks: {snap.crude_stocks_kbarrels:.0f}k barrels"
+            f"{change_note} as of {snap.crude_stocks_date or '?'}"
+        )
+    if snap.refinery_util_pct is not None:
+        petroleum_lines.append(
+            f"Refinery utilization: {snap.refinery_util_pct:.1f}% "
+            f"as of {snap.refinery_util_date or '?'}"
+        )
+    if snap.spr_kbarrels is not None:
+        petroleum_lines.append(
+            f"SPR: {snap.spr_kbarrels:.0f}k barrels as of {snap.spr_date or '?'}"
+        )
+    if petroleum_lines:
+        out["BZ=F"] = "\n".join(
+            ["EIA Weekly Petroleum (Wednesday update):"] + petroleum_lines
+        )
+
+    gas_lines: list[str] = []
+    if snap.ng_storage_bcf is not None:
+        change_note = ""
+        if snap.ng_storage_change_bcf is not None:
+            sign = "+" if snap.ng_storage_change_bcf >= 0 else ""
+            note = "build" if snap.ng_storage_change_bcf >= 0 else "draw"
+            change_note = (
+                f" ({sign}{snap.ng_storage_change_bcf:.0f} Bcf {note} vs prev week)"
+            )
+        gas_lines.append(
+            f"Working gas in storage (Lower 48): "
+            f"{snap.ng_storage_bcf:.0f} Bcf"
+            f"{change_note} as of {snap.ng_storage_date or '?'}"
+        )
+    if snap.steo_hh_price and snap.steo_hh_price.points:
+        forecasts = ", ".join(
+            f"{p}={v:.2f}" for p, v in snap.steo_hh_price.points
+        )
+        gas_lines.append(
+            f"Henry Hub spot price forecast ($/mcf, monthly): {forecasts}"
+        )
+    if snap.steo_ng_production and snap.steo_ng_production.points:
+        forecasts = ", ".join(
+            f"{p}={v:.1f}" for p, v in snap.steo_ng_production.points
+        )
+        gas_lines.append(
+            f"US dry natural gas production forecast (Bcf/d, monthly): {forecasts}"
+        )
+    if snap.steo_ng_exports and snap.steo_ng_exports.points:
+        forecasts = ", ".join(
+            f"{p}={v:.1f}" for p, v in snap.steo_ng_exports.points
+        )
+        gas_lines.append(
+            f"US natural gas total gross exports forecast (LNG+pipeline, Bcf/d, monthly): "
+            f"{forecasts}"
+        )
+    if gas_lines:
+        out["NG=F"] = "\n".join(
+            ["EIA Weekly Natural Gas (Thursday update) + STEO 18m forecast:"]
+            + gas_lines
+        )
+
+    return out
+
+
+def format_eia_snapshot(snap: EiaSnapshot | None) -> str | None:
+    """[DEPRECATED 2026-05-22] Глобальный EIA-блок (oil + gas вместе).
+
+    Используется только в legacy review-cycle и в тестах для обратной
+    совместимости. Новый code path — ``format_eia_by_symbol(snap)``.
     """
     if snap is None:
         return None

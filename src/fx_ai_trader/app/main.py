@@ -238,11 +238,10 @@ def _run_full_cycle(
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
 
     log.info(
-        "LLM call (full): positions=%d news_total=%d eia=%s noaa=%s",
+        "LLM call (full): positions=%d news_total=%d macro_symbols=%s",
         len(ctx.open_positions),
         sum(len(v) for v in ctx.news_per_symbol.values()),
-        "YES" if ctx.eia_block_text else "no",
-        "YES" if ctx.noaa_block_text else "no",
+        ",".join(sorted(ctx.macro_per_symbol.keys())) or "none",
     )
     resp = llm.ask(SYSTEM_PROMPT, user_prompt)
     store.add_api_cost(resp.cost_usd)

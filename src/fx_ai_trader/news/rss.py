@@ -61,7 +61,12 @@ OIL_KEYWORDS = (
     "opec", "opec+",
     "oil", "crude", "brent", "wti", "petroleum",
     "inventory", "inventories", "stockpile",
-    "eia", "api report",
+    # Узкие EIA / API фразы — без голого "eia", который ловил
+    # «EIA Natural Gas Storage Report» (cross-contamination, BUILDLOG
+    # 2026-05-22). Контейнер «api report» убран как слишком broad
+    # (ловил random "API" в нефтегазе).
+    "eia crude", "eia weekly petroleum", "crude inventory",
+    "crude inventories", "crude stocks", "api crude",
     "pipeline", "refinery", "refineries", "refining",
     "strait of hormuz", "red sea", "houthi",
     "iran sanctions", "iran nuclear",
@@ -69,6 +74,44 @@ OIL_KEYWORDS = (
     "saudi arabia", "uae oil", "kuwait oil",
     "spr ", "strategic petroleum reserve",
 )
+
+# Exclude-rules: если text содержит exclude-keyword этого symbol — он
+# НЕ относится к этому bucket даже при keyword-match. Источник анализа:
+# diagnostic 2026-05-22 на 12 RSS items показал 17% cross-contamination
+# (например «India Explores Alternative Energy Amid Oil Supply Shock»
+# попадал и в BZ=F и в NG=F через respective keywords).
+# Принцип: если новость явно про другой instrument, мы не хотим её
+# в текущем bucket. Не симметрично: gas-specific exclude для OIL,
+# oil-specific exclude для GAS, energy-specific exclude для GOLD.
+GOLD_EXCLUDE = (
+    "natural gas", "lng", "henry hub",
+    "crude oil", "brent", "wti",
+    "opec",
+    # Для substring false-positives «gold» в словах вроде «Goldman»,
+    # «Marigold», «Goldilocks» используем word-boundary в classifier
+    # (см. _matches_keyword), не grep по exclude — иначе теряем
+    # легитимные Goldman-gold-reports. См. BUILDLOG 2026-05-22.
+)
+OIL_EXCLUDE = (
+    # gas-specific phrases — gas news не должен попадать в BZ=F bucket.
+    "natural gas storage", "ng storage", "natgas storage",
+    "henry hub", "lng cargo", "lng cargoes", "lng feedgas",
+    "feedgas", "feed gas",
+    # weather-related — drivers газа, не нефти.
+    "noaa", "cpc outlook", "hdd", "cdd",
+    "heating degree", "cooling degree",
+)
+GAS_EXCLUDE = (
+    # oil-specific phrases — oil news не должен попадать в NG=F bucket.
+    "crude oil", "crude inventory", "crude inventories", "crude stocks",
+    "brent", "wti", "petroleum", "opec", "opec+",
+    "strait of hormuz", "houthi", "red sea",
+)
+SYMBOL_EXCLUDE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "XAUUSD": GOLD_EXCLUDE,
+    "BZ=F": OIL_EXCLUDE,
+    "NG=F": GAS_EXCLUDE,
+}
 
 # Газ-keywords подобраны по research-источникам (см. prompts.py): EIA
 # Weekly NatGas Storage Report, NOAA HDD/CDD outlooks, LNG export news,
@@ -168,14 +211,54 @@ def _norm_title(title: str) -> str:
     return _PUNCT_RE.sub("", title.lower()).strip()
 
 
+def _matches_keyword(keyword: str, text_lower: str) -> bool:
+    """Match keyword в text с word-boundary для single-word коротких keywords.
+
+    Цель: «gold» **не** должно матчиться в «Goldman», «oil» в «boiler»,
+    «gas» в «biogas». Для multi-word фраз («natural gas», «strait of
+    hormuz») используем substring как и раньше.
+
+    Эвристика: если keyword содержит пробел или дефис — это фраза,
+    substring match; иначе одиночное слово — \\b-boundary regex.
+
+    См. BUILDLOG 2026-05-22 (cross-contamination diagnostic).
+    """
+    keyword = keyword.strip()
+    if not keyword:
+        return False
+    # Multi-word phrase (содержит пробел) → substring match.
+    if " " in keyword:
+        return keyword in text_lower
+    # Single word → word-boundary check.
+    pattern = re.compile(rf"\b{re.escape(keyword)}\b")
+    return bool(pattern.search(text_lower))
+
+
 def _classify_symbols(text: str, allowed: Sequence[str]) -> list[str]:
-    """Возвращает список символов из allowed, упомянутых в тексте."""
+    """Возвращает список символов из allowed, упомянутых в тексте.
+
+    С 2026-05-22 (BUILDLOG): применяется двухэтапная фильтрация:
+    1. INCLUDE: text содержит хотя бы один keyword из ``SYMBOL_KEYWORDS[sym]``
+       (через ``_matches_keyword`` — word-boundary для single-word).
+    2. EXCLUDE: text НЕ содержит ни одного keyword из
+       ``SYMBOL_EXCLUDE_KEYWORDS[sym]`` (если он определён).
+
+    Цель: исключить cross-contamination между oil/gas/gold buckets.
+    Пример: «EIA Natural Gas Storage Report» больше не попадёт в OIL
+    (узкие фразы 'eia crude' etc.); «India Oil Supply Shock» не
+    попадёт в NG=F bucket (исключено через 'opec'/'crude oil' в
+    GAS_EXCLUDE); «Goldman Sachs» не матчит "gold" (word-boundary).
+    """
     t = text.lower()
     out: list[str] = []
     for sym in allowed:
         keywords = SYMBOL_KEYWORDS.get(sym, ())
-        if any(k in t for k in keywords):
-            out.append(sym)
+        if not any(_matches_keyword(k, t) for k in keywords):
+            continue
+        excludes = SYMBOL_EXCLUDE_KEYWORDS.get(sym, ())
+        if excludes and any(_matches_keyword(k, t) for k in excludes):
+            continue
+        out.append(sym)
     return out
 
 
