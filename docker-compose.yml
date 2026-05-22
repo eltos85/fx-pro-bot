@@ -36,20 +36,31 @@ services:
 
   # Advisor (fx_pro_bot) — rule-based ensemble: Leaders, Outsiders,
   # Shadow, GoldORB, SqueezeH4, TurtleH4, GBPJPYFade, COT, sentiment,
-  # paper exit-strategies. История 2169 закрытых сделок.
+  # paper exit-strategies. История 2386 закрытых сделок.
   #
-  # 2026-05-20: ВОЗВРАЩЁН в работу. Причины возврата:
-  # - LLM Trend-follower (fx_ai_trend) показал 3 убыточных paper-трейда
-  #   за вечер 18 мая, дальше молчал — пользы не приносил.
-  # - Discretionary LLM (fx-ai-trader) на n=7 trades −$7.98 net, не
-  #   очевидно лучше Advisor (sample size << 100 по `sample-size.mdc`).
-  # - Advisor имеет историю 2169 сделок и подтверждённую rule-based
-  #   логику; в текущем рыночном режиме лучше иметь rule-based бэйзлайн
-  #   рядом с экспериментальным LLM.
-  # - Возможный конфликт: XAUUSD ≡ GC=F на FxPro (symbolId=41). Advisor
-  #   и fx-ai-trader торгуют один gold-инструмент. Изоляция через
-  #   broker_order_label сохранена.
+  # 2026-05-22: ОТКЛЮЧЁН по решению пользователя. Статистика с 2026-04-07
+  # (n=2386, 6 недель, p<0.05 на всех stat-significant выборках):
+  # - atr_spike (n=840): WR 43%, net −951 pips, avg −1.13
+  # - orb_breakout (n=477): WR 49%, net −347 pips, avg −0.73
+  # - news_fade (n=450): WR **21%**, net −3676 pips, avg −8.17 ← худшая
+  # - gold_orb_breakout (n=83): WR 45%, net +185 pips, avg +2.23
+  #   (плюсовая, но n<100 — ниже порога sample-size.mdc)
+  # - vwap_deviation, extreme_bb: n=45/40, ниже порога
+  #
+  # Решение: советник проигрывает на большой выборке. Открытая GC=F
+  # SHORT (broker_pid=150934973, opened 22.05 10:49 UTC) оставлена
+  # висеть на брокере, broker SL/TP или manual close в cTrader app
+  # её закроет. label='advisor' → fx-ai-trader её не закроет
+  # (broker-side isolation сохранена).
+  #
+  # Код советника не удалён. Чтобы вернуть: убрать profiles или запустить
+  # `docker compose --profile disabled up -d advisor`.
+  #
+  # Историческая запись возврата 2026-05-20 и убийства fx_ai_trend —
+  # см. BUILDLOG.md и BUILDLOG_AI_FX_TRADER.md.
   advisor:
+    profiles:
+      - disabled
     build: .
     image: fx-pro-bot:local
     restart: unless-stopped
@@ -360,6 +371,11 @@ services:
       # hard-checks нет (risk management на стороне LLM, см. правило
       # .cursor/rules/ai-arena-sources.mdc).
       AI_ARENA_LEVERAGE_MAX: ${AI_ARENA_LEVERAGE_MAX:-20}
+      # v2.z3: server-side notional cap (qty × price ≤ pct × virtual_capital).
+      # Default 0.30 = 30% × $10k = $3000 max notional per opening order.
+      # При срабатывании — silent rescale + одноразовый notice в next prompt.
+      # См. ai-arena-sources.mdc § «Допустимые исключения» исключение #4.
+      AI_ARENA_MAX_ALLOCATION_PCT: ${AI_ARENA_MAX_ALLOCATION_PCT:-0.30}
       # Bybit — ОТДЕЛЬНЫЙ аккаунт (другой UID). Ключи задаются в .env
       # как AI_ARENA_BYBIT_API_KEY/SECRET. Если пустые — бот выходит
       # с ошибкой при старте (не торгует и не падает в loop).

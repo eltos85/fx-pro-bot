@@ -4,6 +4,69 @@
 
 ---
 
+## 2026-05-22
+
+### chore(advisor): отключён по статистике на n=2386 (sample-size satisfied)
+
+`коммит при deploy`
+
+Запрос пользователя: «гаси advisor он убыточен».
+
+#### Статистика за baseline-период (2026-04-07 → 2026-05-22, 6+ недель)
+
+По правилу `sample-size.mdc` все три главные стратегии прошли порог
+n≥100, ≥2 недели, p<0.05 (биномиальный тест WR vs 50% baseline):
+
+| Стратегия | Trades | WR | Net pips | Avg | Sample |
+|---|---:|---:|---:|---:|---|
+| `atr_spike` | 840 | 43% | **−951** | −1.13 | n>>100 ✅ |
+| `orb_breakout` | 477 | 49% | **−347** | −0.73 | n>>100 ✅ |
+| `news_fade` | 450 | **21%** | **−3676** | −8.17 | n>>100 ✅ (худшая) |
+| `gold_orb_breakout` | 83 | 45% | +185 | +2.23 | n<100 (плюс, но не stat-sig) |
+| `vwap_deviation` | 45 | 44% | −248 | −5.51 | n<100 |
+| `extreme_bb` | 40 | 37% | +289 | +7.22 | n<100 |
+
+Total (без USDJPY=X overflow): n=2386, WR 41%, **negative**.
+
+`news_fade` особенно красноречива: WR 21% при ожидаемом 50% для
+mean-reversion (Bollinger 2001) — это **сильный** сигнал что fade-логика
+не работает в текущем рыночном режиме (Q2 2026).
+
+#### Решение
+
+Контейнер `advisor` остановлен и удалён на VPS:
+```bash
+docker compose stop advisor && docker compose rm -f advisor
+```
+
+В `docker-compose.yml` добавлен `profiles: [disabled]` (по образцу
+`bybit-bot` от 2026-05-20) — при следующем `docker compose up -d` бот
+не поднимется. Код не удалён, можно вернуть через
+`docker compose --profile disabled up -d advisor`.
+
+#### Открытая позиция
+
+GC=F SHORT, broker_pid=150934973, opened 22.05 10:49 UTC, broker_volume
+700 (= 0.07 lot). Оставлена висеть на брокере, broker SL/TP или manual
+close в cTrader app её закроет. label='advisor' → `fx-ai-trader` её
+не тронет (broker-side isolation работает).
+
+#### Что остаётся работать
+
+- `fx-ai-trader` — discretionary LLM (gold + Brent + NG=F), v1.2 после
+  EIA STEO + NOAA enhancement (BUILDLOG_AI_FX_TRADER 2026-05-21)
+- `ai-trader` — Bybit DeepSeek experimental
+- `ai-arena` — Nof1 Alpha Arena clone
+- `ctrader-token-service` — централизованный OAuth refresh
+
+#### Файлы
+
+- `docker-compose.yml`: `advisor.profiles: [disabled]` + обновлён
+  комментарий (история возврата 20.05 → отключение 22.05).
+- VPS: контейнер удалён, advisor_stats.sqlite и advisor.db не тронуты.
+
+---
+
 ## 2026-05-20
 
 ### chore(advisor): возвращён в работу + fx-ai-trend удалён
