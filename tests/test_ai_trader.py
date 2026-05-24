@@ -1698,3 +1698,145 @@ class TestOpenSchemaV13DBRoundTrip:
         new_pos = next(p for p in store.get_open_positions() if p.id == new_id)
         assert new_pos.confidence == pytest.approx(0.8)
         assert new_pos.invalidation_condition == "ETH 1H above 3050"
+
+
+# ─── v0.15 (2026-05-24, refactor): template-driven capital rules ──────────
+#
+# Все денежные значения промпта (capital, risk_pct, risk_usd_cap,
+# daily_loss) выводятся из ``settings`` через placeholder'ы. Single source
+# of truth — settings.py / .env. Поведение при default settings
+# поведенчески ЭКВИВАЛЕНТНО прежнему хардкоду ($500/2%/$10/$50).
+class TestSystemPromptCapitalRulesTemplate:
+    """v0.15 refactor: capital rules через placeholder'ы из settings."""
+
+    def test_default_render_byte_identical_to_pre_refactor(self):
+        """Главная инвариант-проверка: при default settings промпт
+        ДОЛЖЕН быть байт-в-байт тот же, что был до refactor'а v0.15.
+
+        Если этот тест падает → refactor сломал поведение ИИ.
+        SHA256 baseline: ac8f4a19b80879a1ad150955840343031b28aced10a0a654cf6cc1d06642942a
+        """
+        import hashlib
+
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import SYSTEM_PROMPT, build_system_prompt
+
+        expected_sha256 = (
+            "ac8f4a19b80879a1ad150955840343031b28aced10a0a654cf6cc1d06642942a"
+        )
+        # 1) Module-level SYSTEM_PROMPT (default render с DEFAULT_AI_SYMBOLS).
+        actual_sha = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
+        assert actual_sha == expected_sha256, (
+            f"SYSTEM_PROMPT changed! Expected sha256={expected_sha256}, "
+            f"got {actual_sha}. Refactor v0.15 should be a no-op for "
+            "default settings (capital=$500, risk=2%, daily=$50)."
+        )
+        # 2) build_system_prompt(default_settings) — должен дать тот же текст.
+        rendered = build_system_prompt(AiTraderSettings())
+        assert rendered == SYSTEM_PROMPT
+        assert hashlib.sha256(rendered.encode()).hexdigest() == expected_sha256
+
+    def test_no_hardcoded_dollar_values_in_template(self):
+        """В _SYSTEM_PROMPT_TEMPLATE НЕ должно быть хардкоженных
+        ``$500``/``$10``/``$50``/``2%``. Все через placeholder'ы.
+        """
+        from ai_trader.llm.prompts import _SYSTEM_PROMPT_TEMPLATE
+
+        forbidden = ["$500", "$10 ", "$10.", "$10,", "$50 ", "2% of"]
+        for token in forbidden:
+            assert token not in _SYSTEM_PROMPT_TEMPLATE, (
+                f"Hardcoded {token!r} found in template — should use "
+                "placeholder __VIRTUAL_CAPITAL__/__RISK_USD_CAP__/etc."
+            )
+
+    def test_template_has_all_four_placeholders(self):
+        """Template должен содержать все 4 placeholder'а (иначе render
+        выдаст текст с literal '__FOO__' который собьёт LLM)."""
+        from ai_trader.llm.prompts import _SYSTEM_PROMPT_TEMPLATE
+
+        for placeholder in (
+            "__VIRTUAL_CAPITAL__",
+            "__RISK_PCT__",
+            "__RISK_USD_CAP__",
+            "__DAILY_LOSS_LIMIT__",
+        ):
+            assert placeholder in _SYSTEM_PROMPT_TEMPLATE, (
+                f"Placeholder {placeholder} missing from template."
+            )
+
+    def test_render_with_custom_settings_produces_correct_numbers(self):
+        """При смене settings (имитация ``.env``) промпт автоматически
+        отражает новые значения — без правок prompts.py.
+
+        Используем ``model_copy(update=...)`` — kwargs по python-имени
+        блокируются ``validation_alias`` (pydantic читает только из env
+        с alias ``AI_TRADER_*``).
+        """
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt
+
+        s = AiTraderSettings().model_copy(
+            update={
+                "virtual_capital_usd": 1000.0,
+                "risk_per_trade_pct": 0.05,
+                "max_daily_loss_usd": 100.0,
+            }
+        )
+        rendered = build_system_prompt(s)
+        # 1000 * 0.05 = 50.0 → cap $50
+        assert "Virtual capital: $1000 USD" in rendered
+        assert "5% of capital ($50 max risk per trade)" in rendered
+        assert "Daily loss limit: $100" in rendered
+        assert "risk_usd ∈ (0, 50]" in rendered
+        assert "(0, 50]" in rendered  # multiple usages
+        # Старые значения НЕ должны всплыть
+        assert "$500 USD" not in rendered
+        assert "2% of capital" not in rendered
+        assert "$10 max" not in rendered
+
+    def test_render_with_default_settings_no_placeholders_left(self):
+        """После render'а в строке не должно остаться '__FOO__' patterns."""
+        import re
+
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt
+
+        rendered = build_system_prompt(AiTraderSettings())
+        leftover = re.findall(r"__[A-Z_]+__", rendered)
+        assert leftover == [], f"Unrendered placeholders: {leftover}"
+
+
+class TestParseActionRiskUsdCapFromSettings:
+    """v0.15: parse_action принимает risk_usd_cap явно (single source = settings)."""
+
+    def _open_json(self, risk_usd: float) -> str:
+        return (
+            '{"action":"open","symbol":"BTCUSDT","side":"Buy","leverage":2,'
+            '"position_size_usd":100,"stop_loss":95000,"take_profit":110000,'
+            '"confidence":0.6,"invalidation_condition":"BTC 1H below 95k",'
+            f'"risk_usd":{risk_usd},"reason":"test"}}'
+        )
+
+    def test_default_cap_is_10(self):
+        # Default cap = 10.0 (соответствует $500 × 2% = $10).
+        result = parse_action(self._open_json(15.0), ALLOWED)
+        assert isinstance(result, str)
+        assert "must be 0 < x <= 10" in result
+
+    def test_custom_cap_50_allows_45(self):
+        # При 10% риска и $500 капитала cap = $50.
+        result = parse_action(self._open_json(45.0), ALLOWED, risk_usd_cap=50.0)
+        assert isinstance(result, ParsedAction)
+
+    def test_custom_cap_50_rejects_55(self):
+        result = parse_action(self._open_json(55.0), ALLOWED, risk_usd_cap=50.0)
+        assert isinstance(result, str)
+        assert "must be 0 < x <= 50" in result
+        assert "Per-trade cap = $50" in result
+
+    def test_custom_cap_message_uses_actual_value(self):
+        # Текст ошибки должен динамически отражать переданный cap.
+        result = parse_action(self._open_json(100.0), ALLOWED, risk_usd_cap=25.0)
+        assert isinstance(result, str)
+        assert "0 < x <= 25" in result
+        assert "$25" in result

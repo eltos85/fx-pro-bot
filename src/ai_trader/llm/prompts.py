@@ -129,12 +129,12 @@ discretionary trader, not a high-frequency bot. You preserve capital first,
 profit second.
 
 CAPITAL RULES (hard constraints):
-- Virtual capital: $500 USD (use this for sizing, not real wallet equity).
+- Virtual capital: $__VIRTUAL_CAPITAL__ USD (use this for sizing, not real wallet equity).
 - Maximum 3 simultaneous open positions.
 - Maximum leverage: 5x per position.
-- Maximum risk per trade: 2% of capital ($10 max risk per trade).
-  Risk = |entry - stop_loss| * qty, must stay <= $10.
-- Daily loss limit: $50 (after that trading blocks until next day).
+- Maximum risk per trade: __RISK_PCT__% of capital ($__RISK_USD_CAP__ max risk per trade).
+  Risk = |entry - stop_loss| * qty, must stay <= $__RISK_USD_CAP__.
+- Daily loss limit: $__DAILY_LOSS_LIMIT__ (after that trading blocks until next day).
 - Each new position MUST have stop_loss and take_profit.
 - Reward-to-Risk MUST be >= 1.5 (i.e. distance to TP >= 1.5x distance to SL).
   If you can't find a setup with R:R >= 1.5, return action="hold".
@@ -182,7 +182,7 @@ plain English (3-8 short lines) covering, in order:
   5) CONFIRMATIONS: list which signals align (need 2+ for entry).
   6) R:R CHECK + RISK_USD: if considering entry, compute reward/risk
      in price distance terms (reject if R:R < 1.5) AND compute the
-     dollar risk |entry - SL| * qty (must be 0 < x <= 10).
+     dollar risk |entry - SL| * qty (must be 0 < x <= __RISK_USD_CAP__).
   7) PRE-COMMIT CHECK (open only): state your confidence band (low /
      medium / high → number) per CONFIDENCE CALIBRATION; state the
      specific PRE-REGISTERED INVALIDATION condition that would void
@@ -199,7 +199,7 @@ Use the following bands to ground the number — do not eyeball it:
 - 0.50-0.69 (medium): 2+ independent confirmations align AND no major
   contrary evidence. Standard sizing.
 - 0.70-1.00 (high): strong multi-timeframe + sentiment + (when relevant)
-  news alignment. Textbook setup. Standard sizing within the $10 risk
+  news alignment. Textbook setup. Standard sizing within the $__RISK_USD_CAP__ risk
   cap is justified.
 
 Be honest. Confidence is logged per decision and will be correlated with
@@ -226,8 +226,8 @@ RISK_USD self-check (mandatory for "open"):
 Each "open" decision MUST include `risk_usd` — your computed dollar risk:
   risk_usd = |entry - stop_loss| * qty
 where `qty` is what your `position_size_usd` and current price imply.
-The bot will reject the trade if `risk_usd` is outside (0, 10] (per-trade
-cap = $10 = 2% of $500 capital). Computing this number forces you to
+The bot will reject the trade if `risk_usd` is outside (0, __RISK_USD_CAP__] (per-trade
+cap = $__RISK_USD_CAP__ = __RISK_PCT__% of $__VIRTUAL_CAPITAL__ capital). Computing this number forces you to
 verify SL distance is compatible with sizing BEFORE the order goes out —
 not after rejection.
 
@@ -366,12 +366,12 @@ For opening a new position:
   "symbol": "BTCUSDT",
   "side": "Buy" | "Sell",
   "leverage": 1-5,
-  "position_size_usd": 50-500,
+  "position_size_usd": 50-__VIRTUAL_CAPITAL__,
   "stop_loss": <number>,
   "take_profit": <number>,
   "confidence": <number 0.00-1.00>,
   "invalidation_condition": "<observable signal that voids the thesis>",
-  "risk_usd": <number, |entry-stop_loss|*qty, must be 0 < x <= 10>,
+  "risk_usd": <number, |entry-stop_loss|*qty, must be 0 < x <= __RISK_USD_CAP__>,
   "reason": "<short rationale, max 200 chars>"
 }
 
@@ -402,14 +402,14 @@ CRITICAL CONSTRAINTS:
 - For "open": `confidence`, `invalidation_condition`, `risk_usd` are
   MANDATORY. Missing or out-of-range values are auto-rejected. Ranges:
   confidence ∈ [0.0, 1.0]; invalidation_condition non-empty (≤500 chars);
-  risk_usd ∈ (0, 10].
+  risk_usd ∈ (0, __RISK_USD_CAP__].
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or all conditions are unclear → return action="hold".
-- Risk = |entry - stop_loss| * qty MUST be <= $10 (2% of $500). If your
+- Risk = |entry - stop_loss| * qty MUST be <= $__RISK_USD_CAP__ (__RISK_PCT__% of $__VIRTUAL_CAPITAL__). If your
   desired SL distance forces qty so small that exchange rejects it,
   HOLD instead — don't widen SL to meet min order size.
 
-Remember: this is a 14-day experiment with $500 virtual capital. Bad
+Remember: this is a 14-day experiment with $__VIRTUAL_CAPITAL__ virtual capital. Bad
 trades compound; HOLD is always safe.
 """
 
@@ -422,24 +422,60 @@ def _render_allowed_pairs(symbols: tuple[str, ...]) -> str:
     return ", ".join(symbols) + "."
 
 
-def build_system_prompt(settings: AiTraderSettings) -> str:
-    """Render SYSTEM_PROMPT с актуальным whitelist пар из ``settings.symbols``.
+def _render_capital_rules(settings: AiTraderSettings) -> dict[str, str]:
+    """Compute placeholder values for capital rules (single source of truth).
 
-    Используется в main.py / executor.py — single source of truth для
-    списка разрешённых символов: ``.env`` (AI_TRADER_SYMBOLS) → settings →
-    промпт + парсер. Изменение whitelist в одном месте, нет рассинхрона.
+    Все 4 числа (`virtual_capital`, `risk_pct`, `risk_usd_cap`, `daily_loss`)
+    выводятся из settings — менять надо только в одном месте (`.env` или
+    settings.py). Промпт + executor валидация всегда консистентны.
+
+    Format: ``:g`` обрезает trailing-нули у целых float'ов: 500.0 → "500".
     """
-    return _SYSTEM_PROMPT_TEMPLATE.replace(
+    risk_usd_cap = settings.virtual_capital_usd * settings.risk_per_trade_pct
+    return {
+        "__VIRTUAL_CAPITAL__": f"{settings.virtual_capital_usd:g}",
+        "__RISK_PCT__": f"{settings.risk_per_trade_pct * 100:g}",
+        "__RISK_USD_CAP__": f"{risk_usd_cap:g}",
+        "__DAILY_LOSS_LIMIT__": f"{settings.max_daily_loss_usd:g}",
+    }
+
+
+def build_system_prompt(settings: AiTraderSettings) -> str:
+    """Render SYSTEM_PROMPT с актуальными значениями из ``settings``.
+
+    Single source of truth:
+    - ``settings.symbols`` (`.env` AI_TRADER_SYMBOLS) → __ALLOWED_PAIRS__.
+    - ``settings.virtual_capital_usd`` → __VIRTUAL_CAPITAL__.
+    - ``settings.risk_per_trade_pct`` → __RISK_PCT__ (×100) и часть
+      __RISK_USD_CAP__ (= virtual_capital × pct).
+    - ``settings.max_daily_loss_usd`` → __DAILY_LOSS_LIMIT__.
+
+    Используется в main.py / executor.py. Изменение в одном месте
+    (settings/.env) — промпт + парсер пересобираются автоматически.
+    """
+    rendered = _SYSTEM_PROMPT_TEMPLATE.replace(
         "__ALLOWED_PAIRS__", _render_allowed_pairs(settings.symbols)
     )
+    for placeholder, value in _render_capital_rules(settings).items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered
 
 
-# Backward-compat: SYSTEM_PROMPT — default render с DEFAULT_AI_SYMBOLS.
-# Использовать ТОЛЬКО в тестах / при отсутствии settings (например docs).
-# Для real-use в LLM call — build_system_prompt(settings).
-SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.replace(
-    "__ALLOWED_PAIRS__", _render_allowed_pairs(DEFAULT_AI_SYMBOLS)
-)
+# Backward-compat: SYSTEM_PROMPT — default render с DEFAULT_AI_SYMBOLS
+# и default-значениями ``AiTraderSettings``. Использовать ТОЛЬКО в тестах
+# / при отсутствии settings (например docs). Для real-use в LLM call —
+# build_system_prompt(settings).
+def _render_default_system_prompt() -> str:
+    rendered = _SYSTEM_PROMPT_TEMPLATE.replace(
+        "__ALLOWED_PAIRS__", _render_allowed_pairs(DEFAULT_AI_SYMBOLS)
+    )
+    default_settings = AiTraderSettings.model_construct()
+    for placeholder, value in _render_capital_rules(default_settings).items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered
+
+
+SYSTEM_PROMPT = _render_default_system_prompt()
 
 
 def build_user_prompt(market_context: str) -> str:

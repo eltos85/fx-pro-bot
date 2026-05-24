@@ -323,7 +323,11 @@ def _run_cycle(
     )
     log.info("LLM response: %s", resp.text[:300].replace("\n", " "))
 
-    parsed = parse_action(resp.text, settings.symbols)
+    parsed = parse_action(
+        resp.text,
+        settings.symbols,
+        risk_usd_cap=settings.virtual_capital_usd * settings.risk_per_trade_pct,
+    )
     if isinstance(parsed, str):
         store.log_decision(
             cycle=cycle,
@@ -436,7 +440,12 @@ def _run_review_cycle(
     )
     log.info("Review response: %s", resp.text[:200].replace("\n", " "))
 
-    parsed = parse_action(resp.text, settings.symbols, review_mode=True)
+    parsed = parse_action(
+        resp.text,
+        settings.symbols,
+        review_mode=True,
+        risk_usd_cap=settings.virtual_capital_usd * settings.risk_per_trade_pct,
+    )
     if isinstance(parsed, str):
         store.log_decision(
             cycle=cycle,

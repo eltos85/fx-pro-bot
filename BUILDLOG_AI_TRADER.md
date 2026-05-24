@@ -1,5 +1,162 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-24 — v0.15-refactor: capital rules через placeholder'ы (single source of truth)
+
+**Запрос пользователя:** «не понравилось что ты начал хардкодить значения
+в промпте, они были до этого из переменной общей, нужно чтобы значения
+подтягивались ИЗ ОДНОГО МЕСТА а не в разных местах».
+
+### Симптом → причина → решение
+
+**Симптом.** При попытке увеличить `risk_per_trade_pct` с `0.02` до `0.10`
+пришлось руками синхронизировать 13 хардкоженных вхождений `$500/2%/$10/$50`
+в `prompts.py`, плюс `executor.py:180` с hardcoded `> 10.0`. Ошибиться в одной
+строке = рассинхрон между промптом (что читает LLM) и парсером (что валидирует
+ответ) → trade либо неправильно нормирован, либо отвергается без видимой
+причины. Это data-fitting baked-in: чтобы поменять стратегию риска, надо
+помнить про 14 файлов/строк.
+
+**Причина.** Канонический Nof1-style промпт не предполагает hardcode чисел —
+они должны выводиться из `settings`. У нас в `prompts.py` уже был частичный
+templating (`__ALLOWED_PAIRS__` для whitelist пар, v0.14). Capital rules
+(`$500`/`2%`/`$10`/`$50`) остались хардкодом по историческим причинам.
+
+**Решение.** Расширил template-механизм на 4 placeholder'а
+(`__VIRTUAL_CAPITAL__`, `__RISK_PCT__`, `__RISK_USD_CAP__`,
+`__DAILY_LOSS_LIMIT__`), все выводимые из `AiTraderSettings`. Теперь
+изменение `AI_TRADER_RISK_PER_TRADE=0.10` в `.env` автоматически:
+- Перерендерит промпт с `10% / $50 cap / $500 capital`.
+- Изменит executor cap (`risk_usd ≤ 50`).
+Без правок в `prompts.py` / `executor.py`.
+
+### Гарантия неизменности поведения (golden-snapshot)
+
+**До refactor'а:** snapshot `SYSTEM_PROMPT` зафиксирован на VPS-baseline:
+- length: **14420 байт**
+- sha256: **`ac8f4a19b80879a1ad150955840343031b28aced10a0a654cf6cc1d06642942a`**
+
+**После refactor'а:** при default `AiTraderSettings()` (capital=$500,
+risk=2%, daily=$50) — оба `SYSTEM_PROMPT` (module-level) и
+`build_system_prompt(default)` дают **тот же** sha256. Поведенчески
+эквивалентно прежнему хардкоду — LLM получает байт-в-байт идентичный
+промпт.
+
+Тест `test_default_render_byte_identical_to_pre_refactor` зашивает
+ожидаемый sha256 в код — любая ненулевая правка `_SYSTEM_PROMPT_TEMPLATE`
+поломает CI и заблокирует commit. Это страховка от случайного drift'а
+("заодно поправил пару символов в комментарии") который сбросил бы
+эксперимент `n=14 дней` (правило `no-data-fitting.mdc`).
+
+### Что изменилось
+
+**1. `src/ai_trader/llm/prompts.py`:**
+- 13 хардкоженных вхождений `$500/$10/$50/2%/0<x<=10/(0,10]/50-500` →
+  placeholder'ы (5×`__VIRTUAL_CAPITAL__`, 3×`__RISK_PCT__`,
+  8×`__RISK_USD_CAP__`, 1×`__DAILY_LOSS_LIMIT__`).
+- `_render_capital_rules(settings)` — single source helper, computes
+  все 4 значения из settings (`risk_usd_cap = capital × risk_pct`).
+- `build_system_prompt(settings)` расширен на capital rules.
+- `_render_default_system_prompt()` (для backward-compat
+  `SYSTEM_PROMPT` на module-level) использует `AiTraderSettings()`
+  default'ы → тот же текст что был.
+
+**2. `src/ai_trader/trading/executor.py`:**
+- `parse_action(text, allowed, *, review_mode=False, risk_usd_cap=10.0)` —
+  новый kwarg. Default `10.0` = `$500 × 2%` (default settings) для
+  backward-compat с тестами. Production main.py передаёт явно.
+- Сообщение об ошибке теперь динамическое:
+  `must be 0 < x <= {cap:g}` / `Per-trade cap = ${cap:g}`.
+
+**3. `src/ai_trader/app/main.py`:**
+- 2 вызова `parse_action()` теперь передают
+  `risk_usd_cap=settings.virtual_capital_usd × settings.risk_per_trade_pct`
+  — single source через settings.
+
+**4. `tests/test_ai_trader.py`:**
+- Новый класс `TestSystemPromptCapitalRulesTemplate` (5 тестов):
+  - golden-snapshot byte-identical check (sha256 baseline);
+  - запрет хардкоженных `$500/$10/$50/2%` в template;
+  - проверка наличия всех 4 placeholder'ов;
+  - render с custom settings даёт правильные числа (через
+    `model_copy(update=...)`, т.к. `validation_alias` блокирует kwargs);
+  - после render'а не остаётся literal `__FOO__` patterns.
+- Новый класс `TestParseActionRiskUsdCapFromSettings` (4 теста):
+  - default cap=10 (backward-compat);
+  - custom cap=50: `risk_usd=45` allowed, `=55` rejected;
+  - текст ошибки динамически отражает переданный cap.
+
+### Pre-refactor baseline (для regression detection)
+
+Источник: ai-trader SQLite `positions` (синхронизирована с Bybit API
+через `_sync_positions_on_startup`). Период — с момента предыдущего
+deploy v0.14 (`2026-05-20 04:40 UTC`) до момента текущего commit'а
+(`2026-05-23 23:11 UTC`), ≈4 дня forward-test.
+
+**Per-symbol breakdown:**
+
+| symbol   | n | wins | WR    | total_pnl | avg_pnl |
+|----------|--:|-----:|------:|----------:|--------:|
+| LINKUSDT | 4 | 3    | 75.0% |   +$17.78 |  +$4.45 |
+| ATOMUSDT | 3 | 1    | 33.3% |   +$15.45 |  +$5.15 |
+| BTCUSDT  | 8 | 4    | 50.0% |    +$2.38 |  +$0.30 |
+| XRPUSDT  | 1 | 1    | 100%  |    +$0.01 |  +$0.01 |
+| SUIUSDT  | 3 | 2    | 66.7% |    −$7.41 |  −$2.47 |
+| **TOTAL** | **19** | **11** | **57.9%** | **+$28.22** | **+$1.49** |
+
+**Close-reason split:**
+- `exchange_closed` (биржевой SL/TP): 4 trades, 3W (75%), pnl=+$25.06
+- LLM early-close (триггеры 1/3/4): 15 trades, 8W (53%), pnl=+$3.16
+
+**Sample-size disclaimer** (правило `.cursor/rules/sample-size.mdc`):
+
+Per-symbol выборки 1–8 трейдов статистически малы (минимальный порог
+≥100). Total n=19 < 100 — это **forward-test baseline**, не статистически
+значимая оценка. Refactor v0.15 фиксирует этот baseline для
+regression-сравнения. Если **после** v0.15 при том же n WR упадёт
+ниже **45%** или PnL станет отрицательным → есть основание подозревать
+скрытый регресс (несмотря на прохождение golden-snapshot теста).
+
+**Ожидание:** WR ≈ 57.9% и PnL ≈ положительный сохраняются.
+
+### Acceptance criteria (выполнено)
+
+- [x] **Поведение НЕ меняется при default settings** — sha256 промпта
+  идентичен baseline'у.
+- [x] **Стратегия НЕ меняется** — все правила (R:R 1.5, max 3 positions,
+  max 5x, EXIT MANAGEMENT 4 триггера, CONFIDENCE bands, COMMON PITFALLS,
+  PRE-REGISTERED INVALIDATION) сохранены текстуально.
+- [x] **`SYSTEM_PROMPT_REVIEW` не трогается** — там нет упоминаний
+  `$500/$10/$50/2%`, lite-цикл оперирует только R-units.
+- [x] Single source of truth: change `AI_TRADER_RISK_PER_TRADE` в
+  `.env` → промпт + executor синхронны автоматически.
+- [x] **Эксперимент n=14 дней НЕ сбрасывается** — поведение
+  поведенчески идентично до и после refactor'а (правило
+  `no-data-fitting.mdc` соблюдается: рефакторинг с поведенческой
+  эквивалентностью допустим).
+- [x] Все 1009 тестов проекта проходят (включая 9 новых).
+
+### Файлы
+
+- `src/ai_trader/llm/prompts.py` (+55/-25)
+- `src/ai_trader/trading/executor.py` (+12/-3)
+- `src/ai_trader/app/main.py` (+11/-2)
+- `tests/test_ai_trader.py` (+142/-0)
+
+### Что ЭТО НЕ делает
+
+Refactor — поведенческий no-op. Никаких изменений в:
+- значениях риска (default остался 2% / $10);
+- стратегии или EXIT-триггерах;
+- расписании циклов (full + review);
+- whitelist'е пар (LTCUSDT/ATOMUSDT/BTCUSDT/SUIUSDT/LINKUSDT остаётся).
+
+Если в будущем потребуется поднять risk_per_trade — это будет
+отдельный 1-line PR в `.env` (`AI_TRADER_RISK_PER_TRADE=0.10`),
+обсуждённый и оформленный как разрешённое отклонение от
+"замороженных параметров эксперимента" по правилу `sample-size.mdc`.
+
+---
+
 ## 2026-05-20 — v0.14: trader-discretion override whitelist + bybit-bot отключён + SYSTEM_PROMPT template-driven
 
 **Запрос пользователя:** «оставить только ai-trader и ai-arena. ai-trader

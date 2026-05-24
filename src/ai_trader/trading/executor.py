@@ -70,6 +70,7 @@ def parse_action(
     allowed_symbols: tuple[str, ...],
     *,
     review_mode: bool = False,
+    risk_usd_cap: float = 10.0,
 ) -> ParsedAction | str:
     """Возвращает ParsedAction или строку с описанием ошибки.
 
@@ -81,6 +82,13 @@ def parse_action(
     action ``"open"`` отвергается явной ошибкой (review-промпт явно
     запрещает open, но дополнительный hard-guard защищает от случаев
     когда LLM проигнорировал инструкцию).
+
+    v0.15 (2026-05-24, refactor): ``risk_usd_cap`` — per-trade cap в USD
+    (= ``settings.virtual_capital_usd × settings.risk_per_trade_pct``).
+    Default ``10.0`` соответствует default-settings ($500 capital × 2%) —
+    backward-compat для существующих тестов. В production (main.py)
+    передаётся явно из settings, чтобы переменная ``AI_TRADER_RISK_PER_TRADE``
+    в ``.env`` была единой точкой истины (промпт + парсер).
     """
     if not text:
         return "empty response"
@@ -175,10 +183,10 @@ def parse_action(
         risk_decl = obj.get("risk_usd")
         if not isinstance(risk_decl, (int, float)) or isinstance(risk_decl, bool):
             return f"risk_usd required (number), got {risk_decl!r}"
-        if float(risk_decl) <= 0 or float(risk_decl) > 10.0:
+        if float(risk_decl) <= 0 or float(risk_decl) > risk_usd_cap:
             return (
-                f"risk_usd out of range (must be 0 < x <= 10): {risk_decl!r}. "
-                "Per-trade cap = $10 (2% of $500 capital)."
+                f"risk_usd out of range (must be 0 < x <= {risk_usd_cap:g}): {risk_decl!r}. "
+                f"Per-trade cap = ${risk_usd_cap:g}."
             )
 
     if action == "close":
