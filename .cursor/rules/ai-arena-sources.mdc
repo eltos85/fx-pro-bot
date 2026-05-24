@@ -103,6 +103,93 @@ Hyperliquid), а явные решения пользователя добави
 2. Запись в `BUILDLOG_AI_ARENA.md` с датой, обоснованием, evidence.
 3. Возможность отключения через флаг или удаления (без поломки логики).
 
+### 2026-05-22 — Server-side notional cap (исключение #4)
+
+**Решение пользователя:** в рамках того же выбора «B + C + D»
+после v2.y, опция C — server-side cap на notional position size.
+Это **самая инвазивная** правка из тройки: первое реальное
+архитектурное вмешательство в Bybit-flow LLM'а.
+
+**Что добавлено:**
+
+1. `AiArenaSettings.max_allocation_pct` — новый config
+   (default `0.30` = 30% от virtual_capital). Пер-эксклюзивно
+   ограничивает **notional** одной открывающей сделки (`qty × price`),
+   не leverage. При `virtual_capital=$10000` cap = $3000.
+2. `src/ai_arena/trading/notional_cap.py` — pure-функция
+   `apply_notional_cap(...)` с чистой сигнатурой (не зависит от
+   client/store). Возвращает `CapResult(rescaled, rejected, ...)`.
+3. `executor._apply_open` интегрирует cap **после** Bybit qty_step
+   rounding и **до** `set_leverage / place_order`. Поведение:
+   - rescaled (qty уменьшен но ≥ min_order_qty) → silent rescale,
+     сохраняется `kv_state["pending_rescale_notice"]`, позиция
+     открывается с уменьшенным qty.
+   - rejected (qty < min_order_qty биржи после cap) → позиция
+     **не** открывается, всё равно сохраняется notice — LLM узнает
+     о попытке.
+4. USER_PROMPT: `build_user_prompt(..., rescale_notice=...)`. Notice
+   вставляется в начало (после header'а, перед `## CURRENT MARKET
+   STATE`) — **ровно один раз**. Clear сразу после построения prompt'а.
+
+**Семантика — почему cap, а не feedback:**
+
+- v2.y / v2.z1 — feedback (LLM сам решает что делать с цифрами).
+- v2.z3 — **hard cap** (server отказывается исполнять too-large
+  qty). Это нужно потому что post-v2.y observed: LLM при
+  conf=0.55 на $10k virtual capital открывает qty=545 SOL × $87 =
+  $47,491 notional (4.7× equity). Никакой feedback не помог
+  (cumulative −$208 на SOL уже виден в v2.z1). Размерность —
+  архитектурная проблема за пределами prompt-инжиниринга.
+
+**Почему именно так (rescale + notice, не reject):**
+
+- Reject + force hold убил бы intent LLM (направление + leverage +
+  SL/TP). Это явное игнорирование решения LLM.
+- Silent rescale **уважает** intent (направление, leverage, SL/TP),
+  ограничивает только размер. Это аналог Bybit'овского
+  `min/max_order_qty` (биржа тоже урезает qty без consent LLM).
+- Notice в next prompt'е даёт LLM **обратную связь** — он узнаёт
+  что cap сработал, и может в следующих циклах считать sizing
+  правильнее. Это превращает cap в **обучающий сигнал**, не просто
+  цензуру.
+
+**Что НЕ изменено (canonical compliance):**
+
+- SYSTEM_PROMPT — без изменений. Cap не упоминается в SYSTEM_PROMPT
+  (canonical 1-в-1 с gist). LLM узнаёт про cap **только из notice**
+  в USER_PROMPT, и только когда cap сработает.
+- USER_PROMPT базовая структура — без изменений (notice вставляется
+  опционально, в conditional слот).
+- Output JSON schema — без изменений.
+- Action space — без изменений (`buy_to_enter | sell_to_enter |
+  hold | close`).
+- Никаких изменений в leverage. Leverage cap = 1-20x остался как
+  был (canonical Nof1).
+
+**Откат:** `AI_ARENA_MAX_ALLOCATION_PCT=1.0` env var в compose.
+При cap=100% × virtual_capital $10000 = $10000 max notional —
+фактически no-cap (любая разумная позиция вписывается). Без rebuild.
+
+**Acceptance criteria:**
+
+- Через 7 дней или ≥30 сделок при cap=30% — повторить
+  `collect_bybit_3bots_stats.py` per-symbol.
+- Если средний notional на open trade упадёт с текущих $30k-$47k
+  до ≤$3000 — cap работает.
+- Если LLM начнёт сам ограничивать `quantity` после notice'ов
+  (избегать silent rescale) — гипотеза «cap как обучающий сигнал»
+  подтверждается.
+- Если результат не улучшится после ≥30 сделок с cap'ом —
+  обсудить ужесточение (cap=15-20% или per-symbol cap).
+
+**Совместимость с исключениями #1, #2, #3:**
+
+- #1 (leverage feedback) — без влияния.
+- #2 (symbol feedback) — без влияния.
+- #3 (cycle 600s) — без влияния, cap проверяется per-cycle.
+- Все 4 исключения **независимы**, могут применяться/откатываться
+  по отдельности.
+
 ### 2026-05-22 — Cycle interval 180→600s (исключение #3)
 
 **Решение пользователя:** на тот же вопрос (после v2.y, что делать с

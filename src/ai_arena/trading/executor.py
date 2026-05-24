@@ -56,6 +56,7 @@ from typing import Any
 from ai_arena.config.settings import AiArenaSettings
 from ai_arena.state.db import AiArenaStore
 from ai_arena.trading.client import AiArenaBybitClient
+from ai_arena.trading.notional_cap import apply_notional_cap, format_rescale_notice
 from ai_arena.trading.symbols import arena_to_bybit, arena_symbols
 
 log = logging.getLogger(__name__)
@@ -541,6 +542,49 @@ def _apply_open(
         qty = _floor_to_step(info.max_order_qty, info.qty_step)
     if qty <= 0:
         return ApplyResult(executed=False, summary="", error="qty<=0 after rounding")
+
+    # 4a) v2.z3 user-approved exception #4 (2026-05-22): server-side
+    # notional cap. Если notional (`qty × price`) > 30% × virtual_capital
+    # (default $3000) — silent rescale до cap, факт фиксируется в
+    # kv_state и показывается LLM в следующем prompt'е блоком
+    # «System notice». См. .cursor/rules/ai-arena-sources.mdc § «Допустимые
+    # исключения» исключение #4.
+    cap_result = apply_notional_cap(
+        requested_qty=qty,
+        price=price,
+        qty_step=info.qty_step,
+        min_order_qty=info.min_order_qty,
+        virtual_capital_usd=settings.virtual_capital_usd,
+        max_allocation_pct=settings.max_allocation_pct,
+    )
+    if cap_result.rescaled or cap_result.rejected:
+        notice = format_rescale_notice(
+            coin=coin,
+            side=side,
+            cap=cap_result,
+            leverage=leverage,
+            virtual_capital_usd=settings.virtual_capital_usd,
+            max_allocation_pct=settings.max_allocation_pct,
+        )
+        store.kv_set("pending_rescale_notice", notice)
+        log.warning(
+            "notional cap: %s qty %g→%g ($%.2f→$%.2f, max=$%.2f, rejected=%s)",
+            coin, cap_result.original_qty, cap_result.capped_qty,
+            cap_result.original_notional, cap_result.capped_notional,
+            cap_result.max_notional, cap_result.rejected,
+        )
+    if cap_result.rejected:
+        return ApplyResult(
+            executed=False, summary="",
+            error=(
+                f"notional cap rejected: {coin} requested notional "
+                f"${cap_result.original_notional:,.2f} > cap "
+                f"${cap_result.max_notional:,.2f}, rescaled qty "
+                f"{cap_result.capped_qty:g} < min_order_qty "
+                f"{info.min_order_qty}"
+            ),
+        )
+    qty = cap_result.capped_qty  # либо без изменений, либо после rescale
 
     # risk_usd_actual — для логирования и записи в БД (для аналитики).
     # Никакого hard-cap'а: source формула `|entry - stop_loss| × quantity`

@@ -186,6 +186,11 @@ def settings(tmp_path: Path, monkeypatch) -> AiArenaSettings:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("AI_ARENA_TRADING_ENABLED", "true")
     monkeypatch.setenv("AI_ARENA_DATA_DIR", str(tmp_path))
+    # v2.z3: эти тесты были написаны до notional cap и проверяют логику
+    # entry_price/qty из Bybit. Отключаем cap чтобы не срабатывал на
+    # тестовых notional ($500 при default cap=$300). Cap-сама-по-себе
+    # покрыта в `tests/test_ai_arena_notional_cap.py`.
+    monkeypatch.setenv("AI_ARENA_MAX_ALLOCATION_PCT", "1.0")
     return AiArenaSettings()
 
 

@@ -18,6 +18,135 @@
 
 ## 2026-05-22
 
+### v2.z3 user-approved exception #4: Server-side notional cap
+
+**Контекст.** Третья и последняя правка из решения пользователя
+«B + C + D» после v2.y — опция C (notional cap). Самая инвазивная:
+первое реальное архитектурное вмешательство в Bybit-flow LLM'а
+(до сих пор серверный код был чистым sanity-парсингом без hard-cap'ов
+— см. правило, экземп­ляр-«не возвращать ни в коем случае»).
+
+**Обоснование (post-v2.y observed):**
+
+Аудит сделок после v2.y показал, что LLM при `confidence=0.55` на
+$10k virtual capital открывает SOLUSDT qty=545 × $87.14 = **$47,491
+notional**, что = 4.7× virtual equity. Move 0.08% по такой позиции
+→ $90 loss за 28 минут (SOL #33). Это не «плохой сетап» — это
+архитектурная проблема sizing'а LLM. Никакой feedback (v2.y по
+leverage tier, v2.z1 по symbol) не помог:
+
+| День       | n  | Sum PnL  | Avg notional/trade |
+|------------|----|----------|--------------------|
+| 2026-05-19 | … | …        | $30k-$47k (наблюдение) |
+| 2026-05-21 | 10 | −$435.02 | (audit pending)    |
+| 2026-05-22 | 2  | −$82.58  | (audit pending)    |
+
+**Почему cap, а не feedback (третий раз):**
+
+- v2.y / v2.z1 — feedback на realized_pnl (LLM сам выбирает что делать).
+- v2.z3 — **hard cap** на notional. SYSTEM_PROMPT остаётся canonical
+  (нельзя править — gist L1-L200 sacred). Cap живёт на server-side
+  и срабатывает **после** Bybit qty_step rounding и **до**
+  `set_leverage / place_order`. LLM узнаёт о факте cap'а только из
+  одноразового notice'а в следующем USER_PROMPT.
+
+**Что добавлено:**
+
+1. `AiArenaSettings.max_allocation_pct` — default `0.30`
+   (= $3000 при `virtual_capital=$10000`). Откат через
+   `AI_ARENA_MAX_ALLOCATION_PCT=1.0` (= $10k cap, фактически no-cap).
+2. `src/ai_arena/trading/notional_cap.py` — pure-функция
+   `apply_notional_cap(...)` + `format_rescale_notice(...)`. Чистая
+   сигнатура без зависимости от client/store. Возвращает
+   `CapResult(rescaled, rejected, original_qty, capped_qty, ...)`.
+   Учитывает Bybit `qty_step` (rounding вниз после cap) и
+   `min_order_qty` (если qty < min → rejected, позиция не открывается).
+3. `executor._apply_open`: cap проверяется **после** existing
+   qty_step rounding и **до** `set_leverage` / `place_order`.
+   Поведение:
+   - **rescaled** (qty уменьшен, но ≥ min_order_qty) → silent rescale,
+     `kv_state["pending_rescale_notice"]` сохраняется, позиция
+     открывается с уменьшенным qty (intent LLM уважён).
+   - **rejected** (qty < min_order_qty после cap) → позиция **не**
+     открывается, notice сохраняется (LLM узнает в next prompt'е).
+   - **noop** (qty не вылез за cap) → ничего не делается.
+4. `app/main.py`: на каждом цикле читает
+   `kv_get("pending_rescale_notice")` и передаёт в `build_user_prompt`.
+   После построения prompt'а сразу clear'ит — notice показывается
+   ровно **один раз**.
+5. `llm/prompts.py::build_user_prompt`: новый опциональный параметр
+   `rescale_notice: str | None = None`. Вставляется между
+   `**Timeframes note:**` и `---` (до `## CURRENT MARKET STATE`).
+   Когда `None` — ничего не меняется (canonical compliance).
+
+**Что НЕ изменено (canonical compliance):**
+
+- **SYSTEM_PROMPT** — без изменений. Cap **не** упоминается в
+  SYSTEM_PROMPT (canonical 1-в-1 с gist). LLM узнаёт про cap
+  **только из notice** в USER_PROMPT, и только когда cap сработает.
+- **USER_PROMPT базовая структура** — без изменений (notice
+  вставляется опционально в conditional слот, default — отсутствует).
+- **Output JSON schema** — без изменений.
+- **Action space** — без изменений (`buy_to_enter | sell_to_enter |
+  hold | close`).
+- **Leverage cap 1-20x** — без изменений (canonical Nof1, только
+  guidance в SYSTEM_PROMPT, не server-side).
+
+**Откат:** `AI_ARENA_MAX_ALLOCATION_PCT=1.0` env var в compose
+(без rebuild — только перезапуск контейнера). При cap=100% ×
+virtual_capital $10k = $10k max notional — любая разумная позиция
+вписывается, cap фактически выключен.
+
+**Acceptance criteria:**
+
+- Через 7 дней или ≥30 сделок при cap=30% — повторить
+  `collect_bybit_3bots_stats.py` per-symbol с per-trade notional.
+- Если средний notional на open trade упадёт с текущих $30k-$47k
+  до ≤$3000 — cap работает механически (sanity-check).
+- Если LLM начнёт сам ограничивать `quantity` после notice'ов
+  (доля silent rescale'ов снизится со временем) — гипотеза
+  «cap как обучающий сигнал» подтверждается.
+- Если общий результат (WR, sum PnL, max DD) **не** улучшится после
+  ≥30 сделок с cap'ом — обсудить ужесточение (cap=15-20%) или
+  per-symbol cap.
+
+**Тесты:**
+
+- `tests/test_ai_arena_notional_cap.py` (новый) — 14 тестов на
+  pure-функцию `apply_notional_cap` + `format_rescale_notice`:
+  noop / rescale / reject / qty_step boundary / min_order_qty
+  boundary / max_allocation_pct edge cases / notice format.
+- `tests/test_ai_arena_executor_logic.py` — добавлен
+  `AI_ARENA_MAX_ALLOCATION_PCT=1.0` в fixture `settings`
+  (существующие тесты используют $500 notional при default cap
+  $300 — пришлось бы переписывать numerics, проще отключить cap
+  и тестировать его отдельно).
+- 351/351 ai_arena тестов проходят.
+
+**Files:**
+- `src/ai_arena/config/settings.py` — новый `max_allocation_pct`
+- `src/ai_arena/trading/notional_cap.py` — новый pure-модуль
+- `src/ai_arena/trading/executor.py` — интеграция cap в `_apply_open`
+- `src/ai_arena/llm/prompts.py` — опциональный `rescale_notice` в USER_PROMPT
+- `src/ai_arena/app/main.py` — чтение/clear notice per cycle
+- `.env.example` — `AI_ARENA_MAX_ALLOCATION_PCT=0.30` блок
+- `.cursor/rules/ai-arena-sources.mdc` — исключение #4
+- `tests/test_ai_arena_notional_cap.py` (новый)
+- `tests/test_ai_arena_executor_logic.py` — cap=1.0 в fixture
+
+**Совместимость с #1, #2, #3:**
+
+- #1 (leverage feedback) — без влияния.
+- #2 (symbol feedback) — без влияния.
+- #3 (cycle 600s) — без влияния, cap проверяется per-cycle независимо.
+- Все 4 исключения **независимы**, могут применяться/откатываться
+  по отдельности.
+
+**Деплой:** этот entry — момент пуша. Default cap = 0.30 запекается
+в код, env var на VPS добавлять необязательно (можно для явности).
+
+---
+
 ### v2.z2 user-approved exception #3: Cycle interval 180→600s
 
 **Контекст.** В рамках того же решения пользователя «B + C + D» —

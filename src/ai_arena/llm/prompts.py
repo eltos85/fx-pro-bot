@@ -408,6 +408,7 @@ def build_user_prompt(
     open_positions_block: str,
     leverage_stats: list[dict] | None = None,
     symbol_stats: list[dict] | None = None,
+    rescale_notice: str | None = None,
 ) -> str:
     """USER_PROMPT 1-в-1 по gist § User Prompt 完整逆向.
 
@@ -431,10 +432,18 @@ def build_user_prompt(
     leverage_stats, разбивка по другому измерению (symbol). См. правило
     ai-arena-sources.mdc § «Допустимые исключения по решению пользователя»
     (исключение #2, 2026-05-22) и BUILDLOG_AI_ARENA.md v2.z1 entry.
+
+    ``rescale_notice`` (опциональный, default None): строка-блок с
+    одноразовым уведомлением о silent rescale на предыдущем цикле
+    (v2.z3 user-approved exception #4, 2026-05-22). Вставляется в
+    начало USER_PROMPT перед ``## CURRENT MARKET STATE``. После показа
+    очищается caller'ом — этот параметр не отвечает за state. См.
+    правило ai-arena-sources.mdc § «Допустимые исключения» исключение #4.
     """
     sharpe_str = f"{sharpe:.3f}" if sharpe is not None else "n/a (insufficient history)"
     leverage_tier_block = _format_leverage_tier_block(leverage_stats)
     symbol_stats_block = _format_symbol_stats_block(symbol_stats)
+    rescale_block = f"\n{rescale_notice}\n" if rescale_notice else ""
     return f"""It has been {minutes_elapsed} minutes since you started trading.
 
 Below, we are providing you with a variety of state data, price data, and predictive signals so you can discover alpha. Below that is your current account information, value, performance, positions, etc.
@@ -442,7 +451,7 @@ Below, we are providing you with a variety of state data, price data, and predic
 ⚠️ **CRITICAL: ALL OF THE PRICE OR SIGNAL DATA BELOW IS ORDERED: OLDEST → NEWEST**
 
 **Timeframes note:** Unless stated otherwise in a section title, intraday series are provided at **3-minute intervals**. If a coin uses a different interval, it is explicitly stated in that coin's section.
-
+{rescale_block}
 ---
 
 ## CURRENT MARKET STATE FOR ALL COINS

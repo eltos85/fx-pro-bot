@@ -238,6 +238,11 @@ def _run_cycle(
     # См. правило ai-arena-sources.mdc § «Допустимые исключения» (исключение #2)
     # и BUILDLOG_AI_ARENA.md v2.z1 entry.
     symbol_stats = store.get_pnl_by_symbol(settings.symbols)
+    # v2.z3 user-approved exception #4 (2026-05-22): pending notional
+    # rescale notice от предыдущего цикла (если был). Показывается в
+    # USER_PROMPT ровно один раз и очищается. См. правило
+    # ai-arena-sources.mdc § «Допустимые исключения» исключение #4.
+    rescale_notice = store.kv_get("pending_rescale_notice") or None
     user_prompt = build_user_prompt(
         minutes_elapsed=minutes_elapsed,
         per_symbol_blocks=format_per_symbol_blocks(ctx),
@@ -248,7 +253,13 @@ def _run_cycle(
         open_positions_block=open_pos_block,
         leverage_stats=leverage_stats,
         symbol_stats=symbol_stats,
+        rescale_notice=rescale_notice,
     )
+    # Clear notice сразу после построения prompt'а: LLM увидит его
+    # ровно один раз. Если в этом же цикле произойдёт ещё один rescale
+    # — apply_action заполнит kv_state заново.
+    if rescale_notice:
+        store.kv_set("pending_rescale_notice", "")
 
     log.info(
         "LLM call: positions=%d real=$%.2f anchor=$%.2f → sandbox=$%.2f "

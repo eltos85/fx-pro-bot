@@ -143,6 +143,30 @@ class AiArenaSettings(BaseSettings):
     # в SYSTEM_PROMPT (текстом "1-20x"), серверного hard-checking нет.
     leverage_max: int = Field(default=20, validation_alias="AI_ARENA_LEVERAGE_MAX")
 
+    # v2.z3 user-approved exception #4 (2026-05-22): server-side notional
+    # cap для одной позиции = `max_allocation_pct × virtual_capital_usd`.
+    # При virtual_capital=$10000 и cap=0.30 → max notional = $3000 на
+    # позицию (3 одновременных позиции по равным долям = ~90% allocation).
+    #
+    # Поведение: silent rescale + log в next prompt. Если LLM запрашивает
+    # qty с notional > cap → qty уменьшается до cap, факт фиксируется в
+    # kv_state ("pending_rescale_notice") и показывается ОДИН раз в
+    # следующем USER_PROMPT блоком "System notice". После показа — clear.
+    #
+    # Обоснование (post-v2.y observed): SOLUSDT #33 — qty 545 × $87.14 =
+    # $47,491 notional на $10k virtual capital (4.7× equity exposure).
+    # Move 0.08% × такая позиция = $90 loss за 28 минут. Cap решает эту
+    # архитектурную проблему за пределами LLM-prompt'а (поскольку
+    # SYSTEM_PROMPT canonical и менять нельзя).
+    #
+    # См. правило `.cursor/rules/ai-arena-sources.mdc` § «Допустимые
+    # исключения» исключение #4 и BUILDLOG_AI_ARENA.md v2.z3.
+    # Откат: `AI_ARENA_MAX_ALLOCATION_PCT=1.0` отключит cap (qty * price
+    # ≤ 100% × virtual_capital = $10000 — фактически no-cap).
+    max_allocation_pct: float = Field(
+        default=0.30, validation_alias="AI_ARENA_MAX_ALLOCATION_PCT"
+    )
+
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_ARENA_DATA_DIR")
     db_filename: str = Field(
