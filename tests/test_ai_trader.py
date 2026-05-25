@@ -1,6 +1,7 @@
 """Тесты для AI-Trader: парсинг ответа LLM, killswitch, БД."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -546,11 +547,16 @@ class _FakeClientReconcile:
     """In-memory fake клиент для reconcile-тестов."""
 
     def __init__(self, *, positions_by_symbol=None, ticker_by_symbol=None,
-                 positions_returns_none=False, ticker_returns_none=False):
+                 positions_returns_none=False, ticker_returns_none=False,
+                 closed_pnl_by_symbol=None, closed_pnl_returns_none=False):
         self._positions = positions_by_symbol or {}
         self._tickers = ticker_by_symbol or {}
         self._positions_none = positions_returns_none
         self._ticker_none = ticker_returns_none
+        # v0.18: get_closed_pnl mock. Default None → fallback на gross
+        # (старые тесты не сломаются и работают как раньше).
+        self._closed_pnl = closed_pnl_by_symbol or {}
+        self._closed_pnl_none = closed_pnl_returns_none
 
     def get_positions(self, symbol=None):
         if self._positions_none:
@@ -561,6 +567,11 @@ class _FakeClientReconcile:
         if self._ticker_none:
             return None
         return self._tickers.get(symbol)
+
+    def get_closed_pnl(self, symbol, *, start_ms=None, end_ms=None, limit=50):
+        if self._closed_pnl_none:
+            return None
+        return list(self._closed_pnl.get(symbol, []))
 
 
 def _open_btc_position(store):
@@ -683,6 +694,11 @@ class TestReconcileClosedPositions:
                         symbol=symbol, last_price=2800.0, bid=2799, ask=2801,
                         funding_rate=0, volume_24h=0, price_change_pct_24h=0,
                     )
+                return None
+
+            def get_closed_pnl(self, symbol, *, start_ms=None, end_ms=None, limit=50):
+                # v0.18: closed-pnl недоступен → fallback на gross
+                # (это эквивалентно старому поведению до v0.18).
                 return None
 
         _reconcile_closed_positions(PartialFailClient(), store, tg=None)
@@ -1998,3 +2014,273 @@ class TestParseActionRiskUsdCapFromSettings:
         assert isinstance(result, str)
         assert "0 < x <= 25" in result
         assert "$25" in result
+
+
+# ─── v0.18 (2026-05-25): Net PnL reconciliation ────────────────────────────
+
+
+def _make_closed_pnl(
+    symbol: str = "BTCUSDT",
+    *,
+    side: str = "Sell",  # invert от position.side ("Buy")
+    order_link_id: str = "ai_test_btc",
+    closed_size: float = 0.006,
+    avg_entry: float = 82184.9,
+    avg_exit: float = 84651.0,
+    closed_pnl: float = 14.20,  # gross 14.7966 минус ~0.59 fee
+    created_ms: int = 1700000000000,
+    updated_ms: int = 1700000000001,
+):
+    from ai_trader.trading.client import ClosedPnl
+    return ClosedPnl(
+        symbol=symbol, side=side, order_link_id=order_link_id,
+        closed_size=closed_size, avg_entry_price=avg_entry,
+        avg_exit_price=avg_exit, closed_pnl=closed_pnl,
+        created_time_ms=created_ms, updated_time_ms=updated_ms,
+    )
+
+
+class TestFetchNetPnl:
+    """v0.18: helper fetch_net_pnl должен корректно матчить запись
+    Bybit closed-pnl с нашей AiPosition в БД.
+    """
+
+    @staticmethod
+    def _make_pos(side: str = "Buy", link: str = "ai_test_btc"):
+        from ai_trader.state.db import AiPosition
+        return AiPosition(
+            id=42, symbol="BTCUSDT", side=side, qty=0.006,
+            entry_price=82184.9, sl_price=80541.0, tp_price=84651.0,
+            leverage=1, order_link_id=link,
+            opened_at="2023-11-14T22:13:20+00:00",
+            closed_at=None, exit_price=None, realized_pnl_usd=None,
+            close_reason=None, llm_reason="t",
+        )
+
+    def test_match_by_order_link_id(self):
+        """Самый надёжный путь: bybit_closed_pnl.orderLinkId == position.order_link_id."""
+        from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+        client = _FakeClientReconcile(closed_pnl_by_symbol={
+            "BTCUSDT": [_make_closed_pnl(closed_pnl=14.20)],
+        })
+        pos = self._make_pos()
+        result = fetch_net_pnl(client, pos)
+        assert result is not None
+        net_pnl, exit_price = result
+        assert net_pnl == pytest.approx(14.20)
+        assert exit_price == pytest.approx(84651.0)
+
+    def test_match_fallback_by_size_and_side(self):
+        """Если orderLinkId не совпал (другой trade) — fallback по
+        closedSize + invert side + createdTime."""
+        from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+        client = _FakeClientReconcile(closed_pnl_by_symbol={
+            "BTCUSDT": [_make_closed_pnl(
+                order_link_id="some_other_link",
+                closed_size=0.006, side="Sell",  # invert от Buy
+                closed_pnl=13.95,
+                created_ms=1700000000000 + 60_000,  # > opened_at
+            )],
+        })
+        pos = self._make_pos()
+        result = fetch_net_pnl(client, pos)
+        assert result is not None
+        assert result[0] == pytest.approx(13.95)
+
+    def test_no_match_when_size_mismatch(self):
+        """closedSize 0.012 != qty 0.006 → не матчим, возвращаем None."""
+        from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+        client = _FakeClientReconcile(closed_pnl_by_symbol={
+            "BTCUSDT": [_make_closed_pnl(
+                order_link_id="other", closed_size=0.012,
+            )],
+        })
+        result = fetch_net_pnl(client, self._make_pos())
+        assert result is None
+
+    def test_api_failure_returns_none(self):
+        """get_closed_pnl=None → caller должен оставить gross."""
+        from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+        client = _FakeClientReconcile(closed_pnl_returns_none=True)
+        assert fetch_net_pnl(client, self._make_pos()) is None
+
+    def test_empty_list_returns_none(self):
+        """Bybit ещё не успел записать closed-pnl → пусто → None
+        (caller fallback на gross, дойдёт через _reconcile_pnl_to_net)."""
+        from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+        client = _FakeClientReconcile(closed_pnl_by_symbol={"BTCUSDT": []})
+        assert fetch_net_pnl(client, self._make_pos()) is None
+
+    def test_picks_latest_updated_when_multiple_match(self):
+        """Несколько кандидатов с одним link_id → берём с max updatedTime
+        (финальная запись после всех partial-fills)."""
+        from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+        client = _FakeClientReconcile(closed_pnl_by_symbol={
+            "BTCUSDT": [
+                _make_closed_pnl(closed_pnl=10.0, updated_ms=1700000000001),
+                _make_closed_pnl(closed_pnl=14.20, updated_ms=1700000000099),
+                _make_closed_pnl(closed_pnl=12.5, updated_ms=1700000000050),
+            ],
+        })
+        result = fetch_net_pnl(client, self._make_pos())
+        assert result is not None
+        assert result[0] == pytest.approx(14.20)
+
+
+class TestUpdatePnlToNet:
+    """v0.18: store.update_pnl_to_net корректно перезаписывает gross→net
+    и адjustит daily_pnl на разницу (idempotent если уже net).
+    """
+
+    def test_basic_gross_to_net_adjusts_daily(self, store):
+        pos_id = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.006, entry_price=82184.9,
+            sl_price=80541.0, tp_price=84651.0, leverage=1,
+            order_link_id="ai_v18_test", llm_reason="t",
+        )
+        # gross close: +14.79 (без fee)
+        store.close_position(
+            pos_id, exit_price=84651.0, realized_pnl_usd=14.79,
+            close_reason="test_gross", pnl_source="gross",
+        )
+        # net update: +14.20 (на $0.59 меньше из-за fee)
+        store.update_pnl_to_net(
+            pos_id, new_realized_pnl_usd=14.20, new_exit_price=84651.0,
+        )
+        # Чтение положения
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT realized_pnl_usd, pnl_source FROM positions WHERE id=?",
+                (pos_id,),
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(14.20)
+        assert row["pnl_source"] == "net"
+        # daily_pnl должен сдвинуться на -0.59
+        assert store.get_today_pnl() == pytest.approx(14.20)
+
+    def test_idempotent_when_already_net(self, store):
+        pos_id = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.006, entry_price=82184.9,
+            sl_price=80541.0, tp_price=84651.0, leverage=1,
+            order_link_id="ai_v18_idem", llm_reason="t",
+        )
+        store.close_position(
+            pos_id, exit_price=84651.0, realized_pnl_usd=14.20,
+            close_reason="test", pnl_source="net",
+        )
+        # Повторный update не должен ничего делать (уже net).
+        before = store.get_today_pnl()
+        store.update_pnl_to_net(pos_id, new_realized_pnl_usd=999.0)
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT realized_pnl_usd FROM positions WHERE id=?", (pos_id,),
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(14.20)  # не изменилось
+        assert store.get_today_pnl() == pytest.approx(before)
+
+    def test_win_to_loss_after_fee_decrements_n_wins(self, store):
+        """gross +0.41 (win) → net -0.23 (loss) после fee. n_wins должен
+        уменьшиться на 1."""
+        pos_id = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.015, entry_price=77109.2,
+            sl_price=76500.0, tp_price=78000.0, leverage=1,
+            order_link_id="ai_v18_w2l", llm_reason="t",
+        )
+        store.close_position(
+            pos_id, exit_price=77136.5, realized_pnl_usd=0.41,
+            close_reason="test", pnl_source="gross",
+        )
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT n_wins, n_trades FROM daily_pnl WHERE day=?",
+                (date.today().isoformat(),),
+            ).fetchone()
+        assert row["n_wins"] == 1 and row["n_trades"] == 1
+
+        store.update_pnl_to_net(pos_id, new_realized_pnl_usd=-0.23)
+
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT n_wins, n_trades, realized_pnl_usd FROM daily_pnl "
+                "WHERE day=?", (date.today().isoformat(),),
+            ).fetchone()
+        assert row["n_wins"] == 0  # win сбросился
+        assert row["n_trades"] == 1  # сделка не дублируется
+        assert row["realized_pnl_usd"] == pytest.approx(-0.23)
+
+
+class TestReconcilePnlToNet:
+    """v0.18: догон gross→net в каждом full-cycle для позиций
+    закрытых < 24h назад."""
+
+    def test_reconciles_recently_closed_gross(self, store):
+        from ai_trader.app.main import _reconcile_pnl_to_net
+        pos_id = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.006, entry_price=82184.9,
+            sl_price=80541.0, tp_price=84651.0, leverage=1,
+            order_link_id="ai_recon_test", llm_reason="t",
+        )
+        store.close_position(
+            pos_id, exit_price=84651.0, realized_pnl_usd=14.79,
+            close_reason="test_gross", pnl_source="gross",
+        )
+        client = _FakeClientReconcile(closed_pnl_by_symbol={
+            "BTCUSDT": [_make_closed_pnl(
+                order_link_id="ai_recon_test", closed_pnl=14.20,
+            )],
+        })
+        _reconcile_pnl_to_net(client, store, hours=24)
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT realized_pnl_usd, pnl_source FROM positions WHERE id=?",
+                (pos_id,),
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(14.20)
+        assert row["pnl_source"] == "net"
+
+    def test_skips_already_net_positions(self, store):
+        from ai_trader.app.main import _reconcile_pnl_to_net
+        pos_id = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.006, entry_price=82184.9,
+            sl_price=80541.0, tp_price=84651.0, leverage=1,
+            order_link_id="ai_already_net", llm_reason="t",
+        )
+        store.close_position(
+            pos_id, exit_price=84651.0, realized_pnl_usd=14.20,
+            close_reason="test", pnl_source="net",
+        )
+        # Даже если API вернул другое значение — не перезаписываем
+        client = _FakeClientReconcile(closed_pnl_by_symbol={
+            "BTCUSDT": [_make_closed_pnl(
+                order_link_id="ai_already_net", closed_pnl=999.0,
+            )],
+        })
+        _reconcile_pnl_to_net(client, store, hours=24)
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT realized_pnl_usd FROM positions WHERE id=?", (pos_id,),
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(14.20)  # не изменилось
+
+    def test_api_failure_keeps_gross(self, store):
+        """get_closed_pnl=None → позиция остаётся gross, повторим в
+        следующем cycle."""
+        from ai_trader.app.main import _reconcile_pnl_to_net
+        pos_id = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.006, entry_price=82184.9,
+            sl_price=80541.0, tp_price=84651.0, leverage=1,
+            order_link_id="ai_outage", llm_reason="t",
+        )
+        store.close_position(
+            pos_id, exit_price=84651.0, realized_pnl_usd=14.79,
+            close_reason="test_gross", pnl_source="gross",
+        )
+        client = _FakeClientReconcile(closed_pnl_returns_none=True)
+        _reconcile_pnl_to_net(client, store, hours=24)
+        with store._conn() as c:  # noqa: SLF001
+            row = c.execute(
+                "SELECT realized_pnl_usd, pnl_source FROM positions WHERE id=?",
+                (pos_id,),
+            ).fetchone()
+        assert row["realized_pnl_usd"] == pytest.approx(14.79)  # не тронуто
+        assert row["pnl_source"] == "gross"  # ещё ждёт догона

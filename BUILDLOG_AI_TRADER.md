@@ -1,5 +1,139 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-25 — v0.18: net PnL (fee + funding) вместо gross в БД + KillSwitch
+
+**Запрос пользователя:** «главное чтоб ии считал винрейт и доход правильно».
+
+### Проблема (выявлено сверкой с exchange-statement 25/05)
+
+Bot до v0.18 писал в `positions.realized_pnl_usd` значение
+`(exit - entry) × qty` — это **gross** PnL без trading fee и без
+funding settlement. По сути вся внутренняя бухгалтерия бота
+(KillSwitch, daily_pnl, будущая self-reflection в промпте) видела
+оптимистичную картину.
+
+Сверка за день 25/05 (5 закрытий бота):
+
+| Trade            | БД (gross) | Statement (net) | Δ комиссия |
+|------------------|-----------:|----------------:|-----------:|
+| BTCUSDT 0.014    |     +3.02  |          +2.44  |     -0.58  |
+| BTCUSDT 0.015    |     +0.41  |          -0.23  |     -0.64  |
+| BTCUSDT 0.006    |     -0.64  |          -0.89  |     -0.25  |
+| LINKUSDT 76.9    |     -2.77  |          -3.17  |     -0.40  |
+| SUIUSDT 220      |     -2.40  |          -2.55  |     -0.15  |
+| **Итого**        |   **-2.38**|        **-4.40**|   **-2.02**|
+
+То есть **БД оптимистичнее реальности на 41% за день**. На 14-дневный
+forward-test эксперимент это даёт ~$25-30 неучтённых комиссий + funding
+sign-flips на удерживаемых позициях.
+
+### Решение: Вариант A (точный, через Bybit API)
+
+Не оценочные комиссии в коде, а **точное** значение от биржи через
+endpoint `/v5/position/closed-pnl` (поле `closedPnl` уже net — после
+fee и funding). Один API-вызов после каждого close.
+
+### Что добавлено
+
+1. **`AiBybitClient.get_closed_pnl(symbol, start_ms=None, limit=50)`**
+   с new dataclass `ClosedPnl`. None при API failure (отличается от `[]`).
+
+2. **`positions.pnl_source`** — новая колонка в SQLite, миграция через
+   `_migrate()`:
+   - `'gross'` — расчёт `(exit-entry)*qty` (не учтены fee/funding)
+   - `'net'`   — точное `closedPnl` от Bybit
+   - `NULL`    — закрытие до миграции (трактуется как gross)
+
+3. **`AiTraderStore.update_pnl_to_net(id, new_realized_pnl_usd, new_exit_price)`**
+   — идемпотентное обновление. Корректирует `daily_pnl.realized_pnl_usd`
+   на разницу gross↔net + `n_wins` если знак прибыли поменялся после fee.
+   Skip если `pnl_source` уже `'net'`.
+
+4. **`AiTraderStore.get_recent_closed_gross_positions(hours=24)`** —
+   getter для догон-логики.
+
+5. **`trading/pnl_reconcile.py`** — новый модуль с helper
+   `fetch_net_pnl(client, position)`:
+   - Матчит запись Bybit closed-pnl с нашей `AiPosition` сначала по
+     `orderLinkId` (наш `ai_open_*`), fallback по `closedSize` +
+     invert side + `createdTime`.
+   - Берёт candidate с max `updatedTime` (финальная запись после
+     partial-fills).
+   - Возвращает `(closed_pnl_net, avg_exit_price)` или `None`.
+
+6. **`executor._apply_close`** — после успешного `client.close_position()`:
+   считаем gross, сразу пробуем `fetch_net_pnl()`, если получили — пишем
+   net. Если нет — `pnl_source='gross'`, догонит позже.
+
+7. **`main._reconcile_closed_positions`** — при exchange-close (SL/TP)
+   та же логика: пробуем net, fallback gross.
+
+8. **`main._reconcile_pnl_to_net`** — новая функция, запускается на
+   каждом full-cycle (раз в `poll_interval_sec`, default 900s).
+   Берёт все позиции с `pnl_source != 'net'` за последние 24h и
+   догоняет их через `fetch_net_pnl()`. Это safety-net для случая
+   когда в момент close `get_closed_pnl` API был недоступен — через
+   ≤15 минут gross перетекает в net.
+
+### Эффект на KillSwitch
+
+`KillSwitch.check_can_trade()` сравнивает `SUM(realized_pnl_usd)` из БД
+с `max_daily_loss_usd=300` / `max_total_loss_usd=500` (v0.16). После
+v0.18 эта сумма точно совпадает с реальным изменением баланса на бирже
+(±пара центов на округление средневзвешенных entry/exit). Daily-loss
+лимит сработает в правильный момент, не позже.
+
+### Файлы
+
+- `src/ai_trader/trading/client.py`: `+ ClosedPnl dataclass`,
+  `+ get_closed_pnl()` (~70 строк).
+- `src/ai_trader/trading/pnl_reconcile.py`: **новый модуль** с
+  `fetch_net_pnl()` (matching-логика, ~110 строк).
+- `src/ai_trader/state/db.py`: `+ pnl_source` поле в `AiPosition`,
+  ALTER TABLE миграция, `pnl_source` параметр в `close_position()`,
+  `+ update_pnl_to_net()`, `+ get_recent_closed_gross_positions()`.
+- `src/ai_trader/trading/executor.py:_apply_close`: integration с
+  `fetch_net_pnl`, summary получает суффикс `(net)` или `(gross)`.
+- `src/ai_trader/app/main.py`:
+  - `_reconcile_closed_positions`: integration с `fetch_net_pnl`.
+  - `+ _reconcile_pnl_to_net()` (~40 строк).
+  - В `_run_full_cycle` после reconcile вызывается `_reconcile_pnl_to_net`.
+- `tests/test_ai_trader.py`: **14 новых тестов** (3 класса):
+  - `TestFetchNetPnl` (6): match by link_id, fallback by size/side,
+    qty-mismatch, API failure, empty list, picks-latest-updated.
+  - `TestUpdatePnlToNet` (3): basic gross→net adjust, idempotent on net,
+    win→loss flip decrements `n_wins`.
+  - `TestReconcilePnlToNet` (3): reconcile recent gross, skip already-net,
+    API failure keeps gross.
+
+### Backwards compatibility
+
+- Все старые closed-позиции в БД остаются с `pnl_source IS NULL` —
+  это **не считается net** (трактуется как pre-v0.18 gross).
+- Re-runable: миграция через `ALTER TABLE ADD COLUMN` идемпотентна.
+- Старые тесты (`TestReconcileClosedPositions`) обновлены: добавлен
+  `get_closed_pnl()` метод в fake-клиент. Default возвращает None —
+  fallback на gross, эквивалентно старому поведению.
+
+### Тесты / linter
+
+- `pytest tests/` — **1030 passed** (было 1016, +14 новых).
+- ReadLints — **No linter errors**.
+
+### Acceptance / monitoring
+
+После deploy:
+1. **Сразу проверить** в логах фразу `PNL-RECONCILE id=...` —
+   это означает догон gross→net сработал.
+2. **Через 15 минут** все недавно закрытые позиции должны иметь
+   `pnl_source='net'` в SQLite.
+3. **Сверка**: сумма `SUM(realized_pnl_usd)` за день должна совпадать
+   с net-PnL из Bybit exchange statement (±$0.05 на округление).
+4. KillSwitch будет срабатывать в правильный момент при достижении
+   реального -$300 daily / -$500 total.
+
+---
+
 ## 2026-05-25 — v0.17 (Шаг 2a): live exchange data в OPEN POSITIONS блоке промпта
 
 **Запрос пользователя:** «мне кажется тут не хватает лайв данных с биржи

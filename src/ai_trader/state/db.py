@@ -43,6 +43,14 @@ class AiPosition:
     confidence: float | None = None  # 0.0-1.0, обязательно при open
     invalidation_condition: str | None = None  # observable exit signal
     risk_usd_declared: float | None = None  # |entry-SL|*qty по расчёту LLM
+    # v0.18 (2026-05-25): "gross" → realized_pnl_usd посчитан как
+    # ``(exit - entry) × qty`` (без trading fee и funding). "net" →
+    # значение синкнуто с Bybit ``closedPnl`` через ``get_closed_pnl``
+    # API (учтены fee + funding). При open всегда NULL, при close
+    # сначала "gross" (немедленно), потом ``_reconcile_pnl_to_net()``
+    # на следующем full-cycle перезаписывает в "net" если API доступен.
+    # KillSwitch и любая стата по PnL должна предпочитать записи "net".
+    pnl_source: str | None = None
 
 
 _SCHEMA = """
@@ -123,6 +131,9 @@ class AiTraderStore:
             ("confidence", "ALTER TABLE positions ADD COLUMN confidence REAL"),
             ("invalidation_condition", "ALTER TABLE positions ADD COLUMN invalidation_condition TEXT"),
             ("risk_usd_declared", "ALTER TABLE positions ADD COLUMN risk_usd_declared REAL"),
+            # v0.18: после ALTER старые closed-позиции остаются с pnl_source=NULL
+            # — это значит "до миграции" и трактуется как gross (см. dataclass).
+            ("pnl_source", "ALTER TABLE positions ADD COLUMN pnl_source TEXT"),
         ]
         for col_name, ddl in migrations:
             if col_name not in existing:
@@ -237,13 +248,25 @@ class AiTraderStore:
         exit_price: float,
         realized_pnl_usd: float,
         close_reason: str,
+        pnl_source: str = "gross",
     ) -> None:
+        """Закрыть позицию в БД и обновить daily_pnl.
+
+        ``pnl_source``: "gross" (default — расчётный
+        ``(exit-entry)*qty``) либо "net" (точный ``closedPnl`` от
+        Bybit с уже вычтенными fee+funding, см. v0.18).
+
+        ``daily_pnl`` инкремент НЕ зависит от ``pnl_source`` — туда
+        кладём то значение что есть. Если позже ``update_pnl_to_net``
+        перезапишет ``realized_pnl_usd`` другим числом — он же
+        корректирует ``daily_pnl`` на разницу.
+        """
         with self._conn() as c:
             c.execute(
                 """
                 UPDATE positions
                 SET closed_at = ?, exit_price = ?, realized_pnl_usd = ?,
-                    close_reason = ?
+                    close_reason = ?, pnl_source = ?
                 WHERE id = ?
                 """,
                 (
@@ -251,6 +274,7 @@ class AiTraderStore:
                     exit_price,
                     realized_pnl_usd,
                     close_reason,
+                    pnl_source,
                     position_id,
                 ),
             )
@@ -267,6 +291,100 @@ class AiTraderStore:
                 """,
                 (today, realized_pnl_usd, won),
             )
+
+    def update_pnl_to_net(
+        self,
+        position_id: int,
+        *,
+        new_realized_pnl_usd: float,
+        new_exit_price: float | None = None,
+    ) -> None:
+        """v0.18: пересчитать ``realized_pnl_usd`` и (опц.) ``exit_price``
+        на точные net-значения из Bybit ``closedPnl``.
+
+        Идемпотентно: если запись уже ``pnl_source='net'`` или новое
+        значение совпадает с текущим — изменений нет, ``daily_pnl`` не
+        двигается. При реальной правке корректирует ``daily_pnl`` на
+        разницу (старое gross заменяется новым net), `n_wins` тоже
+        пересчитывается если сторона прибыли поменялась после fee.
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT realized_pnl_usd, pnl_source, closed_at FROM positions "
+                "WHERE id = ?",
+                (position_id,),
+            ).fetchone()
+            if row is None:
+                return
+            if row["pnl_source"] == "net":
+                return
+            old_pnl = float(row["realized_pnl_usd"] or 0.0)
+            closed_at = row["closed_at"]
+            diff = new_realized_pnl_usd - old_pnl
+            won_old = 1 if old_pnl > 0 else 0
+            won_new = 1 if new_realized_pnl_usd > 0 else 0
+            wins_diff = won_new - won_old
+
+            if new_exit_price is not None:
+                c.execute(
+                    """
+                    UPDATE positions
+                    SET realized_pnl_usd = ?, exit_price = ?, pnl_source = 'net'
+                    WHERE id = ?
+                    """,
+                    (new_realized_pnl_usd, new_exit_price, position_id),
+                )
+            else:
+                c.execute(
+                    """
+                    UPDATE positions
+                    SET realized_pnl_usd = ?, pnl_source = 'net'
+                    WHERE id = ?
+                    """,
+                    (new_realized_pnl_usd, position_id),
+                )
+
+            if abs(diff) > 1e-9 or wins_diff != 0:
+                # daily_pnl привязан к дню закрытия, не «сегодня»
+                day = (closed_at or "")[:10] or date.today().isoformat()
+                c.execute(
+                    """
+                    UPDATE daily_pnl
+                    SET realized_pnl_usd = realized_pnl_usd + ?,
+                        n_wins = MAX(0, n_wins + ?)
+                    WHERE day = ?
+                    """,
+                    (diff, wins_diff, day),
+                )
+
+    def get_recent_closed_gross_positions(
+        self, *, hours: int = 24
+    ) -> list[AiPosition]:
+        """v0.18: позиции закрытые < ``hours`` назад с pnl_source != 'net'.
+
+        Используется ``_reconcile_pnl_to_net()`` для догонной синхронизации
+        ``realized_pnl_usd`` с биржевым net-значением, если в момент close
+        ``get_closed_pnl`` API был недоступен.
+        """
+        cutoff = datetime.now(tz=UTC).timestamp() - hours * 3600
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT * FROM positions
+                WHERE closed_at IS NOT NULL
+                  AND (pnl_source IS NULL OR pnl_source != 'net')
+                ORDER BY closed_at DESC
+                """,
+            ).fetchall()
+        out: list[AiPosition] = []
+        for r in rows:
+            try:
+                ts = datetime.fromisoformat(r["closed_at"]).timestamp()
+                if ts >= cutoff:
+                    out.append(AiPosition(**dict(r)))
+            except (ValueError, TypeError):
+                continue
+        return out
 
     def get_open_positions(self) -> list[AiPosition]:
         with self._conn() as c:

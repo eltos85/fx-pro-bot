@@ -41,6 +41,7 @@ from ai_trader.trading.context import (
     format_context_for_review,
 )
 from ai_trader.trading.executor import apply_action, parse_action
+from ai_trader.trading.pnl_reconcile import fetch_net_pnl
 
 log = logging.getLogger("ai_trader")
 
@@ -110,21 +111,71 @@ def _reconcile_closed_positions(
             pnl = (exit_price - db_pos.entry_price) * db_pos.qty
         else:
             pnl = (db_pos.entry_price - exit_price) * db_pos.qty
+        pnl_source = "gross"
+        # v0.18: при reconcile через exchange-close (SL/TP / manual)
+        # сразу пытаемся синхронизировать с Bybit net-PnL. Это
+        # критично для KillSwitch на закрытиях через биржу — там нет
+        # path через executor, поэтому без fetch_net_pnl будет gross.
+        net = fetch_net_pnl(client, db_pos)
+        if net is not None:
+            pnl, exit_price = net
+            pnl_source = "net"
         store.close_position(
             db_pos.id,
             exit_price=exit_price,
             realized_pnl_usd=pnl,
             close_reason="exchange_closed (SL/TP/manual)",
+            pnl_source=pnl_source,
         )
         msg = (
             f"id={db_pos.id} {db_pos.side} {db_pos.symbol} qty={db_pos.qty}\n"
             f"entry=${db_pos.entry_price:.6g} exit=${exit_price:.6g}\n"
-            f"PnL: ${pnl:+.2f}\n"
+            f"PnL: ${pnl:+.2f} ({pnl_source})\n"
             f"Reason: exchange_closed (SL/TP)"
         )
         log.info("RECONCILE closed: %s", msg.replace("\n", " | "))
         if tg:
             tg.notify_close(msg)
+
+
+def _reconcile_pnl_to_net(
+    client: AiBybitClient, store: AiTraderStore, *, hours: int = 24
+) -> None:
+    """v0.18: догонная синхронизация gross→net для недавно закрытых позиций.
+
+    Запускается один раз на full-cycle. Берёт позиции закрытые за
+    последние ``hours`` часов с ``pnl_source != 'net'`` и пытается
+    получить точное ``closedPnl`` от Bybit. Если получили — обновляет
+    ``realized_pnl_usd`` и ``daily_pnl`` на разницу (``update_pnl_to_net``).
+
+    Это safety-net для случая когда в момент close API был недоступен —
+    через 5-15 минут (следующий full-cycle) gross перетекает в net.
+    """
+    candidates = store.get_recent_closed_gross_positions(hours=hours)
+    if not candidates:
+        return
+    fixed = 0
+    for pos in candidates:
+        net = fetch_net_pnl(client, pos)
+        if net is None:
+            continue
+        new_pnl, new_exit = net
+        old_pnl = float(pos.realized_pnl_usd or 0.0)
+        store.update_pnl_to_net(
+            pos.id,
+            new_realized_pnl_usd=new_pnl,
+            new_exit_price=new_exit,
+        )
+        log.info(
+            "PNL-RECONCILE id=%d %s %s: gross=$%+.2f → net=$%+.2f (Δ=$%+.2f)",
+            pos.id, pos.side, pos.symbol, old_pnl, new_pnl, new_pnl - old_pnl,
+        )
+        fixed += 1
+    if fixed:
+        log.info(
+            "PNL-RECONCILE: synced %d/%d gross→net positions (last %dh)",
+            fixed, len(candidates), hours,
+        )
 
 
 def run() -> None:
@@ -274,6 +325,9 @@ def _run_cycle(
     log.info("─── Cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
 
     _reconcile_closed_positions(bybit, store, tg)
+    # v0.18: после reconcile через get_positions догоняем те gross-PnL
+    # записи которые в момент close не получили net (API падал и т.п.).
+    _reconcile_pnl_to_net(bybit, store)
 
     if store.is_paused():
         log.info("PAUSED (через /pause из Telegram) — пропускаю цикл")

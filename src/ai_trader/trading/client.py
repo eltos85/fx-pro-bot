@@ -51,6 +51,39 @@ class Position:
 
 
 @dataclass
+class ClosedPnl:
+    """Запись из Bybit ``/v5/position/closed-pnl``.
+
+    v0.18 (2026-05-25): bot ранее писал в БД ``realized_pnl_usd`` как
+    ``(exit - entry) × qty`` — это **gross** PnL без trading fee и
+    funding settlement. Это занижало убытки и завышало прибыль (за день
+    25/05 расхождение составило 41% от реального net-убытка). Теперь
+    поверх gross-расчёта мы делаем поправку: дёргаем этот endpoint и
+    берём ``closedPnl`` как точное net-значение, которое уже
+    учитывает все комиссии и funding на момент закрытия позиции.
+
+    Поля Bybit V5 (только используемые):
+    - ``symbol``, ``side``, ``orderLinkId``: для матчинга записи с нашей
+      open-позицией в БД (open-ордер ставился с ``ai_open_…`` link_id,
+      который сохраняется в Bybit на closed-pnl записи).
+    - ``closedSize``: размер закрытой части (для матчинга с qty в БД).
+    - ``avgEntryPrice`` / ``avgExitPrice``: средние цены — могут чуть
+      отличаться от наших, потому что биржа усредняет для slippage.
+    - ``closedPnl``: **net** PnL в USDT (после fee, funding).
+    - ``createdTime`` / ``updatedTime``: для time-window сопоставления.
+    """
+    symbol: str
+    side: str
+    order_link_id: str
+    closed_size: float
+    avg_entry_price: float
+    avg_exit_price: float
+    closed_pnl: float
+    created_time_ms: int
+    updated_time_ms: int
+
+
+@dataclass
 class Ticker:
     symbol: str
     last_price: float
@@ -254,6 +287,72 @@ class AiBybitClient:
                         position_value=float(p.get("positionValue", 0) or 0),
                         mark_price=float(p.get("markPrice", 0) or 0),
                         liq_price=float(p.get("liqPrice", 0) or 0),
+                    )
+                )
+            except (ValueError, TypeError):
+                continue
+        return out
+
+    def get_closed_pnl(
+        self,
+        symbol: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int = 50,
+    ) -> list[ClosedPnl] | None:
+        """Возвращает список Closed PnL записей для symbol.
+
+        Bybit V5 endpoint ``/v5/position/closed-pnl``. По дефолту биржа
+        даёт за последние 7 дней; если ``start_ms`` задан — за указанный
+        диапазон.
+
+        Возвращает:
+        - ``[]`` — API ответил, но записей нет (например, новая пара).
+        - ``None`` — API упал / non-zero retCode. Вызывающий код должен
+          различать ``None`` (transient outage) от ``[]`` (нет данных) —
+          иначе можем перезаписать корректный gross-PnL на 0.
+
+        v0.18 (2026-05-25): метод введён для расчёта net-PnL вместо
+        gross. См. dataclass ``ClosedPnl`` для деталей.
+        """
+        try:
+            params: dict = {
+                "category": self._category,
+                "symbol": symbol,
+                "limit": int(limit),
+            }
+            if start_ms is not None:
+                params["startTime"] = int(start_ms)
+            if end_ms is not None:
+                params["endTime"] = int(end_ms)
+            resp = self._session.get_closed_pnl(**params)
+        except Exception:
+            log.exception("get_closed_pnl failed for %s", symbol)
+            return None
+        ret_code = resp.get("retCode")
+        if ret_code not in (0, None):
+            log.warning(
+                "get_closed_pnl non-zero retCode: code=%s msg=%s",
+                ret_code,
+                resp.get("retMsg", ""),
+            )
+            return None
+        items = resp.get("result", {}).get("list", []) or []
+        out: list[ClosedPnl] = []
+        for it in items:
+            try:
+                out.append(
+                    ClosedPnl(
+                        symbol=it.get("symbol", ""),
+                        side=it.get("side", ""),
+                        order_link_id=it.get("orderLinkId", ""),
+                        closed_size=float(it.get("closedSize", 0) or 0),
+                        avg_entry_price=float(it.get("avgEntryPrice", 0) or 0),
+                        avg_exit_price=float(it.get("avgExitPrice", 0) or 0),
+                        closed_pnl=float(it.get("closedPnl", 0) or 0),
+                        created_time_ms=int(it.get("createdTime", 0) or 0),
+                        updated_time_ms=int(it.get("updatedTime", 0) or 0),
                     )
                 )
             except (ValueError, TypeError):

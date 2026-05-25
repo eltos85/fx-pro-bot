@@ -239,21 +239,40 @@ def _apply_close(
         err_msg = (resp or {}).get("error", "close_position returned empty")
         return ApplyResult(executed=False, summary="", error=f"close_failed: {err_msg}")
 
+    # Сначала считаем gross — на случай если get_closed_pnl недоступен
+    # или Bybit ещё не успел записать closed-pnl (это случается через
+    # 1-2 секунды после close). Если получили net — перезапишем ниже.
     ticker = client.get_ticker(pos.symbol)
     exit_price = ticker.last_price if ticker else pos.entry_price
     if pos.side == "Buy":
         pnl = (exit_price - pos.entry_price) * pos.qty
     else:
         pnl = (pos.entry_price - exit_price) * pos.qty
+    pnl_source = "gross"
+
+    # v0.18: попытка немедленного matching с Bybit closedPnl (net,
+    # с учётом fee + funding). Если API дал ответ — используем net.
+    # Иначе оставляем gross + догоним в _reconcile_pnl_to_net на
+    # следующем full-cycle (см. main.py).
+    from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+    net = fetch_net_pnl(client, pos)
+    if net is not None:
+        pnl, exit_price = net
+        pnl_source = "net"
+
     store.close_position(
         pos.id,
         exit_price=exit_price,
         realized_pnl_usd=pnl,
         close_reason=action.raw.get("reason", "llm_close"),
+        pnl_source=pnl_source,
     )
     return ApplyResult(
         executed=True,
-        summary=f"CLOSE id={pos.id} {pos.side} {pos.symbol} exit=${exit_price:.6g} pnl=${pnl:+.2f}",
+        summary=(
+            f"CLOSE id={pos.id} {pos.side} {pos.symbol} exit=${exit_price:.6g} "
+            f"pnl=${pnl:+.2f} ({pnl_source})"
+        ),
     )
 
 
