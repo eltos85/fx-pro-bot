@@ -41,6 +41,13 @@ class Position:
     leverage: float
     unrealised_pnl: float
     position_value: float
+    # v0.17: live exchange data для feeding в LLM context (Шаг 2a).
+    # Bybit считает unrealised_pnl от ``mark_price``, не от last_price —
+    # поэтому именно эти 2 поля показывают реальную картину позиции.
+    # ``liq_price`` критичен при leverage: бот видит насколько близок к
+    # ликвидации без необходимости вычислять самому.
+    mark_price: float = 0.0
+    liq_price: float = 0.0
 
 
 @dataclass
@@ -245,6 +252,8 @@ class AiBybitClient:
                         leverage=float(p.get("leverage", 1) or 1),
                         unrealised_pnl=float(p.get("unrealisedPnl", 0) or 0),
                         position_value=float(p.get("positionValue", 0) or 0),
+                        mark_price=float(p.get("markPrice", 0) or 0),
+                        liq_price=float(p.get("liqPrice", 0) or 0),
                     )
                 )
             except (ValueError, TypeError):

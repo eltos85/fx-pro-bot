@@ -1,5 +1,194 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-25 — v0.17 (Шаг 2a): live exchange data в OPEN POSITIONS блоке промпта
+
+**Запрос пользователя:** «мне кажется тут не хватает лайв данных с биржи
+по позиции? … ок, делаем шаг 2а, ждем сутки и проверяем деградацию если
+она есть, потом откат если это повлеяло на сумму выигрыша и существенно
+снизило винрейт».
+
+### Что изменилось
+
+LLM теперь видит **реальные данные с биржи** по каждой открытой позиции
+рядом с нашими расчётными значениями. До v0.17 в `OPEN POSITIONS` блоке
+было только то, что бот сам пишет в SQLite (entry/sl/tp/peak_pnl_r) —
+если бирже что-то не нравится (mark price ушёл от ticker.last_price из-за
+funding skew, ликвидность тонкая, liq близко при leverage), бот этого
+не видел.
+
+**Новая строка в промпте под каждой позицией:**
+
+```
+  id=15 Buy BTCUSDT qty=0.014 entry=$77126.2 sl=$76000 tp=$78500 lev=10x
+     peak_pnl_r=+0.81R current_pnl_r=+0.43R
+     LIVE: mark=$77205.4 unrealised=+0.39$ liq=$58400 (29% buffer) margin=$231.41
+```
+
+Где:
+- `mark` — Bybit mark price (от него считается ликвидация и unrealised PnL).
+- `unrealised` — реальный USD-PnL открытой позиции (по mark, не last).
+- `liq` + `% buffer` — расстояние до ликвидации в направлении позиции.
+- `margin` — реально заблокированный USD на бирже.
+
+### Зачем
+
+Пользовательская гипотеза: ИИ хорошо страхует позиции (закрывает в плюс
+даже при WR<50% за счёт асимметрии), но без live-данных он принимает
+exit-решения на устаревшей картине (peak_pnl_r считается от
+ticker.last_price из 1H бара, а не от текущего mark). При leverage 10x
++ funding settlement это создаёт расхождение в ±0.5R между «нашей»
+картиной и реальным состоянием маржи. Цель Шага 2a — закрыть это окно.
+
+### Edge cases
+
+- **API упал** (transient outage): пишет `LIVE: API unavailable
+  (cannot verify live PnL)` — LLM знает что live данным доверять нельзя
+  и будет действовать по нашим расчётам.
+- **БД говорит позиция открыта, биржа не вернула** (reconcile pending):
+  пишет `LIVE: not found on exchange (reconcile pending)` — сигнал что
+  через 1-2 цикла closer-loop её закроет.
+- **Открытых позиций 0**: API биржи не дёргается вовсе (экономия одного
+  REST-вызова на цикл), `live_positions=None` остаётся default.
+
+### Files
+
+- `src/ai_trader/trading/client.py`: `Position` dataclass расширен
+  на `mark_price` и `liq_price`, парсер берёт из API ответа поля
+  `markPrice` и `liqPrice`.
+- `src/ai_trader/trading/context.py`:
+  - `MarketContext.live_positions: dict[str, Position] | None` — новое
+    поле.
+  - `collect_market_context` и `collect_review_context` дёргают
+    `client.get_positions()` (если есть открытые позиции) и складывают
+    в mapping `symbol → Position`.
+  - `_format_live_position_line` — новый helper, формирует строку
+    `LIVE: …` либо одну из 2 fallback-строк.
+  - `format_context_for_prompt` и `format_context_for_review`
+    добавляют LIVE строку под каждой позицией в OPEN POSITIONS блоке.
+- `tests/test_ai_trader.py`: новый класс `TestLivePositionLineFormatter`
+  (7 тестов: normal Buy/Sell, API unavailable, not found, prompt и
+  review интеграция, 0 позиций — нет LIVE строки) + fix `TrackingClient`
+  fake (добавлен `get_positions()` метод).
+
+### Behavioral safety
+
+- Это **аддитивная правка**: ничего не убрано из промпта, только
+  добавлена 1 строка под каждой открытой позицией. Все существующие
+  триггеры (PEAK-DRAWDOWN, exit logic, sizing rules) работают как
+  раньше.
+- Расширение `Position` обратно совместимо: новые поля имеют
+  default `0.0`, существующие тесты не сломаны.
+- API-вызов `get_positions()` лимитирован: только если у бота есть
+  открытые позиции в БД. На пустом портфеле — НЕТ дополнительного
+  API запроса.
+
+### Acceptance / откат
+
+Договорились с пользователем:
+- 24 часа наблюдаем поведение бота с live-данными в промпте.
+- Если **средний выигрыш или WR существенно деградирует** — откат
+  (revert последнего commit'а на VPS, старая версия промпта).
+- Если показатели стабильны или улучшились — оставляем и переходим к
+  Шагу 2b (per-exit-trigger PnL asymmetry в промпте).
+
+### Тесты / linter
+
+- `pytest tests/` — **1016 passed** (включая 7 новых).
+- ReadLints на 3 правленных файлах — **No linter errors**.
+
+---
+
+## 2026-05-25 — v0.16: повышение риска до 10% / $300 daily / $500 total (user-approved)
+
+**Запрос пользователя:** «нам нужно чтобы он принимал наши правки по
+увеличению риска ставки, килсвич не должен резать дневной риск, сделать
+его на уровне 300 долларов».
+
+### Что изменилось
+
+**Только `.env` на VPS** (3 строки) — без правок кода, тестов, промпта.
+Это первая правка, которая использует механизм single source of truth,
+заложенный в refactor v0.15:
+
+```
+AI_TRADER_RISK_PER_TRADE=0.10        # было default 0.02 (2%)
+AI_TRADER_MAX_DAILY_LOSS=300         # было default 50
+AI_TRADER_MAX_TOTAL_LOSS=500         # = virtual_capital_usd ("в обрез")
+```
+
+**По total_loss решение пользователя:** total = virtual_capital = $500.
+Изначально я предложил $1500 (5×daily ratio), но это давало
+противоречие: бот мог потерять больше своего виртуального депозита
+до полного блока. Финальное правило: «бот не может потерять больше
+чем у него есть» → total_loss = capital. После 1-2 плохих дней
+($300+$200) виртуальное депо полностью выработано → блок навсегда.
+
+**Эффект (verified через `docker exec` после рестарта):**
+
+Промпт ИИ автоматически перерисован:
+- `Virtual capital: $500 USD` (sizing база — НЕ изменилась).
+- `Maximum risk per trade: 10% of capital ($50 max risk per trade)`.
+- `Daily loss limit: $300 (after that trading blocks until next day)`.
+- `risk_usd ∈ (0, 50]` в JSON schema + CRITICAL CONSTRAINTS.
+- `cap = $50 = 10% of $500 capital`.
+
+Executor `parse_action` cap автоматически = $50 (`virtual_capital × pct`).
+KillSwitch при старте: `daily=$300 total=$1500 maxpos=3 maxlev=5x`.
+
+### Обоснование изменения
+
+1. **Sample-size warning honest disclosure**: правка существенная (5×
+   увеличение риска), а не bug-fix. Эксперимент с 2% / $50 / $200
+   (стартовавший 2026-05-12 с v0.6-backport, последняя стабильная
+   конфигурация) **обнуляется**. Новый baseline начинается с n=0.
+
+2. **User rationale**: ai-trader показал стабильный позитив на 2%
+   (post-v0.14 baseline 2026-05-20→2026-05-23: WR 57.9% / +$28.22 / 19
+   trades). Пользователь принял решение масштабировать в 5× —
+   это discretion-override, аналогичный v0.14 whitelist override.
+
+3. **Risk math**:
+   - $50/trade × max 3 positions = $150 simultaneous risk (30% capital).
+   - $300/day = 6 убыточных trades подряд до дневного блока.
+   - $500/total = виртуальный депозит исчерпан → блок навсегда (≈1.7
+     плохих дня). Жёсткий потолок «в обрез», как у real-money trader'а
+     с депо $500 без возможности reload.
+
+### Что НЕ изменилось
+
+- `virtual_capital_usd = $500` (sizing база). Реальный equity на Bybit
+  ($49к) ИИ по-прежнему не видит — см. `context.py:373` (в user-prompt
+  только `VIRTUAL CAPITAL: $500.00`).
+- 5x leverage cap — без изменений.
+- Max 3 positions — без изменений.
+- Стратегия (R:R 1.5, EXIT triggers, RSI 25/75 extreme, BB-mid mean
+  reversion target) — без изменений.
+- Код, тесты, образ Docker — без изменений (тот же sha256:3768c08df от
+  v0.15 deploy).
+
+### Acceptance criteria (выполнено)
+
+- [x] Промпт ИИ показывает 10% / $50 / $300 (verified через docker exec).
+- [x] Executor cap = $50 (через `_render_capital_rules(settings)`).
+- [x] Killswitch применяет $300/$500 (verified в стартовом логе).
+- [x] Контейнер стартовал чисто, Cycle 1 запустился (LLM HTTP 200 OK).
+- [x] Real equity ИИ по-прежнему не видит.
+
+### Следующий шаг (отложен)
+
+Шаг 2 (по плану пользователя): добавить per-symbol + per-trigger
+feedback в user_prompt — чтобы ИИ видел свою историю по монетам и
+триггерам выхода. Этап **отложен** на 5–7 дней forward-test нового
+риск-режима, чтобы накопилась первая выборка trades с 10% риска.
+
+### Файлы
+
+- `.env` на VPS (не в git, backup в `.env.bak.20260525`):
+  3 новые строки.
+- `BUILDLOG_AI_TRADER.md`: эта запись.
+
+---
+
 ## 2026-05-24 — v0.15-refactor: capital rules через placeholder'ы (single source of truth)
 
 **Запрос пользователя:** «не понравилось что ты начал хардкодить значения

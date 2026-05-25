@@ -927,6 +927,9 @@ class TestCollectReviewContext:
             def get_wallet_balance(self):
                 return 500.0
 
+            def get_positions(self, symbol=None):
+                return []
+
         ctx = collect_review_context(TrackingClient(), store, 500.0)
         # Тикер запрашивался ТОЛЬКО для BTCUSDT — других 9 пар не дёргали
         assert called_symbols == ["BTCUSDT"]
@@ -1101,6 +1104,161 @@ class TestPeakPnlRStats:
         s = format_context_for_review(ctx)
         assert "peak_pnl_r=" in s
         assert "current_pnl_r=" in s
+
+
+class TestLivePositionLineFormatter:
+    """v0.17 (2026-05-25, Шаг 2a): _format_live_position_line должен
+    корректно отображать live данные биржи рядом с каждой open
+    position. Покрывает 4 ветки: normal, API unavailable, not found
+    on exchange, buffer % calc для Buy/Sell.
+
+    Цель Шага 2a: дать LLM реальные ``mark_price``/``unrealised_pnl``
+    /``liq_price`` от Bybit, а не только наш расчётный
+    ``current_pnl_r`` (который считается от ``ticker.last_price``,
+    отличается от mark_price на чистом spread/funding skew).
+    """
+
+    @staticmethod
+    def _make_pos(side: str = "Buy", symbol: str = "BTCUSDT"):
+        from ai_trader.state.db import AiPosition
+        return AiPosition(
+            id=1, symbol=symbol, side=side, qty=0.01,
+            entry_price=77000.0, sl_price=76000.0, tp_price=79000.0,
+            leverage=10, order_link_id="ai_test",
+            opened_at="2026-05-25T08:00:00+00:00",
+            closed_at=None, exit_price=None, realized_pnl_usd=None,
+            close_reason=None, llm_reason="test",
+        )
+
+    @staticmethod
+    def _make_live(
+        symbol: str = "BTCUSDT", side: str = "Buy", *,
+        mark: float = 77200.0, unreal: float = 0.39,
+        liq: float = 58400.0, lev: float = 10.0, pos_val: float = 2314.1,
+    ):
+        from ai_trader.trading.client import Position
+        return Position(
+            symbol=symbol, side=side, size=0.01, entry_price=77000.0,
+            leverage=lev, unrealised_pnl=unreal, position_value=pos_val,
+            mark_price=mark, liq_price=liq,
+        )
+
+    def test_normal_buy_includes_all_fields(self):
+        from ai_trader.trading.context import _format_live_position_line
+        pos = self._make_pos("Buy")
+        live = self._make_live("BTCUSDT", "Buy", mark=77200.0, unreal=0.39,
+                               liq=58400.0, lev=10.0, pos_val=2314.1)
+        s = _format_live_position_line(pos, {"BTCUSDT": live})
+        assert s is not None
+        assert "LIVE:" in s
+        assert "mark=$77200" in s
+        assert "unrealised=+0.39$" in s
+        assert "liq=$58400" in s
+        assert "buffer" in s
+        assert "margin=$231.41" in s
+
+    def test_normal_sell_buffer_is_directional(self):
+        """Для Sell позиции liq > mark, buffer считается от
+        ``(liq - mark) / mark``, а не наоборот."""
+        from ai_trader.trading.context import _format_live_position_line
+        pos = self._make_pos("Sell")
+        live = self._make_live("BTCUSDT", "Sell", mark=1.029, unreal=-0.09,
+                               liq=1.115, lev=10.0, pos_val=226.4)
+        s = _format_live_position_line(pos, {"BTCUSDT": live})
+        assert s is not None
+        assert "unrealised=-0.09$" in s
+        # (1.115-1.029)/1.029*100 ≈ 8.4% → "8% buffer"
+        assert "8% buffer" in s
+
+    def test_api_unavailable(self):
+        from ai_trader.trading.context import _format_live_position_line
+        pos = self._make_pos("Buy")
+        s = _format_live_position_line(pos, None)
+        assert s is not None
+        assert "API unavailable" in s
+
+    def test_not_found_on_exchange(self):
+        """БД говорит что позиция открыта, биржа не вернула — reconcile
+        pending. LLM должен видеть это явно."""
+        from ai_trader.trading.context import _format_live_position_line
+        pos = self._make_pos("Buy", symbol="BTCUSDT")
+        s = _format_live_position_line(pos, {})  # пустой mapping
+        assert s is not None
+        assert "not found on exchange" in s
+
+    def test_format_for_prompt_includes_live_line(self):
+        """Интеграция: format_context_for_prompt выводит LIVE строку
+        в OPEN POSITIONS блоке."""
+        from ai_trader.trading.client import Bar, Ticker
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_prompt,
+        )
+        pos = self._make_pos("Buy")
+        live = self._make_live("BTCUSDT", "Buy", mark=77205.4, unreal=2.05,
+                               liq=58400.0, lev=10.0, pos_val=2314.1)
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=77205.0, bid=77204.0, ask=77206.0,
+            funding_rate=0.0, volume_24h=10000, price_change_pct_24h=0.0,
+        )
+        bars = [Bar(
+            ts=1_700_000_000_000, open=77200, high=77210, low=77190,
+            close=77205, volume=10,
+        )]
+        snap = SymbolSnapshot(symbol="BTCUSDT", ticker=ticker,
+                              bars_1h=bars, bars_4h=[])
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[pos],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+            live_positions={"BTCUSDT": live},
+        )
+        s = format_context_for_prompt(ctx)
+        assert "LIVE: mark=$77205.4" in s
+        assert "unrealised=+2.05$" in s
+        assert "liq=$58400" in s
+
+    def test_format_for_review_includes_live_line(self):
+        """Интеграция: format_context_for_review тоже должен показать
+        LIVE строку (review-цикл — главное место где LLM решает
+        early-close открытой позиции)."""
+        from ai_trader.trading.client import Bar, Ticker
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_review,
+        )
+        pos = self._make_pos("Buy")
+        live = self._make_live()
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=77200.0, bid=77199.0, ask=77201.0,
+            funding_rate=0.0, volume_24h=10000, price_change_pct_24h=0.0,
+        )
+        bars = [Bar(
+            ts=1_700_000_000_000, open=77100, high=77210, low=77090,
+            close=77200, volume=10,
+        )]
+        snap = SymbolSnapshot(symbol="BTCUSDT", ticker=ticker,
+                              bars_1h=bars, bars_4h=[])
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[pos],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+            live_positions={"BTCUSDT": live},
+        )
+        s = format_context_for_review(ctx)
+        assert "LIVE: mark=" in s
+        assert "unrealised=" in s
+
+    def test_no_live_line_when_no_open_positions(self):
+        """Если открытых позиций нет — LIVE строка не появляется
+        (просто '(none)')."""
+        from ai_trader.trading.context import (
+            MarketContext, format_context_for_prompt,
+        )
+        ctx = MarketContext(
+            snapshots=[], open_positions=[],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+            live_positions=None,
+        )
+        s = format_context_for_prompt(ctx)
+        assert "LIVE:" not in s
+        assert "(none)" in s
 
 
 class TestPeakDrawdownTriggerInPrompts:

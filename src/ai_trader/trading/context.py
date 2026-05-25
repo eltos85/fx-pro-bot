@@ -26,7 +26,7 @@ from datetime import datetime
 from ai_trader.analysis.indicators import IndicatorSnapshot, compute_snapshot, format_snapshot
 from ai_trader.news.rss import NewsItem
 from ai_trader.state.db import AiPosition, AiTraderStore
-from ai_trader.trading.client import AiBybitClient, Bar, Ticker
+from ai_trader.trading.client import AiBybitClient, Bar, Position, Ticker
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +74,15 @@ class MarketContext:
     virtual_capital_usd: float
     real_equity_usd: float
     news: list[NewsItem] = field(default_factory=list)
+    # v0.17 (2026-05-25, Шаг 2a): live данные с биржи по открытым
+    # позициям — mapping ``symbol -> Position`` (Position dataclass
+    # из ``trading.client``). Используется в format_context_for_prompt
+    # / format_context_for_review чтобы LLM видел реальный
+    # ``unrealised_pnl`` (USD), ``mark_price``, ``liq_price`` — а не
+    # только наш расчётный ``current_pnl_r`` из 1H бар.
+    # ``None`` означает что API-вызов не получился (transient outage)
+    # — отличается от ``{}`` (запрос ОК, открытых позиций на бирже нет).
+    live_positions: dict[str, Position] | None = None
 
 
 def collect_market_context(
@@ -119,6 +128,18 @@ def collect_market_context(
     open_positions = store.get_open_positions()
     real_equity = client.get_wallet_balance()
 
+    # v0.17 Шаг 2a: live данные с биржи по открытым позициям. Если
+    # запрос упал (None) — пишем None в context, форматтер покажет
+    # «live: API unavailable». Если биржа вернула пустой список ([]),
+    # значит наших позиций сейчас на ней нет (reconcile pending).
+    live_positions: dict[str, Position] | None = None
+    if open_positions:
+        exchange_positions = client.get_positions()
+        if exchange_positions is None:
+            live_positions = None
+        else:
+            live_positions = {p.symbol: p for p in exchange_positions}
+
     news: list[NewsItem] = []
     if news_provider is not None:
         try:
@@ -133,6 +154,7 @@ def collect_market_context(
         virtual_capital_usd=virtual_capital_usd,
         real_equity_usd=real_equity,
         news=news,
+        live_positions=live_positions,
     )
 
 
@@ -269,12 +291,63 @@ def collect_review_context(
             )
         )
 
+    # v0.17 Шаг 2a: live данные биржи для review-цикла (тот же
+    # principle что в collect_market_context).
+    exchange_positions = client.get_positions()
+    live_positions: dict[str, Position] | None
+    if exchange_positions is None:
+        live_positions = None
+    else:
+        live_positions = {p.symbol: p for p in exchange_positions}
+
     return MarketContext(
         snapshots=snapshots,
         open_positions=open_positions,
         virtual_capital_usd=virtual_capital_usd,
         real_equity_usd=real_equity,
         news=[],
+        live_positions=live_positions,
+    )
+
+
+def _format_live_position_line(
+    position: AiPosition,
+    live_positions: dict[str, Position] | None,
+) -> str | None:
+    """v0.17 Шаг 2a: форматирует live данные биржи по позиции.
+
+    Возвращает строку вида:
+      ``LIVE: mark=$77205.4 unrealised=+$0.39 liq=$58400 (29% buffer)
+      margin=$231.41``
+    либо ``"LIVE: API unavailable"`` если запрос упал, либо
+    ``"LIVE: not found on exchange (reconcile pending)"`` если БД
+    говорит что позиция открыта, а биржа её не вернула.
+
+    None — если ``live_positions={}`` и позиция не открыта на бирже
+    (тогда выше уже выведена нормальная "no live data" ситуация —
+    скорее всего БД stale и close-reconcile вот-вот отработает).
+    """
+    if live_positions is None:
+        return "     LIVE: API unavailable (cannot verify live PnL)"
+    live = live_positions.get(position.symbol)
+    if live is None:
+        return "     LIVE: not found on exchange (reconcile pending)"
+    mark = live.mark_price or 0.0
+    unreal = live.unrealised_pnl or 0.0
+    liq = live.liq_price or 0.0
+    pos_val = live.position_value or 0.0
+    margin = pos_val / live.leverage if live.leverage > 0 else pos_val
+    buf_pct = ""
+    if liq > 0 and mark > 0:
+        # Расстояние до liq в %, направленное (по side).
+        if position.side == "Buy":
+            buf = (mark - liq) / mark * 100 if mark > liq else 0
+        else:
+            buf = (liq - mark) / mark * 100 if liq > mark else 0
+        buf_pct = f" ({buf:.0f}% buffer)"
+    return (
+        f"     LIVE: mark=${mark:.6g} unrealised={unreal:+.2f}$ "
+        f"liq=${liq:.6g}{buf_pct} margin=${margin:.2f}"
     )
 
 
@@ -330,6 +403,9 @@ def format_context_for_review(ctx: MarketContext) -> str:
                 parts.append(
                     f"     peak_pnl_r={peak_r:+.2f}R current_pnl_r={current_r:+.2f}R"
                 )
+            live_line = _format_live_position_line(p, ctx.live_positions)
+            if live_line is not None:
+                parts.append(live_line)
 
     return "\n".join(parts)
 
@@ -434,5 +510,8 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
                 parts.append(
                     f"     peak_pnl_r={peak_r:+.2f}R current_pnl_r={current_r:+.2f}R"
                 )
+            live_line = _format_live_position_line(p, ctx.live_positions)
+            if live_line is not None:
+                parts.append(live_line)
 
     return "\n".join(parts)
