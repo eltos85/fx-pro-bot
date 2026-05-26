@@ -95,6 +95,38 @@ def _coerce_signed_unit(value: Any) -> float:
     return max(-1.0, min(1.0, v))
 
 
+def _coerce_capped_str(max_len: int):
+    """Factory: BeforeValidator который усекает str до ``max_len`` символов.
+
+    Bug-fix 25-May-2026: LLM иногда формулирует ``reason`` многословно
+    (325+ символов про «Iran deal unwind + commodities confluence»),
+    что раньше отвергало _всё_ decision-block из-за pydantic
+    ``max_length=300``. Парсер не должен терять торговое решение из-за
+    стилистики reason — clamp применяется при записи в БД (см. строку
+    ``reason = m.reason[:300]`` в apply_action), так что лимит здесь
+    нужен для бюджета хранения, не для бизнес-валидации.
+
+    Тот же паттерн что и ``_coerce_unit`` / ``_coerce_signed_unit``:
+    BeforeValidator усекает ДО проверки Field-constraint, поэтому
+    constraint фактически всегда проходит, но остаётся видимым в схеме
+    (документация / OpenAPI).
+    """
+
+    def _coerce(value: Any) -> Any:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            try:
+                value = str(value)
+            except Exception:
+                return ""
+        if len(value) > max_len:
+            return value[:max_len]
+        return value
+
+    return _coerce
+
+
 # Annotated type aliases — переиспользуемые «strict + safe» типы.
 # Field(ge/le) остаётся как формальная схема (для документации, OpenAPI
 # export, IDE-hint), а BeforeValidator делает clamp ДО проверки constraint,
@@ -103,6 +135,12 @@ UnitFloat = Annotated[float, BeforeValidator(_coerce_unit), Field(ge=0.0, le=1.0
 SignedUnitFloat = Annotated[
     float, BeforeValidator(_coerce_signed_unit), Field(ge=-1.0, le=1.0)
 ]
+ClampedReason = Annotated[
+    str, BeforeValidator(_coerce_capped_str(300)), Field(max_length=300)
+]
+ClampedTitleSnippet = Annotated[
+    str, BeforeValidator(_coerce_capped_str(200)), Field(max_length=200)
+]
 
 
 class SentimentItem(BaseModel):
@@ -110,7 +148,7 @@ class SentimentItem(BaseModel):
     (см. блок _coerce_* выше). Out-of-range от LLM (например forwardness=-0.3)
     не отвергает решение, а заменяется ближайшей границей."""
 
-    title_snippet: str = Field(default="", max_length=200)
+    title_snippet: ClampedTitleSnippet = ""
     relevance: UnitFloat
     polarity: SignedUnitFloat
     intensity: UnitFloat
@@ -134,19 +172,19 @@ class OpenAction(BaseModel):
     volume_lots: float = Field(gt=0.0, le=10.0)
     stop_loss: float = Field(gt=0.0)
     take_profit: float = Field(gt=0.0)
-    reason: str = Field(default="", max_length=300)
+    reason: ClampedReason = ""
     sentiment: Optional[SentimentBlock] = None
 
 
 class CloseAction(BaseModel):
     action: Literal["close"]
     position_id: int = Field(gt=0)
-    reason: str = Field(default="", max_length=300)
+    reason: ClampedReason = ""
 
 
 class HoldAction(BaseModel):
     action: Literal["hold"]
-    reason: str = Field(default="", max_length=300)
+    reason: ClampedReason = ""
     sentiment: Optional[SentimentBlock] = None
 
 

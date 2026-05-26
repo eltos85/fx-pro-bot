@@ -124,6 +124,46 @@ class TestParseActionSchema:
         assert item1.uncertainty == 0.0  # был null → 0
         assert item1.forwardness == 1.0  # был 2.0 → 1
 
+    def test_hold_long_reason_is_clamped_not_rejected(self):
+        """LLM иногда формулирует reason длиннее 300 символов
+        (commentary про множество драйверов одновременно). Раньше pydantic
+        ``max_length=300`` отвергал _всё_ decision-block. Bug-fix
+        25-May-2026: clamp через BeforeValidator аналогично unit-float
+        паттерну. Решение сохраняется, reason обрезается до 300.
+
+        Repro: real log fx_ai_trader 2026-05-25 10:44:49 — reason ~325 char
+        про «Iran deal unwind + commodities confluence».
+        """
+        import json as _json
+        long_reason = (
+            "No high-conviction setup across commodities. Oil's Iran deal unwind "
+            "is clear macro driver but price is near oversold lower BB and "
+            "uncertainty remains moderate. Gold lacks fresh real-yield/DXY "
+            "catalyst. NatGas bearish storage+weather but oversold and no "
+            "catalyst for entry. Wait for cleaner confluence."
+        )
+        assert len(long_reason) > 300
+        text = _json.dumps({"action": "hold", "reason": long_reason})
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, ParsedAction), result
+        assert isinstance(result.model, HoldAction)
+        assert len(result.model.reason) == 300
+        assert result.model.reason == long_reason[:300]
+
+    def test_open_long_reason_is_clamped_not_rejected(self):
+        """То же для OpenAction: длинный reason → clamp, не reject."""
+        long_reason = "A" * 500
+        text = (
+            '{"action":"open","symbol":"XAUUSD","side":"BUY",'
+            '"volume_lots":0.05,"stop_loss":2380,"take_profit":2410,'
+            f'"reason":"{long_reason}",'
+            '"sentiment":{"aggregate_uncertainty":0.3,"items":[]}}'
+        )
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, ParsedAction), result
+        assert isinstance(result.model, OpenAction)
+        assert len(result.model.reason) == 300
+
     def test_open_high_uncertainty_blocked(self):
         """Anti-hallucination gate — aggregate_uncertainty > 0.7 → reject open."""
         text = (

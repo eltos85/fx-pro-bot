@@ -23,6 +23,8 @@ from fx_ai_trader.llm.prompts import (
     build_system_prompt_review,
     build_user_prompt,
     build_user_prompt_review,
+    format_performance_by_symbol,
+    format_recent_trades,
 )
 from fx_ai_trader.news.eia import EiaProvider
 from fx_ai_trader.news.rss import CommodityRssNewsProvider
@@ -235,13 +237,24 @@ def _run_full_cycle(
         news_provider=news_provider, eia_provider=eia_provider,
         noaa_provider=noaa_provider,
     )
-    user_prompt = build_user_prompt(format_context_for_prompt(ctx))
+    # v1.X self-reflection (2026-05-26): per-symbol perf + последние
+    # closed live trades в USER_PROMPT. Источник правды: store.
+    # См. BUILDLOG_AI_FX_TRADER.md v1.X запись и плановый файл.
+    symbol_stats = store.get_pnl_by_symbol(settings.symbols)
+    recent_trades = store.get_recent_closed_trades(limit=10)
+    user_prompt = build_user_prompt(
+        format_context_for_prompt(ctx),
+        performance_by_symbol=format_performance_by_symbol(symbol_stats),
+        recent_trades=format_recent_trades(recent_trades),
+    )
 
     log.info(
-        "LLM call (full): positions=%d news_total=%d macro_symbols=%s",
+        "LLM call (full): positions=%d news_total=%d macro_symbols=%s "
+        "self_reflection=closed_trades:%d",
         len(ctx.open_positions),
         sum(len(v) for v in ctx.news_per_symbol.values()),
         ",".join(sorted(ctx.macro_per_symbol.keys())) or "none",
+        len(recent_trades),
     )
     resp = llm.ask(SYSTEM_PROMPT, user_prompt)
     store.add_api_cost(resp.cost_usd)
@@ -349,7 +362,14 @@ def _run_review_cycle(
 
     ctx = collect_review_context(adapter, store, settings.virtual_capital_usd)
     system_prompt = build_system_prompt_review(settings)
-    user_prompt = build_user_prompt_review(format_context_for_review(ctx))
+    # v1.X self-reflection (review variant): только per-symbol агрегаты
+    # (без recent_trades — review должен оставаться lightweight, см.
+    # SYSTEM_PROMPT_REVIEW «NO macro feed, NO news, NO EIA, NO 4H bars»).
+    symbol_stats = store.get_pnl_by_symbol(settings.symbols)
+    user_prompt = build_user_prompt_review(
+        format_context_for_review(ctx),
+        performance_by_symbol=format_performance_by_symbol(symbol_stats),
+    )
 
     log.info("Review LLM call: positions=%d", len(ctx.open_positions))
     resp = llm.ask(system_prompt, user_prompt)

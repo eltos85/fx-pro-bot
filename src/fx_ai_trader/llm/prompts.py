@@ -115,6 +115,8 @@ Sentiment framework:
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fx_ai_trader.config.settings import AiFxTraderSettings
 
 
@@ -496,7 +498,22 @@ Write a brief commentary (3-6 short lines) covering, in order:
 3) SENTIMENT summary (aggregate uncertainty + dominant polarity).
 4) OPEN POSITIONS REVIEW (skip if none): setup still valid? unrealised
    R-units? any contrary new evidence?
-5) DECISION rationale (which drivers align, why this size, why this
+5) SELF-REFLECTION (skip if PERFORMANCE / RECENT CLOSED TRADES blocks
+   are absent or all symbols show n=0):
+   - Cross-check current setup against past closed trades on this
+     symbol — same trigger that lost before? Same hour-of-day? Same
+     macro regime?
+   - If the pattern "open → reverse-close within <30 min by reasoning
+     (not SL touch)" repeats for this symbol → your prior entry
+     triggers were too noisy; raise the bar (more confluence, wider
+     SL, or HOLD).
+   - DO NOT try to "win back" a recent loss on the same symbol —
+     revenge trading is a documented common pitfall (Mark Douglas).
+   - Per-symbol WR <30% and sum_pnl <0 on n≥5 → require HIGHER
+     justification this cycle (more drivers aligned), but it is NOT
+     an automatic skip — single losses on small n are not statistical
+     evidence (sample-size principle).
+6) DECISION rationale (which drivers align, why this size, why this
    stop).
 
 Then output EXACTLY ONE JSON object on its own line(s). The parser
@@ -559,14 +576,124 @@ FINAL RULES
 """
 
 
-def build_user_prompt(market_context: str) -> str:
+def _format_pnl_line(stat: dict[str, Any]) -> str:
+    """Одна строка таблицы Performance by Symbol."""
+    sym = stat["symbol"]
+    n = stat["n"]
+    if n == 0:
+        return f"- {sym}: n=0 (no closed live trades yet)"
+    wins = stat["wins"]
+    wr = stat["win_rate_pct"]
+    avg = stat["avg_pnl_usd"]
+    summ = stat["sum_pnl_usd"]
     return (
+        f"- {sym}: n={n}, wins={wins} ({wr:.1f}%), "
+        f"avg_pnl={avg:+.2f}$, sum_pnl={summ:+.2f}$"
+    )
+
+
+def format_performance_by_symbol(stats: list[dict[str, Any]] | None) -> str:
+    """Render Performance by Symbol блок для USER_PROMPT.
+
+    Возвращает пустую строку при ``stats is None`` или пустом списке —
+    блок просто отсутствует в prompt'е (canonical для cycle'ов до первой
+    сделки). Если все символы имеют ``n=0`` — блок всё равно отдаём
+    (явное «no live trades yet» полезнее тишины: LLM узнаёт что данных
+    нет, не строит галлюцинации про прошлые сделки).
+
+    Источник правды per-symbol — `AiFxTraderStore.get_pnl_by_symbol`.
+    Соответствует паттерну `ai_arena/llm/prompts.py::format_symbol_stats_block`
+    (v2.z1, 2026-05-22).
+    """
+    if not stats:
+        return ""
+    lines = ["=== PERFORMANCE BY SYMBOL (live, since experiment start) ==="]
+    lines.extend(_format_pnl_line(s) for s in stats)
+    return "\n".join(lines)
+
+
+def _format_trade_line(trade: dict[str, Any]) -> str:
+    """Multi-line компактное представление одного closed trade."""
+    tid = trade["id"]
+    sym = trade["symbol"]
+    side = trade["side"]
+    lots = trade["volume_lots"]
+    entry = trade["entry_price"]
+    exit_p = trade["exit_price"]
+    pnl = trade["realized_pnl_usd"]
+    dur = trade["duration_minutes"]
+    open_r = trade["llm_reason"] or "(no reason recorded)"
+    close_r = trade["close_reason"] or "(broker auto / SL or TP)"
+    exit_str = f"{exit_p:.5f}" if exit_p is not None else "n/a"
+    dur_str = f"{dur} min" if dur is not None else "n/a"
+    return (
+        f"[id={tid}] {sym} {side} {lots:g} lots, "
+        f"entry {entry:.5f} -> exit {exit_str}, "
+        f"pnl {pnl:+.2f}$, {dur_str}\n"
+        f"  open : {open_r}\n"
+        f"  close: {close_r}"
+    )
+
+
+def format_recent_trades(trades: list[dict[str, Any]] | None) -> str:
+    """Render Recent Closed Trades блок для USER_PROMPT.
+
+    Возвращает пустую строку при ``trades is None`` или пустом списке.
+    Trades должны быть в порядке oldest → newest (как из
+    `AiFxTraderStore.get_recent_closed_trades`) — LLM сильнее
+    взвешивает последние строки, и хронологический порядок ближе к
+    тому, как человек читает историю.
+
+    Используется только в full cycle (`build_user_prompt`), не в
+    review — review должен оставаться lightweight (см. SYSTEM_PROMPT_REVIEW).
+    """
+    if not trades:
+        return ""
+    header = f"=== RECENT CLOSED TRADES (last {len(trades)}, oldest -> newest) ==="
+    body = "\n".join(_format_trade_line(t) for t in trades)
+    return f"{header}\n{body}"
+
+
+def build_user_prompt(
+    market_context: str,
+    *,
+    performance_by_symbol: str | None = None,
+    recent_trades: str | None = None,
+) -> str:
+    """Full-cycle USER_PROMPT.
+
+    Опциональные параметры (v1.X self-reflection, 2026-05-26):
+    - ``performance_by_symbol``: вывод `format_performance_by_symbol(...)`,
+      агрегаты per-symbol с начала эксперимента.
+    - ``recent_trades``: вывод `format_recent_trades(...)`,
+      последние closed trades с open/close reason.
+
+    Когда оба ``None`` (или пустые) — prompt идентичен v1.0 (backward
+    compatibility, существующие тесты `tests/test_fx_ai_trader.py` не
+    падают).
+
+    Блоки идут в **начале** prompt'а перед market_context — LLM
+    сначала видит свою историю (база для self-reflection в шаге 5
+    ANALYSIS STRUCTURE), потом текущий рынок. Тематически чище чем
+    встраивать внутрь market_context (который собирается в
+    `trading/context.py` и относится к рыночным данным, а не к
+    собственной истории бота).
+    """
+    parts: list[str] = []
+    if performance_by_symbol:
+        parts.append(performance_by_symbol)
+    if recent_trades:
+        parts.append(recent_trades)
+    history_block = ("\n\n".join(parts) + "\n\n") if parts else ""
+    return (
+        f"{history_block}"
         "Current market state, news, and your open positions:\n\n"
         f"{market_context}\n\n"
         "Now produce the analysis commentary (3-6 short lines) following "
         "MACRO DRIVER → STRUCTURE → SENTIMENT → OPEN POSITIONS REVIEW "
-        "(skip if none) → DECISION, then output the single JSON object "
-        "with full multi-dim sentiment block."
+        "(skip if none) → SELF-REFLECTION (skip if no PERFORMANCE block) "
+        "→ DECISION, then output the single JSON object with full "
+        "multi-dim sentiment block."
     )
 
 
@@ -639,15 +766,38 @@ def build_system_prompt_review(settings: AiFxTraderSettings) -> str:
     }
 
 
-def build_user_prompt_review(market_context: str) -> str:
+def build_user_prompt_review(
+    market_context: str,
+    *,
+    performance_by_symbol: str | None = None,
+) -> str:
+    """Review-cycle USER_PROMPT.
+
+    Опциональный ``performance_by_symbol`` (v1.X self-reflection,
+    2026-05-26): только агрегаты per-symbol, БЕЗ ``recent_trades``.
+    Review остаётся lightweight (см. SYSTEM_PROMPT_REVIEW «NO macro
+    feed, NO news, NO EIA, NO 4H bars, NO sentiment»). Агрегаты
+    добавляют ~150 токенов, recent trades с reason'ами добавили бы
+    ~1100 — это противоречит роли review-цикла.
+
+    Идея использования в review: «не закрывай позицию по noise если
+    вижу что на этом символе уже было 3 reverse-close внутри 30 мин».
+    """
+    header = (
+        f"{performance_by_symbol}\n\n" if performance_by_symbol else ""
+    )
     return (
+        f"{header}"
         "Mid-cycle review of your open positions:\n\n"
         f"{market_context}\n\n"
         "For each open position, briefly state whether the original "
         "setup is still valid and whether any of the 3 close-triggers "
         "fire (1=invalidation, 2=locked-profit ≥1.5R + invalidation, "
-        "3=adverse technical evidence). Then output a single JSON: "
-        "either {\"action\":\"close\",\"position_id\":<id>,\"reason\":...} "
+        "3=adverse technical evidence). If a PERFORMANCE block is "
+        "present, consider whether the close trigger you are about to "
+        "fire repeats a known noisy pattern on this symbol. Then "
+        "output a single JSON: either "
+        "{\"action\":\"close\",\"position_id\":<id>,\"reason\":...} "
         "or {\"action\":\"hold\",\"reason\":...}. Remember: \"open\" is "
         "forbidden this cycle."
     )

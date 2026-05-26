@@ -1,5 +1,287 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-26 — feat(v1.X self-reflection): per-symbol performance + recent closed trades в USER_PROMPT
+
+`коммит при deploy`
+
+### Контекст и observed (evidence из 2026-05-25)
+
+Два убыточных трейда подряд, оба по одной reasoning-патологии:
+
+| id | symbol | side | entry | exit | pnl | duration | trigger | open justification | close justification |
+|----|--------|------|-------|------|-----|----------|---------|--------------------|----|
+| **27** | NG=F | BUY | $3.05 | $3.044 | **−$14.40** | **16 мин** | LLM full-cycle close | NOAA cold anomaly + STEO + 1H breakout above BB | "Macro bearish: storage build, rising production, mild weather; 4H downtrend intact" |
+| **28** | BZ=F | BUY | $94.904 | $94.759 | **−$3.42** | **5 мин** | LLM review-cycle close | US-Iran Hormuz strikes + oversold 4H RSI + 1H divergence + EIA draw, fade panic | "Broke below lower BB/EMA20, setup invalidated (trigger 1), adverse evidence (trigger 3)" |
+
+**Паттерн:** «**LLM передумал через 5-16 минут**». SL **ни разу не сработал** —
+обе позиции закрылись по reasoning. Это reasoning-проблема (entry triggers
+too noisy / не дано setup'у развернуться), не sizing-проблема и не
+symbol-проблема. По правилу `.cursor/rules/sample-size.mdc` 2 трейда —
+**не статистическое основание** для disable символа, hard-cap'а notional
+или ужесточения per-symbol лимитов. Допустимо только **информативное
+feedback** для reasoning'а.
+
+### Решение пользователя (цитата выбора в чате 2026-05-26)
+
+> «нужно добавить обучение модели на своих ошибках, вчера бот торговал
+> позицию газа и нефти в минус, нужно чтобы он учитывал свои ошибки при
+> входе и слежении за позицией»
+
+После обсуждения выбран **вариант C + окно all** (выбор зафиксирован
+через AskQuestion):
+- **C**: per-symbol агрегаты (Performance by Symbol) **+** последние
+  10 closed trades с open/close reason. Максимум контекста для выводов.
+- **all**: since experiment start (база ~30 closed live trades). Окно
+  эквивалентно 30d на текущем этапе эксперимента.
+
+### Что добавлено (8 файлов)
+
+**1. `src/fx_ai_trader/state/db.py` — 2 новых метода (порт паттерна из
+`ai_arena/state/db.py` v2.z1):**
+
+- `get_pnl_by_symbol(symbols)` — per-symbol агрегаты
+  (`n / wins / win_rate_pct / avg_pnl_usd / sum_pnl_usd`). Фильтр
+  `closed_at IS NOT NULL AND is_paper = 0` (paper-fills из
+  `paper_reconcile.py` могут расходиться с реальностью — не учитываем).
+  Включает символы с `n=0` (явный сигнал «не торговали» — как в
+  ai_arena).
+- `get_recent_closed_trades(limit=10, reason_clamp=180)` — последние N
+  closed live trades. Поля: `id`, `symbol`, `side`, `volume_lots`,
+  `entry_price`, `exit_price`, `realized_pnl_usd`, `opened_at`,
+  `closed_at`, `duration_minutes`, `llm_reason` (clamp 180 chars),
+  `close_reason` (clamp 180 chars). Возврат в порядке **oldest →
+  newest** для prompt readability. Clamp нужен потому что executor
+  schema допускает до 300 chars (см. entry 2026-05-25), но для prompt'а
+  180 достаточно — иначе на 10 trades распухнет budget.
+
+**2. `src/fx_ai_trader/llm/prompts.py` — форматтеры + расширение
+сигнатур:**
+
+- `format_performance_by_symbol(stats)` → блок
+  `=== PERFORMANCE BY SYMBOL (live, since experiment start) ===`,
+  одна строка на символ. Пустой `stats` → пустая строка (canonical
+  для cycle'ов до первой сделки).
+- `format_recent_trades(trades)` → блок
+  `=== RECENT CLOSED TRADES (last N, oldest -> newest) ===`,
+  multi-line компактный layout (id / symbol / side / lots / entry /
+  exit / pnl / duration + open: / close:).
+- `build_user_prompt(market_context, *, performance_by_symbol=None,
+  recent_trades=None)` — оба новых параметра опциональны (backward
+  compat: оба `None` → prompt идентичен v1.0). Блоки идут **в начале**
+  user prompt'а перед `market_context` — LLM сначала видит свою
+  историю, потом текущий рынок (тематически логично, не загромождает
+  `trading/context.py`).
+- `build_user_prompt_review(market_context, *,
+  performance_by_symbol=None)` — только агрегаты, **без** `recent_trades`
+  (review остаётся lightweight, см. SYSTEM_PROMPT_REVIEW «NO macro
+  feed, NO news, NO EIA, NO 4H bars»).
+- SYSTEM_PROMPT (ANALYSIS STRUCTURE BEFORE JSON): добавлен **пункт 5
+  SELF-REFLECTION** — guidance что делать с history (cross-check
+  pattern, raise bar at WR<30% n≥5, явный запрет revenge trading со
+  ссылкой на Mark Douglas «Trading in the Zone»). Никаких жёстких
+  правил «не торгуй если sum_pnl<0».
+
+**3. `src/fx_ai_trader/app/main.py` — интеграция в loop'ы:**
+
+- `_run_full_cycle`: перед `build_user_prompt` вызов
+  `store.get_pnl_by_symbol(settings.symbols)` +
+  `store.get_recent_closed_trades(limit=10)`, оба форматируются и
+  передаются в prompt. Лог дополнен метрикой
+  `self_reflection=closed_trades:N`.
+- `_run_review_cycle`: перед `build_user_prompt_review` только
+  `get_pnl_by_symbol` (без recent_trades).
+
+### Что НЕ изменилось (явно)
+
+- **НЕТ** disable NG=F / BZ=F / XAUUSD по 1-2 убыткам
+  (`sample-size.mdc`, нужно n≥100, p<0.05, ≥2 недели).
+- **НЕТ** cooldown-after-loss / hard-cap notional / ужесточения
+  per-symbol caps (мало данных).
+- **НЕТ** lesson-per-trade с отдельным LLM-call (дорого, premature).
+- **НЕТ** изменения SL/TP defaults / R:R / volume formulas / killswitch
+  thresholds.
+- **НЕТ** review-cycle hold-by-default правила («не закрывай <30 мин
+  без strong adverse evidence») — это вариант E, не выбран; можно
+  добавить позже отдельной правкой если C не сработает за 30 trades.
+- **НЕ тронуты** `trading/context.py`, `trading/executor.py`,
+  `safety/killswitch.py`, `trading/paper_reconcile.py`,
+  `trading/broker_reconcile.py`, `news/*`.
+
+### Тесты
+
+`tests/test_fx_ai_trader_self_reflection.py` (новый, 23 теста):
+
+- **DB:** empty store → n=0 для каждого символа; aggregates only live
+  (paper ignored); preserves symbol order; win-rate `pnl=0` не = win;
+  empty/limit/oldest-newest order / clamp long reason / duration_minutes
+  non-negative.
+- **Форматтеры:** empty list → empty string; n=0 символ показывается
+  явно «no closed live trades yet»; header + lines + signed pnl;
+  `close_reason=""` → `(broker auto / SL or TP)` fallback.
+- **`build_user_prompt`:** backward compat (default None → v1.0
+  layout); empty strings treated as None; порядок (Performance →
+  Recent Trades → Market Context); упоминание SELF-REFLECTION в outro.
+- **`build_user_prompt_review`:** backward compat; performance block
+  inserted; **по дизайну** review **не принимает** `recent_trades`
+  параметр (проверяется через `inspect.signature`).
+
+**Результат:** `103/103 fx_ai_trader тестов проходят` (80 существующих
++ 23 новых, backward compat не сломан). Полный test suite репо:
+`1053/1053 passed`.
+
+### Compliance
+
+- `.cursor/rules/sample-size.mdc`: feedback ≠ hard-cap; никаких
+  изменений параметров стратегии (SL/TP/lots/thresholds). Любые выводы
+  на основании injected stats — за LLM, не на server-side.
+- `.cursor/rules/strategy-guard.mdc`: пользователь явно одобрил выбор
+  C+all через AskQuestion перед началом работы. SYSTEM_PROMPT правка —
+  только добавление пункта SELF-REFLECTION в существующую структуру,
+  без изменения торговых параметров.
+- `.cursor/rules/no-data-fitting.mdc`: блок Performance показывает
+  **фактические** агрегаты из `positions` (источник правды), без
+  пост-hoc интерпретации. Окно `all` (since start) — нет cherry-picking
+  по датам.
+- `.cursor/rules/api-docs.mdc`: правка не трогает cTrader / DeepSeek
+  reconnect/heartbeat/rate-limit параметры.
+
+### Acceptance criteria
+
+- Через **≥30 closed live trades после deploy** (target: 2-3 недели
+  при текущем темпе) — сравнить:
+  - **avg `duration_minutes` open→close** для symbol'ов с присутствующим
+    history. Гипотеза: LLM меньше передумывает на noise, средняя
+    длительность вырастет с текущих ~10-30 мин в сторону положенного
+    holding period setup'а.
+  - **per-symbol WR / sum_pnl trend**. Не должен УХУДШИТЬСЯ
+    statistically significantly (если WR упал на ≥10% с p<0.05 при
+    n≥30 — false alarm, откатить через `git revert`).
+- Если результат не улучшится за n=30 trades **и** не ухудшится → C
+  не помог, но и не вреден. Тогда обсудить вариант E (review hold-by-
+  default first 30 min) как дополнение, не замену.
+
+### Откат
+
+`git revert <commit_hash>` — никаких env-флагов / kv_state-настроек.
+Default параметров prompt'а: оба `None` → polite no-op (старый v1.0
+layout). Если в production обнаружится регрессия — однострочный
+revert + redeploy `fx-ai-trader` контейнера.
+
+### Token budget impact
+
+- Performance block: ~150 токенов (3 строки на 3 символа).
+- Recent trades (10): ~1100 токенов (компактный layout с clamp 180).
+- **Full cycle:** +1.3k токенов (текущий ~4-6k → ~5-7k). DeepSeek
+  cache hit пока ~30-35% (см. ai_arena cache stats) → cost impact
+  минимален.
+- **Review cycle:** +150 токенов (только performance).
+
+### Точки входа (шпаргалка для будущих правок)
+
+| Что | Файл |
+|-----|------|
+| `get_pnl_by_symbol` / `get_recent_closed_trades` | `src/fx_ai_trader/state/db.py` |
+| Форматтеры + signature update | `src/fx_ai_trader/llm/prompts.py` |
+| SYSTEM_PROMPT SELF-REFLECTION step | `src/fx_ai_trader/llm/prompts.py` |
+| Интеграция в `_run_full_cycle` / `_run_review_cycle` | `src/fx_ai_trader/app/main.py` |
+| Тесты | `tests/test_fx_ai_trader_self_reflection.py` |
+| Эта запись | `BUILDLOG_AI_FX_TRADER.md` |
+| План в чате | `.cursor/plans/fx-ai-trader_self-reflection_*.plan.md` |
+
+**Файлы:** `src/fx_ai_trader/state/db.py`,
+`src/fx_ai_trader/llm/prompts.py`, `src/fx_ai_trader/app/main.py`,
+`tests/test_fx_ai_trader_self_reflection.py`,
+`BUILDLOG_AI_FX_TRADER.md`.
+
+---
+
+## 2026-05-25 — fix(executor schema): clamp длинного `reason`/`title_snippet` через BeforeValidator вместо reject
+
+`коммит при deploy`
+
+### Симптом
+
+В live-логе fx_ai_trader 2026-05-25 10:44:49 UTC:
+
+```
+[ERROR] fx_ai_trader: Parse error: schema validation error:
+[{'type': 'string_too_long', 'loc': ('reason',),
+  'msg': 'String should have at most 300 characters',
+  'input': "No high-conviction setup across commodities. Oil's Iran deal
+           unwind is clear macro driver but price is near oversold lower BB
+           and uncertainty remains moderate. Gold lacks fresh real-yield/DXY
+           catalyst. NatGas bearish storage+weather but oversold and no
+           catalyst for entry. Wait for cleaner confluence.",
+  'ctx': {'max_length': 300}}]
+```
+
+LLM прислал валидное `hold`-решение (325 символов в `reason`), но pydantic
+schema validation с `Field(max_length=300)` отвергла **всё** decision-block.
+Парсер вернул error-string → executor пропустил цикл → решение потеряно.
+
+### Причина
+
+Жёсткий `max_length=300` на полях `OpenAction.reason`, `CloseAction.reason`,
+`HoldAction.reason` и `SentimentItem.title_snippet` (200). При этом ниже в
+коде (`apply_action`, строка 531):
+```python
+reason = m.reason[:300]
+```
+— то есть лимит 300 нужен для **бюджета хранения в БД**, а не для
+бизнес-валидации решения. Если LLM написал длиннее — мы должны обрезать,
+а не выбрасывать сигнал.
+
+В файле уже был тот же паттерн для unit-float'ов (`_coerce_unit`,
+`_coerce_signed_unit` через `BeforeValidator + Field(ge/le)`): если LLM
+прислал out-of-range — clamp, не reject. Это рекомендованный Pydantic
+подход для LLM-output:
+- Pydantic blog «Minimize LLM Hallucinations with Pydantic Validators»
+  (<https://blog.pydantic.dev/blog/2024/01/18/llm-validation/>)
+- Instructor «Validation & Retry»
+  (<https://python.useinstructor.com/learning/validation/>)
+
+### Решение
+
+Добавлен factory `_coerce_capped_str(max_len)` → `BeforeValidator`,
+который усекает строку **до** проверки `Field(max_length=...)`, поэтому
+constraint всегда проходит. Два новых типа:
+
+```python
+ClampedReason = Annotated[
+    str, BeforeValidator(_coerce_capped_str(300)), Field(max_length=300)
+]
+ClampedTitleSnippet = Annotated[
+    str, BeforeValidator(_coerce_capped_str(200)), Field(max_length=200)
+]
+```
+
+Заменены поля в `OpenAction` / `CloseAction` / `HoldAction.reason` и
+`SentimentItem.title_snippet`. `m.reason[:300]` в `apply_action`
+остаётся идемпотентным (уже усечённую строку повторно `[:300]` — no-op).
+
+### Тесты
+
+`tests/test_fx_ai_trader.py`:
+- `test_hold_long_reason_is_clamped_not_rejected` — repro точного
+  325-char reason из live-лога; ожидаем `ParsedAction` + `len(reason)==300`.
+- `test_open_long_reason_is_clamped_not_rejected` — 500-char для
+  `OpenAction`.
+
+Все 80 тестов fx_ai_trader зелёные.
+
+### Что НЕ изменилось
+
+- Лимит 300 символов на хранение `reason` сохранён (схема + clamp в
+  apply_action).
+- Торговая логика (SL/TP / volume / uncertainty gate / killswitch /
+  review_mode) — не тронута. Это исключительно фикс robustness парсера.
+- Поведение для коротких `reason` (<300) — идентично.
+
+**Файлы:** `src/fx_ai_trader/trading/executor.py`,
+`tests/test_fx_ai_trader.py`, `BUILDLOG_AI_FX_TRADER.md`.
+
+---
+
 ## 2026-05-22 — feat(cross-contamination fix): per-symbol macro routing + word-boundary classifier + exclude rules
 
 `коммит при deploy`

@@ -342,3 +342,135 @@ class AiFxTraderStore:
                 """
             ).fetchone()
         return (int(row[0]) if row else 0, int(row[1]) if row else 0)
+
+    # ─── Self-reflection (v1.X, 2026-05-26) ──────────────────────────────
+    # Порт паттерна из ai_arena v2.z1 (Performance by Symbol) на
+    # fx_ai_trader. LLM получает фактические per-symbol агрегаты + список
+    # последних closed trades с justification → видит свои прошлые
+    # решения и их исход. Никаких hard-cap'ов / disable — только feedback
+    # для reasoning'а (compliance с `.cursor/rules/sample-size.mdc`).
+    #
+    # Только live trades (`is_paper=0`): paper-fills из
+    # `paper_reconcile.py` могут расходиться с реальностью (M1 touch
+    # vs реальный SL/TP fill), поэтому в self-reflection не учитываются.
+
+    def get_pnl_by_symbol(self, symbols: list[str]) -> list[dict[str, Any]]:
+        """Per-symbol агрегаты по закрытым live-позициям с начала эксперимента.
+
+        Возвращает по одной записи на каждый символ из ``symbols`` (порядок
+        сохраняется). Если по символу нет закрытых live-трейдов — запись
+        с ``n=0`` (явный сигнал «не торговали», не пропуск).
+
+        Поля: ``symbol``, ``n``, ``wins``, ``win_rate_pct``,
+        ``avg_pnl_usd``, ``sum_pnl_usd``.
+
+        Только ``is_paper = 0`` (paper-fills не учитываются — могут
+        искажать статистику).
+        """
+        with self._conn() as c:
+            placeholders = ",".join("?" * len(symbols)) if symbols else "''"
+            rows = c.execute(
+                f"""
+                SELECT symbol,
+                       COUNT(*) AS n,
+                       COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                       COALESCE(AVG(realized_pnl_usd), 0.0) AS avg_pnl,
+                       COALESCE(SUM(realized_pnl_usd), 0.0) AS sum_pnl
+                FROM positions
+                WHERE closed_at IS NOT NULL
+                  AND is_paper = 0
+                  AND symbol IN ({placeholders})
+                GROUP BY symbol
+                """,
+                symbols,
+            ).fetchall()
+        by_symbol = {r["symbol"]: r for r in rows}
+        out: list[dict[str, Any]] = []
+        for sym in symbols:
+            r = by_symbol.get(sym)
+            if r is None:
+                out.append(
+                    {
+                        "symbol": sym,
+                        "n": 0,
+                        "wins": 0,
+                        "win_rate_pct": 0.0,
+                        "avg_pnl_usd": 0.0,
+                        "sum_pnl_usd": 0.0,
+                    }
+                )
+                continue
+            n = int(r["n"])
+            wins = int(r["wins"])
+            wr = (wins / n * 100.0) if n > 0 else 0.0
+            out.append(
+                {
+                    "symbol": sym,
+                    "n": n,
+                    "wins": wins,
+                    "win_rate_pct": wr,
+                    "avg_pnl_usd": float(r["avg_pnl"] or 0.0),
+                    "sum_pnl_usd": float(r["sum_pnl"] or 0.0),
+                }
+            )
+        return out
+
+    def get_recent_closed_trades(
+        self, limit: int = 10, reason_clamp: int = 180
+    ) -> list[dict[str, Any]]:
+        """Последние ``limit`` закрытых live-трейдов, отсортированы
+        по ``closed_at`` ASC (oldest → newest для USER_PROMPT).
+
+        Поля: ``id``, ``symbol``, ``side``, ``volume_lots``,
+        ``entry_price``, ``exit_price``, ``realized_pnl_usd``,
+        ``opened_at``, ``closed_at``, ``duration_minutes``,
+        ``llm_reason`` (clamp), ``close_reason`` (clamp).
+
+        ``reason_clamp`` — лимит на символ для llm_reason / close_reason
+        в prompt'е (default 180). Источник в БД может быть до 300 chars
+        (см. executor schema clamp 2026-05-25), но для prompt'а 180
+        достаточно, чтобы не раздуть token budget на 10 trades.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT id, symbol, side, volume_lots, entry_price, exit_price,
+                       realized_pnl_usd, opened_at, closed_at, llm_reason,
+                       close_reason
+                FROM positions
+                WHERE closed_at IS NOT NULL
+                  AND is_paper = 0
+                ORDER BY closed_at DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            duration_min: int | None = None
+            try:
+                t_open = datetime.fromisoformat(r["opened_at"])
+                t_close = datetime.fromisoformat(r["closed_at"])
+                duration_min = max(0, int((t_close - t_open).total_seconds() // 60))
+            except (TypeError, ValueError):
+                duration_min = None
+            llm_reason = (r["llm_reason"] or "")[:reason_clamp]
+            close_reason = (r["close_reason"] or "")[:reason_clamp]
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "volume_lots": float(r["volume_lots"]),
+                    "entry_price": float(r["entry_price"]),
+                    "exit_price": float(r["exit_price"]) if r["exit_price"] is not None else None,
+                    "realized_pnl_usd": float(r["realized_pnl_usd"]) if r["realized_pnl_usd"] is not None else 0.0,
+                    "opened_at": r["opened_at"],
+                    "closed_at": r["closed_at"],
+                    "duration_minutes": duration_min,
+                    "llm_reason": llm_reason,
+                    "close_reason": close_reason,
+                }
+            )
+        out.reverse()  # oldest → newest для prompt readability
+        return out
