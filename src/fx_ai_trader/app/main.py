@@ -61,6 +61,22 @@ def _extract_sentiment(parsed_raw: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _extract_thesis(parsed_raw: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Извлекает (thesis_status, thesis_invalidator) для audit-log.
+
+    Phase 1 persistent-thesis (2026-05-26): поля присутствуют только на
+    close-actions, NULL для open/hold/parse-errors. Soft-валидация в
+    `executor._log_thesis_audit` уже отработала к моменту вызова —
+    здесь только persist в БД.
+    """
+    status = parsed_raw.get("thesis_status")
+    inv = parsed_raw.get("thesis_invalidator")
+    return (
+        status if isinstance(status, str) else None,
+        inv if isinstance(inv, str) else None,
+    )
+
+
 def run() -> None:
     settings = AiFxTraderSettings()
     logging.basicConfig(
@@ -310,6 +326,7 @@ def _run_full_cycle(
         return
 
     sentiment = _extract_sentiment(parsed.raw)
+    thesis_status, thesis_invalidator = _extract_thesis(parsed.raw)
     apply = apply_action(
         parsed, adapter=adapter, store=store,
         settings=settings, killswitch=killswitch,
@@ -321,6 +338,8 @@ def _run_full_cycle(
         executed=apply.executed, error=apply.error,
         tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
         cost_usd=resp.cost_usd,
+        thesis_status=thesis_status,
+        thesis_invalidator=thesis_invalidator,
     )
     if apply.error:
         log.error("Apply error: %s", apply.error)
@@ -420,6 +439,7 @@ def _run_review_cycle(
         log.error("Review parse error: %s", parsed)
         return
 
+    thesis_status, thesis_invalidator = _extract_thesis(parsed.raw)
     apply = apply_action(
         parsed, adapter=adapter, store=store,
         settings=settings, killswitch=killswitch,
@@ -431,6 +451,8 @@ def _run_review_cycle(
         executed=apply.executed, error=apply.error,
         tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
         cost_usd=resp.cost_usd,
+        thesis_status=thesis_status,
+        thesis_invalidator=thesis_invalidator,
     )
     if apply.error:
         log.error("Review apply error: %s", apply.error)

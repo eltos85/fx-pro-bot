@@ -1,5 +1,143 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-26 — feat(persistent-thesis): требование явного `thesis_status` при close + audit 10 нестыковок промпта (Phase 1)
+
+`коммит при deploy`
+
+### Контекст и observed (research artifact, ДО изменения кода)
+
+После добавления self-reflection (запись ниже, тот же день) проведён
+полный audit decision-making бота. Цель — найти **системные противоречия**,
+которые self-reflection один не починит (`AskQuestion 2026-05-26`,
+пользователь выбрал A+B — журнал + главный фикс, C+D перенесены в
+`NEXT_PHASE_AI_FX_TRADER.md`).
+
+**Источник:** анализ всей истории VPS (1497 LLM-запросов, 27 closed live
+trades, 12 дней) + полный re-read обоих промптов
+(`SYSTEM_PROMPT`, `SYSTEM_PROMPT_REVIEW`) против реальных decision'ов.
+Соответствует `.cursor/rules/no-data-fitting.mdc` («research artifact
+обязателен перед любой правкой торговой логики»).
+
+### Корень проблемы (single-sentence)
+
+**Открытие позиции — макро-thesis-driven, закрытие — техническое-noise-driven,
+без обязательной перепроверки исходного thesis.** LLM открывает по
+«Hormuz tension + 4H breakout», закрывает через 5-16 мин по «MACD flip /
+BB middle break», и в `close_reason` НИ РАЗУ не пишет «macro thesis
+broken because X». Self-reflection видит «open→close <30мин» как noise-
+паттерн, но review-цикл сам и генерирует эти кейсы.
+
+### Конкретные кейсы из VPS (доказательство паттерна)
+
+**Кейс 1 — NG=F id=27, 2026-05-25 (uplink в self-reflection-записи ниже):**
+
+| | open | close (16 мин позже) |
+|---|---|---|
+| reason | "NOAA cold anomaly East Coast + STEO bullish + 1H breakout above BB" | "Macro bearish: storage build + rising production + **mild weather**; 4H downtrend" |
+
+Один и тот же NOAA-источник интерпретирован прямо противоположно
+(«холодно» → «мягко»). SL не сработал. Macro thesis при закрытии
+**не процитирован** — нет фразы «NOAA-cold thesis broken because».
+
+**Кейс 2 — BZ=F id=2, прибыль +$92.82:**
+
+| | open | close |
+|---|---|---|
+| reason | «Chinese tanker testing Hormuz Strait passage signals **persistent tension** → bullish crude» | «Chinese tanker passage signals **de-escalation** → SELL» |
+
+Один и тот же факт (китайский танкер) — противоположные выводы.
+
+**Кейс 3 — NG=F кластер 20 мая (6 итераций open→close):**
+
+6 раз подряд бот открывает одну и ту же позицию по одному и тому же
+макро-обоснованию («Australia LNG strikes + Israel field shutdown +
+LNG supply tightening»). Каждый раз закрывает через 5-50 мин по
+техническому сигналу (MACD против позиции). **В 6 close-reason'ах
+макро-thesis ни разу не процитирован как «broken»**.
+
+### Систематика (полная выборка)
+
+- 18 / 27 closed live trades живут **< 60 мин** (большинство 5-16 мин).
+- 22 / 26 LLM-закрытий (исключая broker_auto SL/TP) — **чисто технические**:
+  «MACD flip», «BB middle break», «1H close against direction».
+- WR = 33% (9 / 27 winners) за 12 дней.
+- Net PnL в плюс **за счёт одного крупного винера** id=2 (+$92), без
+  него медиана и mean отрицательные.
+
+### 10 HIGH-severity нестыковок (audit `SYSTEM_PROMPT` + `SYSTEM_PROMPT_REVIEW`)
+
+| # | Что обещано / прописано | Что реально / противоречие | Severity |
+|---|---|---|---|
+| 1 | «`aggregate_uncertainty > 0.7` → return HOLD» (anti-hallucination gate, строка 439 промпта) | Для XAUUSD/BRENT/NG=F **inherent macro uncertainty высокая** (раздел `WHAT YOU DO NOT SEE`: нет TIPS feed, нет COT, infer из price+news). Дисциплинированное следование = perpetual hold | HIGH |
+| 2 | «If 6-7 of the 8 align, it is a setup developing WATCH, **not a trade**» (MFP, строка 394) | «LOW-conviction setup (1 driver aligned): risk ~0.5% of capital» (строка 328) | HIGH |
+| 3 | Conflicting signals **внутри** symbol: gold real-yields ↓ vs DXY ↑; NG EIA bullish vs NOAA bearish | **Нет правил приоритета**. LLM сам выбирает «что больше нравится» — отсюда reasoning flips между циклами на тех же данных | HIGH |
+| 4 | «DXY proxy 24h direction» обещано в `WHAT YOU SEE EACH FULL CYCLE` (строка 451) | `context.py` (`collect_market_context`) **не передаёт DXY** — LLM либо галлюцинирует, либо игнорирует. Driver #2 для gold (correlation -0.6 до -0.8) фактически слепой | HIGH |
+| 5 | Entry: «4H structural» (MFP rule 2, «4H trend direction + key level» в ANALYSIS) | Review-close triggers: «1H EMA20 / BB middle / RSI / MACD» (SYSTEM_PROMPT_REVIEW, строки 720-729). **4H invalidation не определён** — нет shared invalidation между entry/exit | HIGH |
+| 6 | Full-cycle close triggers (строки 476-482): «macro driver flipped», «4H trend broke», «adverse news» — макро + news | Review-cycle close triggers (строки 720-729): «1H EMA20», «BB middle», «MACD flip» — чисто тех. **22/26 закрытий пошли через review-путь — макро-проверка не делалась** | HIGH |
+| 7 | Self-reflection (новая v1.X, добавлена этой же датой): «если паттерн `open→reverse-close <30мин by reasoning` повторяется → raise the bar» | Review-cycle **сам генерирует** эти короткие reversals на 1H шуме, **и НЕ получает recent_trades** (review остаётся lightweight — phase 1 design) — система критикует то, что сама же создаёт | HIGH |
+| 8 | Multi-source context: news + EIA/NOAA + technicals + (теперь) recent_trades | **Нет правил resolution conflict**. LLM сам решает что важнее, отсюда reasoning flips и противоположные интерпретации одного факта (Кейс 2: танкер) | HIGH |
+| 9 | `OpenAction.sentiment: Optional[SentimentBlock] = None` (executor.py:176) | Если LLM не прислал sentiment → `aggregate_uncertainty > 0.7` gate **не срабатывает** (строка 304: `if model.sentiment is not None and ...`). Bypass возможен через простое omission | HIGH |
+| 10 | SYSTEM_PROMPT JSON schema: `"reason": "<≤200 chars>"` (строки 535, 552, 557) | Pydantic `ClampedReason = Field(max_length=300)` — **расхождение лимита 100 chars**. После clamp-fix 2026-05-25 это уже не reject, но LLM может тратить токены думая «300 ок» когда промпт говорит «200» | HIGH (документация-driven) |
+
+### Compliance
+
+- **`.cursor/rules/strategy-guard.mdc`**: B — изменение торговой логики
+  (требование `thesis_status` при close). **Одобрение пользователя
+  получено** через `AskQuestion 2026-05-26 scope=ab`.
+- **`.cursor/rules/no-data-fitting.mdc`**: research artifact = эта
+  таблица + 3 конкретных кейса + 12-дневная VPS-история (1497 LLM
+  calls, 27 trades). Без подгонки параметров под результат — фикс
+  про **обязательность поля**, не про новый numeric threshold.
+- **`.cursor/rules/sample-size.mdc`**: B не отключает символ, не
+  меняет thresholds. Это **дисциплинарное требование** (как
+  «обязан вернуть sentiment» — schema-уровень). После деплоя — собрать
+  ≥30 closed trades (≈1 неделя), сравнить:
+  - avg trade duration (ожидаем рост с ~30мин до 60+ мин)
+  - % `thesis_status="intact"` среди close (ожидаем падение с ~80% до <30%)
+  - WR (нейтральный hypothesis: не должна упасть; рост был бы бонус).
+
+### Что меняем (Phase 1, B)
+
+**Кратко:** добавляем два поля в `CloseAction` + блок THESIS DISCIPLINE
+в SYSTEM_PROMPT + idempotent миграция БД + soft-валидация (WARN, не
+reject — чтобы не сломать первые часы после деплоя пока LLM учится
+заполнять новые поля).
+
+Подробности по файлам — см. секцию «Файлы» ниже после deploy.
+
+### Что НЕ меняется (Phase 1 out of scope, → `NEXT_PHASE_AI_FX_TRADER.md`)
+
+- **C. Review-noise guard** — запрет close через review в первые 30 мин.
+- **D1. DXY в `context.py`** — добавить proxy в передаваемый блок.
+- **D2. `OpenAction.sentiment` obligatory** — убрать `Optional` (нестыковка #9).
+- **D3. Reason length alignment** — выровнять 200/300 (нестыковка #10).
+
+Эти задачи **уже задокументированы** с evidence/acceptance в файле
+второй фазы; могут быть выбраны отдельными правками без re-audit.
+
+### Acceptance criteria для Phase 1
+
+После ≥30 closed live trades (≈1 неделя на текущей частоте):
+1. ≥90% close-decisions имеют непустой `thesis_status` (заполняемость поля).
+2. Доля `thesis_status="intact"` среди close ≤ 30% (сейчас ≈80%).
+3. Среди close с `thesis_status="intact"` — ≥80% сопровождаются news/SL
+   trigger или time-decay >24ч (соответствие правилу «закрытие при
+   intact thesis разрешено только при ...»).
+4. **НЕ деградирует** WR (нейтральная гипотеза).
+5. Зафиксировать `thesis_status` distribution в follow-up BUILDLOG-записи.
+
+### Файлы
+
+- `BUILDLOG_AI_FX_TRADER.md` (эта запись)
+- `NEXT_PHASE_AI_FX_TRADER.md` (новый)
+- `src/fx_ai_trader/llm/prompts.py` (SYSTEM_PROMPT: THESIS DISCIPLINE)
+- `src/fx_ai_trader/trading/executor.py` (CloseAction: thesis_status, thesis_invalidator)
+- `src/fx_ai_trader/state/db.py` (миграция: 2 колонки в `decisions`)
+- `src/fx_ai_trader/app/main.py` (запись новых полей при `log_decision`)
+- `tests/test_fx_ai_trader_persistent_thesis.py` (новый, schema + DB migration + prompt content)
+
+---
+
 ## 2026-05-26 — feat(v1.X self-reflection): per-symbol performance + recent closed trades в USER_PROMPT
 
 `коммит при deploy`

@@ -141,6 +141,14 @@ ClampedReason = Annotated[
 ClampedTitleSnippet = Annotated[
     str, BeforeValidator(_coerce_capped_str(200)), Field(max_length=200)
 ]
+# Phase 1 persistent-thesis (2026-05-26): thesis_invalidator цитирует
+# конкретный факт-инвалидатор (новость, EIA-print, ключевой level
+# break). 150-char promised в SYSTEM_PROMPT, schema разрешает 200
+# с тем же BeforeValidator-clamp паттерном (10% запас на формулировку,
+# не reject).
+ClampedThesisInvalidator = Annotated[
+    str, BeforeValidator(_coerce_capped_str(200)), Field(max_length=200)
+]
 
 
 class SentimentItem(BaseModel):
@@ -177,9 +185,22 @@ class OpenAction(BaseModel):
 
 
 class CloseAction(BaseModel):
+    """Close action.
+
+    Phase 1 persistent-thesis (2026-05-26, BUILDLOG_AI_FX_TRADER.md):
+    добавлены `thesis_status` и `thesis_invalidator`. Оба Optional чтобы
+    НЕ ломать обратную совместимость в первые часы/дни деплоя пока
+    LLM учится заполнять новые поля по обновлённому SYSTEM_PROMPT.
+    Soft-validation (WARN log) делается в `parse_action`, не reject —
+    закрывать позицию важнее чем заблокировать closes из-за отсутствия
+    audit-поля.
+    """
+
     action: Literal["close"]
     position_id: int = Field(gt=0)
     reason: ClampedReason = ""
+    thesis_status: Optional[Literal["broken", "intact", "partial"]] = None
+    thesis_invalidator: Optional[ClampedThesisInvalidator] = None
 
 
 class HoldAction(BaseModel):
@@ -313,12 +334,54 @@ def parse_action(
                 )
         elif action_type == "close":
             model = CloseAction.model_validate(obj)
+            _log_thesis_audit(model)
         else:
             model = HoldAction.model_validate(obj)
     except ValidationError as e:
         return f"schema validation error: {e.errors(include_url=False)}"
 
     return ParsedAction(action_type=action_type, model=model, raw=obj)
+
+
+def _log_thesis_audit(model: "CloseAction") -> None:
+    """Soft-валидация thesis discipline на CloseAction (Phase 1, 2026-05-26).
+
+    НЕ reject — close-actions важнее чем audit-полнота, поэтому
+    нарушения только логируются. Три класса событий:
+
+    - WARN ``missing_thesis_status``: LLM не прислал ``thesis_status``
+      (старая модель промпта). Ожидаемо в первые часы/дни после деплоя,
+      должно сойти на 0 после ~3-4 LLM-циклов когда новая часть
+      SYSTEM_PROMPT попадает в context.
+    - WARN ``broken_thesis_without_invalidator``: статус "broken" или
+      "partial" — поле invalidator обязательно по промпту, но отсутствует.
+      Это reasoning-нарушение: LLM не назвал конкретный факт-инвалидатор.
+    - INFO ``closed_intact_thesis``: позиция закрыта при `thesis_status=
+      "intact"`. Это и есть кейс «закрыл при цельной макро-идее» —
+      нужно отслеживать долю таких decisions (Phase 1 acceptance #2:
+      ≤30% от close после ≥30 trades).
+    """
+    pos_id = model.position_id
+    status = model.thesis_status
+    if status is None:
+        log.warning(
+            "thesis_audit: missing_thesis_status close pos_id=%d reason=%r",
+            pos_id, model.reason[:80],
+        )
+        return
+    if status in ("broken", "partial") and not model.thesis_invalidator:
+        log.warning(
+            "thesis_audit: broken_thesis_without_invalidator pos_id=%d "
+            "status=%s reason=%r",
+            pos_id, status, model.reason[:80],
+        )
+        return
+    if status == "intact":
+        log.info(
+            "thesis_audit: closed_intact_thesis pos_id=%d "
+            "invalidator=%r reason=%r",
+            pos_id, (model.thesis_invalidator or "")[:80], model.reason[:80],
+        )
 
 
 # ─── Apply ───────────────────────────────────────────────────────────────

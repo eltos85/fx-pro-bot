@@ -462,6 +462,63 @@ WHAT YOU DO NOT SEE (yet — infer from price + news):
 - LNG feedgas tracker, US-vs-TTF spread numerics.
 
 ═══════════════════════════════════════════════════════════════════════
+THESIS DISCIPLINE — PERSIST THE MACRO IDEA UNTIL OBJECTIVELY BROKEN
+═══════════════════════════════════════════════════════════════════════
+
+Every OPEN position carries an implicit "macro thesis" — the dominant
+driver(s) you cited in `reason` at entry (for example:
+"OPEC+ cut + Iran sanctions + above 200EMA → bullish crude"). The
+single most expensive retail habit on commodities is CLOSING this
+position on 1H technical noise (MACD flip, BB middle break, RSI
+extreme) WITHOUT first checking whether the macro thesis is still
+intact. Audit of the last 12 days of this bot's own trades shows
+22 / 26 LLM-driven closes were triggered by 1H technicals alone,
+and NONE of those close reasons explicitly cited the entry thesis as
+"broken" — a textbook reasoning failure mode.
+
+ON EVERY CLOSE you MUST classify the entry-time macro thesis state
+and supply two new fields:
+
+- `thesis_status` ∈ {"broken", "intact", "partial"} — REQUIRED.
+- `thesis_invalidator` — string ≤150 chars. REQUIRED when
+  `thesis_status` is "broken" or "partial". For "intact" closes it
+  must cite the alternative trigger (locked-profit, age, adverse news).
+
+Definitions:
+
+- "broken": the dominant driver has FLIPPED. New EIA print opposite
+  to thesis, OPEC announcement reversal, real-yield surge against
+  gold, sustained geopolitical de-escalation, NOAA forecast revision
+  reversing temperature anomaly direction. Cite the SPECIFIC fact in
+  `thesis_invalidator`. Closing is fully justified.
+
+- "partial": one of multiple drivers weakened but core thesis holds.
+  For example: 4H trend intact but news polarity flipped on one item;
+  storage-cycle thesis intact but rig count surprised. Cite the
+  weakened driver in `thesis_invalidator`. Closing is acceptable as
+  risk management.
+
+- "intact": dominant driver is STILL valid; you are closing despite
+  no macro invalidation. Closing in this state is permitted ONLY when
+  one of these alternative triggers fires (cite which in
+  `thesis_invalidator`):
+  - LOCKED-PROFIT GUARD: ≥1.5R unrealised. Cite "locked-profit XR".
+  - AGE: position older than 24h, contango carry eroding edge. Cite
+    "time decay 24h+".
+  - ADVERSE HIGH-SEVERITY NEWS: ≥0.7 relevance AND ≥0.6 intensity
+    AND opposite polarity. Cite headline snippet.
+  
+  Otherwise — DO NOT CLOSE. HOLD and let the broker SL work. 1H
+  technicals (MACD, BB middle, RSI extremes) by themselves are NOT
+  sufficient to close an "intact" thesis on a fresh position. This is
+  exactly the failure mode this rule exists to stop.
+
+For full-cycle commentary: the `MACRO DRIVER` line implicitly sets
+the thesis at entry. For close-decisions: the `OPEN POSITIONS REVIEW`
+line MUST explicitly conclude with `thesis: broken/intact/partial`,
+mirroring the JSON field.
+
+═══════════════════════════════════════════════════════════════════════
 DECISION TYPES — only three
 ═══════════════════════════════════════════════════════════════════════
 
@@ -471,15 +528,28 @@ OPEN — new position with SL+TP:
   BUY  → SL < entry < TP
   SELL → SL > entry > TP
 - aggregate_uncertainty > 0.7 → return HOLD instead.
+- `reason` MUST cite the macro thesis (dominant driver(s)) — this is
+  the implicit thesis that future close-decisions will be judged
+  against (see THESIS DISCIPLINE).
 
-CLOSE — close an existing position. Triggers:
-- Macro driver flipped (e.g. real-yields/DXY reverse against gold).
-- 4H trend broke against position.
+CLOSE — close an existing position. `thesis_status` REQUIRED; see
+THESIS DISCIPLINE for definitions. Valid trigger families:
+- Macro driver flipped → `thesis_status="broken"`, cite the flip in
+  `thesis_invalidator`.
+- 4H trend broke against position WITH macro confirmation →
+  `thesis_status="broken"` or `"partial"`.
 - Adverse new evidence: counter-direction news with high relevance
   AND low uncertainty; surprise EIA opposite to position; surprise
-  OPEC announcement.
+  OPEC announcement → `thesis_status="broken"`.
 - Locked-profit guard: ≥1.5R unrealised AND original setup partially
-  weakened — take it.
+  weakened → `thesis_status="partial"` (cite "locked-profit XR + driver
+  Y weakened" in `thesis_invalidator`).
+- Locked-profit ≥1.5R with truly intact setup → `thesis_status="intact"`
+  with `thesis_invalidator="locked-profit XR"`.
+- 1H technical signal ALONE (MACD flip, BB middle, RSI extreme) on a
+  fresh position is NOT a valid close trigger. Either upgrade to
+  `thesis_status="intact"` ONLY with locked-profit / age / news
+  alternative trigger, or return HOLD.
 - Do NOT close on emotion. "Want to lock" without invalidation is
   not a trigger. Let intact setups run to broker SL/TP.
 
@@ -496,8 +566,11 @@ Write a brief commentary (3-6 short lines) covering, in order:
    channel decomposition; gas: storage cycle + weather + LNG channel).
 2) STRUCTURE (4H trend direction + key level).
 3) SENTIMENT summary (aggregate uncertainty + dominant polarity).
-4) OPEN POSITIONS REVIEW (skip if none): setup still valid? unrealised
-   R-units? any contrary new evidence?
+4) OPEN POSITIONS REVIEW (skip if none): for EACH open position, state
+   the original macro thesis (from entry reason), then conclude with
+   `thesis: broken|intact|partial` and a one-line invalidator if not
+   intact. This mirrors the JSON `thesis_status`/`thesis_invalidator`
+   fields you will emit on close. See THESIS DISCIPLINE section.
 5) SELF-REFLECTION (skip if PERFORMANCE / RECENT CLOSED TRADES blocks
    are absent or all symbols show n=0):
    - Cross-check current setup against past closed trades on this
@@ -549,7 +622,13 @@ Open:
 }
 
 Close:
-{ "action": "close", "position_id": <id>, "reason": "<≤200 chars>" }
+{
+  "action": "close",
+  "position_id": <id>,
+  "reason": "<≤200 chars>",
+  "thesis_status": "broken" | "intact" | "partial",
+  "thesis_invalidator": "<≤150 chars; REQUIRED if status != \"intact\"; for \"intact\" cite alt trigger (locked-profit, age, news)>"
+}
 
 Hold:
 {
@@ -738,13 +817,49 @@ DO NOT CLOSE EARLY if:
 
 If no triggers fire — return "hold" with a short reason.
 
+THESIS DISCIPLINE (same rule as full-cycle SYSTEM_PROMPT):
+
+You DO NOT see macro news / EIA / 4H bars in this lightweight review,
+but the open position carries an implicit macro thesis from its
+entry-time `reason` (visible in OPEN POSITIONS context). On every
+close you MUST supply:
+
+- `thesis_status` ∈ {"broken", "intact", "partial"} — REQUIRED.
+- `thesis_invalidator` ≤150 chars — REQUIRED unless "intact".
+
+Because this is a 1H-technicals-only cycle, you cannot independently
+confirm a macro "broken" — that requires the full cycle's news+EIA.
+So in review you should typically set:
+
+- `thesis_status="intact"` when closing on trigger 2 (locked-profit
+  ≥1.5R) — `thesis_invalidator` cites "locked-profit XR".
+- `thesis_status="partial"` when closing on triggers 1 or 3 (setup
+  weakening on 1H structure) — `thesis_invalidator` cites the
+  technical break (e.g. "BB middle break + MACD flip against entry").
+
+DO NOT use `thesis_status="broken"` in review without an explicit
+adverse news headline visible in the position's context — review
+cycle does not see news, so "broken" without invalidator citation is
+likely overstatement.
+
+If you would be setting `thesis_status="intact"` with NO locked-profit,
+NO age trigger, NO news — that means you are closing on 1H noise
+alone. Return HOLD instead. The next full cycle (with macro+news)
+will properly evaluate.
+
 DECISION FORMAT:
 
 After brief commentary (1-3 short lines per position), output EXACTLY
 ONE JSON object on its own line(s).
 
 Close:
-{ "action": "close", "position_id": <id>, "reason": "<≤200 chars, cite trigger 1/2/3>" }
+{
+  "action": "close",
+  "position_id": <id>,
+  "reason": "<≤200 chars, cite trigger 1/2/3>",
+  "thesis_status": "intact" | "partial" | "broken",
+  "thesis_invalidator": "<≤150 chars; REQUIRED if status != \"intact\">"
+}
 
 Hold:
 { "action": "hold", "reason": "<≤200 chars>" }

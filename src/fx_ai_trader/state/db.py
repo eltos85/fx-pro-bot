@@ -87,7 +87,13 @@ CREATE TABLE IF NOT EXISTS decisions (
     error TEXT,
     tokens_input INTEGER,
     tokens_output INTEGER,
-    cost_usd REAL
+    cost_usd REAL,
+    -- Phase 1 persistent-thesis (2026-05-26, BUILDLOG_AI_FX_TRADER.md):
+    -- audit полей из CloseAction. Заполнены ТОЛЬКО для cycle close,
+    -- NULL для open / hold. Для existing БД добавляются через idempotent
+    -- ALTER TABLE миграцию в `AiFxTraderStore._migrate_v1_thesis_columns`.
+    thesis_status TEXT,                   -- 'broken' | 'intact' | 'partial' | NULL
+    thesis_invalidator TEXT               -- ≤200 chars или NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions(ts);
@@ -115,6 +121,25 @@ class AiFxTraderStore:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(_SCHEMA)
+            self._migrate_v1_thesis_columns(c)
+
+    @staticmethod
+    def _migrate_v1_thesis_columns(conn: sqlite3.Connection) -> None:
+        """Idempotent миграция: добавить thesis_status / thesis_invalidator
+        в existing `decisions` table (Phase 1 persistent-thesis 2026-05-26).
+
+        SQLite не имеет ``ADD COLUMN IF NOT EXISTS`` — проверяем через
+        ``PRAGMA table_info`` и `ALTER TABLE ADD COLUMN` если колонки
+        отсутствуют. На свежей БД эти колонки уже созданы CREATE TABLE
+        выше, миграция no-op.
+        """
+        existing = {
+            row[1] for row in conn.execute("PRAGMA table_info(decisions)").fetchall()
+        }
+        if "thesis_status" not in existing:
+            conn.execute("ALTER TABLE decisions ADD COLUMN thesis_status TEXT")
+        if "thesis_invalidator" not in existing:
+            conn.execute("ALTER TABLE decisions ADD COLUMN thesis_invalidator TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -143,6 +168,8 @@ class AiFxTraderStore:
         tokens_input: int | None = None,
         tokens_output: int | None = None,
         cost_usd: float | None = None,
+        thesis_status: str | None = None,
+        thesis_invalidator: str | None = None,
     ) -> int:
         with self._conn() as c:
             cur = c.execute(
@@ -150,8 +177,9 @@ class AiFxTraderStore:
                 INSERT INTO decisions
                 (cycle, cycle_type, ts, prompt_system, prompt_user, response_raw,
                  parsed_action, sentiment_json, executed, error,
-                 tokens_input, tokens_output, cost_usd)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 tokens_input, tokens_output, cost_usd,
+                 thesis_status, thesis_invalidator)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cycle,
@@ -167,6 +195,8 @@ class AiFxTraderStore:
                     tokens_input,
                     tokens_output,
                     cost_usd,
+                    thesis_status,
+                    thesis_invalidator,
                 ),
             )
             return int(cur.lastrowid or 0)
