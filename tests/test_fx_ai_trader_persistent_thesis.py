@@ -1,4 +1,4 @@
-"""Тесты Phase 1 persistent-thesis (2026-05-26).
+"""Тесты Phase 1 persistent-thesis + v4 prompt-tune (2026-05-26).
 
 Покрытие:
 - ``CloseAction`` schema: новые опциональные поля thesis_status /
@@ -12,9 +12,13 @@
 - ``SYSTEM_PROMPT`` / ``SYSTEM_PROMPT_REVIEW``: содержат ключевые маркеры
   THESIS DISCIPLINE / thesis_status / thesis_invalidator.
 - ``main._extract_thesis``: корректно извлекает поля из parsed JSON.
+- v4 prompt-tune (A+B+C+D): task-sandwich маркеры в начале/конце
+  prompts, concrete JSON examples в SYSTEM_PROMPT, prime expected
+  output в build_user_prompt[_review], ``DeepSeekClient`` принимает
+  ``effort`` и передаёт через extra_body.
 
-См. ``BUILDLOG_AI_FX_TRADER.md`` запись 2026-05-26 «feat(persistent-
-thesis)» — research artifact, acceptance criteria.
+См. ``BUILDLOG_AI_FX_TRADER.md`` записи 2026-05-26 — research artifact,
+acceptance criteria.
 """
 from __future__ import annotations
 
@@ -22,13 +26,17 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ai_trader.llm.client import DeepSeekClient
 from fx_ai_trader.app.main import _extract_thesis
 from fx_ai_trader.llm.prompts import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_REVIEW,
+    build_user_prompt,
+    build_user_prompt_review,
 )
 from fx_ai_trader.state.db import AiFxTraderStore
 from fx_ai_trader.trading.executor import (
@@ -355,3 +363,179 @@ class TestExtractThesis:
             "thesis_invalidator": ["x"],   # not str
         }
         assert _extract_thesis(raw) == (None, None)
+
+
+# ─── v4 prompt-tune (A+B+C+D, BUILDLOG 2026-05-26) ──────────────────────
+
+
+class TestSystemPromptTaskSandwich:
+    """A: task-summary в начале SYSTEM_PROMPT — deepseekai.guide
+    Practitioner's Guide («early tokens весомее»)."""
+
+    def test_task_block_appears_before_gold_framework(self):
+        """Task-summary должен быть ДО длинного domain context'а."""
+        task_idx = SYSTEM_PROMPT.find("YOUR TASK EACH CYCLE")
+        gold_idx = SYSTEM_PROMPT.find("GOLD (XAUUSD) — FIVE-DRIVER")
+        assert task_idx != -1, "Task summary block missing"
+        assert gold_idx != -1
+        assert task_idx < gold_idx, (
+            "Task summary должен быть ДО длинного domain context"
+        )
+
+    def test_task_block_mentions_all_three_actions(self):
+        task_section_start = SYSTEM_PROMPT.find("YOUR TASK EACH CYCLE")
+        task_section = SYSTEM_PROMPT[task_section_start:task_section_start + 800]
+        for action in ("open", "close", "hold"):
+            assert f"`{action}`" in task_section, f"action `{action}` missing in task summary"
+
+    def test_task_block_mentions_thesis_status_for_close(self):
+        task_section_start = SYSTEM_PROMPT.find("YOUR TASK EACH CYCLE")
+        task_section = SYSTEM_PROMPT[task_section_start:task_section_start + 800]
+        assert "thesis_status" in task_section
+
+
+class TestSystemPromptConcreteExamples:
+    """B: concrete JSON examples с заполненными values — deepseekai.guide
+    «show small example schema, not just describe it»."""
+
+    def test_concrete_examples_block_exists(self):
+        assert "CONCRETE EXAMPLES" in SYSTEM_PROMPT
+
+    def test_example_open_has_filled_values(self):
+        """Example OPEN должен быть с realistic numeric values, не <placeholders>."""
+        examples_start = SYSTEM_PROMPT.find("CONCRETE EXAMPLES")
+        examples_end = SYSTEM_PROMPT.find("FINAL RULES", examples_start)
+        examples_section = SYSTEM_PROMPT[examples_start:examples_end]
+        assert '"action": "open"' in examples_section
+        assert '"BZ=F"' in examples_section or '"XAUUSD"' in examples_section
+        assert '"BUY"' in examples_section
+        # должен быть пример без placeholder'ов
+        assert "<float" not in examples_section
+        assert "<number" not in examples_section
+
+    def test_example_close_has_all_three_thesis_statuses(self):
+        examples_start = SYSTEM_PROMPT.find("CONCRETE EXAMPLES")
+        examples_end = SYSTEM_PROMPT.find("FINAL RULES", examples_start)
+        examples_section = SYSTEM_PROMPT[examples_start:examples_end]
+        for status in ("broken", "intact", "partial"):
+            assert f'"thesis_status": "{status}"' in examples_section, (
+                f"Concrete example для thesis_status={status!r} отсутствует"
+            )
+
+    def test_example_close_intact_cites_locked_profit_invalidator(self):
+        """thesis_status=intact close должен показать как использовать
+        alternative trigger в thesis_invalidator."""
+        examples_start = SYSTEM_PROMPT.find("CONCRETE EXAMPLES")
+        examples_end = SYSTEM_PROMPT.find("FINAL RULES", examples_start)
+        examples_section = SYSTEM_PROMPT[examples_start:examples_end]
+        assert "locked-profit" in examples_section
+
+    def test_review_prompt_has_concrete_examples_too(self):
+        assert "CONCRETE EXAMPLES" in SYSTEM_PROMPT_REVIEW
+
+    def test_review_examples_dont_use_open_action(self):
+        """В review-mode пример open — запрещён (см. SYSTEM_PROMPT_REVIEW)."""
+        examples_start = SYSTEM_PROMPT_REVIEW.find("CONCRETE EXAMPLES")
+        examples_end = SYSTEM_PROMPT_REVIEW.find("FINAL RULES", examples_start)
+        assert examples_start != -1
+        examples_section = SYSTEM_PROMPT_REVIEW[examples_start:examples_end]
+        assert '"action": "open"' not in examples_section
+
+
+class TestUserPromptTaskSandwichAndPrime:
+    """A+C: task-restatement и prime expected output в build_user_prompt[_review]."""
+
+    def test_full_user_prompt_has_task_restatement(self):
+        out = build_user_prompt("MARKET_CTX")
+        assert "TASK RESTATEMENT" in out
+
+    def test_full_user_prompt_ends_with_prime_directive(self):
+        out = build_user_prompt("MARKET_CTX")
+        # Prime directive должен быть в **конце** (после market context)
+        prime_idx = out.find("Begin your reply with")
+        market_idx = out.find("MARKET_CTX")
+        assert prime_idx != -1, "prime directive missing"
+        assert market_idx < prime_idx
+
+    def test_full_user_prompt_primes_analysis_header(self):
+        out = build_user_prompt("MARKET_CTX")
+        assert "## ANALYSIS" in out
+        assert "1) MACRO DRIVER:" in out
+
+    def test_full_user_prompt_task_after_market_context(self):
+        """Task-sandwich: restatement идёт ПОСЛЕ market_context."""
+        out = build_user_prompt(
+            "MARKET_CTX",
+            performance_by_symbol="PERF",
+            recent_trades="TRADES",
+        )
+        market_idx = out.find("MARKET_CTX")
+        task_restate_idx = out.find("TASK RESTATEMENT")
+        assert 0 <= market_idx < task_restate_idx
+
+    def test_review_user_prompt_has_task_restatement(self):
+        out = build_user_prompt_review("REVIEW_CTX")
+        assert "TASK RESTATEMENT" in out
+
+    def test_review_user_prompt_primes_review_header(self):
+        out = build_user_prompt_review("REVIEW_CTX")
+        assert "Begin your reply" in out
+        assert "## REVIEW" in out
+
+    def test_review_user_prompt_forbids_open(self):
+        """Outro явно напоминает что open запрещён."""
+        out = build_user_prompt_review("REVIEW_CTX")
+        assert "FORBIDDEN" in out or "forbidden" in out
+
+
+# ─── D: output_config.effort в DeepSeekClient ───────────────────────────
+
+
+class TestDeepSeekClientEffortParam:
+    """D: ``effort`` передаётся через extra_body."""
+
+    def test_effort_none_does_not_send_extra_body(self):
+        client = DeepSeekClient(api_key="sk-test", effort=None)
+        mock_messages = MagicMock()
+        mock_messages.create.return_value = MagicMock(
+            content=[MagicMock(type="text", text="hello")],
+            usage=MagicMock(input_tokens=10, output_tokens=5),
+        )
+        with patch.object(client, "_client") as mock_anthropic:
+            mock_anthropic.messages = mock_messages
+            client._call("sys", "usr", with_thinking=True)
+        call_kwargs = mock_messages.create.call_args.kwargs
+        assert "extra_body" not in call_kwargs
+
+    def test_effort_high_sends_output_config_via_extra_body(self):
+        client = DeepSeekClient(api_key="sk-test", effort="high")
+        mock_messages = MagicMock()
+        mock_messages.create.return_value = MagicMock(
+            content=[MagicMock(type="text", text="hello")],
+            usage=MagicMock(input_tokens=10, output_tokens=5),
+        )
+        with patch.object(client, "_client") as mock_anthropic:
+            mock_anthropic.messages = mock_messages
+            client._call("sys", "usr", with_thinking=True)
+        call_kwargs = mock_messages.create.call_args.kwargs
+        assert call_kwargs["extra_body"] == {"output_config": {"effort": "high"}}
+
+    def test_effort_not_sent_in_no_thinking_fallback(self):
+        """effort attached ТОЛЬКО к thinking-calls (без thinking — нет смысла)."""
+        client = DeepSeekClient(api_key="sk-test", effort="high")
+        mock_messages = MagicMock()
+        mock_messages.create.return_value = MagicMock(
+            content=[MagicMock(type="text", text="hello")],
+            usage=MagicMock(input_tokens=10, output_tokens=5),
+        )
+        with patch.object(client, "_client") as mock_anthropic:
+            mock_anthropic.messages = mock_messages
+            client._call("sys", "usr", with_thinking=False)
+        call_kwargs = mock_messages.create.call_args.kwargs
+        assert "extra_body" not in call_kwargs
+        assert "thinking" not in call_kwargs
+
+    def test_default_effort_is_none_for_backward_compat(self):
+        """Backward compat: ai_trader вызывает без effort → None → не передаётся."""
+        client = DeepSeekClient(api_key="sk-test")
+        assert client._effort is None

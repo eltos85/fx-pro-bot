@@ -1,5 +1,81 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-26 — feat(v4-prompt-tune): A+B+C+D — task sandwich, concrete JSON examples, prime expected output, output_config.effort=high
+
+`коммит при deploy`
+
+### Контекст
+
+После Phase 1 (persistent thesis discipline, запись ниже того же дня)
+проведён audit DeepSeek-V4 prompt engineering best practices из
+официальных источников + community-проверенного guide. Цель — найти
+**обоснованные** улучшения подачи существующего промпта, без изменения
+торговой логики и доменных правил.
+
+### Research artifact (источники)
+
+| # | Источник | URL | Ключевая цитата |
+|---|---|---|---|
+| 1 | DeepSeek API Docs — Anthropic-compat | [api-docs.deepseek.com/guides/anthropic_api](https://api-docs.deepseek.com/guides/anthropic_api) | «thinking — Supported (`budget_tokens` is ignored); output_config — Only `effort` is supported; cache_control — Ignored» |
+| 2 | Anthropic Adaptive Thinking | [platform.claude.com/docs/en/build-with-claude/adaptive-thinking](https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking) | «effort: low \| medium \| high (default) \| max; controls thinking allocation» |
+| 3 | DeepSeek V4 Practitioner's Guide | [deepseekai.guide/tutorials/deepseek-prompt-engineering](https://deepseekai.guide/tutorials/deepseek-prompt-engineering/) | «DeepSeek weighs early tokens more heavily ... put a one-line restatement of the task after the context too — a 'task sandwich'» + «End your prompt with the first characters of the expected output ... dramatically reduces preamble drift on V4-Flash» + «show a small example schema in the prompt — not just describe it» |
+| 4 | DeepSeek V4 Templates (12 patterns) | [deepseekai.guide/tools/deepseek-prompt-templates](https://deepseekai.guide/tools/deepseek-prompt-templates/) | «System block — role, constraints, output format. Stable across calls» (наш паттерн уже соответствует) |
+| 5 | Pydantic-AI thinking docs | [github.com/pydantic/pydantic-ai/blob/.../thinking.md](https://github.com/pydantic/pydantic-ai/blob/7f5214c6/docs/thinking.md) | «Anthropic effort: top-level request parameter separate from thinking object» |
+
+### Что у нас уже соответствовало best practices (НЕ трогаем)
+
+- ✅ Чёткая role в SYSTEM_PROMPT
+- ✅ JSON schema inline в промпте (но как описание, не как concrete example — фиксится в B)
+- ✅ Слово "JSON object" используется многократно
+- ✅ `max_tokens=8000` с обоснованием в коде (защита от truncation)
+- ✅ try/except + truncation guard в коде
+- ✅ Thinking enabled (`thinking_enabled=True`)
+- ✅ English-only промпт
+- ✅ Стабильный SYSTEM_PROMPT, volatile в USER
+
+### Что НЕ применяем (с обоснованием)
+
+| Что предлагалось | Почему отклонено | Источник |
+|---|---|---|
+| Менять `temperature` | thinking mode её игнорирует на большинстве моделей; у нас нет evidence для tuning | community guide |
+| Cache-friendly переупорядочивание | `cache_control` игнорируется на Anthropic-compat endpoint DeepSeek — бесполезная работа | DeepSeek API docs (источник #1) |
+| CO-STAR rewrite | Наша domain-specific структура (5-driver / 4-channel / NG framework) уже адекватна | — |
+| Раздувать SYSTEM_PROMPT новыми доменными правилами | Уже ~14k tokens после Phase 1; убывающая отдача | — |
+
+### Что меняем (A+B+C+D)
+
+**A. Task sandwich.** Добавляем 1-2 строки task-summary в **начале** SYSTEM_PROMPT (после role) и **в конце** USER_PROMPT (после market_context, перед outro). Обоснование: deepseekai.guide guide — «role and task should land before any long context block» + «put a one-line restatement of the task after the context ... so the instruction is not buried». Применимо: SYSTEM_PROMPT ~14k tokens, USER_PROMPT 2-4k tokens — instruction действительно может «потеряться».
+
+**B. Concrete JSON examples.** Рядом со schema Open/Close/Hold добавляем **заполненный пример** с реалистичными значениями (включая новые thesis_status / thesis_invalidator). Обоснование: deepseekai.guide guide — «show a small example schema, not just describe it». Особенно важно для thesis_status/thesis_invalidator (введены вчера, у LLM нет precedent в training).
+
+**C. Prime expected output.** Конец `build_user_prompt` / `build_user_prompt_review` заканчивается явной директивой: «Begin your reply with: `## ANALYSIS\n1) MACRO DRIVER:`». Обоснование: deepseekai.guide guide — «dramatically reduces preamble drift on V4-Flash» (наша модель `deepseek-v4-flash`).
+
+**D. `output_config.effort='high'`.** Передаём явно через `extra_body` в `client.messages.create(...)`. Сейчас используется default (по Anthropic docs — `high`, но для DeepSeek-side не задокументирован). Делаем explicit + логируем для audit. Обоснование: DeepSeek API docs — «output_config — Only `effort` is supported», Anthropic docs — `high` даёт «deep reasoning on complex tasks» (multi-driver commodity analysis это и есть complex task).
+
+### Compliance
+
+- **`strategy-guard.mdc`**: A/B/C — изменение **формата подачи** существующих правил (никаких новых thresholds, новых триггеров, изменения exit-логики). D — технический tuning API-параметра. Все 4 одобрены пользователем через AskQuestion (scope=abcd).
+- **`no-data-fitting.mdc`**: research artifact — 5 источников выше с прямыми цитатами и URL. Без подгонки под результат (никаких numeric thresholds не меняем).
+- **`sample-size.mdc`**: combined с Phase 1 — единое 1-неделя observation окно после деплоя. Acceptance criteria Phase 1 (≥90% close с непустым thesis_status, ≤30% intact close) остаются валидны.
+- **`api-docs.mdc`**: D ссылается на официальную DeepSeek API doc + Anthropic effort spec, оставлен URL-комментарий в `llm/client.py` рядом с параметром.
+
+### Acceptance criteria для prompt-tune
+
+После ≥30 closed trades + ≥1 недели наблюдения:
+1. **Preamble drift** должен снизиться: доля responses начинающихся с **точного** «## ANALYSIS\n1) MACRO DRIVER:» (или близко) ≥ 80% (сейчас ~50% по audit, остальное — wandering preamble).
+2. **JSON парс ошибок** (`parse_error` в decisions.error): не должны вырасти. Любая регрессия → откатываем prompt-tune отдельным коммитом.
+3. **Token budget**: SYSTEM_PROMPT не должен превысить ~15k tokens (мы добавляем ~150-300 tokens на task summary + examples).
+4. **`thesis_status` заполняемость** не должна упасть (concrete examples с thesis_status должны подкрепить Phase 1 effect).
+
+### Файлы
+
+- `BUILDLOG_AI_FX_TRADER.md` (эта запись)
+- `src/fx_ai_trader/llm/prompts.py` (SYSTEM_PROMPT + SYSTEM_PROMPT_REVIEW + build_user_prompt + build_user_prompt_review)
+- `src/ai_trader/llm/client.py` (output_config.effort через extra_body)
+- `tests/test_fx_ai_trader_persistent_thesis.py` (расширить asserts на новые prompt markers)
+
+---
+
 ## 2026-05-26 — feat(persistent-thesis): требование явного `thesis_status` при close + audit 10 нестыковок промпта (Phase 1)
 
 `коммит при deploy`

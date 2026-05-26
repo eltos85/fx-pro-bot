@@ -62,6 +62,16 @@ class AiFxTraderSettings(BaseSettings):
     deepseek_thinking_enabled: bool = Field(
         default=True, validation_alias="AI_FX_TRADER_DEEPSEEK_THINKING"
     )
+    # output_config.effort для DeepSeek-V4 Anthropic-compat endpoint
+    # (api-docs.deepseek.com/guides/anthropic_api: «output_config — Only
+    # effort is supported»). Anthropic levels: low|medium|high|max
+    # (platform.claude.com/docs/en/build-with-claude/adaptive-thinking).
+    # Default 'high' для full-cycle multi-driver commodity analysis —
+    # обоснование в BUILDLOG_AI_FX_TRADER.md 2026-05-26 v4-prompt-tune.
+    # Пустая строка → не передавать (использовать default endpoint'а).
+    deepseek_effort: str = Field(
+        default="high", validation_alias="AI_FX_TRADER_DEEPSEEK_EFFORT"
+    )
 
     # ─── cTrader API (FxPro demo) ────────────────────────────────────────
     # OAuth-токены **изолированы** от Advisor (с 2026-05-12 после

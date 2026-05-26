@@ -140,6 +140,19 @@ read price action AGAINST the macro thesis, execute fewer but higher
 quality trades. Hold is the default. Patience is the edge.
 
 ═══════════════════════════════════════════════════════════════════════
+YOUR TASK EACH CYCLE (read this BEFORE the long context below)
+═══════════════════════════════════════════════════════════════════════
+
+Produce: (1) a brief commentary (3-6 short lines, fixed structure
+MACRO DRIVER → STRUCTURE → SENTIMENT → OPEN POSITIONS REVIEW →
+SELF-REFLECTION → DECISION), then (2) EXACTLY ONE JSON object on its
+own line(s) describing one of three actions: `open`, `close`, or
+`hold`. On `close` you MUST include `thesis_status` and (when the
+status is `broken`/`partial`) `thesis_invalidator`. See THESIS
+DISCIPLINE section for full rules. HOLD is the safe default; a
+rejected entry costs $0, a forced entry can cost real money.
+
+═══════════════════════════════════════════════════════════════════════
 GOLD (XAUUSD) — FIVE-DRIVER HIERARCHY (KenMacro, 2026)
 ═══════════════════════════════════════════════════════════════════════
 
@@ -638,6 +651,80 @@ Hold:
 }
 
 ═══════════════════════════════════════════════════════════════════════
+CONCRETE EXAMPLES (use these as a template — do NOT echo verbatim)
+═══════════════════════════════════════════════════════════════════════
+
+Example OPEN (oil, supply-led + technical confluence):
+{
+  "action": "open",
+  "symbol": "BZ=F",
+  "side": "BUY",
+  "volume_lots": 0.02,
+  "stop_loss": 84.50,
+  "take_profit": 87.30,
+  "reason": "OPEC+ extending cuts + Iran sanctions tightening; 4H structural pullback to 200EMA + RSI bullish divergence; thesis: supply-led bullish crude",
+  "sentiment": {
+    "aggregate_uncertainty": 0.35,
+    "items": [
+      {
+        "title_snippet": "OPEC+ confirms extension of production cuts through Q3",
+        "relevance": 0.95,
+        "polarity": 0.80,
+        "intensity": 0.75,
+        "uncertainty": 0.20,
+        "forwardness": 0.85
+      }
+    ]
+  }
+}
+
+Example CLOSE with `thesis_status="broken"` (macro driver flipped):
+{
+  "action": "close",
+  "position_id": 42,
+  "reason": "EIA print +35 Bcf vs -8 consensus — bullish gas thesis invalidated; closing long NG",
+  "thesis_status": "broken",
+  "thesis_invalidator": "EIA Weekly Storage +35 Bcf print, +43 surprise vs consensus, 4σ event"
+}
+
+Example CLOSE with `thesis_status="intact"` (locked-profit, thesis still valid):
+{
+  "action": "close",
+  "position_id": 17,
+  "reason": "Locked-profit guard: 1.8R unrealised on XAUUSD long; real-yield thesis still intact but taking risk off",
+  "thesis_status": "intact",
+  "thesis_invalidator": "locked-profit 1.8R; real-yields + DXY still supportive"
+}
+
+Example CLOSE with `thesis_status="partial"` (one driver weakened):
+{
+  "action": "close",
+  "position_id": 23,
+  "reason": "BRENT long: OPEC compliance thesis intact but US recession headlines flipped demand polarity; partial invalidation, taking risk down",
+  "thesis_status": "partial",
+  "thesis_invalidator": "US Q2 GDP miss + China PMI contraction — demand-side driver flipped bearish; supply-side still bullish"
+}
+
+Example HOLD (high-uncertainty news + no confluent setup):
+{
+  "action": "hold",
+  "reason": "Mixed signals across symbols: gold lacks DXY confirmation, oil supply news contradicts EIA draw, gas in structural downtrend with no reversal trigger; await clarity",
+  "sentiment": {
+    "aggregate_uncertainty": 0.72,
+    "items": [
+      {
+        "title_snippet": "Iran nuclear talks: officials say progress but no breakthrough",
+        "relevance": 0.70,
+        "polarity": -0.20,
+        "intensity": 0.50,
+        "uncertainty": 0.80,
+        "forwardness": 0.60
+      }
+    ]
+  }
+}
+
+═══════════════════════════════════════════════════════════════════════
 FINAL RULES
 ═══════════════════════════════════════════════════════════════════════
 
@@ -764,15 +851,25 @@ def build_user_prompt(
     if recent_trades:
         parts.append(recent_trades)
     history_block = ("\n\n".join(parts) + "\n\n") if parts else ""
+    # Task-sandwich (deepseekai.guide Practitioner's Guide, 2026-05-26
+    # research artifact в BUILDLOG): повторяем task ПОСЛЕ длинного
+    # context'а (история + market_context могут быть 2-4k tokens),
+    # чтобы инструкция не «потерялась». «Prime expected output»
+    # снижает preamble drift на V4-Flash.
     return (
         f"{history_block}"
         "Current market state, news, and your open positions:\n\n"
         f"{market_context}\n\n"
-        "Now produce the analysis commentary (3-6 short lines) following "
-        "MACRO DRIVER → STRUCTURE → SENTIMENT → OPEN POSITIONS REVIEW "
-        "(skip if none) → SELF-REFLECTION (skip if no PERFORMANCE block) "
-        "→ DECISION, then output the single JSON object with full "
-        "multi-dim sentiment block."
+        "=== TASK RESTATEMENT ===\n"
+        "Produce: brief commentary (3-6 short lines) following the fixed\n"
+        "structure MACRO DRIVER → STRUCTURE → SENTIMENT → OPEN POSITIONS\n"
+        "REVIEW (skip if none; otherwise conclude EACH position with\n"
+        "`thesis: broken|intact|partial`) → SELF-REFLECTION (skip if no\n"
+        "PERFORMANCE block) → DECISION, then ONE JSON object with full\n"
+        "multi-dim sentiment block (open/hold) or thesis_status +\n"
+        "thesis_invalidator (close). HOLD is the safe default.\n\n"
+        "Begin your reply with the literal line: `## ANALYSIS`\n"
+        "Then on the next line: `1) MACRO DRIVER:`"
     )
 
 
@@ -864,6 +961,32 @@ Close:
 Hold:
 { "action": "hold", "reason": "<≤200 chars>" }
 
+CONCRETE EXAMPLES (use as template, do NOT echo verbatim):
+
+Example CLOSE on trigger 2 (locked-profit, thesis intact):
+{
+  "action": "close",
+  "position_id": 17,
+  "reason": "Trigger 2: 1.7R unrealised on XAUUSD long, BB middle reversion starting; locking profit",
+  "thesis_status": "intact",
+  "thesis_invalidator": "locked-profit 1.7R"
+}
+
+Example CLOSE on trigger 1 (1H structure weakening, partial):
+{
+  "action": "close",
+  "position_id": 23,
+  "reason": "Trigger 1: BRENT long lost 1H EMA20 + MACD flip bearish; partial setup invalidation",
+  "thesis_status": "partial",
+  "thesis_invalidator": "1H EMA20 break + MACD bearish flip against entry direction"
+}
+
+Example HOLD (no objective trigger, setup intact, profit < 1R):
+{
+  "action": "hold",
+  "reason": "NG short profitable +0.4R, 1H still showing weakness, no invalidation; broker SL will work"
+}
+
 FINAL RULES:
 - One action per response. If multiple positions need closing, pick
   the one with the strongest invalidation; others get the next review.
@@ -901,18 +1024,20 @@ def build_user_prompt_review(
     header = (
         f"{performance_by_symbol}\n\n" if performance_by_symbol else ""
     )
+    # Task-sandwich + prime expected output (deepseekai.guide
+    # Practitioner's Guide, 2026-05-26).
     return (
         f"{header}"
         "Mid-cycle review of your open positions:\n\n"
         f"{market_context}\n\n"
-        "For each open position, briefly state whether the original "
-        "setup is still valid and whether any of the 3 close-triggers "
-        "fire (1=invalidation, 2=locked-profit ≥1.5R + invalidation, "
-        "3=adverse technical evidence). If a PERFORMANCE block is "
-        "present, consider whether the close trigger you are about to "
-        "fire repeats a known noisy pattern on this symbol. Then "
-        "output a single JSON: either "
-        "{\"action\":\"close\",\"position_id\":<id>,\"reason\":...} "
-        "or {\"action\":\"hold\",\"reason\":...}. Remember: \"open\" is "
-        "forbidden this cycle."
+        "=== TASK RESTATEMENT ===\n"
+        "For EACH open position, briefly state whether the original setup\n"
+        "is still valid and whether any of the 3 close-triggers fire\n"
+        "(1=invalidation, 2=locked-profit ≥1.5R + invalidation,\n"
+        "3=adverse technical evidence). If a PERFORMANCE block is present,\n"
+        "consider whether the close trigger repeats a known noisy pattern\n"
+        "on this symbol. Then output ONE JSON object: `close` (with\n"
+        "thesis_status + thesis_invalidator unless intact) or `hold`.\n"
+        "`open` is FORBIDDEN this cycle.\n\n"
+        "Begin your reply with the literal line: `## REVIEW`"
     )

@@ -148,6 +148,7 @@ def run() -> None:
         model=settings.deepseek_model,
         max_tokens=settings.deepseek_max_tokens,
         thinking_enabled=settings.deepseek_thinking_enabled,
+        effort=(settings.deepseek_effort or None),
     )
 
     killswitch = KillSwitch(

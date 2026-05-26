@@ -42,7 +42,27 @@ class DeepSeekClient:
         thinking_enabled: bool = True,
         retry_on_empty: int = 1,
         retry_sleep_sec: float = 5.0,
+        effort: str | None = None,
     ) -> None:
+        """DeepSeek-V4 клиент через Anthropic-compatible API.
+
+        ``effort`` — опциональный effort level для thinking, передаётся
+        через ``extra_body={"output_config": {"effort": ...}}``. Возможные
+        значения по Anthropic docs: ``low | medium | high | max``.
+        ``None`` (default) — не передавать, использовать default endpoint'а.
+
+        Поддерживается DeepSeek API через Anthropic-compat:
+        https://api-docs.deepseek.com/guides/anthropic_api
+        («output_config — Only `effort` is supported»).
+
+        Уровни effort:
+        https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
+        - ``high`` (Anthropic default) — deep reasoning on complex tasks.
+        - ``max`` — without thinking-depth constraints.
+
+        Backward-compat: clients вызывающие без ``effort`` (например
+        ai_trader) сохраняют прежнее поведение.
+        """
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY is empty")
         self._client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
@@ -51,6 +71,9 @@ class DeepSeekClient:
         self._thinking_enabled = thinking_enabled
         self._retry_on_empty = max(0, retry_on_empty)
         self._retry_sleep_sec = max(0.0, retry_sleep_sec)
+        self._effort = effort
+        if effort is not None:
+            log.info("DeepSeekClient initialised with effort=%r", effort)
 
     def ask(self, system_prompt: str, user_prompt: str) -> LlmResponse:
         attempts = self._retry_on_empty + 1
@@ -108,6 +131,14 @@ class DeepSeekClient:
             }
             if with_thinking:
                 kwargs["thinking"] = {"type": "enabled"}
+            # ``output_config.effort`` поддерживается DeepSeek через
+            # Anthropic-compat endpoint
+            # (https://api-docs.deepseek.com/guides/anthropic_api).
+            # Передаём через extra_body, чтобы не зависеть от наличия
+            # output_config kwarg в текущей версии anthropic SDK.
+            # Не применяется к fallback-без-thinking (нет смысла без thinking).
+            if with_thinking and self._effort is not None:
+                kwargs["extra_body"] = {"output_config": {"effort": self._effort}}
             msg = self._client.messages.create(**kwargs)
         except Exception as e:
             log.exception("DeepSeek API call failed")
