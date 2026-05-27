@@ -226,6 +226,19 @@ class AiFxTraderSettings(BaseSettings):
         default=21600, validation_alias="AI_FX_TRADER_EIA_CACHE_TTL_SEC"
     )  # 6 часов
 
+    # ─── Macro rates feed (2026-05-27 D1) ───────────────────────────────
+    # DXY / UST10Y / TIP через yfinance (без API-ключа). Включён по
+    # дефолту: SYSTEM_PROMPT ~20 раз ссылается на эти ряды как primary
+    # gold-драйверы. Отключается флагом для тестов или при сбоях
+    # yfinance rate-limits. См. src/fx_ai_trader/data/macro_rates.py.
+    macro_rates_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_MACRO_RATES_ENABLED"
+    )
+    macro_rates_cache_ttl_sec: int = Field(
+        default=1800,
+        validation_alias="AI_FX_TRADER_MACRO_RATES_CACHE_TTL_SEC",
+    )  # 30 минут — достаточно freshness, без HTTP-перегруза
+
     # ─── Misc ────────────────────────────────────────────────────────────
     log_level: str = Field(
         default="INFO", validation_alias="AI_FX_TRADER_LOG_LEVEL"

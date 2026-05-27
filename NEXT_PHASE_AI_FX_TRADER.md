@@ -62,43 +62,18 @@ close_reason.
 
 ---
 
-## D1. DXY в `context.py` (driver #2 для gold сейчас слепой)
+## D1. DXY в `context.py` — **DONE** (2026-05-27)
 
-**Symptom.** SYSTEM_PROMPT обещает «DXY proxy 24h direction» в
-`WHAT YOU SEE EACH FULL CYCLE` (строка 451), но `collect_market_context`
-**не передаёт DXY** в формат для LLM. Для gold DXY — driver #2 по
-важности (correlation -0.6 до -0.8 по KenMacro). Бот фактически слепой
-по второму по силе драйверу.
+Закрыто. См. `BUILDLOG_AI_FX_TRADER.md` запись **2026-05-27 feat(macro-rates D1)**.
+Реализовано шире, чем планировалось здесь: добавлен не только DXY
+(`DX-Y.NYB`), но и UST10Y nominal (`^TNX`) + TIPS ETF (`TIP`) как
+real-yields proxy. Trigger — пользователь поднял красный флаг на
+«0 opens за 22ч после v4-tune», расследование подтвердило что в 100%
+hold reason'ов LLM пишет «lacks DXY/real-yield confirmation».
 
-**Evidence.**
-- Phase 1 нестыковка #4 (BUILDLOG 2026-05-26).
-- `src/fx_ai_trader/trading/context.py::collect_market_context` — нет
-  упоминания DXY / `DX-Y.NYB` / `USDX`.
-- LLM-responses в `decisions.response_raw` упоминают DXY в 73 / 1497
-  цикла (5%) — обычно «infer from price action» (галлюцинация), но в
-  reasoning гольда DXY заявляется как driver постоянно.
-
-**Proposed fix.**
-1. Добавить yfinance-feed `DX-Y.NYB` (ICE US Dollar Index futures) в
-   `context.py`. 24h change → одно число в `format_context_for_prompt`.
-2. Источник: ICE «US Dollar Index Futures»
-   https://www.theice.com/products/194/US-Dollar-Index-Futures —
-   canonical для KenMacro and Wall Street institutional desks.
-3. Alternative (если yfinance unreliable): FRED `DTWEXBGS` (Broad
-   Dollar Index) с задержкой 1 день — приемлемо для daily macro context.
-4. Логика в format: одна строка `DXY 24h: +0.12%` в начале блока.
-
-**Acceptance.**
-- В 100% full-cycle prompts присутствует DXY-строка с актуальным числом.
-- В 50% XAUUSD-decisions reasoning ссылается на DXY (сейчас 5%).
-- WR на XAUUSD trades **не деградирует** (нейтральная гипотеза).
-
-**Compliance.**
-- `api-docs.mdc`: yfinance — третий-party источник, но валидируется
-  напрямую с ICE/FRED. Спецификация символа `DX-Y.NYB` — публичная.
-- `strategy-guard.mdc`: добавление данных в context **не меняет**
-  торговую логику (нет нового threshold). Quasi-bugfix (промпт обещал —
-  кода не было).
+Не делаем (out of scope D1): точное real-yield число через FRED
+`DFII10` — нужен лишний API-ключ ради ±5 bps точности; TIP даёт
+direction, достаточно для confluence.
 
 ---
 
@@ -181,7 +156,7 @@ ClampedReason post-fix 2026-05-25). Никакого risk-of-data-loss.
 После достижения Phase 1 acceptance (≥30 closed trades, доля
 `thesis_status="intact"` close ≤30%) — взять задачи в **этом порядке**:
 
-1. **D1 (DXY)** — closest to bugfix, не меняет торговую логику.
+1. ~~**D1 (DXY)**~~ — **DONE 2026-05-27**.
 2. **D2 (sentiment obligatory)** — bug-fix bypass.
 3. **D3 (reason length)** — документация-only.
 4. **C (review noise-guard)** — самое инвазивное, в конце.

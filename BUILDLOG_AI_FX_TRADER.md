@@ -1,5 +1,141 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-27 — feat(macro-rates D1): DXY + UST10Y + TIPS ETF в context (Phase 2)
+
+`коммит при deploy`
+
+### Контекст и trigger
+
+После деплоя Phase 1 (persistent thesis, 2026-05-26 07:42 UTC) +
+v4 prompt-tune (08:13 UTC) — за **22 часа** 0 opens на 116 full-cycles.
+Пользователь поднял красный флаг «странно, ни одного лота не открыто».
+Расследование (см. AskQuestion 2026-05-27 09:23 +3 UTC):
+
+| Период | Решений | Avg uncertainty | Opens | Holds |
+|---|---:|---:|---:|---:|
+| AFTER v4-tune (22ч) | 116 | **0.68** | 1 | 115 |
+| Pre-deploy 2 дня | 170 | 0.54 | 2 | 166 |
+| 4 дня раньше | 351 | 0.56 | 16 | 335 |
+
+**Главный фактор** — рынок: Hormuz ceasefire / EIA mixed / NG storage build
+подняли uncertainty с 0.54 → 0.68 (+25%). Базовая стат-проверка по
+`sample-size.mdc`: ожидаем 116×0.026=3 opens, фактически 1 → Poisson p≈0.20
+(не значимо). До правок дни 17/22/24 мая были 0 opens на полный день —
+это **норма для стратегии**.
+
+**Но**: в 100% hold reason'ов LLM пишет *«gold lacks DXY/real-yield
+confirmation»* и *«lacks macro confirmation»*. Это **прямое указание на
+известный баг D1** из NEXT_PHASE_AI_FX_TRADER.md (Phase 1 нестыковка #4):
+SYSTEM_PROMPT за ~20 мест ссылается на DXY и real yields как primary
+gold-драйверы, прямо обещает «We see DXY proxy 24h change in context»
+(prompts.py:170), но `collect_market_context` исторически их не отдаёт.
+Бот по этой причине **физически не может** торговать золото по своей
+же стратегии. Пользователь явно одобрил ускоренное закрытие D1.
+
+### Что изменено
+
+| Файл | Что |
+|---|---|
+| `src/fx_ai_trader/data/__init__.py` | новый package |
+| `src/fx_ai_trader/data/macro_rates.py` | `MacroRatesProvider` + `MacroRatesSnapshot` + `format_macro_rates_snapshot` |
+| `src/fx_ai_trader/trading/context.py` | `MarketContext.macro_rates_block`; `collect_market_context(macro_rates_provider=…)`; рендер в `format_context_for_prompt` ПЕРЕД per-symbol macro (canonical hierarchy) |
+| `src/fx_ai_trader/app/main.py` | init `MacroRatesProvider`, проброс в `_run_full_cycle`, поле `us_rates=on/off` в log line `LLM call (full)` |
+| `src/fx_ai_trader/config/settings.py` | `macro_rates_enabled: bool = True` + `macro_rates_cache_ttl_sec: int = 1800` |
+| `.env.example` | задокументированы `AI_FX_TRADER_MACRO_RATES_ENABLED` и `..._CACHE_TTL_SEC` |
+| `NEXT_PHASE_AI_FX_TRADER.md` | секция D1 помечена done |
+| `tests/test_fx_ai_trader_macro_rates.py` | 19 тестов (format + provider happy/cache/degradation + context integration + prompt rendering + review **не** содержит rates) |
+
+### Данные, которые добавились в context
+
+```
+=== US MACRO RATES (gold/oil drivers; gold-canonical hierarchy: real yields → DXY) ===
+DXY (US Dollar Index, ICE futures DX-Y.NYB): 99.12 (24h=-0.03%, 5d=-0.19%)
+UST10Y nominal yield (CBOE TNX): 4.49% (24h=-6.5bps, 5d=-13.0bps)
+TIP (iShares TIPS ETF, real-yields proxy — price↑ ↔ real yields↓): $110.82 (24h=+0.40%, 5d=+0.31%)
+(fetched 2026-05-27T06:42:49+00:00 UTC)
+```
+
+Это **live snapshot** локального smoke-теста 2026-05-27 06:42 UTC.
+DXY<100 + real yields easing + TIP rising = canonical gold long
+confluence, которое бот сейчас слепо игнорирует.
+
+### Research artifact
+
+| Тезис | Источник |
+|---|---|
+| Gold ↔ DXY inverse corr -0.6 … -0.8 | Erb & Harvey (2013) «The Golden Dilemma», NBER WP 18706 |
+| Gold ↔ real yields R² ≈ 0.55 (2003-2024) | World Gold Council (2024) «Gold and real interest rates» |
+| TIPS yield = real cost of money proxy | Fed Board (2007) «TIPS and the inflation risk premium» |
+| Oil ↔ DXY corr -0.3 … -0.5 (weaker) | Akram (2009) Energy Economics |
+
+### Источники данных (компiance с `api-docs.mdc`)
+
+| Ticker | Источник правды | Цитата по спецификации |
+|---|---|---|
+| `DX-Y.NYB` | ICE «US Dollar Index Futures» <https://www.theice.com/products/194/US-Dollar-Index-Futures> | canonical US Dollar Index используется KenMacro / institutional desks |
+| `^TNX` | CBOE 10-Year Treasury Yield Index | values уже в % (4.31 = 4.31%); legacy yfinance возвращал ×10, нормализация в коде если raw>25% |
+| `TIP` | iShares TIPS Bond ETF <https://www.ishares.com/us/products/239467/> | price↑ ↔ real yields↓ (inverse) |
+
+yfinance — third-party библиотека уже используется в `src/fx_pro_bot/`
+для bars; не вводим новой зависимости. Без API-ключа. Cache 30 мин
+(достаточно freshness, без HTTP-перегруза).
+
+### Что НЕ сделано (с обоснованием)
+
+1. **Точное real-yield число (10Y TIPS yield)**: требует FRED `DFII10` +
+   FRED_API_KEY. Не вводим лишний секрет ради ±5 bps точности — `TIP`
+   ETF даёт **направление** (rising TIP ↔ real yields easing), что
+   достаточно для confluence-check.
+2. **Изменения SYSTEM_PROMPT**: ни одной строки промпта не меняем.
+   Промпт уже умеет с этими рядами работать — мы закрываем дырку
+   между обещанием промпта и фактическим контекстом. Чистый quasi-bugfix.
+3. **Включение rates в review-cycle**: NO. SYSTEM_PROMPT_REVIEW явно
+   говорит «NO macro feed, NO news, NO EIA, NO 4H bars» — rates это
+   macro feed; review остаётся lite.
+
+### Compliance
+
+- **`strategy-guard.mdc`**: НЕ меняем торговую логику (нет новых
+  thresholds, exit-логики, R:R). Quasi-bugfix: промпт обещал данные,
+  кода не было. Пользователь явно одобрил ускоренное закрытие D1.
+- **`no-data-fitting.mdc`**: 4 research-источника выше + сам код без
+  hardcoded thresholds (только cache TTL и normalize-эвристика).
+  Никакого тюнинга «под результат».
+- **`api-docs.mdc`**: ссылки на ICE / CBOE / iShares + WGC research
+  оставлены в docstring и в этом BUILDLOG. yfinance — уже
+  существующая dep, не новая.
+- **`sample-size.mdc`**: текущее «0 opens за 22ч» **не достигает**
+  порога p<0.05 (Poisson p≈0.20). Не отключаем ничего, **добавляем
+  данные**. После деплоя ожидаем естественный rebound open-rate
+  по золоту (по reason'ам holds — это и есть блокирующий фактор).
+
+### Acceptance criteria (после деплоя)
+
+После ≥7 дней наблюдения:
+
+1. **100% full-cycle prompts** содержат `=== US MACRO RATES ===` блок
+   (modulo yfinance outages; cache 30 мин гасит транзиентные сбои).
+2. **Reasoning hold'ов по золоту**: фраза «lacks DXY/real-yield
+   confirmation» падает с ~100% (текущее) до <30% (LLM либо открывает,
+   либо приводит конкретный аргумент типа «DXY rising → not going long»).
+3. **Open-rate по XAUUSD**: ожидаем рост vs последняя неделя
+   (нейтрально-положительная гипотеза). НЕ оптимизируем под это число.
+4. **WR на XAUUSD trades** (если будут): не должен деградировать ниже
+   baseline (по правилу `sample-size.mdc` требуется ≥30 trades для
+   значимого вывода — собираем дольше).
+5. **Errors / yfinance failures**: <5% циклов с `us_rates=off` в логе.
+
+### Smoke-check план (после deploy)
+
+1. `docker logs fx-pro-bot-fx-ai-trader-1 --tail 50` после первого
+   full-cycle — должно быть `us_rates=on` в log line.
+2. `decisions.prompt_user` последнего цикла должен содержать `US MACRO
+   RATES` и три тикера с числами.
+3. `decisions.parsed_action.reason` по золоту — проверить отсутствие
+   «lacks DXY» в новых hold'ах.
+
+---
+
 ## 2026-05-26 — feat(v4-prompt-tune): A+B+C+D — task sandwich, concrete JSON examples, prime expected output, output_config.effort=high
 
 `коммит при deploy`

@@ -21,6 +21,10 @@ from fx_ai_trader.analysis.indicators import (
     compute_snapshot,
     format_snapshot,
 )
+from fx_ai_trader.data.macro_rates import (
+    MacroRatesProvider,
+    format_macro_rates_snapshot,
+)
 from fx_ai_trader.news.eia import EiaProvider, format_eia_by_symbol
 from fx_ai_trader.news.rss import CommodityRssNewsProvider, NewsItem
 from fx_ai_trader.news.weather import NoaaOutlookProvider, format_noaa_snapshot
@@ -52,6 +56,11 @@ class MarketContext:
     # Weekly NG + STEO + NOAA discussion: ...'}. XAUUSD обычно пустой
     # ключ (нет EIA-релевантного macro для gold).
     macro_per_symbol: dict[str, str] = field(default_factory=dict)
+    # Cross-symbol macro rates block (BUILDLOG 2026-05-27 D1 — DXY +
+    # UST10Y + TIP). Применим ко всем инструментам (gold primary driver,
+    # oil secondary). None если провайдер недоступен / yfinance failed.
+    # См. src/fx_ai_trader/data/macro_rates.py.
+    macro_rates_block: str | None = None
 
 
 def _price_change_pct_24h(bars_1h: list[Bar]) -> float | None:
@@ -74,6 +83,7 @@ def collect_market_context(
     news_provider: CommodityRssNewsProvider | None = None,
     eia_provider: EiaProvider | None = None,
     noaa_provider: NoaaOutlookProvider | None = None,
+    macro_rates_provider: MacroRatesProvider | None = None,
 ) -> MarketContext:
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
@@ -141,12 +151,28 @@ def collect_market_context(
         except Exception:
             log.exception("noaa_provider failed (продолжаю без NOAA)")
 
+    # Macro rates (BUILDLOG 2026-05-27 D1): cross-symbol — DXY / UST10Y /
+    # TIP, primary driver для gold, secondary для oil. SYSTEM_PROMPT
+    # уже строит на этих рядах canonical gold hierarchy
+    # ("real yields → DXY"). Граф degrade: yfinance failure → None
+    # → блок не появится в prompt, остальные данные остаются.
+    macro_rates_block: str | None = None
+    if macro_rates_provider is not None and macro_rates_provider.enabled:
+        try:
+            rates_snap = macro_rates_provider.get_snapshot()
+            macro_rates_block = format_macro_rates_snapshot(rates_snap)
+        except Exception:
+            log.exception(
+                "macro_rates_provider failed (продолжаю без US rates)"
+            )
+
     return MarketContext(
         snapshots=snapshots,
         open_positions=store.get_open_positions(),
         virtual_capital_usd=virtual_capital_usd,
         news_per_symbol=news,
         macro_per_symbol=macro_per_symbol,
+        macro_rates_block=macro_rates_block,
     )
 
 
@@ -199,6 +225,13 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
     parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
     parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
     parts.append("")
+
+    # Cross-symbol macro rates (2026-05-27 D1): DXY / UST10Y / TIP.
+    # Применимо ко всем инструментам, особенно XAUUSD. Выводим первым
+    # блоком (canonical gold hierarchy "real yields → DXY → …").
+    if ctx.macro_rates_block:
+        parts.append(ctx.macro_rates_block)
+        parts.append("")
 
     # Per-symbol macro (с 2026-05-22): EIA + NOAA маршрутизированы по
     # инструментам, чтобы LLM не смешивал oil/gas/gold macro.

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fx_ai_trader.config.settings import AiFxTraderSettings
+from fx_ai_trader.data.macro_rates import MacroRatesProvider
 from fx_ai_trader.llm.client import DeepSeekClient
 from fx_ai_trader.llm.prompts import (
     SYSTEM_PROMPT,
@@ -178,6 +179,15 @@ def run() -> None:
     noaa_provider: NoaaOutlookProvider | None = None
     if "NG=F" in settings.symbols:
         noaa_provider = NoaaOutlookProvider(cache_ttl_sec=21600)
+    # Macro rates (DXY / UST10Y / TIP) — BUILDLOG 2026-05-27 D1.
+    # Включаем по дефолту; env-flag для отключения в тестах / при
+    # rate-limit issues yfinance. yfinance без API-ключа, retry-loop
+    # внутри библиотеки.
+    macro_rates_provider: MacroRatesProvider | None = None
+    if settings.macro_rates_enabled:
+        macro_rates_provider = MacroRatesProvider(
+            cache_ttl_sec=settings.macro_rates_cache_ttl_sec,
+        )
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -196,6 +206,7 @@ def run() -> None:
                 _run_full_cycle(
                     cycle, settings, store, adapter, llm, killswitch,
                     news_provider, eia_provider, noaa_provider,
+                    macro_rates_provider,
                 )
             except Exception:
                 log.exception("Full cycle %d crashed (продолжаю)", cycle)
@@ -227,6 +238,7 @@ def _run_full_cycle(
     news_provider: CommodityRssNewsProvider | None,
     eia_provider: EiaProvider,
     noaa_provider: NoaaOutlookProvider | None,
+    macro_rates_provider: MacroRatesProvider | None,
 ) -> None:
     log.info("─── Full cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
 
@@ -253,6 +265,7 @@ def _run_full_cycle(
         adapter, store, settings.symbols, settings.virtual_capital_usd,
         news_provider=news_provider, eia_provider=eia_provider,
         noaa_provider=noaa_provider,
+        macro_rates_provider=macro_rates_provider,
     )
     # v1.X self-reflection (2026-05-26): per-symbol perf + последние
     # closed live trades в USER_PROMPT. Источник правды: store.
@@ -267,10 +280,11 @@ def _run_full_cycle(
 
     log.info(
         "LLM call (full): positions=%d news_total=%d macro_symbols=%s "
-        "self_reflection=closed_trades:%d",
+        "us_rates=%s self_reflection=closed_trades:%d",
         len(ctx.open_positions),
         sum(len(v) for v in ctx.news_per_symbol.values()),
         ",".join(sorted(ctx.macro_per_symbol.keys())) or "none",
+        "on" if ctx.macro_rates_block else "off",
         len(recent_trades),
     )
     resp = llm.ask(SYSTEM_PROMPT, user_prompt)
