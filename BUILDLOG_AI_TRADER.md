@@ -1,5 +1,47 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-27 — v0.19: Fee Awareness в промпте (LLM знает о комиссиях)
+
+### Проблема
+
+Trade #120 ATOMUSDT (2026-05-26): бот закрыл позицию с gross PnL = +$2.14,
+но net PnL после round-trip fee оказался отрицательным (~-$2.35). LLM
+принимал решение о закрытии, не зная, что 0.12% round-trip fee съедает
+micro-profit. v0.18 корректно записывает net PnL в БД, но LLM по-прежнему
+не учитывал комиссии при принятии решения «закрыть или подождать».
+
+### Решение
+
+Добавлен блок **FEE AWARENESS** в оба промпта:
+- `SYSTEM_PROMPT` (full cycle) — 13 строк после DO-NOT-CLOSE guards
+- `SYSTEM_PROMPT_REVIEW` (review cycle) — 5 строк (compact version)
+
+Содержание правила:
+- Taker fee = 0.06% per side, round-trip = 0.12% of notional
+- Формула: `fee_cost = notional_usd * 0.0012`
+- Если gross profit < fee_cost И триггер (1-4) НЕ сработал → HOLD
+- Если триггер сработал → закрывать независимо от fee (cutting loss)
+- Запрет на закрытие ради micro-profit без триггера
+
+### Что НЕ меняется
+
+- Стратегия входа (те же триггеры, те же пороги)
+- 4 exit-триггера (invalidation / locked-profit / adverse / peak-drawdown)
+- Risk management (SL/TP geometry, R:R ≥ 1.5, confidence)
+- KillSwitch / daily loss limit
+- Net PnL reconciliation (v0.18)
+
+### Файлы
+
+- `src/ai_trader/llm/prompts.py` — FEE AWARENESS блок + docstring v0.19
+- `tests/test_ai_trader.py` — SHA256 baseline updated
+
+### Тесты
+
+140 passed (pytest tests/test_ai_trader.py)
+
+---
+
 ## 2026-05-25 — v0.18: net PnL (fee + funding) вместо gross в БД + KillSwitch
 
 **Запрос пользователя:** «главное чтоб ии считал винрейт и доход правильно».

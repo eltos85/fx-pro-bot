@@ -1888,7 +1888,7 @@ class TestSystemPromptCapitalRulesTemplate:
         ДОЛЖЕН быть байт-в-байт тот же, что был до refactor'а v0.15.
 
         Если этот тест падает → refactor сломал поведение ИИ.
-        SHA256 baseline: ac8f4a19b80879a1ad150955840343031b28aced10a0a654cf6cc1d06642942a
+        SHA256 baseline: dc44ce7253a1324d92e982102b21a7c8e06608355b694f8775d9169018e2deaf
         """
         import hashlib
 
@@ -1896,7 +1896,7 @@ class TestSystemPromptCapitalRulesTemplate:
         from ai_trader.llm.prompts import SYSTEM_PROMPT, build_system_prompt
 
         expected_sha256 = (
-            "ac8f4a19b80879a1ad150955840343031b28aced10a0a654cf6cc1d06642942a"
+            "dc44ce7253a1324d92e982102b21a7c8e06608355b694f8775d9169018e2deaf"
         )
         # 1) Module-level SYSTEM_PROMPT (default render с DEFAULT_AI_SYMBOLS).
         actual_sha = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
