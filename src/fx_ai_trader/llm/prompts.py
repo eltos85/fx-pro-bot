@@ -409,6 +409,78 @@ Wait for full confluence. This is the discipline that separates
 professional desks from retail chart-pattern guessing.
 
 ═══════════════════════════════════════════════════════════════════════
+COLD-START DISCOVERY RULE — exploring untested (symbol × side) pairs
+═══════════════════════════════════════════════════════════════════════
+
+When the PERFORMANCE BY SYMBOL × SIDE block shows `n=0 (... COLD-START
+...)` for the direction you're considering, you face a cold-start
+bias: with no closed live trade in that direction, the SELF-REFLECTION
+block has nothing to weigh against, and the natural learner bias is
+"I've never done this, so I won't". This is a documented failure mode
+in any past-performance-weighted decision system — the agent never
+explores actions it hasn't already taken.
+
+Research basis:
+- Sutton & Barto (2018) "Reinforcement Learning: An Introduction"
+  §2.7 «Optimistic Initial Values» — canonical RL technique for
+  cold-start exploration: untested actions need an explicit boost so
+  the agent samples them at least once before greedy exploitation.
+- Contextual bandits literature: «when adding new actions, initialize
+  them with optimistic priors or guaranteed minimum exposure to
+  ensure they get explored» (otherwise existing actions monopolise).
+- For commodity trading: never-tried (symbol × side) pairs are
+  unknown-unknowns, not known-failures. Avoiding them indefinitely
+  makes the sample space biased and the discipline unfalsifiable.
+
+YOU ARE PERMITTED — and encouraged — to take a SINGLE small
+"discovery trade" on a (symbol × side) pair flagged COLD-START,
+PROVIDED all four guards hold simultaneously:
+
+1. MACRO supportive: at least one research-backed macro driver
+   actively aligned with the direction (gold-bullish needs real
+   yields easing AND/OR DXY weakening; gold-bearish the inverse).
+   This is the same MACRO line you build in MACRO DRIVER step.
+2. SENTIMENT clean: `aggregate_uncertainty ≤ 0.5` (stricter than the
+   standard 0.7 gate — we want a clean signal, not a noisy guess,
+   for a trade whose primary purpose is to generate one data-point).
+3. SIZE strictly minimum: `volume_lots = 0.01` (broker step minimum
+   for the symbol — do NOT scale a discovery trade).
+4. CADENCE: at most ONE discovery trade per (symbol × side) per
+   week. The point is to produce ONE data-point, not to spam.
+
+When you open a discovery trade, your `reason` MUST begin with the
+literal prefix `COLD-START discovery:` followed by the (symbol × side)
+pair, your macro driver, and your aggregate_uncertainty. Example:
+`COLD-START discovery: XAUUSD BUY n=0; macro=real-yields easing 5d
+−13bps + DXY −0.2%; aggregate_uncertainty=0.42`. This labels the
+trade in our audit so future SELF-REFLECTION can identify discovery
+outcomes separately from full-conviction trades.
+
+What this rule is NOT:
+- NOT permission to bypass STRUCTURE/TRIGGER (rules 2–8 of the SETUP).
+  Discovery trades still require a recognisable structural pullback
+  or trigger — they just unlock the SIZE and adjust the SENTIMENT
+  gate from 0.7 to 0.5.
+- NOT permission to revenge-trade or to "make something happen" on
+  a quiet day. If MACRO is neutral, return HOLD; do not invent a
+  discovery trade.
+- NOT applicable once the (symbol × side) pair has ANY closed live
+  trade. The `COLD-START` marker is the literal gate; one trade
+  removes it.
+- NOT a probability boost. A discovery trade is statistically just
+  ONE observation — it does NOT change your priors on the strategy
+  itself, only on the (symbol × side) viability question.
+
+Discovery-trade outcome interpretation:
+- A win on a discovery trade is NOT proof the (symbol × side) works
+  — n=1 is statistical noise (sample-size principle). Treat the
+  follow-up cycles with normal-conviction discipline; do not
+  immediately scale up.
+- A loss on a discovery trade is NOT proof it does not work — same
+  n=1 caveat. SELF-REFLECTION on the next discovery decision should
+  flag this as "single observation, not yet evidence".
+
+═══════════════════════════════════════════════════════════════════════
 TRADING WINDOWS (UTC, by liquidity)
 ═══════════════════════════════════════════════════════════════════════
 
@@ -537,13 +609,18 @@ DECISION TYPES — only three
 
 OPEN — new position with SL+TP:
 - volume_lots: 0.01–0.50 (broker margin safety cap, do not exceed).
+  For COLD-START discovery trades: strictly 0.01 (see COLD-START
+  DISCOVERY RULE section).
 - SL+TP required, both in the correct direction:
   BUY  → SL < entry < TP
   SELL → SL > entry > TP
-- aggregate_uncertainty > 0.7 → return HOLD instead.
+- aggregate_uncertainty > 0.7 → return HOLD instead. For COLD-START
+  discovery the gate tightens to 0.5 (we want a CLEANER signal for
+  an exploration trade, not a noisier one).
 - `reason` MUST cite the macro thesis (dominant driver(s)) — this is
   the implicit thesis that future close-decisions will be judged
-  against (see THESIS DISCIPLINE).
+  against (see THESIS DISCIPLINE). For discovery trades, `reason`
+  MUST begin with the literal prefix `COLD-START discovery:`.
 
 CLOSE — close an existing position. `thesis_status` REQUIRED; see
 THESIS DISCIPLINE for definitions. Valid trigger families:
@@ -599,6 +676,14 @@ Write a brief commentary (3-6 short lines) covering, in order:
      justification this cycle (more drivers aligned), but it is NOT
      an automatic skip — single losses on small n are not statistical
      evidence (sample-size principle).
+   - COLD-START handling: if PERFORMANCE BY SYMBOL × SIDE flags the
+     (symbol × side) you're considering as `n=0 (COLD-START)`, do
+     NOT treat absence of evidence as evidence of absence. Either
+     HOLD on lack of MACRO/STRUCTURE confluence (normal reason), OR
+     invoke the COLD-START DISCOVERY RULE (separate section) to take
+     ONE minimum-size discovery trade if its four guards hold. Never
+     refuse purely because "I have no past trades in this direction"
+     — that is the cold-start trap.
 6) DECISION rationale (which drivers align, why this size, why this
    stop).
 
@@ -673,6 +758,31 @@ Example OPEN (oil, supply-led + technical confluence):
         "intensity": 0.75,
         "uncertainty": 0.20,
         "forwardness": 0.85
+      }
+    ]
+  }
+}
+
+Example OPEN — COLD-START discovery (gold long, n=0 in history;
+applies COLD-START DISCOVERY RULE: minimum size, sentiment ≤0.5):
+{
+  "action": "open",
+  "symbol": "XAUUSD",
+  "side": "BUY",
+  "volume_lots": 0.01,
+  "stop_loss": 2675.00,
+  "take_profit": 2730.00,
+  "reason": "COLD-START discovery: XAUUSD BUY n=0; macro=real-yields easing 5d -13bps + DXY -0.21% + TIP +0.40%; aggregate_uncertainty=0.42; 4H RSI 24 oversold at prior session VWAP support",
+  "sentiment": {
+    "aggregate_uncertainty": 0.42,
+    "items": [
+      {
+        "title_snippet": "Fed minutes signal data-dependent path; real yields ease across curve",
+        "relevance": 0.85,
+        "polarity": 0.60,
+        "intensity": 0.55,
+        "uncertainty": 0.30,
+        "forwardness": 0.65
       }
     ]
   }
@@ -778,6 +888,60 @@ def format_performance_by_symbol(stats: list[dict[str, Any]] | None) -> str:
     return "\n".join(lines)
 
 
+def _format_pnl_side_line(stat: dict[str, Any]) -> str:
+    """Одна строка таблицы Performance by Symbol × Side (cold-start aware)."""
+    sym = stat["symbol"]
+    side = stat["side"]
+    n = stat["n"]
+    label = f"{sym} {side}"
+    if n == 0:
+        # Явный cold-start marker — на эту строку смотрит DISCOVERY RULE
+        # в SYSTEM_PROMPT (см. раздел COLD-START DISCOVERY RULE).
+        return (
+            f"- {label}: n=0 (NO live trades yet — COLD-START, "
+            f"see DISCOVERY RULE)"
+        )
+    wins = stat["wins"]
+    wr = stat["win_rate_pct"]
+    avg = stat["avg_pnl_usd"]
+    summ = stat["sum_pnl_usd"]
+    return (
+        f"- {label}: n={n}, wins={wins} ({wr:.1f}%), "
+        f"avg_pnl={avg:+.2f}$, sum_pnl={summ:+.2f}$"
+    )
+
+
+def format_performance_by_symbol_side(
+    stats: list[dict[str, Any]] | None,
+) -> str:
+    """Render Performance by (Symbol × Side) блок для USER_PROMPT.
+
+    Дополняет :func:`format_performance_by_symbol`: разбивает агрегаты
+    по BUY/SELL, явно помечая (symbol × side) пары с ``n=0`` маркером
+    "COLD-START, see DISCOVERY RULE". SYSTEM_PROMPT раздел COLD-START
+    DISCOVERY RULE опирается на эту строку при принятии решения о
+    permitted single discovery trade в untested направлении.
+
+    Зачем нужно отдельно от per-symbol: per-symbol агрегат
+    «XAUUSD n=3 wins 100%» скрывает что все 3 — это SHORT trades, и
+    XAUUSD BUY = 0 trades. Без разбивки self-reflection систематически
+    избегает untested side (cold-start trap, Sutton & Barto 2018 §2.7).
+
+    Источник правды — `AiFxTraderStore.get_pnl_by_symbol_side`.
+
+    Возвращает пустую строку при ``stats is None`` или пустом списке.
+    Если ВСЕ (symbol × side) имеют n=0 — блок всё равно отдаём
+    (full cold-start cohort — DISCOVERY RULE применим ко всем).
+    """
+    if not stats:
+        return ""
+    lines = [
+        "=== PERFORMANCE BY SYMBOL × SIDE (live, since experiment start) ==="
+    ]
+    lines.extend(_format_pnl_side_line(s) for s in stats)
+    return "\n".join(lines)
+
+
 def _format_trade_line(trade: dict[str, Any]) -> str:
     """Multi-line компактное представление одного closed trade."""
     tid = trade["id"]
@@ -824,6 +988,7 @@ def build_user_prompt(
     market_context: str,
     *,
     performance_by_symbol: str | None = None,
+    performance_by_symbol_side: str | None = None,
     recent_trades: str | None = None,
 ) -> str:
     """Full-cycle USER_PROMPT.
@@ -831,10 +996,15 @@ def build_user_prompt(
     Опциональные параметры (v1.X self-reflection, 2026-05-26):
     - ``performance_by_symbol``: вывод `format_performance_by_symbol(...)`,
       агрегаты per-symbol с начала эксперимента.
+    - ``performance_by_symbol_side``: вывод
+      `format_performance_by_symbol_side(...)`, разбивка по BUY/SELL
+      с явным cold-start маркером для (symbol × side) пар без
+      закрытых trades. v1.Y COLD-START DISCOVERY RULE (2026-05-28) —
+      опирается на этот блок при принятии решения о discovery trade.
     - ``recent_trades``: вывод `format_recent_trades(...)`,
       последние closed trades с open/close reason.
 
-    Когда оба ``None`` (или пустые) — prompt идентичен v1.0 (backward
+    Когда все ``None`` (или пустые) — prompt идентичен v1.0 (backward
     compatibility, существующие тесты `tests/test_fx_ai_trader.py` не
     падают).
 
@@ -844,10 +1014,17 @@ def build_user_prompt(
     встраивать внутрь market_context (который собирается в
     `trading/context.py` и относится к рыночным данным, а не к
     собственной истории бота).
+
+    Порядок блоков history (от менее к более детальному):
+    1. PERFORMANCE BY SYMBOL (агрегат — общий fingerprint по символу)
+    2. PERFORMANCE BY SYMBOL × SIDE (split — для cold-start detection)
+    3. RECENT CLOSED TRADES (per-trade detail)
     """
     parts: list[str] = []
     if performance_by_symbol:
         parts.append(performance_by_symbol)
+    if performance_by_symbol_side:
+        parts.append(performance_by_symbol_side)
     if recent_trades:
         parts.append(recent_trades)
     history_block = ("\n\n".join(parts) + "\n\n") if parts else ""

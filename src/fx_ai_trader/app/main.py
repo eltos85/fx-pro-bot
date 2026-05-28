@@ -25,6 +25,7 @@ from fx_ai_trader.llm.prompts import (
     build_user_prompt,
     build_user_prompt_review,
     format_performance_by_symbol,
+    format_performance_by_symbol_side,
     format_recent_trades,
 )
 from fx_ai_trader.news.eia import EiaProvider
@@ -270,11 +271,18 @@ def _run_full_cycle(
     # v1.X self-reflection (2026-05-26): per-symbol perf + последние
     # closed live trades в USER_PROMPT. Источник правды: store.
     # См. BUILDLOG_AI_FX_TRADER.md v1.X запись и плановый файл.
+    # v1.Y COLD-START (2026-05-28): дополнительно per-(symbol × side)
+    # split, чтобы LLM явно видел untested направления и мог
+    # применить COLD-START DISCOVERY RULE (Sutton & Barto 2018 §2.7).
     symbol_stats = store.get_pnl_by_symbol(settings.symbols)
+    symbol_side_stats = store.get_pnl_by_symbol_side(list(settings.symbols))
     recent_trades = store.get_recent_closed_trades(limit=10)
     user_prompt = build_user_prompt(
         format_context_for_prompt(ctx),
         performance_by_symbol=format_performance_by_symbol(symbol_stats),
+        performance_by_symbol_side=format_performance_by_symbol_side(
+            symbol_side_stats
+        ),
         recent_trades=format_recent_trades(recent_trades),
     )
 

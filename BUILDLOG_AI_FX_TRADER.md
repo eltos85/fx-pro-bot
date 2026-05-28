@@ -1,5 +1,128 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-28 — feat(cold-start): per-(symbol × side) PnL + DISCOVERY RULE в SYSTEM_PROMPT
+
+`коммит при deploy`
+
+### Контекст и trigger
+
+После деплоя D1 (macro-rates, 2026-05-27 ~07:30 UTC) пользователь
+снова поднял красный флаг: «он всё ещё не открыл ни одной позиции».
+
+Расследование показало две причины (см. AskQuestion 2026-05-28 ~10:30
+UTC+3):
+
+1. **Strict confluence policy** (~69% всех hold reasons): SYSTEM_PROMPT
+   раздел `THE SETUP — MACRO-FLOW CONFLUENCE PULLBACK` требует full
+   8-rule confluence. Даже когда macro stack благоприятен после D1
+   (real yields easing, DXY weakening), но структура/триггер не
+   совпадают (например, цена в downtrend без reversal pattern), бот
+   возвращает HOLD. Это правильное поведение — менять confluence
+   policy без long-term статистики запрещено (`sample-size.mdc`).
+
+2. **Self-reflection bias / cold-start trap** (~оставшиеся hold'ы):
+   `get_pnl_by_symbol` агрегирует через side. Для XAUUSD выдаёт
+   `n=3, WR 100%, +$21` — но все 3 трейда были SHORT, а LONG = 0
+   trades в истории. LLM в SELF-REFLECTION блоке видит «3/3 wins»
+   и думает «золото идёт» в обе стороны, но при анализе bullish
+   setup'а на gold у него **нет** ни одной успешной long-сделки
+   как референса → cold-start trap (canonical RL failure mode).
+
+Пользователь явно выбрал **fix-trauma** опцию: «Снять травму по
+золоту: добавить правило 'если ты никогда не торговал инструмент в
+эту сторону — попробуй один раз минимальным размером для
+эксперимента'».
+
+### Research basis
+
+| Источник | Цитата / положение |
+|---|---|
+| Sutton & Barto (2018) "Reinforcement Learning: An Introduction" §2.7 «Optimistic Initial Values» | «optimism encourages action-value methods to explore. Whichever actions are initially selected, the reward is less than the starting estimates; the learner switches to other actions, being 'disappointed'. The result is that all actions are tried several times before the value estimates converge» |
+| Contextual Bandits literature (Personizely 2025; classic Sutton/Barto contextual bandit chapter) | «When adding new actions, initialize them with optimistic priors or guaranteed minimum exposure to ensure they get explored. Without this, new options might never be tried if existing options have a strong estimated performance» |
+| Lopez de Prado (2018) "Advances in Financial ML" — exploration-exploitation в systematic trading | «Asset managers should focus their efforts on research developing theories, not backtesting trading rules» — applied: untested (symbol × side) — это unexplored hypothesis, не known-failure |
+
+### Что изменено
+
+| Файл | Что |
+|---|---|
+| `src/fx_ai_trader/state/db.py` | новая функция `AiFxTraderStore.get_pnl_by_symbol_side(symbols)` — агрегаты per-(symbol × side); явный `n=0` для untested pair; only `is_paper=0` (consistent с `get_pnl_by_symbol`); BUY первой per symbol |
+| `src/fx_ai_trader/llm/prompts.py` | новый помощник `format_performance_by_symbol_side(stats)` + новый раздел SYSTEM_PROMPT **`COLD-START DISCOVERY RULE`** + новый JSON example `Example OPEN — COLD-START discovery (gold long, n=0)` + bullet в SELF-REFLECTION step 5 + tightening в DECISION TYPES OPEN: для discovery `aggregate_uncertainty` gate 0.7→0.5 + `volume_lots = 0.01` мандат + `reason` prefix `COLD-START discovery:` |
+| `src/fx_ai_trader/llm/prompts.py::build_user_prompt` | новый optional kwarg `performance_by_symbol_side` (вставляется между per-symbol и recent-trades); порядок blocks: per-symbol → per-side → recent-trades; backward-compat (без kwarg prompt идентичен v1.X) |
+| `src/fx_ai_trader/app/main.py` | вызов `store.get_pnl_by_symbol_side(...)` + проброс `format_performance_by_symbol_side(...)` в `build_user_prompt`; log message не менялся (per-side block — это просто расширение history) |
+| `tests/test_fx_ai_trader_cold_start.py` | 23 теста: DB-aggregation (5: cold-start flag/side split/paper exclusion/order/mixed WR), format helper (4: empty/cold-start marker/full data/no $ on n=0 line), SYSTEM_PROMPT content asserts (7: section header/Sutton citation/four guards/reason prefix/«NOT» clauses/decision tightening/SELF-REFLECTION bullet), JSON example asserts (3: present/min size/uncertainty≤0.5), build_user_prompt integration (4: include/omit/backward-compat/order) |
+
+### Дизайн правила (что именно разрешается)
+
+**Гейт** (все 4 guards должны выполниться одновременно):
+1. **MACRO supportive** — research-backed driver aligned с direction
+2. **SENTIMENT clean** — `aggregate_uncertainty ≤ 0.5` (tightened
+   с 0.7 для full-conviction trades — chcемо CLEAN сигнал для
+   exploration trade)
+3. **SIZE strictly minimum** — `volume_lots = 0.01` (broker step)
+4. **CADENCE** — at most ONE discovery trade per (symbol × side)
+   per week
+
+**Что НЕ позволяется:**
+- Bypass STRUCTURE/TRIGGER confluence (rules 2–8 of THE SETUP) —
+  cold-start unlocks только size + sentiment gate
+- Revenge-trade или «make something happen» on a quiet day
+- Discovery trade на (symbol × side) с **любым** closed trade в
+  истории (literal gate — `n=0` only)
+
+**Outcome interpretation в SYSTEM_PROMPT:**
+- Win на discovery ≠ доказательство (n=1 — статистический шум,
+  `sample-size.mdc` принципиально)
+- Loss на discovery ≠ доказательство по тем же причинам
+- SELF-REFLECTION на следующем discovery должен flag «single
+  observation, not yet evidence»
+
+### Compliance check
+
+| Rule | Соблюдение |
+|---|---|
+| `strategy-guard.mdc` (изменение торговой логики только с согласия пользователя) | Пользователь явно одобрил опцию `fix_trauma` в AskQuestion 2026-05-28 |
+| `no-data-fitting.mdc` (research как источник правды) | Sutton & Barto 2018 §2.7 + contextual bandits literature процитированы в коде (SYSTEM_PROMPT блок «Research basis») и в этом BUILDLOG |
+| `sample-size.mdc` (n=1 ≠ evidence) | Явно прописано в SYSTEM_PROMPT «Discovery-trade outcome interpretation»; n=1 win НЕ scale up, n=1 loss НЕ disable |
+| `buildlog.mdc` (логирование изменений стратегии) | Эта запись |
+| `api-docs.mdc` | Не применимо — правка чисто prompt+DB-aggregation, никаких API-параметров |
+
+### Acceptance criteria (smoke + observability)
+
+**Сразу после deploy:**
+- `docker logs fx-pro-bot-ai-trader-1 --tail 80` показывает `LLM
+  call (full) … us_rates=on` (regression-check D1 не сломан)
+- Один full cycle прошёл без exception в коде (BUILDLOG отметит
+  cycle_id)
+- USER_PROMPT в логах содержит `=== PERFORMANCE BY SYMBOL × SIDE
+  (live, since experiment start) ===` блок с `COLD-START` маркером
+  на untested направлениях
+
+**В течение 48 часов:**
+- В analysis (thinking) блоке хотя бы раз должно появиться явное
+  упоминание «COLD-START» или «discovery» (LLM прочитал новый
+  раздел)
+- Если бот откроет discovery trade — он должен соответствовать
+  всем guards: `volume_lots == 0.01`, reason начинается с
+  `COLD-START discovery:`, sentiment.aggregate_uncertainty ≤ 0.5
+
+**Что НЕ acceptance criterion:**
+- Открытие хотя бы одной discovery trade в 48h — это
+  curve-fitting под желаемый результат (`no-data-fitting.mdc`).
+  Если 4 guards не выполняются, HOLD — правильное поведение.
+- Изменение general win-rate за 48h — sample слишком мал
+  (`sample-size.mdc`).
+
+### Что НЕ сделано в этом коммите
+
+- Re-evaluation strict confluence policy (~69% hold'ов). Это
+  отдельный вопрос требующий long-term статистики; pas changement
+  без обсуждения (sample-size.mdc + strategy-guard.mdc).
+- D2-D5 из NEXT_PHASE_AI_FX_TRADER.md (review-noise guard, DXY
+  context — уже сделан в D1, mandatory sentiment, reason length
+  alignment). Остаются в плане.
+
+---
+
 ## 2026-05-27 — feat(macro-rates D1): DXY + UST10Y + TIPS ETF в context (Phase 2)
 
 `коммит при deploy`

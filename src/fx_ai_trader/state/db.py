@@ -445,6 +445,86 @@ class AiFxTraderStore:
             )
         return out
 
+    def get_pnl_by_symbol_side(
+        self, symbols: list[str]
+    ) -> list[dict[str, Any]]:
+        """Per-(symbol × side) агрегаты по закрытым live-позициям.
+
+        Возвращает по 2 записи на каждый символ из ``symbols`` (BUY+SELL,
+        порядок ``symbols`` сохраняется; внутри symbol — BUY первой). Если
+        по (symbol × side) нет закрытых live-трейдов — запись с ``n=0``
+        (явный cold-start сигнал, NOT пропуск).
+
+        Поля: ``symbol``, ``side``, ``n``, ``wins``, ``win_rate_pct``,
+        ``avg_pnl_usd``, ``sum_pnl_usd``.
+
+        Зачем: основной ``get_pnl_by_symbol`` агрегирует через side, что
+        скрывает критическую информацию вида «XAUUSD SELL 3/3 wins, но
+        XAUUSD BUY 0 trades в истории». Self-reflection в SYSTEM_PROMPT
+        без этой разбивки получает confounded WR и систематически
+        избегает untested направления (cold-start bias).
+
+        Research basis: Sutton & Barto (2018) §2.7 «Optimistic Initial
+        Values» — explicit treatment of (action × state) pairs with n=0
+        is required to avoid cold-start trap in any value-tracking
+        learner. См. SYSTEM_PROMPT раздел COLD-START DISCOVERY RULE и
+        BUILDLOG 2026-05-28.
+
+        Только ``is_paper = 0`` (paper-fills не учитываются — могут
+        искажать статистику; same as get_pnl_by_symbol).
+        """
+        with self._conn() as c:
+            placeholders = ",".join("?" * len(symbols)) if symbols else "''"
+            rows = c.execute(
+                f"""
+                SELECT symbol,
+                       side,
+                       COUNT(*) AS n,
+                       COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                       COALESCE(AVG(realized_pnl_usd), 0.0) AS avg_pnl,
+                       COALESCE(SUM(realized_pnl_usd), 0.0) AS sum_pnl
+                FROM positions
+                WHERE closed_at IS NOT NULL
+                  AND is_paper = 0
+                  AND symbol IN ({placeholders})
+                GROUP BY symbol, side
+                """,
+                symbols,
+            ).fetchall()
+        by_key = {(r["symbol"], r["side"]): r for r in rows}
+        out: list[dict[str, Any]] = []
+        for sym in symbols:
+            for side in ("BUY", "SELL"):
+                r = by_key.get((sym, side))
+                if r is None:
+                    out.append(
+                        {
+                            "symbol": sym,
+                            "side": side,
+                            "n": 0,
+                            "wins": 0,
+                            "win_rate_pct": 0.0,
+                            "avg_pnl_usd": 0.0,
+                            "sum_pnl_usd": 0.0,
+                        }
+                    )
+                    continue
+                n = int(r["n"])
+                wins = int(r["wins"])
+                wr = (wins / n * 100.0) if n > 0 else 0.0
+                out.append(
+                    {
+                        "symbol": sym,
+                        "side": side,
+                        "n": n,
+                        "wins": wins,
+                        "win_rate_pct": wr,
+                        "avg_pnl_usd": float(r["avg_pnl"] or 0.0),
+                        "sum_pnl_usd": float(r["sum_pnl"] or 0.0),
+                    }
+                )
+        return out
+
     def get_recent_closed_trades(
         self, limit: int = 10, reason_clamp: int = 180
     ) -> list[dict[str, Any]]:
