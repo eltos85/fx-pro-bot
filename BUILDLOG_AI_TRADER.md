@@ -1,5 +1,181 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-28 — v0.33 hotfix: max_tokens 4096→8192 + DB reset для чистого v0.31 старта
+
+Два production-фикса после деплоя v0.30+v0.31+v0.32 на VPS.
+
+### Hotfix #1: `Parse error: no JSON object found in response`
+
+**Симптом:** в production-логах подряд два цикла с ошибкой
+парсинга — LLM возвращает только `**ANALYSIS COMMENTARY**` без JSON.
+Tokens в логе: `in=2502 out=4096` — упёрлись ровно в `max_tokens`.
+
+**Причина:** v0.30+v0.31+v0.32 промпт стал заметно длиннее
+(EQUITY READ + MACRO REGIME + PER-ASSET HIERARCHY + MFP + COST
+AWARENESS + DECISION JSON). DeepSeek-V4-Flash thinking-блоки
+(~2-4K токенов) + verbose commentary (~3-4K) + JSON (~500) не
+влезают в default `max_tokens=4096`: ответ обрезается на середине
+commentary, до JSON очередь не доходит.
+
+**Фикс:** поднять default `deepseek_max_tokens` с 4096 до 8192.
+
+- `src/ai_trader/config/settings.py`: `default=8192` для
+  `deepseek_max_tokens`, плюс развёрнутый комментарий-обоснование
+  (ссылки на DeepSeek beta-limit и Anthropic SDK).
+- `src/ai_trader/llm/client.py`: `max_tokens: int = 8192` в
+  конструкторе `DeepSeekClient`.
+- `.env.example`: добавлен `AI_TRADER_DEEPSEEK_MAX_TOKENS=8192` с
+  объяснением почему именно 8192 (не выше).
+
+**Почему именно 8192, а не больше:**
+- DeepSeek поддерживает в V4-Flash до 384K output tokens по доке
+  (<https://deepseekai.guide/guides/deepseek-character-limits/>),
+  но **Anthropic SDK** (на котором мы стоим через `/anthropic`-compat
+  endpoint) при `max_tokens > ~8K` падает с
+  `ValueError: Streaming is required for operations that may take
+  longer than 10 minutes`. SDK прикидывает время по
+  `max_tokens × tokens/sec` и блокирует non-streaming. Воспроизведено
+  на VPS: пробовал 32768 → SDK ValueError; 16384 → SDK ValueError;
+  8192 → работает.
+- 8192 = beta-лимит DeepSeek
+  (<https://api-docs.deepseek.com/news/news0725> «8K max_tokens (Beta)»),
+  принимается без переключения на streaming.
+- На production-цикле после фикса: `tokens out=5466 / 8192` (67%
+  использовано) — comfortable headroom. JSON парсится OK.
+
+**Постоянное решение (deferred):** перевод `DeepSeekClient._call`
+на streaming через `client.messages.stream(...)` позволит
+использовать любой `max_tokens` без SDK-ограничения. Сейчас не
+делаем — 8192 покрывает все наблюдаемые usage patterns с запасом.
+
+### Hotfix #2: DB reset — v0.21 history путала v0.31 LLM
+
+**Симптом:** после деплоя v0.30+v0.31+v0.32 свежий LLM-цикл выдавал
+EQUITY READ:
+> «Equity $433.43 = 86.7% of initial; peak drawdown -17.99% →
+> 80-90% zone (caution) AND peak drawdown >15% → cooling-off: prefer
+> trend-following entries, avoid counter-trend.»
+
+То есть бот стартовал в **caution-режиме** (low-band only, no
+cold-start) и резал размер позиций — хотя пользовательский mandate
+был aggressive ($500 / $350 daily / $100 lot / 5 positions).
+
+**Причина:** SQLite volume `ai_trader_data` сохранил историю
+**v0.21 эпохи** (с 2026-05-03):
+
+| Что в БД | Сколько |
+|---|---|
+| `decisions` | 3806 (25 дней персонажа v0.21 «HOLD most cycles») |
+| `positions` closed | 122 (старый risk_per_trade=$10, $50 killswitch) |
+| Total realized P&L | −$66.44 |
+
+Отсюда `peak_equity=$528.53` (был профит, потом drawdown),
+`current=$433.43`, drawdown −18% → v0.32 EQUITY-BASED SIZE ADAPTER
+автоматически переключал бота в `<80% zone` и `peak DD>15%` режим.
+Дополнительно: SELF-REFLECTION читал старые decisions с старым
+персонажем и стилем рассуждений — нерелевантно для v0.31
+aggressive mandate.
+
+Это классический случай «новый DGP, старая выборка» из
+`.cursor/rules/no-data-fitting.mdc` и `sample-size.mdc`:
+- Risk-per-trade сменился (2% → 10%).
+- Max-lot сменился (≈$10 → $100).
+- Killswitch сменился ($50 → $350).
+- Персонаж LLM сменился (HOLD-leaning → aggressively seek setups).
+- Promt-структура сменилась (institutional rewrite, MFP, thesis).
+
+История 3806 решений и 122 сделок — измерения **другого процесса**,
+их применение к новому = curve-fit к шуму прошлой эпохи.
+
+**Фикс:** переименовать SQLite-файл в backup (обратимо), пересоздать
+ai-trader контейнер → миграции создают пустые таблицы → чистый
+старт.
+
+```bash
+docker compose stop ai-trader
+docker run --rm -v fx-pro-bot_ai_trader_data:/data alpine:3 \
+  mv /data/ai_trader.sqlite \
+     /data/ai_trader.sqlite.bak.v021-3806dec-122closed-$(date -u +%Y%m%dT%H%M%SZ)
+docker compose up -d ai-trader
+```
+
+**Backup путь:** внутри volume `fx-pro-bot_ai_trader_data` лежит
+`ai_trader.sqlite.bak.v021-3806dec-122closed-20260528T152259Z`
+(54 MB). При необходимости — `mv ... ai_trader.sqlite` и рестарт.
+
+**Что НЕ затронуто резетом:**
+- Bybit demo-аккаунт (открытые/закрытые ордера на бирже) —
+  абсолютно независим, БД хранила только метаданные. Бот при
+  следующем сигнале откроет позиции с нуля.
+- `fx-ai-trader` контейнер (Forex) — не пересоздавался.
+- Все `AI_FX_TRADER_*` env переменные — без изменений.
+
+**Verification после reset:**
+- Cycle 1 на чистой БД (15:23 UTC):
+  > `EQUITY READ: Equity $500 = 100% initial, peak $500 — normal
+  > zone, no drawdown`
+- LLM tokens: `out=5466/8192` (parse OK).
+- Решение HOLD: «no MFP≥3 qualifying setup, cold-start requires
+  macro thesis which is absent» — **легитимный HOLD по v0.31 cold-start
+  rules** (а не залипание в caution-режиме из-за фейковой просадки).
+
+### VPS .env финальное состояние (только bybit `ai-trader`)
+
+```
+AI_TRADER_RISK_PER_TRADE=0.10
+AI_TRADER_MAX_DAILY_LOSS=350
+AI_TRADER_MAX_TOTAL_LOSS=500
+AI_TRADER_MAX_POSITIONS=5
+AI_TRADER_MAX_POSITION_SIZE_USD=100
+AI_TRADER_DEEPSEEK_MAX_TOKENS=8192
+```
+
+`AI_FX_TRADER_*` — без изменений, fx-ai-trader контейнер
+не пересоздавался (Up 5 hours на момент финального verify).
+
+### Изоляция при деплое
+
+Использован селективный rebuild без триггера full GH Actions
+workflow (см. `.cursor/rules/deploy-vps.mdc`):
+
+```bash
+docker compose up -d --no-deps ai-trader
+```
+
+`--no-deps` гарантирует что compose не трогает `advisor`,
+`bybit-bot`, `fx-ai-trader`. Подтверждено через `docker compose ps`:
+`fx-ai-trader-1` остался `Up 5 hours` (не пересоздавался), цикл
+review продолжается без перерывов.
+
+### Файлы
+
+- `src/ai_trader/config/settings.py` — default `deepseek_max_tokens`
+  4096 → 8192 + обоснование.
+- `src/ai_trader/llm/client.py` — default `max_tokens` 4096 → 8192.
+- `.env.example` — пример переменной + объяснение почему именно 8192.
+- `BUILDLOG_AI_TRADER.md` — эта запись.
+
+### Acceptance
+
+- ✅ 1277/1277 тестов проходят (`pytest tests/ -x -q`).
+- ✅ Production-цикл после фикса: `out=5466/8192` (67%, headroom 33%).
+- ✅ Parse error больше не возникает.
+- ✅ Свежая БД: `EQUITY $500 = 100% initial, drawdown=0%`.
+- ✅ `fx-ai-trader` не пересоздавался (Up 5h на момент финального verify).
+
+### Связь с правилами
+
+- `.cursor/rules/no-data-fitting.mdc` — DB reset обоснован новым
+  DGP (risk, lot, persona, prompt — всё сменилось).
+- `.cursor/rules/sample-size.mdc` — 3806 решений и 122 сделки от
+  v0.21 — это выборка из другого процесса, не подходит для
+  выводов про v0.31.
+- `.cursor/rules/deploy-vps.mdc` — селективный rebuild через
+  `up -d --no-deps`, фикс задеплоен только в один сервис.
+- `.cursor/rules/api-docs.mdc` — выбор 8192 обоснован ссылками на
+  официальные доки DeepSeek и Anthropic SDK, а не «потюнили пока
+  заработало».
+
 ## 2026-05-28 — v0.30 institutional rewrite + v0.31 aggressive mandate + v0.32 EQUITY AWARENESS
 
 Тройной apgrade в одну сессию. Reset n=0 (новые параметры + новый промпт

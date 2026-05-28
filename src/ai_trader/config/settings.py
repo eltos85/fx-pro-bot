@@ -39,8 +39,21 @@ class AiTraderSettings(BaseSettings):
         default="deepseek-v4-flash",
         validation_alias="AI_TRADER_DEEPSEEK_MODEL",
     )
+    # v0.33 (2026-05-28): bump 4096 → 8192. С v0.30+v0.31+v0.32 промптом
+    # (institutional rewrite + verbose commentary: EQUITY READ + MACRO
+    # REGIME + PER-ASSET HIERARCHY + MFP + COST AWARENESS + JSON) thinking
+    # блоки DeepSeek-V4-Flash ~2-4K + commentary ~3-4K + JSON ~500 не
+    # умещались в 4096 — ответ обрезался на commentary, JSON не
+    # генерировался («Parse error: no JSON object found»).
+    # 8192 = beta-limit DeepSeek (https://api-docs.deepseek.com/news/news0725
+    # "8K max_tokens (Beta)"), Anthropic-compat endpoint его принимает без
+    # требования streaming (порог nonstreaming-timeout SDK ≈ 10 мин).
+    # Выше 8192 (например 16384/32768) ловим:
+    # ValueError: Streaming is required for operations that may take longer
+    # than 10 minutes — SDK прикидывает время по max_tokens × tokens/sec
+    # и блокирует non-streaming запрос.
     deepseek_max_tokens: int = Field(
-        default=4096, validation_alias="AI_TRADER_DEEPSEEK_MAX_TOKENS"
+        default=8192, validation_alias="AI_TRADER_DEEPSEEK_MAX_TOKENS"
     )
     deepseek_thinking_enabled: bool = Field(
         default=True, validation_alias="AI_TRADER_DEEPSEEK_THINKING"
