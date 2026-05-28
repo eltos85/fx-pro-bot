@@ -92,6 +92,32 @@ class Ticker:
     funding_rate: float
     volume_24h: float
     price_change_pct_24h: float
+    # v0.21 (2026-05-28): next funding settlement timestamp в ms (Bybit
+    # ``nextFundingTime`` поле тикера). По умолчанию каждые 8ч —
+    # 00:00 / 08:00 / 16:00 UTC. Используется в context.py чтобы
+    # показать LLM "до funding осталось N min, expected cost $X".
+    # 0 = биржа не вернула (rare) — LLM получит "next: unknown".
+    next_funding_time_ms: int = 0
+
+
+@dataclass
+class FundingEvent:
+    """v0.21: одно funding settlement из transaction-log.
+
+    Bybit endpoint ``/v5/account/transaction-log`` возвращает поля:
+    - ``type=SETTLEMENT`` для funding
+    - ``funding`` (string): подписанное USD-значение per settlement.
+      Знак: отрицательное = бот заплатил (long при rate>0 / short при
+      rate<0), положительное = получил (long при rate<0 / short при rate>0).
+    - ``transactionTime`` (ms): момент settlement (всегда 00/08/16 UTC).
+    - ``symbol``, ``side``: для матчинга с позицией.
+
+    Funding в ``closedPnl`` НЕ включается, поэтому надо собирать отдельно.
+    """
+    symbol: str
+    side: str  # "Buy" / "Sell"
+    funding_usd: float  # signed
+    transaction_time_ms: int
 
 
 @dataclass
@@ -179,6 +205,7 @@ class AiBybitClient:
                 funding_rate=float(t.get("fundingRate", 0) or 0),
                 volume_24h=float(t.get("volume24h", 0) or 0),
                 price_change_pct_24h=float(t.get("price24hPcnt", 0) or 0) * 100,
+                next_funding_time_ms=int(t.get("nextFundingTime", 0) or 0),
             )
         except (ValueError, TypeError):
             log.exception("ticker parse failed %s: %s", symbol, t)
@@ -357,6 +384,98 @@ class AiBybitClient:
                 )
             except (ValueError, TypeError):
                 continue
+        return out
+
+    def get_funding_for_position(
+        self,
+        symbol: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+        side: str | None = None,
+    ) -> list[FundingEvent] | None:
+        """v0.21: вытащить все funding settlements по ``symbol`` в окне ``[start_ms, end_ms]``.
+
+        Идём через ``/v5/account/transaction-log`` с фильтрами
+        ``category=linear``, ``type=SETTLEMENT``, ``symbol``,
+        ``startTime``/``endTime``. Bybit V5 max ``limit=50`` per page,
+        делаем pagination через ``cursor`` пока он возвращается.
+
+        Возвращает:
+        - ``[]`` — окно валидное, settlement не было (позиция не пересекла
+          00/08/16 UTC, либо ``end_ms ≤ start_ms``).
+        - ``None`` — API упал / non-zero retCode. Caller должен оставить
+          ``funding_usd=NULL`` и попробовать в следующий reconcile-цикл.
+        - список ``FundingEvent`` — все settlement'ы. ``side`` фильтр
+          опциональный (если позиция Buy, funding запись тоже side=Buy
+          для linear perp; bybit_bot/fx_pro_bot такой match делают по
+          side+symbol совпадению).
+
+        ВАЖНО: если в окне было несколько closed позиций по одному
+        символу — этот метод вернёт ВСЕ их funding'ы. Caller должен
+        правильно сужать ``[start_ms, end_ms]`` под конкретную позицию
+        (использовать ``opened_at``..``closed_at + slack``).
+        """
+        if end_ms <= start_ms:
+            return []
+        out: list[FundingEvent] = []
+        cursor: str | None = None
+        max_pages = 20
+        page = 0
+        while page < max_pages:
+            page += 1
+            try:
+                params: dict = {
+                    "category": self._category,
+                    "symbol": symbol,
+                    "type": "SETTLEMENT",
+                    "startTime": int(start_ms),
+                    "endTime": int(end_ms),
+                    "limit": 50,
+                }
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._session.get_transaction_log(**params)
+            except Exception:
+                log.exception(
+                    "get_transaction_log failed for %s [%d..%d] page=%d",
+                    symbol, start_ms, end_ms, page,
+                )
+                return None
+            ret_code = resp.get("retCode")
+            if ret_code not in (0, None):
+                log.warning(
+                    "get_transaction_log non-zero retCode: code=%s msg=%s "
+                    "symbol=%s window=[%d..%d]",
+                    ret_code, resp.get("retMsg", ""), symbol, start_ms, end_ms,
+                )
+                return None
+            result = resp.get("result", {}) or {}
+            items = result.get("list", []) or []
+            for it in items:
+                try:
+                    funding_str = it.get("funding", "0") or "0"
+                    funding_val = float(funding_str)
+                    if funding_val == 0:
+                        continue
+                    row_side = it.get("side", "")
+                    if side is not None and row_side != side:
+                        continue
+                    out.append(
+                        FundingEvent(
+                            symbol=it.get("symbol", symbol),
+                            side=row_side,
+                            funding_usd=funding_val,
+                            transaction_time_ms=int(
+                                it.get("transactionTime", 0) or 0
+                            ),
+                        )
+                    )
+                except (ValueError, TypeError):
+                    continue
+            cursor = result.get("nextPageCursor") or None
+            if not cursor:
+                break
         return out
 
     # ─── Orders / leverage / SL-TP ───────────────────────────────────────

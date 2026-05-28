@@ -41,6 +41,7 @@ from ai_trader.trading.context import (
     format_context_for_review,
 )
 from ai_trader.trading.executor import apply_action, parse_action
+from ai_trader.trading.funding_reconcile import fetch_position_funding
 from ai_trader.trading.pnl_reconcile import fetch_net_pnl
 
 log = logging.getLogger("ai_trader")
@@ -127,15 +128,84 @@ def _reconcile_closed_positions(
             close_reason="exchange_closed (SL/TP/manual)",
             pnl_source=pnl_source,
         )
+
+        # v0.21: попытка немедленного funding-sync. Для exchange-close
+        # (особенно через SL/TP в течение дня без holding overnight)
+        # обычно funding=0 (позиция не пересекла 00/08/16 UTC). Если
+        # пересекла — funding появится в transaction-log через 1-2 мин.
+        funding_suffix = ""
+        try:
+            closed_pos = store.get_position_by_link_id(db_pos.order_link_id)
+            if closed_pos is not None and closed_pos.closed_at:
+                funding = fetch_position_funding(client, closed_pos)
+                if funding is not None:
+                    store.update_funding(closed_pos.id, funding_usd=funding)
+                    if abs(funding) >= 0.005:
+                        net_total = pnl + funding
+                        funding_suffix = (
+                            f"\nFunding: ${funding:+.2f} → "
+                            f"NET total: ${net_total:+.2f}"
+                        )
+        except Exception:
+            log.exception(
+                "immediate funding fetch failed for id=%d", db_pos.id
+            )
+
         msg = (
             f"id={db_pos.id} {db_pos.side} {db_pos.symbol} qty={db_pos.qty}\n"
             f"entry=${db_pos.entry_price:.6g} exit=${exit_price:.6g}\n"
-            f"PnL: ${pnl:+.2f} ({pnl_source})\n"
+            f"PnL: ${pnl:+.2f} ({pnl_source}){funding_suffix}\n"
             f"Reason: exchange_closed (SL/TP)"
         )
         log.info("RECONCILE closed: %s", msg.replace("\n", " | "))
         if tg:
             tg.notify_close(msg)
+
+
+def _reconcile_funding(
+    client: AiBybitClient, store: AiTraderStore, *, hours: int = 96
+) -> None:
+    """v0.21: догонная запись funding_usd для закрытых позиций.
+
+    Funding settlements происходят каждые 8ч (00:00 / 08:00 / 16:00 UTC)
+    и НЕ включены в Bybit ``closedPnl`` (которым мы пользуемся в
+    ``_reconcile_pnl_to_net``). Это четвёртая утечка от gross к net:
+    позиции которые висят дольше 8ч могут иметь до ±0.05% / 8h от
+    notional funding-cost (типично 0.01–0.02%).
+
+    Идём по closed-позициям с ``funding_usd IS NULL`` за последние
+    ``hours``, через ``get_transaction_log`` (type=SETTLEMENT) собираем
+    суммарный funding в окне ``[opened_at..closed_at]`` и пишем в БД
+    через ``update_funding`` (она же корректирует ``daily_pnl``).
+
+    Default 96h — funding records появляются обычно в течение 1-2 мин
+    после settlement, но запас на случай отказа API при первой попытке.
+    Bybit transaction-log хранит данные до 2 лет (см.
+    https://bybit-exchange.github.io/docs/v5/account/transaction-log).
+    """
+    candidates = store.get_positions_missing_funding(hours=hours)
+    if not candidates:
+        return
+    fixed = 0
+    nonzero = 0
+    for pos in candidates:
+        funding = fetch_position_funding(client, pos)
+        if funding is None:
+            continue
+        store.update_funding(pos.id, funding_usd=funding)
+        fixed += 1
+        if abs(funding) > 1e-9:
+            nonzero += 1
+            log.info(
+                "FUNDING-RECONCILE id=%d %s %s: funding=$%+.4f (was NULL)",
+                pos.id, pos.side, pos.symbol, funding,
+            )
+    if fixed:
+        log.info(
+            "FUNDING-RECONCILE: synced %d/%d positions (%d with non-zero "
+            "funding, last %dh)",
+            fixed, len(candidates), nonzero, hours,
+        )
 
 
 def _reconcile_pnl_to_net(
@@ -328,6 +398,10 @@ def _run_cycle(
     # v0.18: после reconcile через get_positions догоняем те gross-PnL
     # записи которые в момент close не получили net (API падал и т.п.).
     _reconcile_pnl_to_net(bybit, store)
+    # v0.21: после net-PnL синка догоняем funding_usd для закрытых позиций
+    # которые висели >= 1 settlement (8ч). Это четвёртая утечка от
+    # gross к real net (closedPnl не включает funding).
+    _reconcile_funding(bybit, store)
 
     if store.is_paused():
         log.info("PAUSED (через /pause из Telegram) — пропускаю цикл")

@@ -1,5 +1,197 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-28 — v0.21: Funding Awareness (perp-futures 8h holding cost)
+
+### Запрос пользователя
+
+> «еще я заметил что пока висят открытые лоты биржа делает странные
+> транзакции по списанию, ощущение что это помимо комиссии еще и
+> средства за удержание этой позиции в какой-то промежуток времени»
+
+### Диагностика
+
+Подтверждено через `get_transaction_log(category=linear, type=SETTLEMENT)`
+за последние 96ч. В реальной выписке:
+
+| Время (UTC ms)   | Symbol   | Side | Funding     |
+|------------------|----------|------|-------------|
+| 1779724800000    | ATOMUSDT | Buy  | **−$0.1885** (заплатили) |
+| 1779667200000    | SUIUSDT  | Sell | **+$0.0227** (получили) |
+| 1779638400000    | SUIUSDT  | Sell | **+$0.0334** (получили) |
+
+Это **funding settlements** на perpetual futures: каждые 8ч (00:00,
+08:00, 16:00 UTC) биржа считает funding rate × notional между longs и
+shorts. Если позиция пересекает settlement timestamp — funding
+списывается/начисляется. Это НЕ комиссия (taker fee, v0.20 уже учёл).
+
+**Четвёртая утечка от gross к net** (после fee_on_open, fee_on_close,
+reconcile-fee): `closedPnl` от Bybit НЕ включает funding settlements.
+`positions.realized_pnl_usd` (pnl_source='net') это игнорировал —
+позиции висевшие через хотя бы один settlement получали скрытый PnL-drift.
+
+### Решение (Вариант C по предложению агента — максимальное покрытие)
+
+#### 1. БД: новая колонка `positions.funding_usd`
+
+`src/ai_trader/state/db.py` — идемпотентная миграция (ALTER TABLE ADD
+COLUMN funding_usd REAL). Хранит подписанное USD-значение: − значит
+бот заплатил, + значит получил. NULL = ещё не синкнули с биржей.
+
+Новые методы:
+- `update_funding(position_id, funding_usd)` — идемпотентный апдейт +
+  коррекция `daily_pnl` на разницу (закрытая позиция, иначе no-op).
+- `get_positions_missing_funding(hours=96)` — закрытые позиции с
+  `funding_usd IS NULL` за последние N часов (для reconcile-цикла).
+
+Полный net по позиции = `realized_pnl_usd + funding_usd`. Хранятся
+отдельно, чтобы можно было аудитить какая часть PnL пришла из price
+move + fees vs holding cost.
+
+#### 2. Bybit client: `get_funding_for_position` и `FundingEvent`
+
+`src/ai_trader/trading/client.py` — новый dataclass `FundingEvent`
+(symbol, side, funding_usd, transaction_time_ms). Метод
+`get_funding_for_position(symbol, start_ms, end_ms, side=None)` ходит
+в `/v5/account/transaction-log` с фильтрами `type=SETTLEMENT`,
+`category=linear`, `symbol`, делает full pagination через
+`nextPageCursor` (правило `stats-collection.mdc` про API без
+incomplete data).
+
+Также `Ticker` теперь включает `next_funding_time_ms` (ms-timestamp
+следующего settlement; обычно через 0–480 минут). Bybit поле
+`nextFundingTime` из `/v5/market/tickers`.
+
+Источник: <https://bybit-exchange.github.io/docs/v5/account/transaction-log>,
+<https://bybit-exchange.github.io/docs/v5/market/tickers>.
+
+#### 3. Reconcile: `funding_reconcile.fetch_position_funding` + main-loop
+
+`src/ai_trader/trading/funding_reconcile.py` (новый модуль, по аналогии
+с `pnl_reconcile.py` для consistency):
+- Из (opened_at, closed_at) делает окно `[opened_ms − 2min,
+  closed_ms + 2min]` со slack для transaction-log запроса.
+- Фильтрует events по строгому `[opened_ms, closed_ms]` (slack нужен
+  только для запроса, settlement timestamp всегда ровно 00/08/16 UTC).
+- Возвращает суммарный `funding_usd` (signed) или `None` при API failure.
+
+`src/ai_trader/app/main.py`:
+- Добавлена функция `_reconcile_funding(client, store, hours=96)`,
+  вызывается в каждом full-cycle после `_reconcile_pnl_to_net`.
+- В `executor._apply_close` и `main._reconcile_closed_positions`
+  попытка немедленного fetch funding после close (если позиция держалась
+  через settlement — funding уже в transaction-log через 1–2 мин).
+
+#### 4. TG-нотификация CLOSE
+
+Если ненулевой funding пойман сразу:
+```
+CLOSE id=121 Sell BTCUSDT exit=$74678 pnl=$+7.48 (net) funding=$-0.42 net_total=$+7.06
+```
+Если funding не успел появиться на момент close — `_reconcile_funding`
+догонит на следующем full-cycle (без отдельного TG-сообщения,
+информация будет в БД и в `/pnl` сводках).
+
+#### 5. LLM context: `next_funding=Xm` hint в LIVE-строке
+
+`src/ai_trader/trading/context.py`:
+- Новый helper `_funding_cost_hint(position, live, ticker)`:
+  - Считает `minutes_to_next = (next_funding_time_ms − now_ms) / 60_000`.
+  - Считает `est_funding_usd = |size| × mark × |rate|`.
+  - Знак: long платит при rate>0 (`paying as Buy`), short платит при
+    rate<0 (`paying as Sell`); инвертировано → `earning`.
+  - Возвращает строку `| next_funding=8m rate=+0.0125%/8h est=-$0.31
+    (paying as Buy)` или `""` если ticker/next_funding отсутствует.
+- `_format_live_position_line` принимает новый kwarg `ticker` и
+  дописывает hint после `close_net`.
+- Оба форматтера (`format_context_for_prompt`, `format_context_for_review`)
+  пробрасывают `sym_snap.ticker` в `_format_live_position_line`.
+
+Пример того что теперь видит LLM:
+```
+id=42 Buy BTCUSDT qty=0.01 entry=$77000 sl=$76500 tp=$78500
+     peak_pnl_r=+0.30R current_pnl_r=+0.10R | NET (after est. RT fees $0.85): peak=+0.13R cur=-0.07R
+     LIVE: mark=$77100 unrealised=+1.00$ liq=$70000 (9% buffer) margin=$77.10 close_net=+0.58$ (after -$0.42 close fee) | next_funding=15m rate=+0.0125%/8h est=-$0.10 (paying as Buy)
+```
+
+#### 6. Prompt: блок FUNDING AWARENESS (full + review)
+
+`src/ai_trader/llm/prompts.py`:
+- В `WHAT YOU SEE EACH CYCLE` добавлен абзац про `next_funding=` поле.
+- Новый блок `FUNDING AWARENESS (v0.21 …)` после FEE AWARENESS:
+  - Объясняет funding как НЕ trading fee, а 8h holding cost.
+  - `rate > 0` → longs pay shorts; `rate < 0` → shorts pay longs.
+  - Бэнды `0.005–0.05% per 8h` типично, `>0.20%` extreme.
+  - **CLOSE DECISION RULES**:
+    - `next_funding ≤ 30m` + paying + est > close_net → CLOSE NOW.
+    - `next_funding ≤ 30m` + earning > 0 → HOLD через settlement (free).
+    - `next_funding > 30m` → ignore, let triggers 1-4 drive.
+  - **OPEN**: funding band остаётся entry signal (как до v0.21);
+    per-trade funding cost явно НЕ применяется к sizing (notional
+    кэппится `risk_usd_cap`, funding мало относительно типичных TP).
+- Аналогичный блок в `SYSTEM_PROMPT_REVIEW` (короче).
+- `ANALYSIS COMMENTARY for funding-driven close MUST cite numeric
+  tradeoff (close_net vs est funding cost in Xm)`.
+
+#### 7. Тесты (+22 новых, total 194/194 в test_ai_trader.py, 1218/1218 проектных)
+
+- `TestPositionsFundingUsdMigration` (3): new DB / idempotent /
+  миграция на pre-v0.21 БД (важно для VPS — там 121 closed-позиций без
+  колонки).
+- `TestStoreUpdateFunding` (5): write / idempotent same value /
+  correction on change / ignore on open / `get_positions_missing_funding`
+  возвращает только closed+NULL.
+- `TestGetFundingForPositionClient` (7): empty window / parse SETTLEMENT /
+  skip zero / filter by side / pagination cursor / non-zero retCode →
+  None / exception → None.
+- `TestFetchPositionFunding` (4): zero когда не пересекли / sum нескольких /
+  exclude вне strict window / None при API failure.
+- `TestFundingCostHint` (4): Buy paying / Sell earning / no ticker → no
+  hint / next_funding=0 → no hint.
+- `TestPromptFundingAwareness` (4): полный prompt содержит секцию,
+  review тоже, decision rules (PAYING/EARNING/HOLD), open-guidance.
+
+SHA256 baseline `SYSTEM_PROMPT` обновлён:
+- было: `ec9503296d5c9686796b91eae67757659bfa1521c34491a67cfa507e6d48464a` (v0.20)
+- стало: `532b344a93035dfceeaf2eb1dc8169dbdfee931b51bcf702c005aa91d6ee5569` (v0.21)
+
+### Reset 14-day эксперимента n=0
+
+Согласно `.cursor/rules/no-data-fitting.mdc` — изменение торговой
+логики (CLOSE-decision получил funding-rule, который меняет когда бот
+закрывает позицию). Все накопленные стататы до v0.20 → stale baseline,
+с v0.21 — fresh forward-test.
+
+### Файлы
+
+- `src/ai_trader/state/db.py` — миграция + методы funding
+- `src/ai_trader/trading/client.py` — `FundingEvent`, `Ticker.next_funding_time_ms`,
+  `get_funding_for_position`
+- `src/ai_trader/trading/funding_reconcile.py` — **новый**
+- `src/ai_trader/trading/executor.py` — immediate funding fetch
+- `src/ai_trader/app/main.py` — `_reconcile_funding` + TG-suffix
+- `src/ai_trader/trading/context.py` — `_funding_cost_hint` + LIVE-строка
+- `src/ai_trader/llm/prompts.py` — FUNDING AWARENESS блок (full + review)
+- `tests/test_ai_trader.py` — +22 теста, обновлён SHA256 baseline
+- `BUILDLOG_AI_TRADER.md` — эта запись
+
+### Проверки
+
+- 1218/1218 тестов прошли (`pytest tests/`)
+- Render промптов: SHA256 совпадает, `%%` → `%` в review правильно.
+- Lint: 0 ошибок (новые модули + правки старых).
+
+### Источники
+
+- Bybit V5 docs: <https://bybit-exchange.github.io/docs/v5/intro>
+- Transaction log endpoint:
+  <https://bybit-exchange.github.io/docs/v5/account/transaction-log>
+- Tickers (nextFundingTime):
+  <https://bybit-exchange.github.io/docs/v5/market/tickers>
+- Funding mechanism explainer:
+  <https://www.bybit.com/en/help-center/article/Introduction-to-Funding-Rate>
+
+---
+
 ## 2026-05-28 — v0.20: Fee Awareness на OPEN + hard-валидация executor'а + NET R-units в контексте
 
 ### Запрос пользователя

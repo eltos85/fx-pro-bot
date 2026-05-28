@@ -108,6 +108,29 @@ exit-триггера (1-4). Решает проблему «бот закрыв
 после комиссий» (trade #120 ATOMUSDT, 2026-05-26). Не меняет стратегию,
 только добавляет знание о структуре издержек.
 
+v0.21 (2026-05-28): FUNDING AWARENESS блок (отдельно от FEE AWARENESS).
+Funding settlements на perpetual futures каждые 8ч (00:00/08:00/16:00 UTC)
+— это ДРУГИЕ списания, не trading fee. Bybit ``closedPnl`` их НЕ
+включает, поэтому позиции висящие через settlement могут потерять
+0.01–0.05%% notional / 8h, а долгие позиции — больше.
+
+Изменения:
+- LLM теперь видит для каждой open position строчку
+  ``next_funding=Xm rate=±Y%/8h est=±$Z (paying|earning as Buy/Sell)``
+  в LIVE-строке. Раньше funding rate был только в MARKET DATA block
+  без привязки к позиции и без оценки US$.
+- Новый блок FUNDING AWARENESS в full + review prompts:
+  если до settlement < 30 мин и я плачу > closing fee → закрыть сейчас
+  (выходит дешевле); если получаю > 0 → держать через settlement.
+- DB: новая колонка ``positions.funding_usd`` — заполняется через
+  ``get_transaction_log(type=SETTLEMENT)`` после закрытия. Полный
+  net = realized_pnl_usd + funding_usd.
+- TG-нотификация CLOSE теперь показывает funding=$X net_total=$Y
+  если позиция пересекала settlement.
+
+Не меняет стратегию entry-decision, добавляет данные для close-decision.
+Сброс 14-day эксперимента n=0.
+
 v0.20 (2026-05-28): FEE AWARENESS расширен на OPEN-decision (раньше
 говорил только про close). Исправлен таркер fee 0.06%% → 0.055%% per side
 (VIP-0 demo, проверено на id=121: openFee=1.3597 на cumEntry=2472.21 =
@@ -335,6 +358,19 @@ Compute R-units for each position from its TP/SL geometry:
   taker fee is already a sunk cost, not refundable). If `close_net` is
   negative while `unrealised` is positive, the price moved your way
   but not enough to cover the closing fee.
+- v0.21: when the next funding settlement is within 8h (always true on
+  Bybit perp — settlements are 00:00 / 08:00 / 16:00 UTC), the LIVE
+  line ALSO shows:
+  `| next_funding=Xm rate=±Y%/8h est=±$Z.ZZ (paying|earning as Buy/Sell)`
+  - `next_funding=Xm`: minutes until the next settlement.
+  - `rate=±Y%/8h`: current funding rate (will be applied at settlement).
+  - `est=±$Z.ZZ`: estimated USD impact = notional × |rate|. Sign `-` =
+    you will pay this much, `+` = you will receive.
+  - `paying as Buy` means longs pay when rate > 0; `earning as Sell`
+    means shorts receive when rate > 0; symmetrically inverted for
+    rate < 0.
+  Use this to inform CLOSE decisions when settlement is near. See
+  FUNDING AWARENESS below for the rule.
 
 CLOSE EARLY (action="close") if ANY of:
 
@@ -451,6 +487,49 @@ the LIVE line as the authoritative answer ("what I get if I close now").
 The ANALYSIS COMMENTARY for any close-action MUST cite which trigger
 (1/2/3/4) fired and which specific signal changed, AND the `close_net`
 value (positive or negative).
+
+FUNDING AWARENESS (v0.21 — perp-futures holding cost, SEPARATE from trading fees):
+
+Bybit perpetual futures settle funding every 8 hours at 00:00, 08:00 and
+16:00 UTC. Funding is NOT a trading fee — it's a periodic payment between
+longs and shorts that pegs the perp price to the spot index:
+- rate > 0 → longs pay shorts (the typical sign when sentiment is long-heavy).
+- rate < 0 → shorts pay longs (squeeze risk for shorts).
+- |rate| typically 0.005% - 0.05% per 8h on majors; can spike to 0.20%+
+  during extreme positioning (e.g. squeezes, news-driven moves).
+
+A position that does NOT cross a settlement timestamp pays zero funding,
+even if held for 7h 59m. A position that crosses settlement pays/receives
+the full 8h rate × notional, regardless of how long it was held that period.
+
+The bot now shows you per-position:
+- In the LIVE line: `next_funding=Xm rate=±Y%/8h est=±$Z (paying|earning ...)`
+- After close: `funding_usd` is collected via transaction-log and added
+  to net PnL (you'll see this in subsequent cycles via PnL summaries).
+
+DECISION RULES (close-decision impact):
+
+- If `next_funding <= 30m` AND you are PAYING (est < 0) AND the est. cost
+  > `close_net` for your position → consider CLOSE NOW. You'll capture
+  the current close_net and avoid being charged at settlement. Trade-off:
+  closing means paying close fee (already in close_net); holding means
+  paying funding. Whichever is smaller wins.
+- If `next_funding <= 30m` AND you are EARNING (est > 0) → HOLD through
+  settlement (free money). After settlement, re-evaluate exit triggers
+  per EXIT MANAGEMENT.
+- If `next_funding > 30m` — funding is not actionable this cycle; ignore
+  it for close decisions and let triggers 1-4 drive the choice.
+- For OPEN decisions: funding rate band (NEUTRAL / mild lean / STRONG)
+  in MARKET DATA remains an entry signal as before (see Funding rate
+  framework section above). Do NOT add per-trade funding cost as an
+  open-decision factor — open size is already capped by the per-trade
+  risk_usd cap, funding is small enough relative to typical TP distances
+  to not affect entry sizing.
+
+The ANALYSIS COMMENTARY for any close-action driven by funding MUST
+cite both the trigger (typically "near-settlement funding cost")
+AND the specific numeric tradeoff (`close_net=+$X.XX` vs `est funding
+cost=-$Y.YY in Zm`).
 
 DECISION FORMAT:
 
@@ -648,6 +727,11 @@ WHAT YOU SEE THIS CYCLE (much less than full cycle):
   where `close_net` is what you would realise by closing at mark price
   RIGHT NOW (after the closing taker fee). Use this number — NOT raw
   `unrealised` — for any fee-aware decision.
+- v0.21: LIVE line ALSO shows
+  `| next_funding=Xm rate=±Y%%/8h est=±$Z (paying|earning as Buy/Sell)`
+  — `est` is the USD impact of the next funding settlement IF you hold
+  through it. Sign `-` = you pay, `+` = you receive. Use for the
+  FUNDING AWARENESS rule below.
 - NOTHING ELSE: no macro context, no news, no 4H bars, no orderflow
   beyond what's listed above. Use ONLY the data fields explicitly shown
   in this cycle. If a trigger description below references a signal you
@@ -700,6 +784,20 @@ you would realise by closing at mark RIGHT NOW. Rules:
   lock a net loss despite price moving in your favour).
 - NEVER close purely to "lock-in" a tiny `unrealised`-positive when
   `close_net` is negative.
+
+FUNDING AWARENESS (v0.21 — perp-futures 8h holding cost):
+
+Funding settles every 8h at 00:00 / 08:00 / 16:00 UTC. Read the
+`next_funding=Xm rate=±Y%%/8h est=±$Z` field from the LIVE line.
+
+DECISION RULES:
+- If `next_funding <= 30m` AND you are PAYING (est < 0) AND est cost >
+  current `close_net` → CLOSE NOW (cheaper to take close fee than pay
+  funding). Cite both numbers in your `reason`.
+- If `next_funding <= 30m` AND EARNING (est > 0) → HOLD through
+  settlement (free), then re-evaluate next cycle.
+- If `next_funding > 30m` → funding is not actionable; ignore for this
+  cycle's close-decision.
 
 If no triggers fire — return "hold" with a short reason.
 

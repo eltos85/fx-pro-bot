@@ -251,9 +251,9 @@ def _apply_close(
     pnl_source = "gross"
 
     # v0.18: попытка немедленного matching с Bybit closedPnl (net,
-    # с учётом fee + funding). Если API дал ответ — используем net.
-    # Иначе оставляем gross + догоним в _reconcile_pnl_to_net на
-    # следующем full-cycle (см. main.py).
+    # с учётом fee, но БЕЗ funding — см. v0.21). Если API дал ответ —
+    # используем net. Иначе оставляем gross + догоним в
+    # _reconcile_pnl_to_net на следующем full-cycle (см. main.py).
     from ai_trader.trading.pnl_reconcile import fetch_net_pnl
     net = fetch_net_pnl(client, pos)
     if net is not None:
@@ -267,11 +267,36 @@ def _apply_close(
         close_reason=action.raw.get("reason", "llm_close"),
         pnl_source=pnl_source,
     )
+
+    # v0.21: попытка немедленной записи funding_usd. Если позиция
+    # пересекала funding settlement (00/08/16 UTC) — он там был.
+    # Bybit transaction-log обычно отдаёт SETTLEMENT в течение 1–2
+    # минут после fact, в момент close скорее всего уже доступен для
+    # «старых» settlement'ов (тех, что были давно за время удержания).
+    # Если API упал / запись ещё не появилась — funding_usd=NULL,
+    # _reconcile_funding догонит на следующем full-cycle.
+    funding_suffix = ""
+    try:
+        from ai_trader.trading.funding_reconcile import fetch_position_funding
+
+        closed_pos = store.get_position_by_link_id(pos.order_link_id)
+        if closed_pos is not None and closed_pos.closed_at:
+            funding = fetch_position_funding(client, closed_pos)
+            if funding is not None:
+                store.update_funding(closed_pos.id, funding_usd=funding)
+                if abs(funding) >= 0.005:
+                    net_total = pnl + funding
+                    funding_suffix = (
+                        f" funding=${funding:+.2f} net_total=${net_total:+.2f}"
+                    )
+    except Exception:
+        log.exception("immediate funding fetch failed for id=%d", pos.id)
+
     return ApplyResult(
         executed=True,
         summary=(
             f"CLOSE id={pos.id} {pos.side} {pos.symbol} exit=${exit_price:.6g} "
-            f"pnl=${pnl:+.2f} ({pnl_source})"
+            f"pnl=${pnl:+.2f} ({pnl_source}){funding_suffix}"
         ),
     )
 

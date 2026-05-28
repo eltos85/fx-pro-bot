@@ -398,6 +398,7 @@ def _format_live_position_line(
     live_positions: dict[str, Position] | None,
     *,
     taker_fee_pct: float = 0.0,
+    ticker: Ticker | None = None,
 ) -> str | None:
     """v0.17 Шаг 2a: форматирует live данные биржи по позиции.
 
@@ -418,6 +419,13 @@ def _format_live_position_line(
     (mark - entry) × size — НЕ учитывает закрывающий taker fee, который
     спишется при reduce-only ордере. openFee уже списан при открытии
     (sunk cost, не возвращается).
+
+    v0.21 (2026-05-28): если ``ticker`` передан и ``ticker.next_funding_time_ms``
+    > 0, добавляется funding-блок:
+      ``next_funding=8m (rate=+0.0125%/8h, est cost=$0.31 paying as Buy)``
+    Это позволяет LLM принимать close-decision с учётом приближающегося
+    settlement: «до funding 8 мин, я long при rate +0.0125%, заплачу
+    $0.31 — может закрыть сейчас если close_net > 0?».
     """
     if live_positions is None:
         return "     LIVE: API unavailable (cannot verify live PnL)"
@@ -431,7 +439,6 @@ def _format_live_position_line(
     margin = pos_val / live.leverage if live.leverage > 0 else pos_val
     buf_pct = ""
     if liq > 0 and mark > 0:
-        # Расстояние до liq в %, направленное (по side).
         if position.side == "Buy":
             buf = (mark - liq) / mark * 100 if mark > liq else 0
         else:
@@ -444,9 +451,55 @@ def _format_live_position_line(
         net_suffix = (
             f" close_net={net_close:+.2f}$ (after -${close_fee:.2f} close fee)"
         )
+    funding_suffix = _funding_cost_hint(position, live, ticker)
     return (
         f"     LIVE: mark=${mark:.6g} unrealised={unreal:+.2f}$ "
         f"liq=${liq:.6g}{buf_pct} margin=${margin:.2f}{net_suffix}"
+        f"{funding_suffix}"
+    )
+
+
+def _funding_cost_hint(
+    position: AiPosition,
+    live: Position,
+    ticker: Ticker | None,
+) -> str:
+    """v0.21: «next_funding=Xm (rate=±Y%/8h, est cost=$Z paying|earning)».
+
+    Без ticker, без nextFundingTime, без rate — возвращает пустую строку
+    (тогда LLM не получает доп. контекста, не ошибается).
+
+    Знак funding:
+    - rate > 0 → long платит, short получает.
+    - rate < 0 → long получает, short платит.
+
+    notional = |size| × mark; est_funding_usd = notional × |rate|.
+    """
+    if ticker is None:
+        return ""
+    next_ms = getattr(ticker, "next_funding_time_ms", 0) or 0
+    rate = ticker.funding_rate or 0.0
+    if next_ms <= 0:
+        return ""
+    now_ms = int(time.time() * 1000)
+    minutes_to = (next_ms - now_ms) / 60_000
+    if minutes_to <= 0 or minutes_to > 8 * 60 + 5:
+        # past settlement or anomalous > 8h — Bybit лимитирует 8h.
+        return ""
+    size = abs(live.size or position.qty or 0.0)
+    mark = live.mark_price or 0.0
+    notional = size * mark
+    est_funding = notional * abs(rate)
+    paying = False
+    if position.side == "Buy" and rate > 0:
+        paying = True
+    elif position.side == "Sell" and rate < 0:
+        paying = True
+    verb = "paying" if paying else "earning"
+    sign = "-" if paying else "+"
+    return (
+        f" | next_funding={minutes_to:.0f}m rate={rate * 100:+.4f}%/8h "
+        f"est={sign}${est_funding:.2f} ({verb} as {position.side})"
     )
 
 
@@ -505,7 +558,6 @@ def format_context_for_review(ctx: MarketContext) -> str:
                     f"     peak_pnl_r={stats.peak_r:+.2f}R "
                     f"current_pnl_r={stats.current_r:+.2f}R"
                 )
-                # v0.20: net-R только если fee известен (taker_fee_pct > 0)
                 if (
                     ctx.taker_fee_pct > 0
                     and stats.peak_r_net is not None
@@ -518,8 +570,11 @@ def format_context_for_review(ctx: MarketContext) -> str:
                         f"cur={stats.current_r_net:+.2f}R"
                     )
                 parts.append(line)
+            ticker = sym_snap.ticker if sym_snap else None
             live_line = _format_live_position_line(
-                p, ctx.live_positions, taker_fee_pct=ctx.taker_fee_pct
+                p, ctx.live_positions,
+                taker_fee_pct=ctx.taker_fee_pct,
+                ticker=ticker,
             )
             if live_line is not None:
                 parts.append(live_line)
@@ -642,8 +697,11 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
                         f"cur={stats.current_r_net:+.2f}R"
                     )
                 parts.append(line)
+            ticker_full = sym_snap.ticker if sym_snap else None
             live_line = _format_live_position_line(
-                p, ctx.live_positions, taker_fee_pct=ctx.taker_fee_pct
+                p, ctx.live_positions,
+                taker_fee_pct=ctx.taker_fee_pct,
+                ticker=ticker_full,
             )
             if live_line is not None:
                 parts.append(live_line)

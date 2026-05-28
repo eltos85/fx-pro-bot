@@ -1897,6 +1897,9 @@ class TestSystemPromptCapitalRulesTemplate:
         - ec950329... (v0.20 2026-05-28: FEE AWARENESS на open, fix
           0.06%→0.055%, NET R-units в OPEN POSITIONS, $-примеры через
           placeholder __VIRTUAL_CAPITAL__ — см. BUILDLOG).
+        - 532b344a... (v0.21 2026-05-28: FUNDING AWARENESS блок
+          (perp-futures 8h holding cost), next_funding hint в LIVE-
+          строке, doc-блок в WHAT YOU SEE EACH CYCLE. См. BUILDLOG).
         """
         import hashlib
 
@@ -1904,7 +1907,7 @@ class TestSystemPromptCapitalRulesTemplate:
         from ai_trader.llm.prompts import SYSTEM_PROMPT, build_system_prompt
 
         expected_sha256 = (
-            "ec9503296d5c9686796b91eae67757659bfa1521c34491a67cfa507e6d48464a"
+            "532b344a93035dfceeaf2eb1dc8169dbdfee931b51bcf702c005aa91d6ee5569"
         )
         # 1) Module-level SYSTEM_PROMPT (default render с DEFAULT_AI_SYMBOLS).
         actual_sha = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
@@ -2779,3 +2782,524 @@ class TestApplyOpenFeeAwareValidation:
             killswitch=self._ks(store),
         )
         assert result.executed, f"with fee=0 should pass, error={result.error}"
+
+
+# ─── v0.21 (2026-05-28) FUNDING AWARENESS ───────────────────────────────
+
+
+class TestPositionsFundingUsdMigration:
+    """v0.21: positions.funding_usd добавлена через идемпотентную миграцию.
+
+    Не должен ломать существующие БД (на VPS уже накоплены 121 closed-
+    позиций без этой колонки) — миграция через `ALTER TABLE ADD COLUMN`,
+    допустимая для NULL-default.
+    """
+
+    def test_new_db_has_funding_usd_column(self, tmp_path):
+        from ai_trader.state.db import AiTraderStore
+
+        db_path = tmp_path / "ai_new.sqlite"
+        AiTraderStore(str(db_path))
+        import sqlite3
+
+        with sqlite3.connect(str(db_path)) as c:
+            cols = {row[1] for row in c.execute("PRAGMA table_info(positions)")}
+        assert "funding_usd" in cols
+
+    def test_migration_idempotent_on_existing_db(self, tmp_path):
+        """Открыть и закрыть стор 2 раза — миграция не должна
+        дублироваться (SQLite уронит дубль на ALTER ADD COLUMN)."""
+        from ai_trader.state.db import AiTraderStore
+
+        db_path = tmp_path / "ai.sqlite"
+        AiTraderStore(str(db_path))
+        AiTraderStore(str(db_path))
+
+    def test_migration_adds_column_to_pre_v021_db(self, tmp_path):
+        """Эмулируем pre-v0.21 БД (без funding_usd) → миграция добавляет."""
+        import sqlite3
+
+        from ai_trader.state.db import AiTraderStore
+
+        db_path = tmp_path / "old.sqlite"
+        with sqlite3.connect(str(db_path)) as c:
+            c.executescript(
+                """
+                CREATE TABLE positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    qty REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    sl_price REAL,
+                    tp_price REAL,
+                    leverage INTEGER NOT NULL,
+                    order_link_id TEXT NOT NULL UNIQUE,
+                    opened_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    exit_price REAL,
+                    realized_pnl_usd REAL,
+                    close_reason TEXT,
+                    llm_reason TEXT NOT NULL
+                );
+                """
+            )
+        AiTraderStore(str(db_path))
+        with sqlite3.connect(str(db_path)) as c:
+            cols = {row[1] for row in c.execute("PRAGMA table_info(positions)")}
+        assert "funding_usd" in cols, (
+            "v0.21 migration didn't add funding_usd to existing DB. "
+            "This means old positions on VPS won't get the column on bot "
+            "restart and _reconcile_funding will crash."
+        )
+
+
+class TestStoreUpdateFunding:
+    """v0.21: update_funding / get_positions_missing_funding."""
+
+    @staticmethod
+    def _open_close(store, symbol="BTCUSDT") -> int:
+        pid = store.open_position(
+            symbol=symbol, side="Buy", qty=0.01, entry_price=100.0,
+            sl_price=95.0, tp_price=110.0, leverage=1,
+            order_link_id=f"ai_{symbol}_test", llm_reason="t",
+        )
+        store.close_position(
+            pid, exit_price=101.0, realized_pnl_usd=0.10,
+            close_reason="test", pnl_source="net",
+        )
+        return pid
+
+    def test_update_funding_writes_value(self, tmp_path):
+        from ai_trader.state.db import AiTraderStore
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        pid = self._open_close(store)
+        store.update_funding(pid, funding_usd=-0.1885)
+
+        import sqlite3
+
+        with sqlite3.connect(store.db_path) as c:
+            row = c.execute(
+                "SELECT funding_usd FROM positions WHERE id = ?", (pid,)
+            ).fetchone()
+        assert abs(row[0] - (-0.1885)) < 1e-9
+
+    def test_update_funding_idempotent_same_value(self, tmp_path):
+        """Повторный вызов с тем же значением не двигает daily_pnl."""
+        from ai_trader.state.db import AiTraderStore
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        pid = self._open_close(store)
+        store.update_funding(pid, funding_usd=-0.50)
+        day_after_first = store.get_today_pnl()
+        store.update_funding(pid, funding_usd=-0.50)
+        day_after_second = store.get_today_pnl()
+        assert abs(day_after_first - day_after_second) < 1e-9
+
+    def test_update_funding_corrects_daily_pnl_on_change(self, tmp_path):
+        """funding записан −0.50, теперь биржа обновила запись на
+        −0.45 (исправлена) → daily_pnl двигается на +0.05."""
+        from ai_trader.state.db import AiTraderStore
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        pid = self._open_close(store)
+        store.update_funding(pid, funding_usd=-0.50)
+        pnl_before = store.get_today_pnl()
+        store.update_funding(pid, funding_usd=-0.45)
+        pnl_after = store.get_today_pnl()
+        assert abs((pnl_after - pnl_before) - 0.05) < 1e-9
+
+    def test_update_funding_ignores_open_position(self, tmp_path):
+        """funding имеет смысл только для закрытых; на открытой no-op."""
+        from ai_trader.state.db import AiTraderStore
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        pid = store.open_position(
+            symbol="BTCUSDT", side="Buy", qty=0.01, entry_price=100,
+            sl_price=95, tp_price=110, leverage=1,
+            order_link_id="ai_open_test", llm_reason="t",
+        )
+        store.update_funding(pid, funding_usd=-1.0)
+        import sqlite3
+
+        with sqlite3.connect(store.db_path) as c:
+            row = c.execute(
+                "SELECT funding_usd FROM positions WHERE id=?", (pid,)
+            ).fetchone()
+        assert row[0] is None
+
+    def test_get_positions_missing_funding_returns_only_closed_null(self, tmp_path):
+        from ai_trader.state.db import AiTraderStore
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        pid1 = self._open_close(store, symbol="BTCUSDT")
+        pid2 = self._open_close(store, symbol="ETHUSDT")
+        store.update_funding(pid1, funding_usd=-0.1)
+        missing = store.get_positions_missing_funding(hours=24)
+        ids = [p.id for p in missing]
+        assert pid2 in ids
+        assert pid1 not in ids
+
+
+class TestGetFundingForPositionClient:
+    """v0.21: AiBybitClient.get_funding_for_position через transaction-log."""
+
+    @staticmethod
+    def _fake_session(items_pages):
+        """items_pages — список страниц; каждая страница это
+        (list_of_items, next_cursor)."""
+
+        class FakeSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get_transaction_log(self, **kwargs):
+                self.calls += 1
+                page_idx = min(self.calls - 1, len(items_pages) - 1)
+                items, cursor = items_pages[page_idx]
+                return {
+                    "retCode": 0, "retMsg": "OK",
+                    "result": {"list": items, "nextPageCursor": cursor},
+                }
+
+        return FakeSession()
+
+    def _make_client(self, session):
+        from ai_trader.trading.client import AiBybitClient
+
+        c = AiBybitClient.__new__(AiBybitClient)
+        c._session = session
+        c._category = "linear"
+        c._instr_cache = {}
+        return c
+
+    def test_returns_empty_when_window_invalid(self):
+        c = self._make_client(self._fake_session([([], None)]))
+        out = c.get_funding_for_position("BTCUSDT", start_ms=100, end_ms=50)
+        assert out == []
+
+    def test_parses_single_settlement(self):
+        session = self._fake_session([(
+            [{
+                "type": "SETTLEMENT", "symbol": "ATOMUSDT", "side": "Buy",
+                "funding": "-0.18846439", "transactionTime": "1779724800000",
+            }],
+            None,
+        )])
+        c = self._make_client(session)
+        out = c.get_funding_for_position(
+            "ATOMUSDT", start_ms=0, end_ms=2_000_000_000_000,
+        )
+        assert out is not None and len(out) == 1
+        assert abs(out[0].funding_usd - (-0.18846439)) < 1e-9
+        assert out[0].symbol == "ATOMUSDT"
+        assert out[0].side == "Buy"
+
+    def test_skips_zero_funding_rows(self):
+        session = self._fake_session([(
+            [
+                {"type": "SETTLEMENT", "symbol": "X", "side": "Buy",
+                 "funding": "0", "transactionTime": "1"},
+                {"type": "SETTLEMENT", "symbol": "X", "side": "Buy",
+                 "funding": "1.5", "transactionTime": "2"},
+            ],
+            None,
+        )])
+        c = self._make_client(session)
+        out = c.get_funding_for_position("X", start_ms=0, end_ms=10)
+        assert len(out) == 1
+        assert out[0].funding_usd == 1.5
+
+    def test_filters_by_side(self):
+        session = self._fake_session([(
+            [
+                {"type": "SETTLEMENT", "symbol": "X", "side": "Buy",
+                 "funding": "1.0", "transactionTime": "1"},
+                {"type": "SETTLEMENT", "symbol": "X", "side": "Sell",
+                 "funding": "2.0", "transactionTime": "2"},
+            ],
+            None,
+        )])
+        c = self._make_client(session)
+        out = c.get_funding_for_position(
+            "X", start_ms=0, end_ms=10, side="Sell",
+        )
+        assert len(out) == 1
+        assert out[0].side == "Sell"
+
+    def test_pagination_via_cursor(self):
+        page1 = (
+            [{"type": "SETTLEMENT", "symbol": "X", "side": "Buy",
+              "funding": "1.0", "transactionTime": "1"}],
+            "next_cursor_abc",
+        )
+        page2 = (
+            [{"type": "SETTLEMENT", "symbol": "X", "side": "Buy",
+              "funding": "2.0", "transactionTime": "2"}],
+            None,
+        )
+        session = self._fake_session([page1, page2])
+        c = self._make_client(session)
+        out = c.get_funding_for_position("X", start_ms=0, end_ms=10)
+        assert len(out) == 2
+        assert sum(e.funding_usd for e in out) == 3.0
+
+    def test_returns_none_on_non_zero_retcode(self):
+        class FakeSession:
+            def get_transaction_log(self, **kwargs):
+                return {"retCode": 10001, "retMsg": "bad", "result": {}}
+
+        c = self._make_client(FakeSession())
+        out = c.get_funding_for_position("X", start_ms=0, end_ms=10)
+        assert out is None
+
+    def test_returns_none_on_exception(self):
+        class FakeSession:
+            def get_transaction_log(self, **kwargs):
+                raise RuntimeError("network down")
+
+        c = self._make_client(FakeSession())
+        out = c.get_funding_for_position("X", start_ms=0, end_ms=10)
+        assert out is None
+
+
+class TestFetchPositionFunding:
+    """v0.21: funding_reconcile.fetch_position_funding."""
+
+    @staticmethod
+    def _pos(opened_at, closed_at, symbol="BTCUSDT", side="Buy", qty=0.01):
+        from ai_trader.state.db import AiPosition
+
+        return AiPosition(
+            id=1, symbol=symbol, side=side, qty=qty,
+            entry_price=100.0, sl_price=95.0, tp_price=110.0, leverage=1,
+            order_link_id="ai_test", opened_at=opened_at, closed_at=closed_at,
+            exit_price=101.0, realized_pnl_usd=0.5, close_reason="x",
+            llm_reason="x",
+        )
+
+    def test_zero_funding_when_no_settlements_crossed(self):
+        """Позиция 17:16 → 22:03 UTC между двумя settlement (16:00, 00:00)
+        — пересечений нет, total = 0."""
+        from ai_trader.trading.funding_reconcile import fetch_position_funding
+
+        class FakeClient:
+            def get_funding_for_position(self, *a, **kw):
+                return []
+
+        out = fetch_position_funding(
+            FakeClient(),
+            self._pos("2026-05-27T17:16:34+00:00", "2026-05-27T22:03:26+00:00"),
+        )
+        assert out == 0.0
+
+    def test_sums_multiple_settlements(self):
+        """3 settlement за время удержания: −0.1, −0.2, +0.05 = −0.25."""
+        from datetime import datetime
+
+        from ai_trader.trading.client import FundingEvent
+        from ai_trader.trading.funding_reconcile import fetch_position_funding
+
+        opened_iso = "2026-05-26T07:00:00+00:00"
+        closed_iso = "2026-05-27T01:00:00+00:00"
+        opened_ms = int(
+            datetime.fromisoformat(opened_iso).timestamp() * 1000
+        )
+        # 08:00 UTC, 16:00 UTC, 00:00 UTC — в окне [07:00..01:00 next day]
+        events = [
+            FundingEvent("BTCUSDT", "Buy", -0.1, opened_ms + 3600_000),
+            FundingEvent("BTCUSDT", "Buy", -0.2, opened_ms + 9 * 3600_000),
+            FundingEvent("BTCUSDT", "Buy", 0.05, opened_ms + 17 * 3600_000),
+        ]
+
+        class FakeClient:
+            def get_funding_for_position(self, symbol, start_ms, end_ms, side=None):
+                return events
+
+        out = fetch_position_funding(
+            FakeClient(), self._pos(opened_iso, closed_iso),
+        )
+        assert out is not None
+        assert abs(out - (-0.25)) < 1e-9
+
+    def test_excludes_events_outside_position_window(self):
+        """API может вернуть settlement-ы за slack — фильтруем по
+        строгому [opened, closed]."""
+        from datetime import datetime
+
+        from ai_trader.trading.client import FundingEvent
+        from ai_trader.trading.funding_reconcile import fetch_position_funding
+
+        opened_iso = "2026-05-26T10:00:00+00:00"
+        closed_iso = "2026-05-26T20:00:00+00:00"
+        opened_ms = int(
+            datetime.fromisoformat(opened_iso).timestamp() * 1000
+        )
+        events = [
+            # settlement за 5 минут ДО opened (slack захватил, но фильтр должен отбросить)
+            FundingEvent("X", "Buy", -1.0, opened_ms - 5 * 60_000),
+            # внутри окна
+            FundingEvent("X", "Buy", -0.3, opened_ms + 4 * 3600_000),
+            # после closed (slack захватил)
+            FundingEvent("X", "Buy", -0.7, opened_ms + 11 * 3600_000),
+        ]
+
+        class FakeClient:
+            def get_funding_for_position(self, symbol, start_ms, end_ms, side=None):
+                return events
+
+        out = fetch_position_funding(
+            FakeClient(), self._pos(opened_iso, closed_iso),
+        )
+        assert out is not None
+        assert abs(out - (-0.3)) < 1e-9
+
+    def test_returns_none_on_api_failure(self):
+        from ai_trader.trading.funding_reconcile import fetch_position_funding
+
+        class FakeClient:
+            def get_funding_for_position(self, *a, **kw):
+                return None
+
+        out = fetch_position_funding(
+            FakeClient(),
+            self._pos("2026-05-27T00:00:00+00:00", "2026-05-27T12:00:00+00:00"),
+        )
+        assert out is None
+
+
+class TestFundingCostHint:
+    """v0.21: _funding_cost_hint в _format_live_position_line."""
+
+    @staticmethod
+    def _pos(side="Buy"):
+        from ai_trader.state.db import AiPosition
+
+        return AiPosition(
+            id=1, symbol="BTCUSDT", side=side, qty=0.01,
+            entry_price=100.0, sl_price=95.0, tp_price=110.0, leverage=1,
+            order_link_id="ai_test", opened_at="2026-05-28T12:00:00+00:00",
+            closed_at=None, exit_price=None, realized_pnl_usd=None,
+            close_reason=None, llm_reason="x",
+        )
+
+    @staticmethod
+    def _live(side="Buy", mark=77000.0, size=0.01, unreal=0.0):
+        from ai_trader.trading.client import Position
+
+        return Position(
+            symbol="BTCUSDT", side=side, size=size, entry_price=77000.0,
+            leverage=10.0, unrealised_pnl=unreal, position_value=mark * size,
+            mark_price=mark, liq_price=70000.0,
+        )
+
+    @staticmethod
+    def _ticker(rate=0.0001, next_in_min=15):
+        import time
+
+        from ai_trader.trading.client import Ticker
+
+        next_ms = int(time.time() * 1000 + next_in_min * 60_000)
+        return Ticker(
+            symbol="BTCUSDT", last_price=77000.0, bid=76990, ask=77010,
+            funding_rate=rate, volume_24h=0, price_change_pct_24h=0,
+            next_funding_time_ms=next_ms,
+        )
+
+    def test_buy_paying_when_rate_positive(self):
+        """Buy + rate +0.0125% (0.000125) → paying. notional=$770,
+        est = 770 * 0.000125 = $0.0963"""
+        from ai_trader.trading.context import _format_live_position_line
+
+        s = _format_live_position_line(
+            self._pos(side="Buy"), {"BTCUSDT": self._live(side="Buy")},
+            taker_fee_pct=0.00055,
+            ticker=self._ticker(rate=0.000125, next_in_min=15),
+        )
+        assert s is not None and "next_funding=" in s
+        assert "paying as Buy" in s
+        assert "est=-$" in s
+
+    def test_sell_earning_when_rate_positive(self):
+        from ai_trader.trading.context import _format_live_position_line
+
+        s = _format_live_position_line(
+            self._pos(side="Sell"), {"BTCUSDT": self._live(side="Sell")},
+            taker_fee_pct=0.00055,
+            ticker=self._ticker(rate=0.000125, next_in_min=15),
+        )
+        assert s is not None
+        assert "earning as Sell" in s
+        assert "est=+$" in s
+
+    def test_no_hint_when_ticker_missing(self):
+        from ai_trader.trading.context import _format_live_position_line
+
+        s = _format_live_position_line(
+            self._pos(), {"BTCUSDT": self._live()},
+            taker_fee_pct=0.00055, ticker=None,
+        )
+        assert s is not None
+        assert "next_funding=" not in s
+
+    def test_no_hint_when_next_funding_zero(self):
+        import time
+
+        from ai_trader.trading.client import Ticker
+        from ai_trader.trading.context import _format_live_position_line
+
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=77000.0, bid=76990, ask=77010,
+            funding_rate=0.0001, volume_24h=0, price_change_pct_24h=0,
+            next_funding_time_ms=0,
+        )
+        s = _format_live_position_line(
+            self._pos(), {"BTCUSDT": self._live()},
+            taker_fee_pct=0.00055, ticker=ticker,
+        )
+        assert s is not None
+        assert "next_funding=" not in s
+
+
+class TestPromptFundingAwareness:
+    """v0.21: FUNDING AWARENESS секция в SYSTEM_PROMPT и SYSTEM_PROMPT_REVIEW."""
+
+    def test_full_prompt_has_funding_awareness_section(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+
+        assert "FUNDING AWARENESS (v0.21" in SYSTEM_PROMPT
+        assert "00:00, 08:00" in SYSTEM_PROMPT
+        assert "next_funding=" in SYSTEM_PROMPT
+        assert "paying|earning" in SYSTEM_PROMPT
+        assert "next_funding <= 30m" in SYSTEM_PROMPT
+
+    def test_review_prompt_has_funding_awareness_section(self):
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt_review
+
+        rendered = build_system_prompt_review(AiTraderSettings())
+        assert "FUNDING AWARENESS (v0.21" in rendered
+        assert "00:00 / 08:00" in rendered
+        assert "next_funding=" in rendered
+        # %% должно превратиться в % после форматтера
+        assert "rate=±Y%/8h" in rendered
+        # А %% literal в шаблоне не должен утечь в финал
+        assert "%%" not in rendered
+
+    def test_full_prompt_explains_close_decision_rules(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+
+        assert "DECISION RULES" in SYSTEM_PROMPT
+        # Правило: payment + cost > close_net → close
+        assert "PAYING" in SYSTEM_PROMPT
+        assert "EARNING" in SYSTEM_PROMPT
+        assert "HOLD through" in SYSTEM_PROMPT
+
+    def test_open_decision_funding_neutral_guidance(self):
+        """v0.21: для OPEN funding band — entry signal (как было),
+        но per-trade funding cost явно НЕ применяется к sizing."""
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+
+        assert "For OPEN decisions" in SYSTEM_PROMPT
+        assert "Do NOT add per-trade funding cost as an" in SYSTEM_PROMPT

@@ -46,11 +46,22 @@ class AiPosition:
     # v0.18 (2026-05-25): "gross" → realized_pnl_usd посчитан как
     # ``(exit - entry) × qty`` (без trading fee и funding). "net" →
     # значение синкнуто с Bybit ``closedPnl`` через ``get_closed_pnl``
-    # API (учтены fee + funding). При open всегда NULL, при close
+    # API (учтены fee, **но НЕ funding** — Bybit closedPnl это не
+    # включает, см. v0.21 ниже). При open всегда NULL, при close
     # сначала "gross" (немедленно), потом ``_reconcile_pnl_to_net()``
     # на следующем full-cycle перезаписывает в "net" если API доступен.
     # KillSwitch и любая стата по PnL должна предпочитать записи "net".
     pnl_source: str | None = None
+    # v0.21 (2026-05-28): funding settlements за время жизни позиции.
+    # Bybit на perpetual futures каждые 8ч (00:00/08:00/16:00 UTC) делает
+    # settlement: long платит при rate>0, short при rate<0; в обратном
+    # случае получает. Если позиция не пересекает settlement timestamp —
+    # funding_usd=0. closedPnl от Bybit (поле realized_pnl_usd при
+    # pnl_source='net') funding НЕ включает, поэтому храним отдельно.
+    # Полный net = realized_pnl_usd + funding_usd. Заполняется
+    # ``_reconcile_funding()`` через `get_transaction_log` (type=SETTLEMENT).
+    # Отрицательное значение = бот заплатил, положительное = бот получил.
+    funding_usd: float | None = None
 
 
 _SCHEMA = """
@@ -134,6 +145,8 @@ class AiTraderStore:
             # v0.18: после ALTER старые closed-позиции остаются с pnl_source=NULL
             # — это значит "до миграции" и трактуется как gross (см. dataclass).
             ("pnl_source", "ALTER TABLE positions ADD COLUMN pnl_source TEXT"),
+            # v0.21: funding settlements за время жизни позиции (см. dataclass).
+            ("funding_usd", "ALTER TABLE positions ADD COLUMN funding_usd REAL"),
         ]
         for col_name, ddl in migrations:
             if col_name not in existing:
@@ -356,6 +369,80 @@ class AiTraderStore:
                     """,
                     (diff, wins_diff, day),
                 )
+
+    def update_funding(
+        self,
+        position_id: int,
+        *,
+        funding_usd: float,
+    ) -> None:
+        """v0.21: записать funding_usd для уже закрытой позиции.
+
+        Идемпотентно: пере-вызов с тем же значением — no-op. При первой
+        записи funding включается в ``daily_pnl.realized_pnl_usd``
+        (он считается net+funding для full picture). При повторной
+        правке (например после задержки биржевой записи) ``daily_pnl``
+        двигается на разницу.
+
+        Если позиция ещё не закрыта — функция игнорируется (funding имеет
+        смысл только для закрытых позиций; для открытых funding-cost
+        отображается в context.py для LLM на лету).
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT funding_usd, closed_at FROM positions WHERE id = ?",
+                (position_id,),
+            ).fetchone()
+            if row is None:
+                return
+            if row["closed_at"] is None:
+                return
+            old_funding = float(row["funding_usd"] or 0.0)
+            diff = funding_usd - old_funding
+            if abs(diff) < 1e-9:
+                return
+            c.execute(
+                "UPDATE positions SET funding_usd = ? WHERE id = ?",
+                (funding_usd, position_id),
+            )
+            day = (row["closed_at"] or "")[:10] or date.today().isoformat()
+            c.execute(
+                """
+                UPDATE daily_pnl
+                SET realized_pnl_usd = realized_pnl_usd + ?
+                WHERE day = ?
+                """,
+                (diff, day),
+            )
+
+    def get_positions_missing_funding(
+        self, *, hours: int = 96
+    ) -> list[AiPosition]:
+        """v0.21: закрытые позиции с funding_usd IS NULL за последние ``hours``.
+
+        Используется ``_reconcile_funding()``. По умолчанию 96ч —
+        funding settlements могут отставать на 1–2 минуты от close, плюс
+        запас на случай если бот был остановлен и не успел синкнуть
+        вовремя. Bybit transaction-log хранит данные до 2 лет.
+        """
+        cutoff = datetime.now(tz=UTC).timestamp() - hours * 3600
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT * FROM positions
+                WHERE closed_at IS NOT NULL AND funding_usd IS NULL
+                ORDER BY closed_at DESC
+                """,
+            ).fetchall()
+        out: list[AiPosition] = []
+        for r in rows:
+            try:
+                ts = datetime.fromisoformat(r["closed_at"]).timestamp()
+                if ts >= cutoff:
+                    out.append(AiPosition(**dict(r)))
+            except (ValueError, TypeError):
+                continue
+        return out
 
     def get_recent_closed_gross_positions(
         self, *, hours: int = 24
