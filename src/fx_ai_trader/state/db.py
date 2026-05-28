@@ -384,21 +384,37 @@ class AiFxTraderStore:
     # `paper_reconcile.py` могут расходиться с реальностью (M1 touch
     # vs реальный SL/TP fill), поэтому в self-reflection не учитываются.
 
-    def get_pnl_by_symbol(self, symbols: list[str]) -> list[dict[str, Any]]:
-        """Per-symbol агрегаты по закрытым live-позициям с начала эксперимента.
+    def get_pnl_by_symbol(
+        self,
+        symbols: list[str],
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-symbol агрегаты по закрытым live-позициям.
 
         Возвращает по одной записи на каждый символ из ``symbols`` (порядок
-        сохраняется). Если по символу нет закрытых live-трейдов — запись
-        с ``n=0`` (явный сигнал «не торговали», не пропуск).
+        сохраняется). Если по символу нет закрытых live-трейдов в окне —
+        запись с ``n=0`` (явный сигнал «не торговали», не пропуск).
 
         Поля: ``symbol``, ``n``, ``wins``, ``win_rate_pct``,
         ``avg_pnl_usd``, ``sum_pnl_usd``.
 
         Только ``is_paper = 0`` (paper-fills не учитываются — могут
         искажать статистику).
+
+        ``since`` — ISO 8601 cutoff на ``opened_at`` (включительно: ≥).
+        ``None`` или пустая строка → без фильтра, вся история.
+        Применяется для regime-change cutoff (Phase 1 = 2026-05-26 07:42 UTC):
+        pre-Phase-1 trades — outcome другой стратегии, не должны влиять на
+        SELF-REFLECTION. См. BUILDLOG_AI_FX_TRADER.md 2026-05-28 и
+        ``AiFxTraderSettings.stats_window_start``.
         """
         with self._conn() as c:
             placeholders = ",".join("?" * len(symbols)) if symbols else "''"
+            params: list[Any] = list(symbols)
+            since_clause = ""
+            if since:
+                since_clause = " AND opened_at >= ?"
+                params.append(since)
             rows = c.execute(
                 f"""
                 SELECT symbol,
@@ -409,10 +425,10 @@ class AiFxTraderStore:
                 FROM positions
                 WHERE closed_at IS NOT NULL
                   AND is_paper = 0
-                  AND symbol IN ({placeholders})
+                  AND symbol IN ({placeholders}){since_clause}
                 GROUP BY symbol
                 """,
-                symbols,
+                params,
             ).fetchall()
         by_symbol = {r["symbol"]: r for r in rows}
         out: list[dict[str, Any]] = []
@@ -446,14 +462,16 @@ class AiFxTraderStore:
         return out
 
     def get_pnl_by_symbol_side(
-        self, symbols: list[str]
+        self,
+        symbols: list[str],
+        since: str | None = None,
     ) -> list[dict[str, Any]]:
         """Per-(symbol × side) агрегаты по закрытым live-позициям.
 
         Возвращает по 2 записи на каждый символ из ``symbols`` (BUY+SELL,
         порядок ``symbols`` сохраняется; внутри symbol — BUY первой). Если
-        по (symbol × side) нет закрытых live-трейдов — запись с ``n=0``
-        (явный cold-start сигнал, NOT пропуск).
+        по (symbol × side) нет закрытых live-трейдов в окне — запись
+        с ``n=0`` (явный cold-start сигнал, NOT пропуск).
 
         Поля: ``symbol``, ``side``, ``n``, ``wins``, ``win_rate_pct``,
         ``avg_pnl_usd``, ``sum_pnl_usd``.
@@ -470,11 +488,23 @@ class AiFxTraderStore:
         learner. См. SYSTEM_PROMPT раздел COLD-START DISCOVERY RULE и
         BUILDLOG 2026-05-28.
 
+        ``since`` — ISO 8601 cutoff на ``opened_at`` (включительно: ≥).
+        ``None`` или пустая строка → без фильтра, вся история.
+        Regime-change cutoff (Phase 1 = 2026-05-26 07:42 UTC): pre-Phase-1
+        trades — outcome другой стратегии, не должны влиять на cold-start
+        gate. После cutoff (symbol × side) с n=0 заслуженно re-активируют
+        DISCOVERY RULE. См. ``AiFxTraderSettings.stats_window_start``.
+
         Только ``is_paper = 0`` (paper-fills не учитываются — могут
         искажать статистику; same as get_pnl_by_symbol).
         """
         with self._conn() as c:
             placeholders = ",".join("?" * len(symbols)) if symbols else "''"
+            params: list[Any] = list(symbols)
+            since_clause = ""
+            if since:
+                since_clause = " AND opened_at >= ?"
+                params.append(since)
             rows = c.execute(
                 f"""
                 SELECT symbol,
@@ -486,10 +516,10 @@ class AiFxTraderStore:
                 FROM positions
                 WHERE closed_at IS NOT NULL
                   AND is_paper = 0
-                  AND symbol IN ({placeholders})
+                  AND symbol IN ({placeholders}){since_clause}
                 GROUP BY symbol, side
                 """,
-                symbols,
+                params,
             ).fetchall()
         by_key = {(r["symbol"], r["side"]): r for r in rows}
         out: list[dict[str, Any]] = []
@@ -526,7 +556,10 @@ class AiFxTraderStore:
         return out
 
     def get_recent_closed_trades(
-        self, limit: int = 10, reason_clamp: int = 180
+        self,
+        limit: int = 10,
+        reason_clamp: int = 180,
+        since: str | None = None,
     ) -> list[dict[str, Any]]:
         """Последние ``limit`` закрытых live-трейдов, отсортированы
         по ``closed_at`` ASC (oldest → newest для USER_PROMPT).
@@ -540,20 +573,32 @@ class AiFxTraderStore:
         в prompt'е (default 180). Источник в БД может быть до 300 chars
         (см. executor schema clamp 2026-05-25), но для prompt'а 180
         достаточно, чтобы не раздуть token budget на 10 trades.
+
+        ``since`` — ISO 8601 cutoff на ``opened_at`` (≥). Regime-change
+        cutoff consistent с ``get_pnl_by_symbol*``: pre-cutoff reasoning
+        — другая стратегия, не должно влиять на SELF-REFLECTION.
+        ``None`` или пустая строка → без фильтра. См.
+        ``AiFxTraderSettings.stats_window_start``.
         """
         with self._conn() as c:
+            params: list[Any] = []
+            since_clause = ""
+            if since:
+                since_clause = " AND opened_at >= ?"
+                params.append(since)
+            params.append(int(limit))
             rows = c.execute(
-                """
+                f"""
                 SELECT id, symbol, side, volume_lots, entry_price, exit_price,
                        realized_pnl_usd, opened_at, closed_at, llm_reason,
                        close_reason
                 FROM positions
                 WHERE closed_at IS NOT NULL
-                  AND is_paper = 0
+                  AND is_paper = 0{since_clause}
                 ORDER BY closed_at DESC
                 LIMIT ?
                 """,
-                (int(limit),),
+                params,
             ).fetchall()
         out: list[dict[str, Any]] = []
         for r in rows:

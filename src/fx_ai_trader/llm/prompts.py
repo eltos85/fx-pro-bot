@@ -481,6 +481,47 @@ Discovery-trade outcome interpretation:
   flag this as "single observation, not yet evidence".
 
 ═══════════════════════════════════════════════════════════════════════
+REGIME-CHANGE WINDOW — why the stats window may show "since YYYY-MM-DD"
+═══════════════════════════════════════════════════════════════════════
+
+PERFORMANCE BY SYMBOL × SIDE and RECENT CLOSED TRADES blocks may
+display a header tag like "since 2026-MM-DD regime-change cutoff".
+This means closed trades opened before that date are EXCLUDED from
+your self-reflection input — not because the trades didn't happen
+(they remain in the audit database), but because they are the
+outcome of a MATERIALLY DIFFERENT prompt + rules version, not the
+strategy you are currently running.
+
+Why this matters for your reasoning:
+- Pre-cutoff trades were closed by a version WITHOUT this thesis
+  discipline section, WITHOUT US macro rates context, and WITHOUT
+  the cold-start discovery rule. Treating their P&L as evidence of
+  the current strategy would systematically over-weight the failure
+  modes those earlier rules created.
+- Research basis: Lopez de Prado «Advances in Financial ML» (2018)
+  ch.7 — structural breaks invalidate use of pre-break outcomes as
+  evidence for post-break performance. Hamilton (1989) regime-switching
+  framework.
+
+How this interacts with COLD-START DISCOVERY RULE:
+- If a (symbol × side) pair has trades only in the pre-cutoff
+  window, the post-cutoff aggregate shows `n=0 (COLD-START)`. The
+  DISCOVERY RULE is legitimately applicable to that pair — the
+  current strategy genuinely has no data on it.
+- This is NOT a loophole to ignore prior losses. Cold-start
+  discovery still requires ALL FOUR guards (macro supportive,
+  uncertainty ≤ 0.5, size 0.01, 1/week cadence). You are not
+  forced to take a discovery trade — HOLD remains the safe default.
+
+What this rule is NOT:
+- NOT permission to forget prior trades exist. The PERFORMANCE block
+  and RECENT CLOSED TRADES block reflect the active window only;
+  older outcomes are intentionally outside your view.
+- NOT permanent. As post-cutoff trade history accumulates, the
+  cutoff stops mattering — the post-cutoff window becomes
+  representative of the current strategy.
+
+═══════════════════════════════════════════════════════════════════════
 TRADING WINDOWS (UTC, by liquidity)
 ═══════════════════════════════════════════════════════════════════════
 
@@ -868,7 +909,11 @@ def _format_pnl_line(stat: dict[str, Any]) -> str:
     )
 
 
-def format_performance_by_symbol(stats: list[dict[str, Any]] | None) -> str:
+def format_performance_by_symbol(
+    stats: list[dict[str, Any]] | None,
+    *,
+    window_label: str | None = None,
+) -> str:
     """Render Performance by Symbol блок для USER_PROMPT.
 
     Возвращает пустую строку при ``stats is None`` или пустом списке —
@@ -877,13 +922,20 @@ def format_performance_by_symbol(stats: list[dict[str, Any]] | None) -> str:
     (явное «no live trades yet» полезнее тишины: LLM узнаёт что данных
     нет, не строит галлюцинации про прошлые сделки).
 
+    ``window_label`` — короткая метка, показываемая в заголовке (например
+    ``"since 2026-05-26 Phase 1 deploy — regime change cutoff"``).
+    ``None`` → header v1.X ("since experiment start"). Используется
+    для regime-change cutoff (v1.Z, 2026-05-28); БД фильтрация — на
+    стороне store.
+
     Источник правды per-symbol — `AiFxTraderStore.get_pnl_by_symbol`.
     Соответствует паттерну `ai_arena/llm/prompts.py::format_symbol_stats_block`
     (v2.z1, 2026-05-22).
     """
     if not stats:
         return ""
-    lines = ["=== PERFORMANCE BY SYMBOL (live, since experiment start) ==="]
+    header_window = window_label or "since experiment start"
+    lines = [f"=== PERFORMANCE BY SYMBOL (live, {header_window}) ==="]
     lines.extend(_format_pnl_line(s) for s in stats)
     return "\n".join(lines)
 
@@ -913,6 +965,8 @@ def _format_pnl_side_line(stat: dict[str, Any]) -> str:
 
 def format_performance_by_symbol_side(
     stats: list[dict[str, Any]] | None,
+    *,
+    window_label: str | None = None,
 ) -> str:
     """Render Performance by (Symbol × Side) блок для USER_PROMPT.
 
@@ -927,6 +981,9 @@ def format_performance_by_symbol_side(
     XAUUSD BUY = 0 trades. Без разбивки self-reflection систематически
     избегает untested side (cold-start trap, Sutton & Barto 2018 §2.7).
 
+    ``window_label`` — короткая метка для header (regime-change cutoff
+    v1.Z, 2026-05-28). ``None`` → header v1.Y ("since experiment start").
+
     Источник правды — `AiFxTraderStore.get_pnl_by_symbol_side`.
 
     Возвращает пустую строку при ``stats is None`` или пустом списке.
@@ -935,8 +992,9 @@ def format_performance_by_symbol_side(
     """
     if not stats:
         return ""
+    header_window = window_label or "since experiment start"
     lines = [
-        "=== PERFORMANCE BY SYMBOL × SIDE (live, since experiment start) ==="
+        f"=== PERFORMANCE BY SYMBOL × SIDE (live, {header_window}) ==="
     ]
     lines.extend(_format_pnl_side_line(s) for s in stats)
     return "\n".join(lines)
@@ -965,7 +1023,11 @@ def _format_trade_line(trade: dict[str, Any]) -> str:
     )
 
 
-def format_recent_trades(trades: list[dict[str, Any]] | None) -> str:
+def format_recent_trades(
+    trades: list[dict[str, Any]] | None,
+    *,
+    window_label: str | None = None,
+) -> str:
     """Render Recent Closed Trades блок для USER_PROMPT.
 
     Возвращает пустую строку при ``trades is None`` или пустом списке.
@@ -974,12 +1036,19 @@ def format_recent_trades(trades: list[dict[str, Any]] | None) -> str:
     взвешивает последние строки, и хронологический порядок ближе к
     тому, как человек читает историю.
 
+    ``window_label`` — короткая метка regime-change cutoff (v1.Z,
+    2026-05-28). ``None`` → header v1.X без window-метки.
+
     Используется только в full cycle (`build_user_prompt`), не в
     review — review должен оставаться lightweight (см. SYSTEM_PROMPT_REVIEW).
     """
     if not trades:
         return ""
-    header = f"=== RECENT CLOSED TRADES (last {len(trades)}, oldest -> newest) ==="
+    window_part = f", {window_label}" if window_label else ""
+    header = (
+        f"=== RECENT CLOSED TRADES (last {len(trades)}, "
+        f"oldest -> newest{window_part}) ==="
+    )
     body = "\n".join(_format_trade_line(t) for t in trades)
     return f"{header}\n{body}"
 

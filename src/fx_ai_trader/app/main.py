@@ -274,16 +274,31 @@ def _run_full_cycle(
     # v1.Y COLD-START (2026-05-28): дополнительно per-(symbol × side)
     # split, чтобы LLM явно видел untested направления и мог
     # применить COLD-START DISCOVERY RULE (Sutton & Barto 2018 §2.7).
-    symbol_stats = store.get_pnl_by_symbol(settings.symbols)
-    symbol_side_stats = store.get_pnl_by_symbol_side(list(settings.symbols))
-    recent_trades = store.get_recent_closed_trades(limit=10)
+    # v1.Z REGIME CHANGE CUTOFF (2026-05-28): фильтр trades < Phase 1
+    # deploy (settings.stats_window_start). Pre-Phase-1 trades — outcome
+    # другой стратегии (Lopez de Prado «Advances in Financial ML» 2018
+    # ch.7 structural breaks); БД сохраняется, но LLM видит only
+    # post-cutoff. См. BUILDLOG 2026-05-28.
+    since = settings.stats_window_start or None
+    window_label = (
+        f"since {since[:10]} regime-change cutoff" if since else None
+    )
+    symbol_stats = store.get_pnl_by_symbol(settings.symbols, since=since)
+    symbol_side_stats = store.get_pnl_by_symbol_side(
+        list(settings.symbols), since=since
+    )
+    recent_trades = store.get_recent_closed_trades(limit=10, since=since)
     user_prompt = build_user_prompt(
         format_context_for_prompt(ctx),
-        performance_by_symbol=format_performance_by_symbol(symbol_stats),
-        performance_by_symbol_side=format_performance_by_symbol_side(
-            symbol_side_stats
+        performance_by_symbol=format_performance_by_symbol(
+            symbol_stats, window_label=window_label
         ),
-        recent_trades=format_recent_trades(recent_trades),
+        performance_by_symbol_side=format_performance_by_symbol_side(
+            symbol_side_stats, window_label=window_label
+        ),
+        recent_trades=format_recent_trades(
+            recent_trades, window_label=window_label
+        ),
     )
 
     log.info(
@@ -407,10 +422,18 @@ def _run_review_cycle(
     # v1.X self-reflection (review variant): только per-symbol агрегаты
     # (без recent_trades — review должен оставаться lightweight, см.
     # SYSTEM_PROMPT_REVIEW «NO macro feed, NO news, NO EIA, NO 4H bars»).
-    symbol_stats = store.get_pnl_by_symbol(settings.symbols)
+    # v1.Z regime-change cutoff применяется и здесь — consistency с
+    # full cycle (settings.stats_window_start).
+    since = settings.stats_window_start or None
+    window_label = (
+        f"since {since[:10]} regime-change cutoff" if since else None
+    )
+    symbol_stats = store.get_pnl_by_symbol(settings.symbols, since=since)
     user_prompt = build_user_prompt_review(
         format_context_for_review(ctx),
-        performance_by_symbol=format_performance_by_symbol(symbol_stats),
+        performance_by_symbol=format_performance_by_symbol(
+            symbol_stats, window_label=window_label
+        ),
     )
 
     log.info("Review LLM call: positions=%d", len(ctx.open_positions))

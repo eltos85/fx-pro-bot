@@ -239,6 +239,36 @@ class AiFxTraderSettings(BaseSettings):
         validation_alias="AI_FX_TRADER_MACRO_RATES_CACHE_TTL_SEC",
     )  # 30 минут — достаточно freshness, без HTTP-перегруза
 
+    # ─── Self-reflection regime change cutoff (2026-05-28) ───────────────
+    # Фильтрует closed trades в SELF-REFLECTION блоках USER_PROMPT
+    # (get_pnl_by_symbol / get_pnl_by_symbol_side / get_recent_closed_trades).
+    # Trades с opened_at < этой метки НЕ показываются LLM, хотя физически
+    # ОСТАЮТСЯ в БД (для аудита и анализа).
+    #
+    # Зачем: 2026-05-26 07:42 UTC задеплоен Phase 1 (persistent thesis
+    # discipline) — это первое фундаментальное изменение reasoning-rules
+    # после старта эксперимента. Pre-26.05 trades — outcome ДРУГОЙ
+    # стратегии (бот закрывал 22/26 позиций на 1H technical noise без
+    # macro reference); использовать их как evidence для SELF-REFLECTION
+    # текущей стратегии = systematic bias (бот «наказывает» себя за уже
+    # исправленное поведение). См. BUILDLOG_AI_FX_TRADER.md 2026-05-28.
+    #
+    # Research basis: Lopez de Prado "Advances in Financial ML" (2018)
+    # ch.7 «Cross-Validation in Finance» — structural breaks invalidate
+    # use of pre-break outcomes as evidence for post-break performance.
+    # Hamilton (1989) regime-switching framework.
+    #
+    # Compliance: НЕ отключает инструменты (sample-size.mdc), НЕ меняет
+    # торговую логику (strategy-guard.mdc), НЕ удаляет данные
+    # (full audit trail сохраняется в БД).
+    #
+    # Format: ISO 8601 с timezone. Empty string ("") = фильтр отключён,
+    # бот видит всю историю (legacy v1.X behavior).
+    stats_window_start: str = Field(
+        default="2026-05-26T07:42:00+00:00",
+        validation_alias="AI_FX_TRADER_STATS_WINDOW_START",
+    )
+
     # ─── Misc ────────────────────────────────────────────────────────────
     log_level: str = Field(
         default="INFO", validation_alias="AI_FX_TRADER_LOG_LEVEL"

@@ -1,5 +1,147 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-28 — feat(regime-cutoff): фильтр self-reflection trades с Phase 1 deploy ts
+
+`коммит при deploy`
+
+### Контекст и trigger
+
+После успешного COLD-START deploy в 08:32:32 UTC бот открыл и
+закрыл первую discovery-сделку на XAUUSD BUY (+$6.95 за 49 мин).
+В следующем full cycle (09:37 UTC) в SELF-REFLECTION блоке бот
+сам прокомментировал:
+
+> «NG=F BUY record 2/12 (17%) for −$43 – catastrophic; avoid NG
+> long without structural macro shift. BZ=F BUY 1/6 but +$78 sum
+> due to one outlier; recent BZ=F BUY trades failing (<30min closes)»
+
+Пользователь обоснованно указал что **эти 12 NG=F BUY trades и
+все BZ=F trades — pre-Phase-1 (до 2026-05-26 07:42 UTC)**, то
+есть outcome **другой** версии стратегии:
+
+| Symbol × Side | Trades | Все pre-Phase-1? |
+|---|---:|:---:|
+| NG=F BUY | 12 | ✅ (18-25 мая) |
+| BZ=F BUY | 6 | ✅ (13-25 мая) |
+| BZ=F SELL | 5 | ✅ (14-25 мая) |
+| XAUUSD SELL | 3 | ✅ |
+| XAUUSD BUY | 1 | ❌ (только сегодняшний COLD-START) |
+
+После Phase 1 deploy (26 мая) — **0 трейдов на NG/BZ**. Бот сейчас
+SELF-REFLECTION «наказывает» себя за поведение, которое уже исправлено
+тремя последовательными правками: Phase 1 (persistent thesis,
+2026-05-26), D1 (DXY+UST10Y+TIPS, 2026-05-27), COLD-START rule
+(2026-05-28). Это **systematic continuation bias**: данные ≠
+strategy, они outcome **другой** strategy.
+
+### Research basis
+
+| Источник | Положение |
+|---|---|
+| Lopez de Prado «Advances in Financial ML» (2018) ch.7 «Cross-Validation in Finance» | Structural breaks invalidate use of pre-break outcomes as evidence for post-break performance. Cross-validation внутри одного regime — обязателен. |
+| Hamilton (1989) «A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle» Econometrica 57(2) | Regime-switching framework: финансовые временные ряды содержат discrete regime changes; параметры до и после change — разные DGP, mixing inadmissible. |
+
+В нашем случае точная дата regime break — **2026-05-26 07:42 UTC**
+(Phase 1 deploy timestamp = первое фундаментальное изменение
+reasoning-rules после старта эксперимента 12 мая).
+
+### Что изменено
+
+| Файл | Что |
+|---|---|
+| `src/fx_ai_trader/config/settings.py` | new `stats_window_start: str` (default `"2026-05-26T07:42:00+00:00"`, env `AI_FX_TRADER_STATS_WINDOW_START`). Пустая строка отключает фильтр (legacy). |
+| `src/fx_ai_trader/state/db.py` | `get_pnl_by_symbol`, `get_pnl_by_symbol_side`, `get_recent_closed_trades` — добавлен kwarg `since: str | None = None` (filter on `opened_at >= since`). Backward-compat: `since=None` == legacy behavior (passes existing tests). |
+| `src/fx_ai_trader/llm/prompts.py` | `format_performance_by_symbol`, `format_performance_by_symbol_side`, `format_recent_trades` — добавлен kwarg `window_label: str | None = None` для header tag («since YYYY-MM-DD regime-change cutoff»). Backward-compat: `window_label=None` == legacy header. |
+| `src/fx_ai_trader/llm/prompts.py::SYSTEM_PROMPT` | новый раздел **`REGIME-CHANGE WINDOW`** после `COLD-START DISCOVERY RULE`: объясняет что header «since YYYY-MM-DD» значит, цитирует Lopez de Prado + Hamilton, описывает interaction с COLD-START (cold-start re-trigger допустим, но 4 guards остаются обязательны). |
+| `src/fx_ai_trader/app/main.py` | `_run_full_cycle` и `_run_review_cycle` пробрасывают `since=settings.stats_window_start` в DB-вызовы и `window_label=f"since {date} regime-change cutoff"` в format helpers. |
+| `tests/test_fx_ai_trader_regime_cutoff.py` | 23 теста: DB filter (since/None/empty/inclusive boundary/cold-start re-trigger), format helpers (window_label + default), SYSTEM_PROMPT content asserts (section header + Lopez de Prado citation + Hamilton + cold-start interaction + "NOT a loophole" warning), Settings (default ts + env override + empty disables). |
+
+### Effect для бота после deploy
+
+Per-side stats теперь покажут только post-cutoff trades:
+
+```
+=== PERFORMANCE BY SYMBOL × SIDE (live, since 2026-05-28 regime-change cutoff) ===
+- XAUUSD BUY: n=1, wins=1 (100.0%), avg_pnl=+6.95$, sum_pnl=+6.95$
+- XAUUSD SELL: n=0 (NO live trades yet — COLD-START, see DISCOVERY RULE)
+- BZ=F BUY: n=0 (NO live trades yet — COLD-START, see DISCOVERY RULE)
+- BZ=F SELL: n=0 (NO live trades yet — COLD-START, see DISCOVERY RULE)
+- NG=F BUY: n=0 (NO live trades yet — COLD-START, see DISCOVERY RULE)
+- NG=F SELL: n=0 (NO live trades yet — COLD-START, see DISCOVERY RULE)
+```
+
+NG=F BUY / BZ=F BUY / BZ=F SELL / XAUUSD SELL / NG=F SELL re-активируют
+**COLD-START DISCOVERY RULE** — то есть теоретически бот может попробовать
+по одной discovery-сделке каждым из них, но только при выполнении ВСЕХ 4 guards:
+1. MACRO supportive (research-driven)
+2. SENTIMENT clean (aggregate_uncertainty ≤ 0.5)
+3. SIZE strictly minimum (0.01 lot)
+4. CADENCE ≤ 1 per (symbol × side) per week
+
+**Защита от злоупотребления**: SYSTEM_PROMPT раздел REGIME-CHANGE WINDOW
+явно говорит «This is **NOT a loophole** to ignore prior losses. Cold-start
+discovery still requires ALL FOUR guards». Plus — pre-cutoff trades остаются
+в БД для аудита, разработчик в любой момент может откатить cutoff на пустой
+string (`AI_FX_TRADER_STATS_WINDOW_START=""`) и бот опять увидит всю
+историю.
+
+### Compliance check
+
+| Rule | Соблюдение |
+|---|---|
+| `strategy-guard.mdc` (user approval для изменения торговой логики) | Пользователь явно одобрил «вариант 2 (query-time filter)» в AskQuestion 2026-05-28 12:58 UTC+3 |
+| `no-data-fitting.mdc` (research as source of truth) | Lopez de Prado 2018 ch.7 + Hamilton 1989 процитированы в коде (`settings.py` docstring + SYSTEM_PROMPT новый раздел) и в этом BUILDLOG |
+| `sample-size.mdc` (n<100 → не отключать) | Инструменты **НЕ** отключаются. Изменилось только что бот видит в SELF-REFLECTION — статистическая выборка перезапускается с точки regime change. БД физически сохранена. |
+| `buildlog.mdc` (логирование изменений) | Эта запись |
+| `api-docs.mdc` | Не применимо — query-time filter, никаких API-параметров |
+
+### Acceptance criteria (smoke + observability)
+
+**Сразу после deploy:**
+- `docker logs fx-pro-bot-fx-ai-trader-1 --tail 80` показывает
+  `LLM call (full) … us_rates=on self_reflection=closed_trades:N`
+  где `N` — это количество post-cutoff trades (на момент deploy = 1
+  только XAUUSD BUY от сегодняшнего COLD-START)
+- USER_PROMPT в логах содержит блок `=== PERFORMANCE BY SYMBOL × SIDE
+  (live, since 2026-05-26 regime-change cutoff) ===` (header с window
+  label вместо «since experiment start»)
+- 5 из 6 (symbol × side) пар должны показывать `n=0 (... COLD-START
+  ...)` (только XAUUSD BUY остаётся с n=1)
+
+**В течение 48 часов:**
+- В analysis/thinking блоке хотя бы раз должно появиться явное
+  упоминание «regime-change», «cutoff», или «cold-start» в контексте
+  re-activation на NG/BZ (LLM прочитал новый SYSTEM_PROMPT раздел)
+- БД сохраняет все pre-cutoff trades (audit invariant)
+- daily_pnl таблица **не** должна разъехаться с новым SELF-REFLECTION
+  view — daily_pnl не использует regime cutoff (это agreement reporting,
+  не self-reflection input)
+
+**Что НЕ acceptance criterion:**
+- Открытие discovery trade на NG/BZ в 48h — это curve-fitting под
+  желаемый результат (`no-data-fitting.mdc`). Если 4 guards не
+  выполняются, HOLD — правильное поведение.
+- Прибыльность post-cutoff — sample слишком мал (`sample-size.mdc`),
+  rule оценивается через 2-4 недели на полной выборке.
+
+### Что НЕ сделано в этом коммите
+
+- Не меняется `daily_pnl` агрегат (financial reporting должен
+  отражать всю историю, не cutoff window)
+- Не меняется `decisions` таблица (audit-only)
+- Не меняется `broker_reconcile` (operational integrity)
+
+### Reversal procedure
+
+Если через 2 недели окажется что cutoff создаёт side-effects (например,
+discovery trades на NG=F BUY систематически проигрывают), можно:
+- Отключить cutoff без deploy: `AI_FX_TRADER_STATS_WINDOW_START=""`
+  в `.env` → бот опять видит всю историю (legacy v1.X behavior)
+- Сдвинуть cutoff: `AI_FX_TRADER_STATS_WINDOW_START="2026-06-01T00:00:00+00:00"`
+  если найдём ещё более позднюю regime-change точку
+
+---
+
 ## 2026-05-28 — feat(cold-start): per-(symbol × side) PnL + DISCOVERY RULE в SYSTEM_PROMPT
 
 `коммит при deploy`
