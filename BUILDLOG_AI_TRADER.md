@@ -1,5 +1,173 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-28 — v0.20: Fee Awareness на OPEN + hard-валидация executor'а + NET R-units в контексте
+
+### Запрос пользователя
+
+> «убедись что ии видит и учитывает комиссии при совершении сделок,
+> как при расчете стоплоссов так и при слежении за лотом. У меня
+> подозрение что тут может быть не точность и ии заходит в сделку с
+> более оптимистичным настроем, а когда закрывает уверен в том что он
+> получил прибыль»
+
+### Подозрение оправдалось
+
+v0.19 (2026-05-27) добавил FEE AWARENESS, но **только на close-decision**.
+При OPEN AI оценивал R:R и risk_usd чисто по ценам:
+
+1. **R:R 1.5 price-based ≠ R:R 1.5 после fees.**
+   На notional ~$2500, fee_RT ≈ $2.75. При declared risk=$10 и reward=$15:
+   - eff_reward = $15 − $2.75 = $12.25
+   - eff_risk = $10 + $2.75 = $12.75
+   - **eff_R:R = 0.96** — отрицательное матожидание.
+2. **risk_usd cap=$10 не равен реальному убытку на SL.**
+   Реальный убыток = declared_risk + fee_RT. При declared $10 + $2.75 fee
+   = $12.75 (27% выше per-trade лимита __RISK_PCT__% от капитала).
+3. **peak_pnl_r / current_pnl_r — чисто price-based.**
+   AI видит peak=+1R, считает «зафиксировал бы R», а реально после
+   round-trip fee это ~+0.7R. Триггер LOCKED-PROFIT (1.5R) фактически
+   локирует ~1.2R, PEAK-DRAWDOWN (cur≤0.45R) у мелких notional при
+   gross-cur=+0.45R даёт net-cur ≈ −0.1R (close в минус).
+4. **LIVE `unrealised_pnl` от Bybit не учитывает closeFee.**
+   `unrealised_pnl = (mark - entry) × size`, спишется ещё close fee при
+   reduce-only ордере. AI читает «unrealised=+$2», уверен что закрытие
+   = +$2 net, на деле −$1 (ровно кейс ATOMUSDT #120 в v0.19).
+5. **Промпт говорил `0.06% per side` — реальный fee 0.055%** (VIP-0 demo,
+   проверено на сверке id=121: openFee=$1.3597 на cumEntryValue=$2472.21
+   → ровно 0.055%). Старое число завышало fee на ~9% но всё равно было
+   неточным.
+
+### Решение (Вариант B по предложению агента)
+
+#### 1. Новая настройка `taker_fee_pct`
+
+`src/ai_trader/config/settings.py` — default `0.00055` (0.055% per side
+VIP-0 demo), env `AI_TRADER_TAKER_FEE_PCT`. Single source of truth для
+промпта, контекста и валидатора.
+
+#### 2. Hard-валидация в `_apply_open` (executor.py)
+
+После расчёта `qty` бот сам считает fee_RT и проверяет **до** place_order:
+
+```
+fee_RT_usd = price * qty * taker_fee_pct * 2
+
+# (1) net-risk cap
+declared_risk_usd + fee_RT_usd MUST be <= risk_usd_cap  → иначе reject
+"net_risk_exceeds_cap"
+
+# (2) effective R:R after fees
+eff_reward_usd = |TP-entry| * qty - fee_RT_usd
+eff_risk_usd   = |entry-SL| * qty + fee_RT_usd
+eff_R:R = eff_reward_usd / eff_risk_usd  MUST be >= 1.5  → иначе reject
+"eff_rr_below_1.5"
+```
+
+Это **жёсткая страховка** — даже если LLM ошибётся в арифметике,
+исполнитель сам пересчитает и не пропустит сделку с EV < 0.
+
+#### 3. `PositionPnlStats` + net R-units в контексте (context.py)
+
+Новый dataclass `PositionPnlStats(peak_r, current_r, peak_r_net,
+current_r_net, fee_round_trip_usd)`. Новая функция
+`_compute_position_pnl_stats(..., taker_fee_pct=...)` считает обе версии.
+Старая `_compute_position_r_stats(...)` оставлена как thin wrapper для
+backward-compat (возвращает только gross — все 8 существующих тестов
+продолжают работать без правок).
+
+В `format_context_for_prompt` / `format_context_for_review` к каждой
+открытой позиции теперь добавляется (при `taker_fee_pct > 0`):
+```
+peak_pnl_r=+1.00R current_pnl_r=+0.20R | NET (after est. RT fees $0.55):
+peak=+0.94R cur=+0.14R
+```
+
+#### 4. `close_net` в LIVE-строке (context.py)
+
+`_format_live_position_line(..., taker_fee_pct=...)` теперь добавляет:
+```
+LIVE: mark=$77205 unrealised=+2.05$ liq=$58400 (...) margin=$231.41
+close_net=+1.62$ (after -$0.42 close fee)
+```
+`close_net` = `unrealised - close_fee` = то, что реально получим при
+закрытии прямо сейчас по mark price. **openFee не учитывается — он уже
+sunk cost** (списан при открытии, не возвращается).
+
+#### 5. Расширен FEE AWARENESS в промпте (prompts.py)
+
+- Title: `affects ALL close decisions` → `affects BOTH open AND close
+  decisions`.
+- Два раздела: `RULES FOR OPEN` (eff_R:R + net-risk cap с формулами,
+  иллюстративный worked example через placeholder'ы) и `RULES FOR
+  CLOSE` (как v0.19, но ссылается на `close_net` из LIVE-строки вместо
+  гипотетического fee_cost).
+- Fee-числа теперь через placeholder'ы: `__TAKER_FEE_PCT__`,
+  `__TAKER_FEE_RT_PCT__`, `__TAKER_FEE_FRACTION_RT__`,
+  `__FEE_RT_AT_CAPITAL_USD__`. При смене `AI_TRADER_TAKER_FEE_PCT` или
+  `AI_TRADER_VIRTUAL_CAPITAL` в .env промпт автоматически пересчитывает
+  все примеры (`$500` capital → `$0.55` fee_RT для default).
+- `RISK_USD self-check` и `R:R CHECK + RISK_USD` теперь явно говорят
+  про after-fee требования.
+- `build_system_prompt_review` тоже рендерит fee-placeholder'ы (до
+  v0.20 review-промпт не вызывал `_render_capital_rules`).
+
+### Перезапуск 14-day эксперимента n=0
+
+Согласно `.cursor/rules/no-data-fitting.mdc` и `sample-size.mdc`:
+**любое изменение торговой логики промпта/parser'а сбрасывает
+forward-test n=0**. Все накопленные за период статы (положительные или
+отрицательные) до этого коммита трактуются как stale baseline для v0.19,
+дальнейший анализ — для v0.20.
+
+### Что НЕ меняется
+
+- Стратегия входа (триггеры, RSI/EMA/BB пороги, confirmations, leverage).
+- 4 exit-триггера (invalidation / locked-profit / adverse / peak-drawdown).
+- KillSwitch / daily loss limit / max positions / max leverage.
+- Net PnL reconciliation (v0.18) — `closedPnl` от Bybit в БД, без funding.
+- Telegram-нотификации (gross→net апдейт в TG — отдельная тема для v0.21).
+
+### Файлы
+
+- `src/ai_trader/config/settings.py` — `taker_fee_pct` field.
+- `src/ai_trader/trading/context.py` — `MarketContext.taker_fee_pct`,
+  `PositionPnlStats` dataclass, `_compute_position_pnl_stats`, fee-aware
+  `_format_live_position_line`, обновлённые format-функции.
+- `src/ai_trader/trading/executor.py` — fee-aware валидация в
+  `_apply_open` (net_risk_cap + eff_R:R).
+- `src/ai_trader/llm/prompts.py` — docstring v0.20, новый
+  `__FEE_RT_AT_CAPITAL_USD__` placeholder, переписанный FEE AWARENESS
+  блок в обоих промптах, рендер capital-rules в review.
+- `src/ai_trader/app/main.py` — пробрасывает `settings.taker_fee_pct`
+  в `collect_market_context` / `collect_review_context`.
+- `tests/test_ai_trader.py` — обновлён SHA256 baseline для SYSTEM_PROMPT
+  (`dc44ce72…` → `ec950329…`), +27 новых тестов (TakerFeePctSetting,
+  PromptFeePlaceholders, PromptFeeAwarenessOpenSection,
+  ComputePositionPnlStatsNet, LiveLineCloseNet,
+  ApplyOpenFeeAwareValidation).
+
+### Тесты
+
+```
+tests/test_ai_trader.py: 167 passed (было 140, +27 новых)
+tests/ (вся репа): 1145 passed
+```
+
+### Источник (verification of taker fee)
+
+Бэкап выписки для id=121 (Sell BTCUSDT 0.033, 2026-05-27):
+- `cumEntryValue=2472.2115`, `openFee=1.35971633` → 1.35972/2472.21 =
+  **0.000550** = 0.055%
+- `cumExitValue=2464.4466`, `closeFee=1.35544563` → 1.35545/2464.45 =
+  **0.000550** = 0.055%
+- `closedPnl = (2472.2115 - 2464.4466) - 1.3597 - 1.3555 = 5.04974` ✓
+
+Это VIP-0 default на Bybit demo unified perpetual. Если в будущем
+перейдём на live с VIP-1+ или с rebate-таркером — менять только
+`AI_TRADER_TAKER_FEE_PCT` в `.env`, код не трогать.
+
+---
+
 ## 2026-05-27 — v0.19: Fee Awareness в промпте (LLM знает о комиссиях)
 
 ### Проблема

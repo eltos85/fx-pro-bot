@@ -341,7 +341,12 @@ def _run_cycle(
         return
 
     ctx = collect_market_context(
-        bybit, store, settings.symbols, settings.virtual_capital_usd, news_provider
+        bybit,
+        store,
+        settings.symbols,
+        settings.virtual_capital_usd,
+        news_provider,
+        taker_fee_pct=settings.taker_fee_pct,
     )
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
@@ -463,7 +468,10 @@ def _run_review_cycle(
         return
 
     ctx = collect_review_context(
-        bybit, store, settings.virtual_capital_usd
+        bybit,
+        store,
+        settings.virtual_capital_usd,
+        taker_fee_pct=settings.taker_fee_pct,
     )
     system_prompt = build_system_prompt_review(settings)
     user_prompt = build_user_prompt_review(format_context_for_review(ctx))

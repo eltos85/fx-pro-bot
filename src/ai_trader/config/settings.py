@@ -106,6 +106,21 @@ class AiTraderSettings(BaseSettings):
         default=0.02, validation_alias="AI_TRADER_RISK_PER_TRADE"
     )
 
+    # v0.20 (2026-05-28): Bybit taker fee per side в долях. Default 0.00055
+    # = 0.055% per side (VIP-0 на demo + spot/perp linear, см. id=121
+    # сверка: openFee=1.3597 на cumEntryValue=2472.21 → ровно 0.055%).
+    # Round-trip = 2× per_side = 0.11% от notional.
+    # Используется ВСЮДУ:
+    # - prompts.py: рендер числа в FEE AWARENESS блок (open + close)
+    # - context.py: peak_pnl_r_net / current_pnl_r_net / live unrealised net
+    # - executor._apply_open: hard-валидация effective R:R и
+    #   risk_usd + fee_RT <= cap.
+    # При переходе на live / другой VIP-tier — менять через .env
+    # (`AI_TRADER_TAKER_FEE_PCT=0.0006` для 0.06%).
+    taker_fee_pct: float = Field(
+        default=0.00055, validation_alias="AI_TRADER_TAKER_FEE_PCT"
+    )
+
     # ─── Storage ─────────────────────────────────────────────────────────
     data_dir: str = Field(default="/data", validation_alias="AI_TRADER_DATA_DIR")
     db_filename: str = Field(

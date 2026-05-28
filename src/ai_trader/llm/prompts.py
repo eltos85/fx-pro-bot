@@ -108,6 +108,21 @@ exit-триггера (1-4). Решает проблему «бот закрыв
 после комиссий» (trade #120 ATOMUSDT, 2026-05-26). Не меняет стратегию,
 только добавляет знание о структуре издержек.
 
+v0.20 (2026-05-28): FEE AWARENESS расширен на OPEN-decision (раньше
+говорил только про close). Исправлен таркер fee 0.06%% → 0.055%% per side
+(VIP-0 demo, проверено на id=121: openFee=1.3597 на cumEntry=2472.21 =
+ровно 0.055%%). Введены 4 hard-валидации в executor._apply_open:
+- net_risk = declared_risk_usd + fee_RT MUST be <= cap ($10 default).
+- effective R:R = (reward_dist*qty - fee_RT) / (risk_dist*qty + fee_RT)
+  MUST be >= 1.5 (price-only R:R игнорируется).
+В контексте к каждой open position добавлено поле NET (peak/cur R-units
+после round-trip fees) — раньше LLM видел только gross-R, заявленная
+прибыль на пике перетрактовывалась как «зафиксированная». Реальная
+польза: TRADE #120 ATOMUSDT (gross +$2.14 / net -$2.35) теперь видна
+LLM-у как «cur=+0.21R gross / -0.45R NET» — close-decision принимается
+с учётом fee. fee_pct настраивается через AI_TRADER_TAKER_FEE_PCT в .env.
+Правка стратегии → reset 14-day эксперимента n=0.
+
 SYSTEM_PROMPT_REVIEW v0.13 не трогается (review-цикл выдаёт только
 close|hold, новые поля не нужны). Использование invalidation_condition
 для семантического exit-trigger в review — Этап 2.
@@ -140,11 +155,15 @@ CAPITAL RULES (hard constraints):
 - Maximum 3 simultaneous open positions.
 - Maximum leverage: 5x per position.
 - Maximum risk per trade: __RISK_PCT__% of capital ($__RISK_USD_CAP__ max risk per trade).
-  Risk = |entry - stop_loss| * qty, must stay <= $__RISK_USD_CAP__.
+  Risk = |entry - stop_loss| * qty. The bot's hard validator (v0.20)
+  rejects the trade if `risk_usd + estimated round-trip fee > $__RISK_USD_CAP__`.
+  See FEE AWARENESS below for the exact formula.
 - Daily loss limit: $__DAILY_LOSS_LIMIT__ (after that trading blocks until next day).
 - Each new position MUST have stop_loss and take_profit.
-- Reward-to-Risk MUST be >= 1.5 (i.e. distance to TP >= 1.5x distance to SL).
-  If you can't find a setup with R:R >= 1.5, return action="hold".
+- Reward-to-Risk MUST be >= 1.5 — computed AFTER round-trip fees, NOT
+  by raw price distance. See FEE AWARENESS for the effective-R:R formula
+  the bot will validate against. If your idea only clears R:R 1.5 by
+  price but not after fees, return action="hold".
 
 ALLOWED PAIRS (only these):
 - __ALLOWED_PAIRS__
@@ -187,9 +206,11 @@ plain English (3-8 short lines) covering, in order:
      c) any contrary new evidence (news, funding flip, EMA shift)?
      This drives close/hold decision per EXIT MANAGEMENT below.
   5) CONFIRMATIONS: list which signals align (need 2+ for entry).
-  6) R:R CHECK + RISK_USD: if considering entry, compute reward/risk
-     in price distance terms (reject if R:R < 1.5) AND compute the
-     dollar risk |entry - SL| * qty (must be 0 < x <= __RISK_USD_CAP__).
+  6) R:R CHECK + RISK_USD: if considering entry, compute price-distance
+     R:R AND the AFTER-FEE effective R:R per FEE AWARENESS (BOTH must
+     be >= 1.5). Compute dollar risk = |entry - SL| * qty and verify
+     `risk_usd + fee_RT <= $__RISK_USD_CAP__` — the bot's executor will
+     reject the trade otherwise.
   7) PRE-COMMIT CHECK (open only): state your confidence band (low /
      medium / high → number) per CONFIDENCE CALIBRATION; state the
      specific PRE-REGISTERED INVALIDATION condition that would void
@@ -233,10 +254,12 @@ RISK_USD self-check (mandatory for "open"):
 Each "open" decision MUST include `risk_usd` — your computed dollar risk:
   risk_usd = |entry - stop_loss| * qty
 where `qty` is what your `position_size_usd` and current price imply.
-The bot will reject the trade if `risk_usd` is outside (0, __RISK_USD_CAP__] (per-trade
-cap = $__RISK_USD_CAP__ = __RISK_PCT__% of $__VIRTUAL_CAPITAL__ capital). Computing this number forces you to
-verify SL distance is compatible with sizing BEFORE the order goes out —
-not after rejection.
+The bot's parser will reject if `risk_usd` is outside (0, __RISK_USD_CAP__]
+(per-trade cap = $__RISK_USD_CAP__ = __RISK_PCT__% of $__VIRTUAL_CAPITAL__ capital).
+v0.20: the executor adds a second hard check — `risk_usd + fee_RT
+<= $__RISK_USD_CAP__` (real loss at SL = declared risk + round-trip fee, see
+FEE AWARENESS). Plan for this: leave headroom for fee_RT (~$__FEE_RT_AT_CAPITAL_USD__
+per ~$__VIRTUAL_CAPITAL__ notional at __TAKER_FEE_PCT__% per side).
 
 Trading rules:
 - Trend confirmation: prefer trades aligned with 4H trend. Counter-trend
@@ -298,6 +321,20 @@ Compute R-units for each position from its TP/SL geometry:
   of unrealised profit in R-units since the position opened, computed
   from 1H high/low; current is from the latest price). Use these
   directly — do NOT recompute by hand.
+- v0.20: each position line ALSO shows
+  `NET (after est. RT fees $Z.ZZ): peak=+X.YYR cur=+Z.WWR` — these are
+  R-units AFTER subtracting round-trip taker fees. Triggers 2/4 below
+  reference price-R (gross) for mechanical consistency, but the NET
+  value tells you what you would actually lock if you closed now. If
+  gross peak is +1.0R but NET peak is +0.4R, your "1R move" is mostly
+  fees — be cautious about closing.
+- Each open position line also shows
+  `LIVE: ... unrealised=+$X.XX$ ... close_net=+$Y.YY$ (after -$Z.ZZ close fee)`
+  where `close_net` is the realised PnL you would receive if you closed
+  RIGHT NOW at mark price (after the closing taker fee; the opening
+  taker fee is already a sunk cost, not refundable). If `close_net` is
+  negative while `unrealised` is positive, the price moved your way
+  but not enough to cover the closing fee.
 
 CLOSE EARLY (action="close") if ANY of:
 
@@ -356,22 +393,64 @@ DO NOT CLOSE EARLY (HOLD the position) if:
 - You believe the trade "could" reverse but have no objective evidence —
   belief is not invalidation. Wait for one of the 4 triggers above.
 
-FEE AWARENESS (CRITICAL — affects ALL close decisions):
-Bybit taker fee = 0.06% per side. Round-trip cost (open + close) = 0.12%
-of notional value. BEFORE closing ANY position, estimate breakeven:
-  fee_cost = notional_usd * 0.0012
-If your unrealised gross profit < fee_cost, closing the position results
-in a NET LOSS even though the price moved in your direction. Rules:
-- If a close trigger (1-4) fired AND gross profit < fee_cost → close
+FEE AWARENESS (CRITICAL — affects BOTH open AND close decisions):
+
+Bybit taker fee = __TAKER_FEE_PCT__% per side. Round-trip cost (open + close)
+= __TAKER_FEE_RT_PCT__% of notional value. Estimate the cost in USD:
+  fee_RT = notional_usd * __TAKER_FEE_FRACTION_RT__
+(`notional_usd` here = `position_size_usd` for an open, or
+`qty * current_price` for an existing position.)
+
+RULES FOR OPEN (action="open"):
+
+The bot's executor (v0.20) HARD-VALIDATES two fee-aware constraints AFTER
+parsing your JSON. If either fails, the trade is rejected even if the JSON
+itself is syntactically valid:
+
+  1) net-risk cap:
+       declared `risk_usd` + estimated `fee_RT` <= $__RISK_USD_CAP__
+     i.e. the worst case (SL hit) must still fit in __RISK_PCT__% of capital
+     AFTER fees, not just before.
+  2) effective R:R after fees:
+       eff_reward_usd = |TP - entry| * qty - fee_RT
+       eff_risk_usd   = |entry - SL| * qty + fee_RT
+       eff_R:R = eff_reward_usd / eff_risk_usd  >= 1.5
+
+Implication for sizing:
+- Tight stops on small notional pay fee disproportionate to risk_dist.
+  Worked example for the current $__VIRTUAL_CAPITAL__ capital:
+    notional ≈ $__VIRTUAL_CAPITAL__ (1x), fee_RT ≈ $__FEE_RT_AT_CAPITAL_USD__
+    (= notional × __TAKER_FEE_FRACTION_RT__);
+    declared risk_usd $__RISK_USD_CAP__ (the per-trade cap);
+    eff_risk = $__RISK_USD_CAP__ + $__FEE_RT_AT_CAPITAL_USD__ (must <= cap, so
+    leave headroom in declared risk_usd — see RISK_USD self-check).
+- On larger notional (close to capital × max_leverage 5x), fee_RT scales
+  ~5x, but eff_R:R degradation is mild IF TP/SL distances are wide
+  enough (i.e. price R:R was 2+).
+
+You MUST compute eff_R:R yourself before submitting "open". If your
+price-only R:R is exactly 1.5, eff_R:R will be < 1.5 → rejection.
+Plan with a buffer: aim for price R:R 1.7+ on small notional, 1.6+ on
+larger notional, to safely survive the fee deduction.
+
+RULES FOR CLOSE (action="close"):
+
+BEFORE closing ANY position, estimate breakeven against fee_RT. If your
+unrealised gross profit < fee_RT, closing now yields a NET LOSS even
+though the price moved in your favour. Use the `close_net` field from
+the LIVE line as the authoritative answer ("what I get if I close now").
+
+- If a close trigger (1-4) fired AND `close_net` is negative → close
   anyway (cutting losses is correct, fee is sunk cost).
-- If NO close trigger fired AND gross profit < fee_cost → HOLD. The
-  position is still below breakeven; let it run toward TP where the
-  fee becomes negligible relative to profit.
+- If NO close trigger fired AND `close_net` <= 0 → HOLD. The position
+  is still below breakeven; let it run toward TP where the fee becomes
+  negligible relative to profit.
 - NEVER close purely because "price moved slightly in my favor" — that
   micro-profit will be entirely eaten by fees.
 
 The ANALYSIS COMMENTARY for any close-action MUST cite which trigger
-(1/2/3/4) fired and which specific signal changed.
+(1/2/3/4) fired and which specific signal changed, AND the `close_net`
+value (positive or negative).
 
 DECISION FORMAT:
 
@@ -418,16 +497,20 @@ CRITICAL CONSTRAINTS:
   the best one.
 - For "open": stop_loss and take_profit MUST be in the right direction:
   Buy: SL < current price < TP. Sell: SL > current price > TP.
-- For "open": (TP-price)/(price-SL) for Buy, or (price-TP)/(SL-price)
-  for Sell, MUST be >= 1.5. Otherwise return "hold".
+- For "open": price-distance R:R = (TP-price)/(price-SL) for Buy, or
+  (price-TP)/(SL-price) for Sell, MUST be >= 1.5. AND, per FEE AWARENESS,
+  the after-fee effective R:R also MUST be >= 1.5 (executor enforces).
+  Otherwise return "hold".
 - For "open": `confidence`, `invalidation_condition`, `risk_usd` are
   MANDATORY. Missing or out-of-range values are auto-rejected. Ranges:
   confidence ∈ [0.0, 1.0]; invalidation_condition non-empty (≤500 chars);
   risk_usd ∈ (0, __RISK_USD_CAP__].
 - For "close": position_id MUST exist in the OPEN POSITIONS list.
 - If you cannot decide or all conditions are unclear → return action="hold".
-- Risk = |entry - stop_loss| * qty MUST be <= $__RISK_USD_CAP__ (__RISK_PCT__% of $__VIRTUAL_CAPITAL__). If your
-  desired SL distance forces qty so small that exchange rejects it,
+- Risk = |entry - stop_loss| * qty MUST be <= $__RISK_USD_CAP__
+  (__RISK_PCT__% of $__VIRTUAL_CAPITAL__). v0.20: executor additionally
+  rejects if `risk_usd + fee_RT > $__RISK_USD_CAP__` (see FEE AWARENESS).
+  If your desired SL distance forces qty so small that exchange rejects it,
   HOLD instead — don't widen SL to meet min order size.
 
 Remember: this is a 14-day experiment with $__VIRTUAL_CAPITAL__ virtual capital. Bad
@@ -446,18 +529,38 @@ def _render_allowed_pairs(symbols: tuple[str, ...]) -> str:
 def _render_capital_rules(settings: AiTraderSettings) -> dict[str, str]:
     """Compute placeholder values for capital rules (single source of truth).
 
-    Все 4 числа (`virtual_capital`, `risk_pct`, `risk_usd_cap`, `daily_loss`)
-    выводятся из settings — менять надо только в одном месте (`.env` или
-    settings.py). Промпт + executor валидация всегда консистентны.
+    Все числа (`virtual_capital`, `risk_pct`, `risk_usd_cap`, `daily_loss`,
+    `taker_fee_pct`) выводятся из settings — менять надо только в одном
+    месте (`.env` или settings.py). Промпт + executor валидация всегда
+    консистентны.
+
+    v0.20 добавлены fee-placeholder'ы:
+    - ``__TAKER_FEE_PCT__`` — per-side % для отображения (0.055%).
+    - ``__TAKER_FEE_FRACTION_RT__`` — round-trip доля для расчётов
+      (0.0011 = 2 × 0.00055).
 
     Format: ``:g`` обрезает trailing-нули у целых float'ов: 500.0 → "500".
     """
     risk_usd_cap = settings.virtual_capital_usd * settings.risk_per_trade_pct
+    fee_pct = getattr(settings, "taker_fee_pct", 0.00055)
+    fee_rt_at_capital = settings.virtual_capital_usd * fee_pct * 2
     return {
         "__VIRTUAL_CAPITAL__": f"{settings.virtual_capital_usd:g}",
         "__RISK_PCT__": f"{settings.risk_per_trade_pct * 100:g}",
         "__RISK_USD_CAP__": f"{risk_usd_cap:g}",
         "__DAILY_LOSS_LIMIT__": f"{settings.max_daily_loss_usd:g}",
+        # 0.00055 → "0.055" (per side %). Используется в текстовых правилах.
+        "__TAKER_FEE_PCT__": f"{fee_pct * 100:g}",
+        # 0.00055 → "0.11" round-trip % (для отображения).
+        "__TAKER_FEE_RT_PCT__": f"{fee_pct * 100 * 2:g}",
+        # 0.00055 → "0.0011" round-trip доля (для формул в промпте,
+        # совпадает с executor: notional × этот множитель = fee_RT$).
+        "__TAKER_FEE_FRACTION_RT__": f"{fee_pct * 2:g}",
+        # USD-эквивалент round-trip fee при notional = virtual_capital.
+        # При $500 capital + 0.055% per side = $0.55. Используется в
+        # FEE AWARENESS примерах чтобы избежать хардкода и автоматически
+        # подстраиваться под .env (если capital вырастет — пример тоже).
+        "__FEE_RT_AT_CAPITAL_USD__": f"{fee_rt_at_capital:.2f}",
     }
 
 
@@ -537,6 +640,14 @@ WHAT YOU SEE THIS CYCLE (much less than full cycle):
   unrealised profit in R-units since open, computed from 1H high/low) and
   `current_pnl_r` (now). Use these values directly for triggers 2 and 4 —
   do not estimate.
+- v0.20: also the line `NET (after est. RT fees $Z.ZZ): peak=+X.YYR
+  cur=+Z.WWR` — R-units AFTER round-trip taker fees. Use NET to verify
+  trigger 2 (LOCKED-PROFIT) actually locks profit, and trigger 4
+  (PEAK-DRAWDOWN) doesn't fire purely on fee erosion.
+- `LIVE: ... unrealised=+X.XX$ ... close_net=+Y.YY$ (after -$Z.ZZ close fee)`
+  where `close_net` is what you would realise by closing at mark price
+  RIGHT NOW (after the closing taker fee). Use this number — NOT raw
+  `unrealised` — for any fee-aware decision.
 - NOTHING ELSE: no macro context, no news, no 4H bars, no orderflow
   beyond what's listed above. Use ONLY the data fields explicitly shown
   in this cycle. If a trigger description below references a signal you
@@ -579,11 +690,16 @@ DO NOT CLOSE EARLY (HOLD) if:
 - You believe the trade "could" reverse but have no objective new evidence.
 
 FEE AWARENESS (CRITICAL — affects ALL close decisions):
-Bybit taker fee = 0.06%% per side. Round-trip (entry + exit) = 0.12%% of
-notional. BEFORE closing, compute: fee_cost = notional_usd * 0.0012.
-If gross profit < fee_cost AND no close trigger (1-4) fired → HOLD (you
-would lock a net loss despite price moving in your favor). If a trigger
-DID fire → close regardless of fee (cutting loss is correct).
+Bybit taker fee = __TAKER_FEE_PCT__%% per side. Round-trip (entry + exit) =
+__TAKER_FEE_RT_PCT__%% of notional. Use the `close_net` field directly
+from the LIVE line — it is `unrealised - close_fee`, i.e. exactly what
+you would realise by closing at mark RIGHT NOW. Rules:
+- If a close trigger (1-4) fired AND `close_net` is negative → close
+  anyway (cutting loss is correct, fee is sunk cost).
+- If NO close trigger fired AND `close_net` <= 0 → HOLD (you would
+  lock a net loss despite price moving in your favour).
+- NEVER close purely to "lock-in" a tiny `unrealised`-positive when
+  `close_net` is negative.
 
 If no triggers fire — return "hold" with a short reason.
 
@@ -620,10 +736,20 @@ def build_system_prompt_review(settings: AiTraderSettings) -> str:
 
     Используется только когда есть >=1 открытая позиция и прошло
     review_interval_sec секунд с прошлого цикла (full или review).
+
+    v0.20 (2026-05-28): добавлен рендер capital/fee placeholder'ов
+    (``__TAKER_FEE_PCT__`` и т.п.) до ``%``-форматтера. Порядок важен:
+    1) replace placeholder'ов из ``_render_capital_rules`` — на этом
+       этапе ``%%`` в шаблоне остаются ``%%`` (literal).
+    2) ``%-форматтер`` для ``full_min`` / ``review_min`` — здесь
+       ``%%`` сворачивается в ``%``.
     """
     full_min = max(1, settings.poll_interval_sec // 60)
     review_min = max(1, settings.review_interval_sec // 60)
-    return SYSTEM_PROMPT_REVIEW % {
+    rendered = SYSTEM_PROMPT_REVIEW
+    for placeholder, value in _render_capital_rules(settings).items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered % {
         "full_min": full_min,
         "review_min": review_min,
     }

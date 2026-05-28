@@ -358,6 +358,57 @@ def _apply_open(
     if qty <= 0:
         return ApplyResult(executed=False, summary="", error="qty<=0 after rounding")
 
+    # v0.20 (2026-05-28): hard fee-aware валидация. До v0.20 R:R и
+    # risk_usd считались чисто по ценам — реальный убыток на SL =
+    # (entry-SL)*qty + round-trip fees превышал заявленный cap, а
+    # effective_R:R после fees мог быть < 1.0 при price R:R = 1.5.
+    # Считаем оценку round-trip fee (используем текущий price для
+    # обеих сторон — приближение, разница ~1% между entry и exit).
+    fee_rate = max(0.0, float(getattr(settings, "taker_fee_pct", 0.0)))
+    if fee_rate > 0:
+        fee_RT_usd = price * qty * fee_rate * 2
+        risk_usd_cap = settings.virtual_capital_usd * settings.risk_per_trade_pct
+        # 1) net-risk cap: реальный убыток при SL hit = gross + fee_RT.
+        #    Должен влезать в per-trade cap.
+        net_risk_usd = risk_usd_declared + fee_RT_usd
+        if net_risk_usd > risk_usd_cap:
+            return ApplyResult(
+                executed=False, summary="",
+                error=(
+                    f"net_risk_exceeds_cap: declared risk_usd={risk_usd_declared:.2f} "
+                    f"+ est. fee_RT={fee_RT_usd:.2f} = {net_risk_usd:.2f} > "
+                    f"cap=${risk_usd_cap:.2f}. Reduce position_size_usd or widen SL."
+                ),
+            )
+        # 2) effective R:R после fees.
+        #    eff_reward = |TP-entry|*qty - fee_RT
+        #    eff_risk   = |entry-SL|*qty + fee_RT
+        reward_dist = abs(tp_price - price)
+        risk_dist = abs(price - sl_price)
+        eff_reward_usd = reward_dist * qty - fee_RT_usd
+        eff_risk_usd = risk_dist * qty + fee_RT_usd
+        if eff_risk_usd <= 0 or eff_reward_usd <= 0:
+            return ApplyResult(
+                executed=False, summary="",
+                error=(
+                    f"eff_rr_non_positive: reward_dist={reward_dist} "
+                    f"risk_dist={risk_dist} qty={qty} fee_RT={fee_RT_usd:.2f}"
+                ),
+            )
+        eff_rr = eff_reward_usd / eff_risk_usd
+        if eff_rr < 1.5:
+            return ApplyResult(
+                executed=False, summary="",
+                error=(
+                    f"eff_rr_below_1.5: after fees "
+                    f"(eff_reward=${eff_reward_usd:.2f} / "
+                    f"eff_risk=${eff_risk_usd:.2f}) = {eff_rr:.2f}. "
+                    f"Price-only R:R {reward_dist / risk_dist:.2f} doesn't "
+                    f"survive round-trip fee ${fee_RT_usd:.2f}. "
+                    f"Widen TP or pick larger-edge setup."
+                ),
+            )
+
     if not settings.trading_enabled:
         # PAPER MODE: не вызываем биржу, только пишем decision-only
         return ApplyResult(

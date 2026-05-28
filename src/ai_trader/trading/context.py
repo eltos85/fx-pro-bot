@@ -83,6 +83,15 @@ class MarketContext:
     # ``None`` означает что API-вызов не получился (transient outage)
     # — отличается от ``{}`` (запрос ОК, открытых позиций на бирже нет).
     live_positions: dict[str, Position] | None = None
+    # v0.20 (2026-05-28): Bybit taker fee per side в долях (default 0 —
+    # backward-compat для тестов, не пробрасывающих fee). В main.py
+    # передаётся из settings.taker_fee_pct (0.00055 для VIP-0 demo).
+    # Format-функции используют для расчёта:
+    # - peak_pnl_r_net / current_pnl_r_net рядом с gross R-units
+    # - LIVE: net unrealised после closeFee (то что реально получим
+    #   при закрытии прямо сейчас)
+    # Если 0.0 — net-строки не показываются (старое поведение).
+    taker_fee_pct: float = 0.0
 
 
 def collect_market_context(
@@ -91,6 +100,8 @@ def collect_market_context(
     symbols: tuple[str, ...],
     virtual_capital_usd: float,
     news_provider=None,
+    *,
+    taker_fee_pct: float = 0.0,
 ) -> MarketContext:
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
@@ -155,6 +166,7 @@ def collect_market_context(
         real_equity_usd=real_equity,
         news=news,
         live_positions=live_positions,
+        taker_fee_pct=taker_fee_pct,
     )
 
 
@@ -180,28 +192,77 @@ def _compute_position_r_stats(
     bars_1h: list[Bar],
     current_price: float | None,
 ) -> tuple[float | None, float | None]:
-    """Считает (peak_pnl_r, current_pnl_r) для открытой позиции.
+    """Считает (peak_pnl_r, current_pnl_r) — gross-only.
 
-    peak_pnl_r — high-water mark максимальной нереализованной прибыли в R-units
-    от момента открытия позиции до текущего бара. Считается по high/low 1H
-    свечей с opened_at:
+    Wrapper для backward-compat. См. ``_compute_position_pnl_stats`` —
+    он возвращает полный набор полей включая ``_net`` варианты с учётом
+    round-trip fees (v0.20).
+    """
+    stats = _compute_position_pnl_stats(
+        position, bars_1h, current_price, taker_fee_pct=0.0
+    )
+    return (stats.peak_r, stats.current_r)
+
+
+@dataclass
+class PositionPnlStats:
+    """v0.20 (2026-05-28): расширенная PnL-статистика per-position.
+
+    Поля _gross — чисто price-based (как было до v0.20). Поля _net —
+    после оценки round-trip taker fees:
+      fee_RT_est = (entry_value + close_value) * taker_fee_pct
+                ≈ entry * qty * taker_fee_pct * 2  (для оценки)
+    net_pnl_usd = gross_pnl_usd - fee_RT_est
+    net_r = net_pnl_usd / risk_dist / qty
+
+    Используется для подсветки ИИ-у реальной картинки: триггер
+    PEAK-DRAWDOWN на gross-R может показать peak=+0.8R, но **net**
+    после fee = +0.5R — то есть локированная прибыль гораздо меньше
+    чем кажется. Аналогично LOCKED-PROFIT (1.5R gross ≈ 1.2R net).
+
+    Все поля могут быть None если расчёт невозможен (нет SL, нет цены,
+    нет qty).
+    """
+    peak_r: float | None
+    current_r: float | None
+    peak_r_net: float | None
+    current_r_net: float | None
+    fee_round_trip_usd: float | None
+
+
+def _compute_position_pnl_stats(
+    position: AiPosition,
+    bars_1h: list[Bar],
+    current_price: float | None,
+    *,
+    taker_fee_pct: float = 0.0,
+) -> PositionPnlStats:
+    """v0.20: полный расчёт peak/current R-units gross И net (after fees).
+
+    Логика gross-расчёта идентична прежней _compute_position_r_stats:
       - Buy:  peak_r = (max(high)   - entry) / risk_dist
       - Sell: peak_r = (entry - min(low))   / risk_dist
-    current_pnl_r — текущий нереализованный PnL в R-units (от ticker.last_price).
-    risk_dist = |entry - sl|.
+      - current_r от ticker.last_price.
 
-    Возвращает (None, None) если sl_price/entry/risk_dist некорректны.
-    Если bars пусты (позиция открыта <1 часа назад) — peak ≈ current.
+    Net-расчёт (v0.20):
+      gross_pnl_usd_at_R = R × risk_dist × qty
+      fee_RT_usd ≈ entry × qty × taker_fee_pct × 2 (приближение close=entry)
+        (для точности peak: можно использовать peak_price × qty × pct + entry_value × pct,
+         но разница на 1-2% от feeRT в типичных trade — не существенно)
+      net_pnl_usd = gross - fee_RT
+      net_r = net_pnl_usd / (risk_dist × qty)
 
-    Используется для триггера PEAK-DRAWDOWN: peak_r ≥ 0.8 и current_r ≤ 0.45
-    означают что движение, оправдавшее вход, развернулось — лучше зафиксировать
-    остаток прибыли чем рисковать дальнейшим decay до SL.
+    Если ``taker_fee_pct == 0`` → ``_net`` поля равны ``_gross``.
     """
+    empty = PositionPnlStats(None, None, None, None, None)
     if position.sl_price is None or position.entry_price is None:
-        return (None, None)
+        return empty
     risk_dist = abs(position.entry_price - position.sl_price)
     if risk_dist <= 0:
-        return (None, None)
+        return empty
+    qty = position.qty
+    if qty is None or qty <= 0:
+        return empty
 
     try:
         opened_dt = datetime.fromisoformat(position.opened_at.replace("Z", "+00:00"))
@@ -232,13 +293,33 @@ def _compute_position_r_stats(
     elif peak_r is None and current_r is not None:
         peak_r = current_r
 
-    return (peak_r, current_r)
+    fee_RT_usd: float | None = None
+    peak_r_net: float | None = peak_r
+    current_r_net: float | None = current_r
+    if taker_fee_pct > 0:
+        fee_RT_usd = abs(position.entry_price) * qty * taker_fee_pct * 2
+        denom = risk_dist * qty
+        if denom > 0:
+            if peak_r is not None:
+                peak_r_net = peak_r - (fee_RT_usd / denom)
+            if current_r is not None:
+                current_r_net = current_r - (fee_RT_usd / denom)
+
+    return PositionPnlStats(
+        peak_r=peak_r,
+        current_r=current_r,
+        peak_r_net=peak_r_net,
+        current_r_net=current_r_net,
+        fee_round_trip_usd=fee_RT_usd,
+    )
 
 
 def collect_review_context(
     client: AiBybitClient,
     store: AiTraderStore,
     virtual_capital_usd: float,
+    *,
+    taker_fee_pct: float = 0.0,
 ) -> MarketContext:
     """Lite-сборка контекста для review-цикла (5 мин). v0.10-backport на v0.3.
 
@@ -264,6 +345,7 @@ def collect_review_context(
             virtual_capital_usd=virtual_capital_usd,
             real_equity_usd=real_equity,
             news=[],
+            taker_fee_pct=taker_fee_pct,
         )
 
     review_symbols = sorted({p.symbol for p in open_positions})
@@ -307,12 +389,15 @@ def collect_review_context(
         real_equity_usd=real_equity,
         news=[],
         live_positions=live_positions,
+        taker_fee_pct=taker_fee_pct,
     )
 
 
 def _format_live_position_line(
     position: AiPosition,
     live_positions: dict[str, Position] | None,
+    *,
+    taker_fee_pct: float = 0.0,
 ) -> str | None:
     """v0.17 Шаг 2a: форматирует live данные биржи по позиции.
 
@@ -326,6 +411,13 @@ def _format_live_position_line(
     None — если ``live_positions={}`` и позиция не открыта на бирже
     (тогда выше уже выведена нормальная "no live data" ситуация —
     скорее всего БД stale и close-reconcile вот-вот отработает).
+
+    v0.20 (2026-05-28): если ``taker_fee_pct > 0`` — добавляется
+    `close_net=+$X.XX (after -$Y.YY close fee)` (что реально получим
+    при закрытии прямо сейчас по mark price). Bybit ``unrealised_pnl`` =
+    (mark - entry) × size — НЕ учитывает закрывающий taker fee, который
+    спишется при reduce-only ордере. openFee уже списан при открытии
+    (sunk cost, не возвращается).
     """
     if live_positions is None:
         return "     LIVE: API unavailable (cannot verify live PnL)"
@@ -345,9 +437,16 @@ def _format_live_position_line(
         else:
             buf = (liq - mark) / mark * 100 if liq > mark else 0
         buf_pct = f" ({buf:.0f}% buffer)"
+    net_suffix = ""
+    if taker_fee_pct > 0 and mark > 0:
+        close_fee = abs(mark) * abs(live.size or position.qty) * taker_fee_pct
+        net_close = unreal - close_fee
+        net_suffix = (
+            f" close_net={net_close:+.2f}$ (after -${close_fee:.2f} close fee)"
+        )
     return (
         f"     LIVE: mark=${mark:.6g} unrealised={unreal:+.2f}$ "
-        f"liq=${liq:.6g}{buf_pct} margin=${margin:.2f}"
+        f"liq=${liq:.6g}{buf_pct} margin=${margin:.2f}{net_suffix}"
     )
 
 
@@ -398,12 +497,30 @@ def format_context_for_review(ctx: MarketContext) -> str:
             sym_snap = next((s for s in ctx.snapshots if s.symbol == p.symbol), None)
             bars = sym_snap.bars_1h if sym_snap else []
             cur_price = sym_snap.ticker.last_price if sym_snap and sym_snap.ticker else None
-            peak_r, current_r = _compute_position_r_stats(p, bars, cur_price)
-            if peak_r is not None and current_r is not None:
-                parts.append(
-                    f"     peak_pnl_r={peak_r:+.2f}R current_pnl_r={current_r:+.2f}R"
+            stats = _compute_position_pnl_stats(
+                p, bars, cur_price, taker_fee_pct=ctx.taker_fee_pct
+            )
+            if stats.peak_r is not None and stats.current_r is not None:
+                line = (
+                    f"     peak_pnl_r={stats.peak_r:+.2f}R "
+                    f"current_pnl_r={stats.current_r:+.2f}R"
                 )
-            live_line = _format_live_position_line(p, ctx.live_positions)
+                # v0.20: net-R только если fee известен (taker_fee_pct > 0)
+                if (
+                    ctx.taker_fee_pct > 0
+                    and stats.peak_r_net is not None
+                    and stats.current_r_net is not None
+                    and stats.fee_round_trip_usd is not None
+                ):
+                    line += (
+                        f" | NET (after est. RT fees ${stats.fee_round_trip_usd:.2f}): "
+                        f"peak={stats.peak_r_net:+.2f}R "
+                        f"cur={stats.current_r_net:+.2f}R"
+                    )
+                parts.append(line)
+            live_line = _format_live_position_line(
+                p, ctx.live_positions, taker_fee_pct=ctx.taker_fee_pct
+            )
             if live_line is not None:
                 parts.append(live_line)
 
@@ -505,12 +622,29 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
             sym_snap = next((s for s in ctx.snapshots if s.symbol == p.symbol), None)
             bars = sym_snap.bars_1h if sym_snap else []
             cur_price = sym_snap.ticker.last_price if sym_snap and sym_snap.ticker else None
-            peak_r, current_r = _compute_position_r_stats(p, bars, cur_price)
-            if peak_r is not None and current_r is not None:
-                parts.append(
-                    f"     peak_pnl_r={peak_r:+.2f}R current_pnl_r={current_r:+.2f}R"
+            stats = _compute_position_pnl_stats(
+                p, bars, cur_price, taker_fee_pct=ctx.taker_fee_pct
+            )
+            if stats.peak_r is not None and stats.current_r is not None:
+                line = (
+                    f"     peak_pnl_r={stats.peak_r:+.2f}R "
+                    f"current_pnl_r={stats.current_r:+.2f}R"
                 )
-            live_line = _format_live_position_line(p, ctx.live_positions)
+                if (
+                    ctx.taker_fee_pct > 0
+                    and stats.peak_r_net is not None
+                    and stats.current_r_net is not None
+                    and stats.fee_round_trip_usd is not None
+                ):
+                    line += (
+                        f" | NET (after est. RT fees ${stats.fee_round_trip_usd:.2f}): "
+                        f"peak={stats.peak_r_net:+.2f}R "
+                        f"cur={stats.current_r_net:+.2f}R"
+                    )
+                parts.append(line)
+            live_line = _format_live_position_line(
+                p, ctx.live_positions, taker_fee_pct=ctx.taker_fee_pct
+            )
             if live_line is not None:
                 parts.append(live_line)
 

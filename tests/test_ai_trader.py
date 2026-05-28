@@ -1885,10 +1885,18 @@ class TestSystemPromptCapitalRulesTemplate:
 
     def test_default_render_byte_identical_to_pre_refactor(self):
         """Главная инвариант-проверка: при default settings промпт
-        ДОЛЖЕН быть байт-в-байт тот же, что был до refactor'а v0.15.
+        ДОЛЖЕН быть байт-в-байт тот же, что был до последнего intentional
+        change. Любой случайный мутант текста (typo, refactor regression)
+        ломает тест. При intentional изменении промпта (например v0.20
+        FEE AWARENESS на open) обновить baseline ВРУЧНУЮ и записать в
+        BUILDLOG_AI_TRADER.md (это автоматически triggerит reset n=0
+        для 14-day experiment по правилу no-data-fitting.mdc).
 
-        Если этот тест падает → refactor сломал поведение ИИ.
-        SHA256 baseline: dc44ce7253a1324d92e982102b21a7c8e06608355b694f8775d9169018e2deaf
+        SHA256 history:
+        - dc44ce72... (v0.15 refactor baseline)
+        - ec950329... (v0.20 2026-05-28: FEE AWARENESS на open, fix
+          0.06%→0.055%, NET R-units в OPEN POSITIONS, $-примеры через
+          placeholder __VIRTUAL_CAPITAL__ — см. BUILDLOG).
         """
         import hashlib
 
@@ -1896,14 +1904,16 @@ class TestSystemPromptCapitalRulesTemplate:
         from ai_trader.llm.prompts import SYSTEM_PROMPT, build_system_prompt
 
         expected_sha256 = (
-            "dc44ce7253a1324d92e982102b21a7c8e06608355b694f8775d9169018e2deaf"
+            "ec9503296d5c9686796b91eae67757659bfa1521c34491a67cfa507e6d48464a"
         )
         # 1) Module-level SYSTEM_PROMPT (default render с DEFAULT_AI_SYMBOLS).
         actual_sha = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
         assert actual_sha == expected_sha256, (
             f"SYSTEM_PROMPT changed! Expected sha256={expected_sha256}, "
-            f"got {actual_sha}. Refactor v0.15 should be a no-op for "
-            "default settings (capital=$500, risk=2%, daily=$50)."
+            f"got {actual_sha}. If this is an intentional prompt change, "
+            "update the SHA256 baseline + add a SHA history line in this "
+            "test's docstring + log the change in BUILDLOG_AI_TRADER.md "
+            "(triggers experiment reset n=0 per no-data-fitting.mdc)."
         )
         # 2) build_system_prompt(default_settings) — должен дать тот же текст.
         rendered = build_system_prompt(AiTraderSettings())
@@ -2284,3 +2294,488 @@ class TestReconcilePnlToNet:
             ).fetchone()
         assert row["realized_pnl_usd"] == pytest.approx(14.79)  # не тронуто
         assert row["pnl_source"] == "gross"  # ещё ждёт догона
+
+
+# ─── v0.20 (2026-05-28): Fee-aware open + net R-units в контексте ─────────
+
+
+class TestTakerFeePctSetting:
+    """v0.20: taker_fee_pct в AiTraderSettings, default 0.00055
+    (= 0.055%% per side, VIP-0 Bybit demo подтверждено на trade id=121:
+    openFee=1.3597 на cumEntryValue=2472.21).
+    """
+
+    def _make_settings(self, monkeypatch, **env):
+        import os
+        for key in list(os.environ.keys()):
+            if key.startswith(("AI_TRADER_", "DEEPSEEK_")):
+                monkeypatch.delenv(key, raising=False)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        from ai_trader.config.settings import AiTraderSettings
+        return AiTraderSettings()
+
+    def test_default_taker_fee_pct(self, monkeypatch):
+        s = self._make_settings(monkeypatch)
+        assert s.taker_fee_pct == pytest.approx(0.00055)
+
+    def test_override_via_env(self, monkeypatch):
+        s = self._make_settings(monkeypatch, AI_TRADER_TAKER_FEE_PCT="0.0006")
+        assert s.taker_fee_pct == pytest.approx(0.0006)
+
+
+class TestPromptFeePlaceholders:
+    """v0.20: __TAKER_FEE_PCT__ / __TAKER_FEE_RT_PCT__ /
+    __TAKER_FEE_FRACTION_RT__ / __FEE_RT_AT_CAPITAL_USD__ должны
+    рендериться из settings, не быть hardcoded в шаблоне.
+    """
+
+    def test_all_fee_placeholders_in_template(self):
+        from ai_trader.llm.prompts import _SYSTEM_PROMPT_TEMPLATE
+        for placeholder in (
+            "__TAKER_FEE_PCT__",
+            "__TAKER_FEE_RT_PCT__",
+            "__TAKER_FEE_FRACTION_RT__",
+            "__FEE_RT_AT_CAPITAL_USD__",
+        ):
+            assert placeholder in _SYSTEM_PROMPT_TEMPLATE, (
+                f"placeholder {placeholder} missing from FULL template"
+            )
+
+    def test_review_template_has_fee_placeholders(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT_REVIEW
+        assert "__TAKER_FEE_PCT__" in SYSTEM_PROMPT_REVIEW
+        assert "__TAKER_FEE_RT_PCT__" in SYSTEM_PROMPT_REVIEW
+
+    def test_default_render_has_055_pct(self):
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt
+        rendered = build_system_prompt(AiTraderSettings())
+        assert "0.055% per side" in rendered
+        assert "0.11% of notional" in rendered
+        assert "notional_usd * 0.0011" in rendered
+        # $-пример соответствует капиталу $500: fee_RT = 500*0.0011 = $0.55
+        assert "$0.55" in rendered
+        assert "≈ $500 (1x)" in rendered
+
+    def test_custom_capital_rerenders_example(self, monkeypatch):
+        """При virtual_capital=$1000 пример авто-пересчитывается на
+        $1000 / $1.10 fee_RT (не остаётся $500/$0.55)."""
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt
+        s = AiTraderSettings().model_copy(
+            update={"virtual_capital_usd": 1000.0}
+        )
+        rendered = build_system_prompt(s)
+        assert "≈ $1000 (1x)" in rendered
+        assert "$1.10" in rendered
+        # Default $500/$0.55 НЕ должны всплыть
+        assert "≈ $500" not in rendered
+        assert "$0.55" not in rendered
+
+    def test_custom_fee_rate_rerenders(self, monkeypatch):
+        """При taker_fee_pct=0.0006 (0.06%) числа RT/fraction
+        пересчитываются."""
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt
+        s = AiTraderSettings().model_copy(
+            update={"taker_fee_pct": 0.0006}
+        )
+        rendered = build_system_prompt(s)
+        assert "0.06% per side" in rendered
+        assert "0.12% of notional" in rendered
+        assert "notional_usd * 0.0012" in rendered
+
+    def test_review_render_has_taker_fee(self):
+        from ai_trader.config.settings import AiTraderSettings
+        from ai_trader.llm.prompts import build_system_prompt_review
+        rendered = build_system_prompt_review(AiTraderSettings())
+        assert "0.055% per side" in rendered
+        assert "0.11% of notional" in rendered
+
+
+class TestPromptFeeAwarenessOpenSection:
+    """v0.20: FEE AWARENESS теперь обязан говорить про OPEN, не только
+    про close. Проверяем что ключевые куски присутствуют."""
+
+    def test_full_prompt_mentions_both_open_and_close(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "affects BOTH open AND close decisions" in SYSTEM_PROMPT
+        assert "RULES FOR OPEN" in SYSTEM_PROMPT
+        assert "RULES FOR CLOSE" in SYSTEM_PROMPT
+
+    def test_full_prompt_describes_eff_rr_formula(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "eff_reward_usd = |TP - entry| * qty - fee_RT" in SYSTEM_PROMPT
+        assert "eff_risk_usd" in SYSTEM_PROMPT
+        assert "eff_R:R" in SYSTEM_PROMPT
+        # Threshold: must be >= 1.5
+        assert ">= 1.5" in SYSTEM_PROMPT
+
+    def test_full_prompt_describes_net_risk_cap(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT
+        assert "net-risk cap" in SYSTEM_PROMPT
+        assert "declared `risk_usd` + estimated `fee_RT`" in SYSTEM_PROMPT
+
+    def test_review_prompt_describes_close_net(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT_REVIEW
+        assert "close_net" in SYSTEM_PROMPT_REVIEW
+
+    def test_review_prompt_describes_net_r_units(self):
+        from ai_trader.llm.prompts import SYSTEM_PROMPT_REVIEW
+        assert "NET (after est. RT fees" in SYSTEM_PROMPT_REVIEW
+
+    def test_no_old_0_06_pct_in_prompts(self):
+        """v0.19 говорил 0.06% — v0.20 fix на 0.055% (verified id=121)."""
+        from ai_trader.llm.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_REVIEW
+        # 0.06% per side НЕ должно остаться (если кто-то откатит fix)
+        assert "0.06% per side" not in SYSTEM_PROMPT
+        assert "0.06%" not in SYSTEM_PROMPT  # ни в каком виде
+        assert "0.12% of notional" not in SYSTEM_PROMPT
+        assert "0.06%" not in SYSTEM_PROMPT_REVIEW
+        assert "0.12% of notional" not in SYSTEM_PROMPT_REVIEW
+
+
+class TestComputePositionPnlStatsNet:
+    """v0.20: _compute_position_pnl_stats возвращает peak_r/current_r
+    gross И net (после round-trip fee), плюс fee_round_trip_usd.
+    """
+
+    @staticmethod
+    def _make_bars(highs_lows, start_ms=1_700_000_000_000):
+        from ai_trader.trading.client import Bar
+        bars = []
+        for i, (h, l) in enumerate(highs_lows):
+            bars.append(Bar(
+                ts=start_ms + i * 3_600_000,
+                open=(h + l) / 2, high=h, low=l, close=(h + l) / 2, volume=100.0,
+            ))
+        return bars
+
+    @staticmethod
+    def _make_pos(side="Buy", entry=100.0, sl=95.0, qty=10.0):
+        from ai_trader.state.db import AiPosition
+        return AiPosition(
+            id=1, symbol="BTCUSDT", side=side, qty=qty,
+            entry_price=entry, sl_price=sl, tp_price=entry + (entry - sl) * 2,
+            leverage=1, order_link_id="ai_test",
+            opened_at="2023-11-14T00:00:00+00:00",
+            closed_at=None, exit_price=None, realized_pnl_usd=None,
+            close_reason=None, llm_reason="test",
+        )
+
+    def test_zero_fee_means_net_equals_gross(self):
+        from ai_trader.trading.context import _compute_position_pnl_stats
+        pos = self._make_pos(qty=10.0)  # risk_dist=5, qty=10 → fee_RT при 0=0
+        bars = self._make_bars([(102, 99), (105, 101)])  # peak=105 → 1R
+        stats = _compute_position_pnl_stats(
+            pos, bars, current_price=101.0, taker_fee_pct=0.0,
+        )
+        assert stats.peak_r == pytest.approx(1.0)
+        assert stats.current_r == pytest.approx(0.2)
+        assert stats.peak_r_net == pytest.approx(1.0)
+        assert stats.current_r_net == pytest.approx(0.2)
+        assert stats.fee_round_trip_usd is None
+
+    def test_fee_reduces_net_r(self):
+        """qty=10, entry=$100, fee_pct=0.00055 → fee_RT = 100*10*0.00055*2 = $1.10
+        risk_dist=5, qty=10 → 1R USD = $50
+        net_peak_r = 1.0 - (1.10/50) = 0.978
+        net_cur_r  = 0.2 - (1.10/50) = 0.178
+        """
+        from ai_trader.trading.context import _compute_position_pnl_stats
+        pos = self._make_pos(qty=10.0)
+        bars = self._make_bars([(102, 99), (105, 101)])
+        stats = _compute_position_pnl_stats(
+            pos, bars, current_price=101.0, taker_fee_pct=0.00055,
+        )
+        assert stats.peak_r == pytest.approx(1.0)
+        assert stats.current_r == pytest.approx(0.2)
+        assert stats.fee_round_trip_usd == pytest.approx(1.10)
+        assert stats.peak_r_net == pytest.approx(0.978)
+        assert stats.current_r_net == pytest.approx(0.178)
+
+    def test_returns_empty_on_missing_sl(self):
+        from ai_trader.trading.context import _compute_position_pnl_stats
+        pos = self._make_pos()
+        pos.sl_price = None
+        stats = _compute_position_pnl_stats(
+            pos, [], current_price=101.0, taker_fee_pct=0.00055,
+        )
+        assert stats.peak_r is None
+        assert stats.peak_r_net is None
+        assert stats.fee_round_trip_usd is None
+
+    def test_format_for_prompt_includes_net_when_fee_pct_set(self):
+        """В OPEN POSITIONS блоке появляется
+        'NET (after est. RT fees ...): peak=... cur=...' строка."""
+        from ai_trader.trading.client import Ticker
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_prompt,
+        )
+        pos = self._make_pos(qty=10.0)
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=101.0, bid=100.99, ask=101.01,
+            funding_rate=0.0, volume_24h=10000, price_change_pct_24h=0.0,
+        )
+        bars = self._make_bars([(105, 99)])
+        snap = SymbolSnapshot(symbol="BTCUSDT", ticker=ticker, bars_1h=bars, bars_4h=[])
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[pos],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+            taker_fee_pct=0.00055,
+        )
+        s = format_context_for_prompt(ctx)
+        assert "peak_pnl_r=" in s
+        assert "NET (after est. RT fees" in s
+        assert "$1.10" in s  # entry $100 × qty 10 × 0.00055 × 2 = $1.10
+
+    def test_format_for_prompt_no_net_when_fee_zero(self):
+        """Если taker_fee_pct=0.0 — NET-строка не появляется (backward
+        compat для тестов / окружений без fee настройки)."""
+        from ai_trader.trading.client import Ticker
+        from ai_trader.trading.context import (
+            MarketContext, SymbolSnapshot, format_context_for_prompt,
+        )
+        pos = self._make_pos(qty=10.0)
+        ticker = Ticker(
+            symbol="BTCUSDT", last_price=101.0, bid=100.99, ask=101.01,
+            funding_rate=0.0, volume_24h=10000, price_change_pct_24h=0.0,
+        )
+        bars = self._make_bars([(105, 99)])
+        snap = SymbolSnapshot(symbol="BTCUSDT", ticker=ticker, bars_1h=bars, bars_4h=[])
+        ctx = MarketContext(
+            snapshots=[snap], open_positions=[pos],
+            virtual_capital_usd=500.0, real_equity_usd=500.0,
+            taker_fee_pct=0.0,
+        )
+        s = format_context_for_prompt(ctx)
+        assert "peak_pnl_r=" in s
+        assert "NET (after est. RT fees" not in s
+
+
+class TestLiveLineCloseNet:
+    """v0.20: _format_live_position_line добавляет close_net=...
+    когда taker_fee_pct > 0."""
+
+    @staticmethod
+    def _make_pos(side="Buy", symbol="BTCUSDT"):
+        from ai_trader.state.db import AiPosition
+        return AiPosition(
+            id=1, symbol=symbol, side=side, qty=0.01,
+            entry_price=77000.0, sl_price=76000.0, tp_price=79000.0,
+            leverage=10, order_link_id="ai_test",
+            opened_at="2026-05-25T08:00:00+00:00",
+            closed_at=None, exit_price=None, realized_pnl_usd=None,
+            close_reason=None, llm_reason="test",
+        )
+
+    @staticmethod
+    def _make_live(symbol="BTCUSDT", side="Buy", *,
+                   mark=77200.0, unreal=2.0, size=0.01):
+        from ai_trader.trading.client import Position
+        return Position(
+            symbol=symbol, side=side, size=size, entry_price=77000.0,
+            leverage=10.0, unrealised_pnl=unreal, position_value=mark * size,
+            mark_price=mark, liq_price=70000.0,
+        )
+
+    def test_no_close_net_when_fee_zero(self):
+        from ai_trader.trading.context import _format_live_position_line
+        s = _format_live_position_line(
+            self._make_pos(), {"BTCUSDT": self._make_live()},
+            taker_fee_pct=0.0,
+        )
+        assert s is not None
+        assert "close_net" not in s
+        assert "close fee" not in s
+
+    def test_close_net_present_when_fee_set(self):
+        """mark=$77200, size=0.01, fee_pct=0.00055
+        → close_fee = 77200 × 0.01 × 0.00055 = $0.4246
+        unreal=$2.0 → close_net = 2.0 - 0.4246 = $1.575
+        """
+        from ai_trader.trading.context import _format_live_position_line
+        s = _format_live_position_line(
+            self._make_pos(), {"BTCUSDT": self._make_live(unreal=2.0)},
+            taker_fee_pct=0.00055,
+        )
+        assert s is not None
+        assert "close_net=+1.58$" in s
+        assert "after -$0.42 close fee" in s
+
+    def test_close_net_negative_when_unreal_below_fee(self):
+        """unreal=$0.20, close_fee=$0.42 → close_net=-0.22 (lock loss)."""
+        from ai_trader.trading.context import _format_live_position_line
+        s = _format_live_position_line(
+            self._make_pos(), {"BTCUSDT": self._make_live(unreal=0.20)},
+            taker_fee_pct=0.00055,
+        )
+        assert s is not None
+        assert "close_net=-0.22$" in s
+
+    def test_old_signature_still_works(self):
+        """Backward-compat: вызов без taker_fee_pct (старые тесты) — без net."""
+        from ai_trader.trading.context import _format_live_position_line
+        s = _format_live_position_line(
+            self._make_pos(), {"BTCUSDT": self._make_live()},
+        )
+        assert s is not None
+        assert "close_net" not in s
+
+
+class TestApplyOpenFeeAwareValidation:
+    """v0.20: _apply_open hard-rejects если
+    (1) declared_risk_usd + fee_RT > cap, или
+    (2) effective R:R после fees < 1.5.
+    """
+
+    @staticmethod
+    def _fake_client(price=100.0, qty_step=0.001, min_qty=0.001,
+                    max_qty=1000.0, tick=0.01):
+        from ai_trader.trading.client import InstrumentInfo, Ticker
+
+        class FakeClient:
+            def get_ticker(self, symbol):
+                return Ticker(
+                    symbol=symbol, last_price=price, bid=price - 0.01,
+                    ask=price + 0.01,
+                    funding_rate=0.0, volume_24h=0, price_change_pct_24h=0,
+                )
+
+            def get_instrument_info(self, symbol):
+                return InstrumentInfo(
+                    symbol=symbol, qty_step=qty_step,
+                    min_order_qty=min_qty, max_order_qty=max_qty,
+                    tick_size=tick,
+                )
+
+            def set_leverage(self, *a, **kw):
+                return True
+
+            def place_order(self, **kwargs):
+                return {"ok": True, "result": {"orderId": "x"}}
+
+        return FakeClient()
+
+    @staticmethod
+    def _settings(monkeypatch, *, taker_fee_pct=0.00055, capital=500.0,
+                  risk_pct=0.02, trading=True):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            trading_enabled=trading,
+            virtual_capital_usd=capital,
+            risk_per_trade_pct=risk_pct,
+            taker_fee_pct=taker_fee_pct,
+        )
+
+    @staticmethod
+    def _ks(store):
+        from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
+        return KillSwitch(KillSwitchConfig(
+            max_daily_loss_usd=300, max_total_loss_usd=1000,
+            max_open_positions=5, max_leverage=10,
+        ), store)
+
+    def _action(self, **overrides):
+        from ai_trader.trading.executor import ParsedAction
+        raw = {
+            "action": "open", "symbol": "BTCUSDT", "side": "Buy",
+            "leverage": 1, "position_size_usd": 500.0,
+            "stop_loss": 95.0, "take_profit": 110.0,
+            "confidence": 0.6,
+            "invalidation_condition": "1H close below 95",
+            "risk_usd": 9.5,  # declared, чуть ниже cap $10
+            "reason": "test",
+        }
+        raw.update(overrides)
+        return ParsedAction(action="open", raw=raw)
+
+    def test_passes_when_fee_rt_fits_cap_and_eff_rr_ok(self, tmp_path, monkeypatch):
+        """Baseline: price=$100, qty=5 → notional $500, fee_RT=$0.55.
+        risk_dist=5 → declared_risk_usd=$5×qty5=$25, но cap=$10 — не пройдёт.
+        Берём меньший SL: SL=99, TP=102.5 → R:R=2.5, risk_dist=1, qty=5,
+        declared=$5; fee_RT=500*0.0011=$0.55; risk+fee=$5.55 ≤ $10 ✓
+        eff_R:R = (1.5*5 - 0.55) / (1*5 + 0.55) = 6.95/5.55 = 1.25 ❌ < 1.5
+        Сложно — выберу другой setup.
+
+        Простой случай: notional=$300 (qty=3 при price=$100), fee_RT=$0.33
+        SL=98, TP=104.4 → risk_dist=2, reward_dist=4.4
+        declared_risk = 2*3 = $6, +0.33 = $6.33 ≤ $10 ✓
+        eff_reward = 4.4*3 - 0.33 = $12.87
+        eff_risk = 2*3 + 0.33 = $6.33
+        eff_R:R = 12.87/6.33 = 2.03 ≥ 1.5 ✓
+        """
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.executor import _apply_open
+
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        action = self._action(
+            position_size_usd=300.0, stop_loss=98.0, take_profit=104.4,
+            risk_usd=6.0,
+        )
+        result = _apply_open(
+            action, client=self._fake_client(price=100.0),
+            store=store, settings=self._settings(monkeypatch),
+            killswitch=self._ks(store),
+        )
+        assert result.executed, f"should pass, error={result.error}"
+
+    def test_rejects_when_declared_risk_plus_fee_exceeds_cap(self, tmp_path, monkeypatch):
+        """declared $9.99 + fee_RT $0.55 = $10.54 > $10 → reject."""
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.executor import _apply_open
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        # notional=$500 → fee_RT=$0.55, qty=5 при price=$100
+        # SL=98 → risk_dist=2, declared=$10 = 2*5
+        action = self._action(
+            position_size_usd=500.0, stop_loss=98.0, take_profit=104.0,
+            risk_usd=9.99,
+        )
+        result = _apply_open(
+            action, client=self._fake_client(price=100.0),
+            store=store, settings=self._settings(monkeypatch),
+            killswitch=self._ks(store),
+        )
+        assert not result.executed
+        assert "net_risk_exceeds_cap" in (result.error or "")
+
+    def test_rejects_when_eff_rr_below_1_5(self, tmp_path, monkeypatch):
+        """price=$100, notional=$500, qty=5, fee_RT=$0.55.
+        SL=99, TP=101.5 → price R:R = 1.5, но
+        eff_reward = 1.5*5 - 0.55 = $6.95
+        eff_risk   = 1.0*5 + 0.55 = $5.55
+        eff_R:R = 6.95/5.55 = 1.25 → reject.
+        """
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.executor import _apply_open
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        action = self._action(
+            position_size_usd=500.0, stop_loss=99.0, take_profit=101.5,
+            risk_usd=5.0,
+        )
+        result = _apply_open(
+            action, client=self._fake_client(price=100.0),
+            store=store, settings=self._settings(monkeypatch),
+            killswitch=self._ks(store),
+        )
+        assert not result.executed
+        assert "eff_rr_below_1.5" in (result.error or "")
+
+    def test_no_fee_check_when_pct_zero(self, tmp_path, monkeypatch):
+        """taker_fee_pct=0.0 → старое поведение (fee-aware checks skipped)."""
+        from ai_trader.state.db import AiTraderStore
+        from ai_trader.trading.executor import _apply_open
+        store = AiTraderStore(str(tmp_path / "ai.sqlite"))
+        # Тот же setup что test_rejects_when_eff_rr_below_1_5 — без fee пройдёт.
+        action = self._action(
+            position_size_usd=500.0, stop_loss=99.0, take_profit=101.5,
+            risk_usd=5.0,
+        )
+        result = _apply_open(
+            action, client=self._fake_client(price=100.0),
+            store=store,
+            settings=self._settings(monkeypatch, taker_fee_pct=0.0),
+            killswitch=self._ks(store),
+        )
+        assert result.executed, f"with fee=0 should pass, error={result.error}"
