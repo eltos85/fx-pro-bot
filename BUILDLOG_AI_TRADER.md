@@ -1,5 +1,232 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-28 — v0.30 institutional rewrite + v0.31 aggressive mandate + v0.32 EQUITY AWARENESS
+
+Тройной apgrade в одну сессию. Reset n=0 (новые параметры + новый промпт
+= новый DGP, см. `.cursor/rules/no-data-fitting.mdc`).
+
+### v0.30 — Institutional Rewrite (port FX-trader patterns)
+
+Перевод бота из «retail chartist» режима (MFP по 1H индикаторам без
+тезиса) в «institutional discretionary trader» (THESIS-driven). Адаптация
+10 концепций FX-bot под крипту:
+
+1. **PER-ASSET MACRO DRIVER HIERARCHY** для BTC/ETH/SOL/BNB/XRP/LTC/DOGE
+   с research URLs (BitMEX 2026 DXY corr -0.72..-0.90, BYDFi BTC.D, и т.д.).
+2. **MFP CONFLUENCE FRAMEWORK**: 5-rule entry gate (momentum / BB-Z /
+   RSI extreme / breakout / news catalyst), ≥3/5 для trend, ≥4/5 для
+   counter-trend. Замена нечёткому «2+ confirmations».
+3. **THESIS DISCIPLINE**: `macro_thesis` обязательное при open (50-500
+   chars), `thesis_status` + `thesis_invalidator` при close. Закрывает
+   FX-bot паттерн «22/26 closes by 1H MACD flip ignoring entry thesis».
+4. **SELF-REFLECTION**: per-symbol PnL + per-(symbol×side) cold-start
+   + last 10 closed trades с прошлым reasoning. Прямо в user-context.
+5. **COLD-START DISCOVERY RULE**: для n=0 (symbol×side) разрешён
+   guarded discovery trade на 0.5R. Sutton & Barto 2018 §2.7.
+6. **REGIME-CHANGE WINDOW**: SELF-REFLECTION filtered by
+   `stats_window_start`. Lopez de Prado 2018 ch.7 + Hamilton 1989.
+7. **NOISE-BAND POSITION SIZING**: STANDARD / EVENT / SHOCK days based
+   on ATR%.
+8. **5-DIM NEWS SENTIMENT**: relevance / polarity / intensity /
+   uncertainty / forwardness. Hard gate: `aggregate_uncertainty > 0.7`
+   → open auto-rejected by executor.
+9. **EXTERNAL MACRO CONTEXT**: DXY/UST10Y через yfinance
+   (`MacroRatesProvider`), BTC.D/total cap через CoinGecko
+   (`CryptoMacroProvider`).
+10. **CONCRETE JSON EXAMPLES** в промпте (filled-out open / close /
+    hold с реальными цифрами).
+
+**Файлы:**
+- `src/ai_trader/state/db.py` — миграции для `macro_thesis`,
+  `thesis_status`, `thesis_invalidator`, `aggregate_uncertainty`,
+  `sentiment_items_json`, `macro_rates_snapshot`; новые методы
+  `get_pnl_by_symbol`, `get_pnl_by_symbol_side`, `get_recent_closed_trades`,
+  `update_decision_thesis`, `update_decision_sentiment`.
+- `src/ai_trader/config/settings.py` — `macro_rates_enabled`,
+  `crypto_macro_enabled`, `stats_window_start`,
+  `news_uncertainty_block_threshold`.
+- `src/ai_trader/data/macro_rates.py` (создан, без TIP).
+- `src/ai_trader/data/crypto_macro.py` (создан).
+- `src/ai_trader/trading/executor.py` — `strict_v030_schema` flag,
+  валидация macro_thesis / sentiment / thesis_status; `ApplyResult`
+  audit-trail.
+- `src/ai_trader/trading/context.py` — `MarketContext` расширен 6
+  блоками; `collect_market_context` собирает их.
+- `src/ai_trader/llm/prompts.py` — институциональная переписка
+  SYSTEM_PROMPT (~30k → ~36k chars).
+- `src/ai_trader/app/main.py` — orchestration новых providers
+  и persisting audit-trail.
+- 4 новых test файла (1276 → 1277 тестов).
+
+### Collision audit (DeepSeek perspective, 6 коллизий)
+
+Запустил симулятор полного цикла (`tests/test_ai_trader_llm_perspective.py`,
+рендерит SYSTEM+USER prompt в `/tmp/ai_trader_llm_simulation.txt`),
+прочитал ~850 строк глазами LLM, нашёл 6 проблем:
+
+1. **`mark=$0 liq=$0`** в LIVE-строке когда биржа не вернула данные
+   (Position dataclass defaults 0.0) → LLM думает позиция aborted.
+   Фикс: показывать `n/a` явно (`context.py:_format_live_data`).
+2. **`est=±$0.00`** для negligible funding → выглядит как баг. Фикс:
+   `<±$0.01` (`context.py:_funding_cost_hint`).
+3. **`[bullish]`** слипается с RSI value → визуальная двусмысленность.
+   Фикс: `[MACD-bullish]` явно (`indicators.py:format_snapshot`).
+4. **`MACRO (relative)`** дублирует `CRYPTO MACRO` block → две
+   source-of-truth для BTC dominance. Фикс: показывать proxy ТОЛЬКО
+   как fallback когда `crypto_macro_block is None`.
+5. **PER-ASSET HIERARCHY содержит 7+ символов, ALLOWED PAIRS только 5**.
+   Что делать с открытой позицией по non-allowed? Фикс: явный блок
+   "treat as REFERENCE ONLY for non-allowed; MAY only close, never add".
+6. **EXIT trigger 1** двусмысленный: "macro re-check is PRIMARY" +
+   "tactical mean-rev close at SMA20". Фикс: разделил на 1a MACRO
+   INVALIDATION (thesis_status=broken) + 1b TACTICAL EXIT TARGET
+   (thesis_status=intact).
+
+После фиксов прогнал симуляцию как DeepSeek — все 8 шагов ANALYSIS
+APPROACH прошли без противоречий, решение HOLD для двух открытых
+позиций обосновано чётко.
+
+### v0.31 — Aggressive Mandate (по запросу пользователя)
+
+> «нужно чтобы он торговал агрессивно. Баланс 500, килсвич 350 в день,
+> лот может стоить до 100 долларов зависит от уверенности. Должен не
+> забывать про комиссию и funding settlements»
+
+**Параметры (`settings.py`):**
+- `max_daily_loss_usd`: $50 → **$350** (70% capital killswitch).
+- `max_open_positions`: 3 → **5** (агрессивная диверсификация).
+- `max_total_loss_usd`: $200 → **$400** (80% capital halt).
+- `max_position_size_usd`: НОВОЕ явное поле = **$100** (cap на
+  `position_size_usd` в JSON; раньше было неявно = virtual_capital $500).
+
+При max_lot $100 × max_leverage 5x = notional до $500 = весь капитал.
+**Risk per trade $10 (2%) не меняем** — industry standard; агрессия
+достигается через ЧАСТОТУ setup'ов, не через risk-per-trade.
+
+**Executor (`executor.py`):**
+- `parse_action(position_size_cap_usd=...)` — новый параметр + hard
+  reject если `position_size_usd > cap`.
+- `ApplyResult.cost_estimate_usd` — soft enforcement audit поле
+  (LLM ожидается заполнить, executor логирует, не блокирует).
+
+**Промпт (`prompts.py`):**
+- Удалено «Most cycles SHOULD be HOLD» (противоречило aggressive).
+  Замена: «Your mandate is AGGRESSIVE EXECUTION: actively seek
+  qualified setups». HOLD остаётся correct default ТОЛЬКО при MFP<3/5
+  на всех allowed pairs или aggregate_uncertainty>0.7.
+- Новая секция **CONFIDENCE → SIZE MAPPING**: low (0.30-0.49) =
+  0.25-0.50x cap, medium (0.50-0.69) = 0.50-0.75x, high (0.70+) =
+  0.75-1.00x. Bands выражены как fraction of `max_position_size_usd`
+  (auto-rerendered при изменении settings).
+- Новый pitfall **COST AMNESIA / OVERTRADING-COSTS**: явный fee_RT +
+  funding cost netout требуется в commentary BEFORE the JSON.
+  Aggressive mandate ≠ overtrading-without-edge.
+- Старая v0.21 «Do NOT add per-trade funding cost as an open-decision
+  factor» отменена. Теперь funding cost учитывается через
+  `cost_estimate_usd` когда settlement в горизонте удержания.
+- OPEN example переписан под aggressive sizing (lot $75 lev 4x вместо
+  lot 400 lev 2x).
+
+### v0.32 — EQUITY AWARENESS (live capital tracking)
+
+> «бот думает что у него 500долларов, по факту на демо много больше.
+> ИИ должен играть на 500, видеть что эта сумма убывает или растёт
+> и от этого у него мысли другие будут»
+
+**Проблема:** до v0.32 промпт показывал статичный
+`VIRTUAL CAPITAL: $500.00` — это **initial deposit**, immutable.
+LLM не видел как капитал эволюционирует, не мог адаптировать sizing
+в drawdown / profit zone. Дисциплинированный трейдер всегда смотрит
+на equity curve (Mark Douglas «Trading in the Zone» 2000 ch.7).
+
+**Решение:**
+
+- `src/ai_trader/state/db.py` — новый метод
+  `get_equity_high_water_mark(initial_capital_usd)` — running cumsum
+  по daily_pnl, возвращает peak (daily resolution).
+- `src/ai_trader/trading/context.py`:
+  - `MarketContext` расширен: `realized_pnl_total_usd`,
+    `unrealised_pnl_total_usd`, `peak_equity_usd`.
+  - `collect_market_context` заполняет из `store.get_total_pnl()` +
+    `store.get_equity_high_water_mark()` + sum по live_positions.
+  - Новая helper `_format_equity_block` рендерит:
+    ```
+    VIRTUAL CAPITAL: initial=$500.00  current_equity=$487.50 (-2.50% vs initial)  peak=$502.00 (-2.89% vs peak)
+      realized_since_start=-12.50$ (net: closed PnL + funding)  unrealised=$0.00 (live mark-based)
+    ```
+    Используется в обоих форматтерах (full + review).
+- `src/ai_trader/llm/prompts.py`:
+  - Новая секция **EQUITY AWARENESS** с zone-based adapter:
+    - `current_equity ≥ 100% initial` → Normal sizing.
+    - `90% ≤ current < 100%` → Mild: high-band capped at 0.75x.
+    - `80% ≤ current < 90%` → Caution: high+medium capped at 0.50x +
+      review which (symbol×side) losing.
+    - `current < 80%` → Defensive: only LOW band + only proven
+      WR>50% (symbol×side), no COLD-START discovery.
+  - Peak-aware secondary: new high → DO NOT autoscale; -15% from
+    peak → cooling-off + prefer trend-following over mean-revert.
+  - `ANALYSIS APPROACH` — добавлен шаг 1 «EQUITY READ»; шаг 7
+    PRE-COMMIT теперь явно требует apply EQUITY adapter поверх
+    CONFIDENCE band (whichever more restrictive).
+
+### Compliance check
+
+- ✅ `strategy-guard.mdc`: research basis для каждого изменения
+  процитирован (per-asset URLs в hierarchy блоках, Lopez de Prado /
+  Hamilton / Sutton-Barto / Mark Douglas / BBX Research / BitMEX).
+- ✅ `sample-size.mdc`: НЕ отключали ни одного инструмента / стратегии.
+  v0.31 параметры (killswitch $350, max_pos 5, lot cap $100) —
+  user-driven configuration, не data-fitted (sample n=0).
+- ✅ `no-data-fitting.mdc`: НЕ подкручивали по результатам прошлых
+  тестов. v0.32 EQUITY AWARENESS — структурное добавление, не tuning.
+  Reset n=0 явно отмечен.
+- ✅ `api-docs.mdc`: не трогали API connection layer.
+- ✅ `stats-collection.mdc`: добавлен явный warning в SELF-REFLECTION
+  блок про возможный mix gross/net PnL (collision audit fix).
+
+### Acceptance criteria (для будущей observation 2-3 дня)
+
+После selective deploy ai-trader (см. `deploy-vps.mdc`):
+
+1. **Smoke (5 min)**: `docker logs fx-pro-bot-ai-trader-1 --tail 50`
+   показывает успешный full-cycle с новой EQUITY строкой; БД содержит
+   новые колонки (`macro_thesis`, `thesis_status`, `aggregate_uncertainty`,
+   `sentiment_items_json`); промпт не упирается в max_tokens.
+2. **24h**: ≥3 закрытых сделки, все с заполнен `macro_thesis@open`,
+   `thesis_status@close`. `cost_estimate_usd` присутствует в ≥80%
+   open-decisions (soft enforcement working).
+3. **48-72h**: EQUITY block обновляется (если есть PnL); LLM в
+   commentary действительно ссылается на equity zone хотя бы 1 раз
+   (text scan `grep -i "equity zone\|drawdown\|peak"`); ни одного
+   open с `position_size_usd > $100` (hard cap working).
+4. **Sanity**: при искусственном drawdown -15% (можно симулировать
+   через `UPDATE daily_pnl SET realized_pnl_usd = -75 WHERE day=...`)
+   LLM в следующем full-cycle должен в commentary назвать zone
+   «Caution» и `position_size_usd` уменьшить vs предыдущий цикл.
+
+**Файлы (v0.30+v0.31+v0.32):**
+- `src/ai_trader/state/db.py` (миграции v0.30 + `get_equity_high_water_mark` v0.32)
+- `src/ai_trader/config/settings.py` (v0.30 macro/sentiment, v0.31 aggressive)
+- `src/ai_trader/data/macro_rates.py` (создан, v0.30)
+- `src/ai_trader/data/crypto_macro.py` (создан, v0.30)
+- `src/ai_trader/trading/executor.py` (v0.30 strict schema, v0.31 lot cap + cost_estimate)
+- `src/ai_trader/trading/context.py` (v0.30 8 новых полей, v0.32 equity-block)
+- `src/ai_trader/llm/prompts.py` (v0.30 ~36k chars, v0.31 +1.5k, v0.32 +3.5k)
+- `src/ai_trader/app/main.py` (передаёт новые params в parse_action)
+- `src/ai_trader/analysis/indicators.py` (collision-fix MACD label)
+- `.env.example` (v0.31 aggressive override hints)
+- 5 новых test файлов: `test_ai_trader_self_reflection.py`,
+  `test_ai_trader_thesis_discipline.py`, `test_ai_trader_macro_rates.py`,
+  `test_ai_trader_crypto_macro.py`, `test_ai_trader_llm_perspective.py`
+- `tests/test_ai_trader.py` (SHA baseline + ~10 assertions updated)
+
+**SHA SYSTEM_PROMPT эволюция:** d380da80 (v0.30 baseline) → a8b1785b
+(collision audit) → 93da6fb8 (v0.31 aggressive) → f5022a69 (v0.32 EQUITY).
+
+**1277/1277 тестов проходят.**
+
+---
+
 ## 2026-05-28 — v0.21: Funding Awareness (perp-futures 8h holding cost)
 
 ### Запрос пользователя

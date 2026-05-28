@@ -228,7 +228,7 @@ def format_snapshot(s: IndicatorSnapshot) -> str:
 
     macd_label = ""
     if s.macd_hist is not None:
-        macd_label = " [bullish]" if s.macd_hist > 0 else " [bearish]"
+        macd_label = " [MACD-bullish]" if s.macd_hist > 0 else " [MACD-bearish]"
 
     trend_label = ""
     if s.ema20 is not None and s.ema50 is not None:

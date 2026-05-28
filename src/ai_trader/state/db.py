@@ -62,6 +62,17 @@ class AiPosition:
     # ``_reconcile_funding()`` через `get_transaction_log` (type=SETTLEMENT).
     # Отрицательное значение = бот заплатил, положительное = бот получил.
     funding_usd: float | None = None
+    # v0.30 (2026-05-28): macro_thesis cited at open (THESIS DISCIPLINE port
+    # из FX-trader). Это "WHY this position exists" — dominant macro driver(s)
+    # из per-asset hierarchy. Например для BTC long: "ETF net inflow $1.2B
+    # last 5d + DXY -0.8% testing 98.5 support + Fed dovish minutes".
+    # Дополняет invalidation_condition (v0.13): invalidation = OBSERVABLE
+    # signal (price level / indicator value), macro_thesis = НАРРАТИВ.
+    # Перечитывается каждый цикл в LIVE-строке (исправляет паттерн
+    # «closes by 1H MACD flip ignoring entry thesis», см. FX-trader
+    # 22/26 closes audit, BUILDLOG_AI_FX_TRADER.md 2026-05-26).
+    # Обязательное на open (executor валидирует ≥50 chars).
+    macro_thesis: str | None = None
 
 
 _SCHEMA = """
@@ -136,21 +147,63 @@ class AiTraderStore:
 
         v0.13 (2026-05-18): meta-cognition поля для open positions
         (см. AI_TRADER_PROPOSAL_ALPHA_ARENA.md, Nof1-style schema).
+
+        v0.30 (2026-05-28): institutional rewrite (порт FX-trader patterns).
+        positions.macro_thesis — pre-registered dominant macro driver
+        cited at open, перечитывается каждый цикл в LIVE-строке (Phase 1
+        FX-bot pattern, BUILDLOG_AI_FX_TRADER.md 2026-05-26). Дополняет
+        существующее `invalidation_condition` (v0.13): invalidation =
+        observable signal (price level), macro_thesis = WHY position
+        exists (макро-нарратив).
+        decisions.thesis_status / thesis_invalidator — обязательные при
+        close (см. THESIS DISCIPLINE в SYSTEM_PROMPT). Поля сохраняются
+        в `decisions` (audit-trail), а не в `positions`, потому что
+        position может закрываться по разным triggers в разное время
+        (broker SL, LLM close, review close) — БД хранит decision-time
+        анализ.
+        decisions.aggregate_uncertainty / sentiment_items_json — 5-dim
+        news sentiment по итерации, нужно для аудита `>0.7 → reject` gate.
+        decisions.macro_rates_snapshot — точная картинка DXY/UST10Y/BTC.D
+        на момент решения (опционально, для аудита расхождений).
         """
-        existing = {row[1] for row in c.execute("PRAGMA table_info(positions)")}
-        migrations: list[tuple[str, str]] = [
-            ("confidence", "ALTER TABLE positions ADD COLUMN confidence REAL"),
-            ("invalidation_condition", "ALTER TABLE positions ADD COLUMN invalidation_condition TEXT"),
-            ("risk_usd_declared", "ALTER TABLE positions ADD COLUMN risk_usd_declared REAL"),
-            # v0.18: после ALTER старые closed-позиции остаются с pnl_source=NULL
-            # — это значит "до миграции" и трактуется как gross (см. dataclass).
-            ("pnl_source", "ALTER TABLE positions ADD COLUMN pnl_source TEXT"),
-            # v0.21: funding settlements за время жизни позиции (см. dataclass).
-            ("funding_usd", "ALTER TABLE positions ADD COLUMN funding_usd REAL"),
+        positions_cols = {row[1] for row in c.execute("PRAGMA table_info(positions)")}
+        decisions_cols = {row[1] for row in c.execute("PRAGMA table_info(decisions)")}
+        per_table: list[tuple[str, set[str], list[tuple[str, str]]]] = [
+            (
+                "positions",
+                positions_cols,
+                [
+                    ("confidence", "ALTER TABLE positions ADD COLUMN confidence REAL"),
+                    ("invalidation_condition", "ALTER TABLE positions ADD COLUMN invalidation_condition TEXT"),
+                    ("risk_usd_declared", "ALTER TABLE positions ADD COLUMN risk_usd_declared REAL"),
+                    # v0.18: после ALTER старые closed-позиции остаются с pnl_source=NULL
+                    # — это значит "до миграции" и трактуется как gross (см. dataclass).
+                    ("pnl_source", "ALTER TABLE positions ADD COLUMN pnl_source TEXT"),
+                    # v0.21: funding settlements за время жизни позиции (см. dataclass).
+                    ("funding_usd", "ALTER TABLE positions ADD COLUMN funding_usd REAL"),
+                    # v0.30: macro thesis cited at open (THESIS DISCIPLINE port из FX-trader).
+                    ("macro_thesis", "ALTER TABLE positions ADD COLUMN macro_thesis TEXT"),
+                ],
+            ),
+            (
+                "decisions",
+                decisions_cols,
+                [
+                    # v0.30: thesis classification at close (audit-trail per decision).
+                    ("thesis_status", "ALTER TABLE decisions ADD COLUMN thesis_status TEXT"),
+                    ("thesis_invalidator", "ALTER TABLE decisions ADD COLUMN thesis_invalidator TEXT"),
+                    # v0.30: 5-dim news sentiment per-cycle.
+                    ("aggregate_uncertainty", "ALTER TABLE decisions ADD COLUMN aggregate_uncertainty REAL"),
+                    ("sentiment_items_json", "ALTER TABLE decisions ADD COLUMN sentiment_items_json TEXT"),
+                    # v0.30: macro snapshot at decision time (optional audit).
+                    ("macro_rates_snapshot", "ALTER TABLE decisions ADD COLUMN macro_rates_snapshot TEXT"),
+                ],
+            ),
         ]
-        for col_name, ddl in migrations:
-            if col_name not in existing:
-                c.execute(ddl)
+        for _table, existing, migrations in per_table:
+            for col_name, ddl in migrations:
+                if col_name not in existing:
+                    c.execute(ddl)
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -219,6 +272,7 @@ class AiTraderStore:
         confidence: float | None = None,
         invalidation_condition: str | None = None,
         risk_usd_declared: float | None = None,
+        macro_thesis: str | None = None,
     ) -> int:
         """Открыть позицию с записью meta-cognition полей.
 
@@ -226,6 +280,9 @@ class AiTraderStore:
         обязательны на стороне promp'а (parser требует), но дефолтные
         ``None`` сохраняются для backward compatibility (старые тесты,
         потенциальные future паттерны без этих полей).
+
+        v0.30: ``macro_thesis`` — обязательное при open в production-промпте
+        (THESIS DISCIPLINE), default ``None`` для backward compat в тестах.
         """
         with self._conn() as c:
             cur = c.execute(
@@ -233,8 +290,9 @@ class AiTraderStore:
                 INSERT INTO positions
                 (symbol, side, qty, entry_price, sl_price, tp_price, leverage,
                  order_link_id, opened_at, llm_reason,
-                 confidence, invalidation_condition, risk_usd_declared)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, invalidation_condition, risk_usd_declared,
+                 macro_thesis)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -250,6 +308,7 @@ class AiTraderStore:
                     confidence,
                     invalidation_condition,
                     risk_usd_declared,
+                    macro_thesis,
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -505,6 +564,31 @@ class AiTraderStore:
             ).fetchone()
         return float(row[0]) if row else 0.0
 
+    def get_equity_high_water_mark(self, initial_capital_usd: float) -> float:
+        """v0.32 (2026-05-28): peak equity для drawdown tracking.
+
+        Считает running cumulative sum по дням (ORDER BY day) поверх
+        `initial_capital_usd`, возвращает максимум достигнутого equity.
+        Если PnL пуст — peak = initial. Используется в context.py для
+        EQUITY AWARENESS блока (drawdown_from_peak_pct помогает LLM
+        видеть «бывал ли в плюсе и насколько откатилось»).
+
+        Аппроксимация: peak считается по концу дня, не intra-day. Для
+        нашего periodicity (15min full + 5min review) достаточно: бот
+        видит daily resolution drawdown, не minute-by-minute.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT realized_pnl_usd FROM daily_pnl ORDER BY day"
+            ).fetchall()
+        peak = initial_capital_usd
+        running = initial_capital_usd
+        for r in rows:
+            running += float(r[0] or 0.0)
+            if running > peak:
+                peak = running
+        return peak
+
     def add_api_cost(self, cost_usd: float) -> None:
         today = date.today().isoformat()
         with self._conn() as c:
@@ -580,3 +664,301 @@ class AiTraderStore:
                 """
             ).fetchone()
         return (int(row[0]) if row else 0, int(row[1]) if row else 0)
+
+    # ─── v0.30 SELF-REFLECTION / COLD-START / REGIME-CHANGE ──────────────
+    # Port из fx_ai_trader/state/db.py (BUILDLOG_AI_FX_TRADER.md 2026-05-26
+    # «self-reflection» + 2026-05-28 «cold-start» + 2026-05-28
+    # «regime-change cutoff»). Адаптация для Bybit:
+    # - таблица `positions` без `is_paper` (ai-trader всегда demo, нет
+    #   paper-mode) и без `volume_lots` (qty вместо).
+    # - sides "Buy"/"Sell" с capital letter (вместо FX "BUY"/"SELL").
+    # - cumulative pnl preference: net (pnl_source='net' — после v0.21
+    #   reconcile) чтобы self-reflection видел реальные числа после fee.
+
+    def get_pnl_by_symbol(
+        self,
+        symbols: list[str],
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-symbol агрегаты по закрытым позициям (live demo).
+
+        Возвращает по одной записи на каждый символ из ``symbols`` (порядок
+        сохраняется). Если по символу нет закрытых трейдов в окне — запись
+        с ``n=0`` (явный сигнал «не торговали», не пропуск).
+
+        Поля: ``symbol``, ``n``, ``wins``, ``win_rate_pct``,
+        ``avg_pnl_usd``, ``sum_pnl_usd``.
+
+        ``since`` — ISO 8601 cutoff на ``opened_at`` (включительно: ≥).
+        ``None`` или пустая строка → без фильтра, вся история. Применяется
+        для regime-change cutoff: pre-v0.30 trades — outcome другой
+        стратегии (без THESIS DISCIPLINE / per-asset hierarchy), включение
+        в SELF-REFLECTION = curve-fitting. См.
+        ``AiTraderSettings.stats_window_start`` и
+        BUILDLOG_AI_TRADER.md v0.30.
+
+        В отличие от FX-trader (`is_paper=0` фильтр) — в ai-trader нет
+        paper-mode, поэтому все закрытые позиции считаются live demo.
+        """
+        with self._conn() as c:
+            placeholders = ",".join("?" * len(symbols)) if symbols else "''"
+            params: list[Any] = list(symbols)
+            since_clause = ""
+            if since:
+                since_clause = " AND opened_at >= ?"
+                params.append(since)
+            rows = c.execute(
+                f"""
+                SELECT symbol,
+                       COUNT(*) AS n,
+                       COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                       COALESCE(AVG(realized_pnl_usd), 0.0) AS avg_pnl,
+                       COALESCE(SUM(realized_pnl_usd), 0.0) AS sum_pnl
+                FROM positions
+                WHERE closed_at IS NOT NULL
+                  AND symbol IN ({placeholders}){since_clause}
+                GROUP BY symbol
+                """,
+                params,
+            ).fetchall()
+        by_symbol = {r["symbol"]: r for r in rows}
+        out: list[dict[str, Any]] = []
+        for sym in symbols:
+            r = by_symbol.get(sym)
+            if r is None:
+                out.append(
+                    {
+                        "symbol": sym,
+                        "n": 0,
+                        "wins": 0,
+                        "win_rate_pct": 0.0,
+                        "avg_pnl_usd": 0.0,
+                        "sum_pnl_usd": 0.0,
+                    }
+                )
+                continue
+            n = int(r["n"])
+            wins = int(r["wins"])
+            wr = (wins / n * 100.0) if n > 0 else 0.0
+            out.append(
+                {
+                    "symbol": sym,
+                    "n": n,
+                    "wins": wins,
+                    "win_rate_pct": wr,
+                    "avg_pnl_usd": float(r["avg_pnl"] or 0.0),
+                    "sum_pnl_usd": float(r["sum_pnl"] or 0.0),
+                }
+            )
+        return out
+
+    def get_pnl_by_symbol_side(
+        self,
+        symbols: list[str],
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Per-(symbol × side) агрегаты по закрытым позициям.
+
+        Возвращает по 2 записи на каждый символ из ``symbols`` (Buy+Sell,
+        порядок ``symbols`` сохраняется; внутри symbol — Buy первой). Если
+        по (symbol × side) нет закрытых трейдов в окне — запись с ``n=0``
+        (явный cold-start сигнал, NOT пропуск).
+
+        Поля: ``symbol``, ``side``, ``n``, ``wins``, ``win_rate_pct``,
+        ``avg_pnl_usd``, ``sum_pnl_usd``.
+
+        Зачем: основной ``get_pnl_by_symbol`` агрегирует через side, что
+        скрывает критическую информацию вида «BTCUSDT Sell 3/3 wins, но
+        BTCUSDT Buy 0 trades в истории». Self-reflection в SYSTEM_PROMPT
+        без этой разбивки получает confounded WR и систематически
+        избегает untested направления (cold-start bias).
+
+        Research basis: Sutton & Barto (2018) §2.7 «Optimistic Initial
+        Values» — explicit treatment of (action × state) pairs with n=0
+        is required to avoid cold-start trap. См. SYSTEM_PROMPT раздел
+        COLD-START DISCOVERY RULE и BUILDLOG_AI_TRADER.md v0.30.
+
+        ``since`` — same semantics как get_pnl_by_symbol.
+        """
+        with self._conn() as c:
+            placeholders = ",".join("?" * len(symbols)) if symbols else "''"
+            params: list[Any] = list(symbols)
+            since_clause = ""
+            if since:
+                since_clause = " AND opened_at >= ?"
+                params.append(since)
+            rows = c.execute(
+                f"""
+                SELECT symbol,
+                       side,
+                       COUNT(*) AS n,
+                       COALESCE(SUM(CASE WHEN realized_pnl_usd > 0 THEN 1 ELSE 0 END), 0) AS wins,
+                       COALESCE(AVG(realized_pnl_usd), 0.0) AS avg_pnl,
+                       COALESCE(SUM(realized_pnl_usd), 0.0) AS sum_pnl
+                FROM positions
+                WHERE closed_at IS NOT NULL
+                  AND symbol IN ({placeholders}){since_clause}
+                GROUP BY symbol, side
+                """,
+                params,
+            ).fetchall()
+        by_key = {(r["symbol"], r["side"]): r for r in rows}
+        out: list[dict[str, Any]] = []
+        for sym in symbols:
+            for side in ("Buy", "Sell"):
+                r = by_key.get((sym, side))
+                if r is None:
+                    out.append(
+                        {
+                            "symbol": sym,
+                            "side": side,
+                            "n": 0,
+                            "wins": 0,
+                            "win_rate_pct": 0.0,
+                            "avg_pnl_usd": 0.0,
+                            "sum_pnl_usd": 0.0,
+                        }
+                    )
+                    continue
+                n = int(r["n"])
+                wins = int(r["wins"])
+                wr = (wins / n * 100.0) if n > 0 else 0.0
+                out.append(
+                    {
+                        "symbol": sym,
+                        "side": side,
+                        "n": n,
+                        "wins": wins,
+                        "win_rate_pct": wr,
+                        "avg_pnl_usd": float(r["avg_pnl"] or 0.0),
+                        "sum_pnl_usd": float(r["sum_pnl"] or 0.0),
+                    }
+                )
+        return out
+
+    def get_recent_closed_trades(
+        self,
+        limit: int = 10,
+        reason_clamp: int = 180,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Последние ``limit`` закрытых трейдов, отсортированы по
+        ``closed_at`` ASC (oldest → newest для USER_PROMPT readability).
+
+        Поля: ``id``, ``symbol``, ``side``, ``qty``, ``entry_price``,
+        ``exit_price``, ``realized_pnl_usd``, ``opened_at``, ``closed_at``,
+        ``duration_minutes``, ``llm_reason`` (clamp), ``close_reason``
+        (clamp), ``macro_thesis`` (clamp, v0.30 audit-trail).
+
+        ``reason_clamp`` — лимит на символ для llm_reason / close_reason /
+        macro_thesis (default 180). LLM в SELF-REFLECTION сможет
+        cross-check свой past reasoning с outcome.
+
+        ``since`` — same semantics как get_pnl_by_symbol.
+        """
+        with self._conn() as c:
+            params: list[Any] = []
+            since_clause = ""
+            if since:
+                since_clause = " AND opened_at >= ?"
+                params.append(since)
+            params.append(int(limit))
+            rows = c.execute(
+                f"""
+                SELECT id, symbol, side, qty, entry_price, exit_price,
+                       realized_pnl_usd, opened_at, closed_at, llm_reason,
+                       close_reason, macro_thesis
+                FROM positions
+                WHERE closed_at IS NOT NULL{since_clause}
+                ORDER BY closed_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            duration_min: int | None = None
+            try:
+                t_open = datetime.fromisoformat(r["opened_at"])
+                t_close = datetime.fromisoformat(r["closed_at"])
+                duration_min = max(0, int((t_close - t_open).total_seconds() // 60))
+            except (TypeError, ValueError):
+                duration_min = None
+            llm_reason = (r["llm_reason"] or "")[:reason_clamp]
+            close_reason = (r["close_reason"] or "")[:reason_clamp]
+            macro_thesis = (r["macro_thesis"] or "")[:reason_clamp]
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "qty": float(r["qty"]),
+                    "entry_price": float(r["entry_price"]),
+                    "exit_price": float(r["exit_price"]) if r["exit_price"] is not None else None,
+                    "realized_pnl_usd": float(r["realized_pnl_usd"]) if r["realized_pnl_usd"] is not None else 0.0,
+                    "opened_at": r["opened_at"],
+                    "closed_at": r["closed_at"],
+                    "duration_minutes": duration_min,
+                    "llm_reason": llm_reason,
+                    "close_reason": close_reason,
+                    "macro_thesis": macro_thesis,
+                }
+            )
+        out.reverse()  # oldest → newest для prompt readability
+        return out
+
+    def update_decision_thesis(
+        self,
+        decision_id: int,
+        *,
+        thesis_status: str | None,
+        thesis_invalidator: str | None,
+    ) -> None:
+        """v0.30: записать thesis_status + thesis_invalidator в decisions.
+
+        Вызывается из executor._apply_close после успешного close (если
+        action содержал thesis-поля). Если decision_id невалидный или
+        запись не существует — silent no-op (commit-time write,
+        audit-trail).
+        """
+        with self._conn() as c:
+            c.execute(
+                """
+                UPDATE decisions
+                SET thesis_status = ?, thesis_invalidator = ?
+                WHERE id = ?
+                """,
+                (thesis_status, thesis_invalidator, decision_id),
+            )
+
+    def update_decision_sentiment(
+        self,
+        decision_id: int,
+        *,
+        aggregate_uncertainty: float | None,
+        sentiment_items_json: str | None,
+        macro_rates_snapshot: str | None = None,
+    ) -> None:
+        """v0.30: записать 5-dim news sentiment + macro snapshot в decisions.
+
+        Audit-trail для последующего анализа: чем выше corr между
+        ``aggregate_uncertainty`` и ``error="open blocked: ..."`` —
+        тем валиднее gate. ``macro_rates_snapshot`` опционально для
+        случаев когда LLM решение зависит от DXY/UST10Y.
+        """
+        with self._conn() as c:
+            c.execute(
+                """
+                UPDATE decisions
+                SET aggregate_uncertainty = ?,
+                    sentiment_items_json = ?,
+                    macro_rates_snapshot = ?
+                WHERE id = ?
+                """,
+                (
+                    aggregate_uncertainty,
+                    sentiment_items_json,
+                    macro_rates_snapshot,
+                    decision_id,
+                ),
+            )

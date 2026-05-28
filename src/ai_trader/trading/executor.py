@@ -63,6 +63,35 @@ class ApplyResult:
     executed: bool
     summary: str
     error: str | None = None
+    # v0.30 audit-trail для последующей записи в `decisions` через
+    # ``store.update_decision_thesis`` / ``store.update_decision_sentiment``
+    # после того, как main.py получит decision_id из ``log_decision``.
+    # Все поля опциональные — None означает «не применимо для этого
+    # action» (например, thesis_status — только при close).
+    thesis_status: str | None = None
+    thesis_invalidator: str | None = None
+    aggregate_uncertainty: float | None = None
+    sentiment_items_json: str | None = None
+    # v0.31 (2026-05-28, aggressive mandate cost-awareness): optional
+    # `cost_estimate_usd` поле в open-JSON, заполняется LLM как сумма
+    # fee_RT (round-trip taker fee на ожидаемом notional) + funding cost
+    # to next 8h settlement. Soft enforcement: executor НЕ блокирует если
+    # поле отсутствует или вне диапазона, только логирует и пишет в БД.
+    # Цель: data trail для оценки accuracy LLM в pre-trade cost-thinking.
+    cost_estimate_usd: float | None = None
+
+
+# v0.30 thesis_status enum для close-action audit.
+_ALLOWED_THESIS_STATUS = {"broken", "intact", "partial"}
+
+# v0.30 5-dim news sentiment поля (см. SYSTEM_PROMPT NEWS SENTIMENT блок).
+_REQUIRED_SENTIMENT_FIELDS = (
+    "aggregate_relevance",
+    "aggregate_polarity",
+    "aggregate_intensity",
+    "aggregate_uncertainty",
+    "aggregate_forwardness",
+)
 
 
 def parse_action(
@@ -71,6 +100,9 @@ def parse_action(
     *,
     review_mode: bool = False,
     risk_usd_cap: float = 10.0,
+    strict_v030_schema: bool = False,
+    news_uncertainty_block: float = 0.7,
+    position_size_cap_usd: float = 500.0,
 ) -> ParsedAction | str:
     """Возвращает ParsedAction или строку с описанием ошибки.
 
@@ -89,6 +121,28 @@ def parse_action(
     backward-compat для существующих тестов. В production (main.py)
     передаётся явно из settings, чтобы переменная ``AI_TRADER_RISK_PER_TRADE``
     в ``.env`` была единой точкой истины (промпт + парсер).
+
+    v0.30 (2026-05-28): институциональная схема (port FX-trader patterns).
+    Управляется флагом ``strict_v030_schema`` (default False для
+    backward-compat с существующими тестами):
+
+    - ``action=open`` требует ДОПОЛНИТЕЛЬНО:
+      * ``macro_thesis`` (string, ≥50 ≤500 chars) — pre-registered
+        dominant macro driver(s) из per-asset hierarchy.
+      * ``sentiment`` блок с 5 числовыми полями (0.0-1.0):
+        aggregate_relevance, aggregate_polarity (-1..+1 допустим),
+        aggregate_intensity, aggregate_uncertainty, aggregate_forwardness.
+      * Hard gate: если ``sentiment.aggregate_uncertainty >
+        news_uncertainty_block`` → reject с явной ошибкой (промпт сам
+        должен возвращать hold; gate — safety net).
+    - ``action=close`` требует ДОПОЛНИТЕЛЬНО:
+      * ``thesis_status`` ∈ {"broken", "intact", "partial"} —
+        классификация что произошло с тезисом (THESIS DISCIPLINE).
+      * ``thesis_invalidator`` (string non-empty) — что именно сломало
+        или подтвердило тезис.
+
+    Backward-compat: с ``strict_v030_schema=False`` (default) все эти
+    поля **опциональны** — старые тесты v0.2-v0.21 продолжают работать.
     """
     if not text:
         return "empty response"
@@ -160,6 +214,19 @@ def parse_action(
             if not isinstance(v, (int, float)) or v <= 0:
                 return f"invalid {key}: {v!r}"
 
+        # v0.31 (2026-05-28, aggressive mandate): position_size_usd cap.
+        # Default 500.0 = legacy behavior (вся virtual capital). main.py
+        # передаёт явный `settings.max_position_size_usd` (default $100
+        # для aggressive mandate) — это binding constraint при leverage до
+        # 5x, чтобы notional не превышал весь капитал. См. settings.py.
+        pos_size = float(obj["position_size_usd"])
+        if pos_size > position_size_cap_usd:
+            return (
+                f"position_size_usd {pos_size:g} > cap {position_size_cap_usd:g}. "
+                f"v0.31 lot cap = ${position_size_cap_usd:g} (notional with "
+                f"leverage up to 5x = ${position_size_cap_usd * 5:g} = full capital)."
+            )
+
         # v0.13 (2026-05-18) — meta-cognition поля Nof1-style.
         # Эти три поля обязательны для action=open и принуждают LLM
         # явно посчитать (а не «прикинуть») уверенность, риск и заранее
@@ -189,9 +256,70 @@ def parse_action(
                 f"Per-trade cap = ${risk_usd_cap:g}."
             )
 
+        # v0.30 strict schema: macro_thesis + sentiment block + gate.
+        if strict_v030_schema:
+            mth = obj.get("macro_thesis")
+            if not isinstance(mth, str):
+                return (
+                    f"macro_thesis required (string), got {type(mth).__name__}. "
+                    "Cite dominant macro driver(s) from per-asset hierarchy."
+                )
+            mth_stripped = mth.strip()
+            if len(mth_stripped) < 50:
+                return (
+                    f"macro_thesis too short (min 50 chars, got "
+                    f"{len(mth_stripped)}). Cite ≥1 driver from per-asset "
+                    "hierarchy + specific level/number (e.g. \"ETF net inflow "
+                    "$1.2B last 5d + DXY -0.8% testing 98.5\")."
+                )
+            if len(mth_stripped) > 500:
+                return f"macro_thesis too long (max 500 chars): got {len(mth_stripped)}"
+
+            sent = obj.get("sentiment")
+            if not isinstance(sent, dict):
+                return (
+                    f"sentiment required (object with 5 fields: "
+                    f"{', '.join(_REQUIRED_SENTIMENT_FIELDS)}), got "
+                    f"{type(sent).__name__}"
+                )
+            for fld in _REQUIRED_SENTIMENT_FIELDS:
+                v = sent.get(fld)
+                if not isinstance(v, (int, float)) or isinstance(v, bool):
+                    return (
+                        f"sentiment.{fld} required (number 0.0-1.0, "
+                        f"polarity allows -1..+1), got {v!r}"
+                    )
+            # Hard gate: aggregate_uncertainty > threshold → блокируем open.
+            au = float(sent["aggregate_uncertainty"])
+            if au > news_uncertainty_block:
+                return (
+                    f"open_blocked_by_uncertainty: aggregate_uncertainty="
+                    f"{au:.2f} > threshold={news_uncertainty_block:.2f}. "
+                    "Promote to HOLD (NEWS UNCERTAINTY GATE)."
+                )
+
     if action == "close":
         if not isinstance(obj.get("position_id"), int):
             return f"close requires int position_id, got {obj.get('position_id')!r}"
+
+        if strict_v030_schema:
+            ts = obj.get("thesis_status")
+            if ts not in _ALLOWED_THESIS_STATUS:
+                return (
+                    f"thesis_status required (one of {sorted(_ALLOWED_THESIS_STATUS)}), "
+                    f"got {ts!r}. broken=thesis invalidated, intact=thesis "
+                    "still valid (closing for other reason), partial=thesis "
+                    "partially playing out."
+                )
+            inv = obj.get("thesis_invalidator")
+            if not isinstance(inv, str) or not inv.strip():
+                return (
+                    f"thesis_invalidator required (non-empty string), got "
+                    f"{inv!r}. Specify what broke / confirmed the thesis "
+                    "(price level / news / indicator)."
+                )
+            if len(inv) > 500:
+                return f"thesis_invalidator too long (max 500 chars): got {len(inv)}"
 
     return ParsedAction(action=action, raw=obj)
 
@@ -223,6 +351,14 @@ def _apply_close(
     action: ParsedAction, *, client: AiBybitClient, store: AiTraderStore
 ) -> ApplyResult:
     pos_id = int(action.raw["position_id"])
+    # v0.30 audit-trail (опциональные, пробрасываем дальше в ApplyResult).
+    thesis_status = action.raw.get("thesis_status")
+    if not isinstance(thesis_status, str):
+        thesis_status = None
+    thesis_invalidator = action.raw.get("thesis_invalidator")
+    if not isinstance(thesis_invalidator, str):
+        thesis_invalidator = None
+
     pos = None
     for p in store.get_open_positions():
         if p.id == pos_id:
@@ -230,14 +366,20 @@ def _apply_close(
             break
     if pos is None:
         return ApplyResult(
-            executed=False, summary="", error=f"position id={pos_id} not found among open positions"
+            executed=False, summary="", error=f"position id={pos_id} not found among open positions",
+            thesis_status=thesis_status,
+            thesis_invalidator=thesis_invalidator,
         )
 
     link_id = f"ai_close_{uuid.uuid4().hex[:10]}"
     resp = client.close_position(pos.symbol, pos.side, pos.qty, link_id)
     if not resp or not resp.get("ok"):
         err_msg = (resp or {}).get("error", "close_position returned empty")
-        return ApplyResult(executed=False, summary="", error=f"close_failed: {err_msg}")
+        return ApplyResult(
+            executed=False, summary="", error=f"close_failed: {err_msg}",
+            thesis_status=thesis_status,
+            thesis_invalidator=thesis_invalidator,
+        )
 
     # Сначала считаем gross — на случай если get_closed_pnl недоступен
     # или Bybit ещё не успел записать closed-pnl (это случается через
@@ -298,6 +440,8 @@ def _apply_close(
             f"CLOSE id={pos.id} {pos.side} {pos.symbol} exit=${exit_price:.6g} "
             f"pnl=${pnl:+.2f} ({pnl_source}){funding_suffix}"
         ),
+        thesis_status=thesis_status,
+        thesis_invalidator=thesis_invalidator,
     )
 
 
@@ -322,23 +466,66 @@ def _apply_open(
     confidence = float(raw["confidence"])
     invalidation_condition = str(raw["invalidation_condition"]).strip()[:500]
     risk_usd_declared = float(raw["risk_usd"])
+    # v0.30: macro_thesis (опционально на парсер-уровне для backward-compat
+    # с paper/test, но обязательно в production через strict_v030_schema).
+    macro_thesis_raw = raw.get("macro_thesis")
+    macro_thesis = (
+        str(macro_thesis_raw).strip()[:500]
+        if isinstance(macro_thesis_raw, str) and macro_thesis_raw.strip()
+        else None
+    )
+    # v0.30: 5-dim sentiment block для audit-trail в decisions.
+    sent_block = raw.get("sentiment") if isinstance(raw.get("sentiment"), dict) else None
+    aggregate_uncertainty: float | None = None
+    sentiment_items_json: str | None = None
+    if sent_block:
+        au_v = sent_block.get("aggregate_uncertainty")
+        if isinstance(au_v, (int, float)) and not isinstance(au_v, bool):
+            aggregate_uncertainty = float(au_v)
+        try:
+            sentiment_items_json = json.dumps(sent_block, ensure_ascii=False)[:2000]
+        except (TypeError, ValueError):
+            sentiment_items_json = None
+
+    # v0.31 (aggressive mandate): cost_estimate_usd — optional audit поле.
+    # LLM ожидает посчитать fee_RT + funding-to-settlement и сравнить с
+    # ожидаемой прибылью. Soft enforcement: невалидное значение → None
+    # (не блокируем сделку, только не пишем в audit).
+    cost_estimate_usd: float | None = None
+    ce_raw = raw.get("cost_estimate_usd")
+    if isinstance(ce_raw, (int, float)) and not isinstance(ce_raw, bool):
+        ce_val = float(ce_raw)
+        if 0.0 <= ce_val <= 50.0:  # реальный диапазон при $500 capital
+            cost_estimate_usd = ce_val
+
+    def _result(executed: bool, summary: str, error: str | None = None) -> ApplyResult:
+        """v0.30 helper: каждый ApplyResult из _apply_open пробрасывает
+        audit-trail (aggregate_uncertainty / sentiment_items_json) — это
+        не зависит от того, executed True или False. main.py запишет в
+        ``decisions`` через update_decision_sentiment.
+        """
+        return ApplyResult(
+            executed=executed,
+            summary=summary,
+            error=error,
+            aggregate_uncertainty=aggregate_uncertainty,
+            sentiment_items_json=sentiment_items_json,
+            cost_estimate_usd=cost_estimate_usd,
+        )
 
     check = killswitch.check_can_open_position(leverage)
     if not check.allowed:
-        return ApplyResult(executed=False, summary="", error=f"killswitch: {check.reason}")
+        return _result(False, "", error=f"killswitch: {check.reason}")
 
     ticker = client.get_ticker(symbol)
     if ticker is None or ticker.last_price <= 0:
-        return ApplyResult(executed=False, summary="", error=f"ticker unavailable for {symbol}")
+        return _result(False, "", error=f"ticker unavailable for {symbol}")
     price = ticker.last_price
 
     # instruments-info — для round'инга qty/SL/TP под Bybit фильтры.
     info = client.get_instrument_info(symbol)
     if info is None:
-        return ApplyResult(
-            executed=False, summary="",
-            error=f"instruments-info unavailable for {symbol}",
-        )
+        return _result(False, "", error=f"instruments-info unavailable for {symbol}")
 
     # Округляем SL/TP под tick_size ДО sanity-check'а — чтобы не падать
     # из-за плавающей точки LLM (1.38531 при tickSize 0.0001).
@@ -348,16 +535,14 @@ def _apply_open(
     # Sanity check на направление SL/TP
     if side == "Buy":
         if not (sl_price < price < tp_price):
-            return ApplyResult(
-                executed=False,
-                summary="",
+            return _result(
+                False, "",
                 error=f"Buy: need SL<price<TP, got SL={sl_price} price={price} TP={tp_price}",
             )
     else:
         if not (sl_price > price > tp_price):
-            return ApplyResult(
-                executed=False,
-                summary="",
+            return _result(
+                False, "",
                 error=f"Sell: need SL>price>TP, got SL={sl_price} price={price} TP={tp_price}",
             )
 
@@ -371,8 +556,8 @@ def _apply_open(
     qty_raw = notional_usd / price
     qty = _floor_to_step(qty_raw, info.qty_step)
     if qty < info.min_order_qty:
-        return ApplyResult(
-            executed=False, summary="",
+        return _result(
+            False, "",
             error=(
                 f"qty {qty} < min_order_qty {info.min_order_qty} for {symbol} "
                 f"(notional ${notional_usd:.2f} / price {price} / step {info.qty_step})"
@@ -381,7 +566,7 @@ def _apply_open(
     if qty > info.max_order_qty:
         qty = _floor_to_step(info.max_order_qty, info.qty_step)
     if qty <= 0:
-        return ApplyResult(executed=False, summary="", error="qty<=0 after rounding")
+        return _result(False, "", error="qty<=0 after rounding")
 
     # v0.20 (2026-05-28): hard fee-aware валидация. До v0.20 R:R и
     # risk_usd считались чисто по ценам — реальный убыток на SL =
@@ -397,8 +582,8 @@ def _apply_open(
         #    Должен влезать в per-trade cap.
         net_risk_usd = risk_usd_declared + fee_RT_usd
         if net_risk_usd > risk_usd_cap:
-            return ApplyResult(
-                executed=False, summary="",
+            return _result(
+                False, "",
                 error=(
                     f"net_risk_exceeds_cap: declared risk_usd={risk_usd_declared:.2f} "
                     f"+ est. fee_RT={fee_RT_usd:.2f} = {net_risk_usd:.2f} > "
@@ -413,8 +598,8 @@ def _apply_open(
         eff_reward_usd = reward_dist * qty - fee_RT_usd
         eff_risk_usd = risk_dist * qty + fee_RT_usd
         if eff_risk_usd <= 0 or eff_reward_usd <= 0:
-            return ApplyResult(
-                executed=False, summary="",
+            return _result(
+                False, "",
                 error=(
                     f"eff_rr_non_positive: reward_dist={reward_dist} "
                     f"risk_dist={risk_dist} qty={qty} fee_RT={fee_RT_usd:.2f}"
@@ -422,8 +607,8 @@ def _apply_open(
             )
         eff_rr = eff_reward_usd / eff_risk_usd
         if eff_rr < 1.5:
-            return ApplyResult(
-                executed=False, summary="",
+            return _result(
+                False, "",
                 error=(
                     f"eff_rr_below_1.5: after fees "
                     f"(eff_reward=${eff_reward_usd:.2f} / "
@@ -436,13 +621,16 @@ def _apply_open(
 
     if not settings.trading_enabled:
         # PAPER MODE: не вызываем биржу, только пишем decision-only
-        return ApplyResult(
-            executed=False,
-            summary=(
+        mth_suffix = (
+            f" mth=\"{macro_thesis[:80]}\"" if macro_thesis else ""
+        )
+        return _result(
+            False,
+            (
                 f"[PAPER] OPEN {side} {symbol} qty={qty} @ ${price:.6g} "
                 f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
                 f"conf={confidence:.2f} risk_decl=${risk_usd_declared:.2f} "
-                f"inv=\"{invalidation_condition[:80]}\" — {reason}"
+                f"inv=\"{invalidation_condition[:80]}\"{mth_suffix} — {reason}"
             ),
         )
 
@@ -463,9 +651,8 @@ def _apply_open(
     )
     if not resp or not resp.get("ok"):
         err_msg = (resp or {}).get("error", "place_order returned empty")
-        return ApplyResult(
-            executed=False,
-            summary="",
+        return _result(
+            False, "",
             error=(
                 f"open_failed: {err_msg} "
                 f"(symbol={symbol} side={side} qty={qty} lev={leverage}x)"
@@ -485,13 +672,15 @@ def _apply_open(
         confidence=confidence,
         invalidation_condition=invalidation_condition,
         risk_usd_declared=risk_usd_declared,
+        macro_thesis=macro_thesis,
     )
-    return ApplyResult(
-        executed=True,
-        summary=(
+    mth_suffix = f" mth=\"{macro_thesis[:80]}\"" if macro_thesis else ""
+    return _result(
+        True,
+        (
             f"OPEN {side} {symbol} qty={qty} @ ${price:.6g} "
             f"SL=${sl_price:.6g} TP=${tp_price:.6g} lev={leverage}x "
             f"conf={confidence:.2f} risk_decl=${risk_usd_declared:.2f} "
-            f"inv=\"{invalidation_condition[:80]}\" — {reason}"
+            f"inv=\"{invalidation_condition[:80]}\"{mth_suffix} — {reason}"
         ),
     )

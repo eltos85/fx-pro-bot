@@ -92,6 +92,41 @@ class MarketContext:
     #   при закрытии прямо сейчас)
     # Если 0.0 — net-строки не показываются (старое поведение).
     taker_fee_pct: float = 0.0
+    # v0.30 (2026-05-28): institutional rewrite. Новые блоки контекста.
+    # Все опциональные / default empty — backward-compat для тестов.
+    # macro_rates_block: pre-formatted text от MacroRatesProvider
+    # (см. data/macro_rates.py format_macro_rates_snapshot). None если
+    # provider disabled или fetch упал.
+    macro_rates_block: str | None = None
+    # crypto_macro_block: pre-formatted text от CryptoMacroProvider
+    # (BTC.D + total crypto cap). None если provider disabled / fetch fail.
+    crypto_macro_block: str | None = None
+    # SELF-REFLECTION: per-symbol агрегат закрытых позиций (post-cutoff).
+    per_symbol_pnl: list[dict] = field(default_factory=list)
+    # SELF-REFLECTION: per-(symbol × side) для cold-start gate.
+    per_symbol_side_pnl: list[dict] = field(default_factory=list)
+    # SELF-REFLECTION: последние ≤10 closed trades с reasoning для
+    # LLM cross-check своих past decisions vs outcomes.
+    recent_closed_trades: list[dict] = field(default_factory=list)
+    # Stats window cutoff (ISO 8601). Если non-empty — LLM видит
+    # явное «pre-cutoff trades excluded as different DGP».
+    stats_window_start: str | None = None
+    # v0.32 (2026-05-28): EQUITY AWARENESS блок. До v0.32 промпт показывал
+    # статичный `VIRTUAL CAPITAL: $500.00` (= initial deposit), не давая
+    # LLM понять как капитал эволюционирует со временем. Дисциплинированный
+    # трейдер всегда смотрит на equity curve и адаптирует size/aggression
+    # (Mark Douglas «Trading in the Zone» 2000 ch.7 — "your psychological
+    # state IS your capital state"). Поля:
+    # - realized_pnl_total_usd: SUM(daily_pnl.realized_pnl_usd) — все
+    #   закрытые сделки net (с funding settlements, без unrealized).
+    # - unrealised_pnl_total_usd: sum(live_position.unrealised_pnl) на
+    #   момент сбора контекста. Реальная картина с биржи (mark price).
+    # - peak_equity_usd: max(initial, initial + running_cumsum_realized).
+    #   Daily resolution (не intra-day) — см. db.get_equity_high_water_mark.
+    # Все опциональные None — backward-compat для тестов / pre-v0.32 callers.
+    realized_pnl_total_usd: float | None = None
+    unrealised_pnl_total_usd: float | None = None
+    peak_equity_usd: float | None = None
 
 
 def collect_market_context(
@@ -102,7 +137,22 @@ def collect_market_context(
     news_provider=None,
     *,
     taker_fee_pct: float = 0.0,
+    macro_rates_provider=None,
+    crypto_macro_provider=None,
+    stats_window_start: str | None = None,
+    self_reflection_limit: int = 10,
 ) -> MarketContext:
+    """Полный сбор market context для full-cycle.
+
+    v0.30 (2026-05-28): добавлены providers для US rates / crypto macro
+    и SELF-REFLECTION блоки (per-symbol PnL + recent closed trades с
+    regime-change cutoff). Все новые параметры опциональные — при
+    отсутствии provider'а соответствующий блок пустой и formatter его
+    пропускает.
+
+    ``stats_window_start`` — ISO 8601 cutoff на ``opened_at``, см.
+    ``AiTraderSettings.stats_window_start``. None / "" → вся история.
+    """
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
         ticker = client.get_ticker(sym)
@@ -159,6 +209,76 @@ def collect_market_context(
             log.exception("news_provider failed (продолжаю без новостей)")
             news = []
 
+    # v0.30 macro blocks (опциональные, fail-safe).
+    macro_rates_block: str | None = None
+    if macro_rates_provider is not None:
+        try:
+            from ai_trader.data.macro_rates import format_macro_rates_snapshot
+            snap = macro_rates_provider.get_snapshot()
+            macro_rates_block = format_macro_rates_snapshot(snap)
+        except Exception:
+            log.exception("macro_rates_provider failed (без US rates блока)")
+            macro_rates_block = None
+
+    crypto_macro_block: str | None = None
+    if crypto_macro_provider is not None:
+        try:
+            from ai_trader.data.crypto_macro import format_crypto_macro_snapshot
+            snap = crypto_macro_provider.get_snapshot()
+            crypto_macro_block = format_crypto_macro_snapshot(snap)
+        except Exception:
+            log.exception("crypto_macro_provider failed (без BTC.D блока)")
+            crypto_macro_block = None
+
+    # v0.30 SELF-REFLECTION blocks (always запрашиваем, fail-safe).
+    symbol_list = list(symbols)
+    since_arg = stats_window_start or None
+    try:
+        per_symbol_pnl = store.get_pnl_by_symbol(symbol_list, since=since_arg)
+    except Exception:
+        log.exception("get_pnl_by_symbol failed (без per-symbol agg)")
+        per_symbol_pnl = []
+    try:
+        per_symbol_side_pnl = store.get_pnl_by_symbol_side(symbol_list, since=since_arg)
+    except Exception:
+        log.exception("get_pnl_by_symbol_side failed (без cold-start signal)")
+        per_symbol_side_pnl = []
+    try:
+        recent_closed_trades = store.get_recent_closed_trades(
+            limit=self_reflection_limit, since=since_arg
+        )
+    except Exception:
+        log.exception("get_recent_closed_trades failed (без recent-trades)")
+        recent_closed_trades = []
+
+    # v0.32 EQUITY AWARENESS: total realized + unrealized + peak.
+    # Realized total — net (включает funding settlements). Unrealized —
+    # сумма по live_positions (mark-based, не реализован). Peak — running
+    # max equity по daily resolution (см. db.get_equity_high_water_mark).
+    realized_pnl_total: float | None = None
+    unrealised_pnl_total: float | None = None
+    peak_equity: float | None = None
+    try:
+        realized_pnl_total = store.get_total_pnl()
+    except Exception:
+        log.exception("get_total_pnl failed (без EQUITY total)")
+        realized_pnl_total = None
+    try:
+        peak_equity = store.get_equity_high_water_mark(virtual_capital_usd)
+    except Exception:
+        log.exception("get_equity_high_water_mark failed (peak=None)")
+        peak_equity = None
+    if live_positions:
+        # Сумма по реальным mark-price unrealised. Не суммируем по
+        # open_positions из БД, потому что у них unrealised не хранится.
+        unrealised_pnl_total = sum(
+            float(p.unrealised_pnl or 0.0) for p in live_positions.values()
+        )
+    elif live_positions == {}:
+        unrealised_pnl_total = 0.0
+    # live_positions is None → unrealised_pnl_total остаётся None
+    # (LLM получит «unrealised: API unavailable»).
+
     return MarketContext(
         snapshots=snapshots,
         open_positions=open_positions,
@@ -167,6 +287,15 @@ def collect_market_context(
         news=news,
         live_positions=live_positions,
         taker_fee_pct=taker_fee_pct,
+        macro_rates_block=macro_rates_block,
+        crypto_macro_block=crypto_macro_block,
+        per_symbol_pnl=per_symbol_pnl,
+        per_symbol_side_pnl=per_symbol_side_pnl,
+        recent_closed_trades=recent_closed_trades,
+        stats_window_start=since_arg,
+        realized_pnl_total_usd=realized_pnl_total,
+        unrealised_pnl_total_usd=unrealised_pnl_total,
+        peak_equity_usd=peak_equity,
     )
 
 
@@ -437,6 +566,13 @@ def _format_live_position_line(
     liq = live.liq_price or 0.0
     pos_val = live.position_value or 0.0
     margin = pos_val / live.leverage if live.leverage > 0 else pos_val
+    # v0.30 collision-fix: если биржа не вернула mark/liq (dataclass default
+    # 0.0), вместо вводящего в заблуждение "mark=$0 liq=$0" (LLM думает что
+    # позиция ликвидирована) показываем явное "API returned partial data" +
+    # последнюю известную цену из ticker если есть. Бывает при transient
+    # outage Bybit position-endpoint когда ticker-endpoint работает.
+    mark_str = f"${mark:.6g}" if mark > 0 else "n/a"
+    liq_str = f"${liq:.6g}" if liq > 0 else "n/a"
     buf_pct = ""
     if liq > 0 and mark > 0:
         if position.side == "Buy":
@@ -451,12 +587,29 @@ def _format_live_position_line(
         net_suffix = (
             f" close_net={net_close:+.2f}$ (after -${close_fee:.2f} close fee)"
         )
+    elif taker_fee_pct > 0:
+        net_suffix = " close_net=n/a (no mark price)"
     funding_suffix = _funding_cost_hint(position, live, ticker)
     return (
-        f"     LIVE: mark=${mark:.6g} unrealised={unreal:+.2f}$ "
-        f"liq=${liq:.6g}{buf_pct} margin=${margin:.2f}{net_suffix}"
+        f"     LIVE: mark={mark_str} unrealised={unreal:+.2f}$ "
+        f"liq={liq_str}{buf_pct} margin=${margin:.2f}{net_suffix}"
         f"{funding_suffix}"
     )
+
+
+def _format_macro_thesis_line(position: AiPosition) -> str | None:
+    """v0.30: показать macro_thesis под position-line, чтобы LLM каждый
+    цикл перечитывал почему позиция открыта.
+
+    Закрывает паттерн «closes by 1H MACD flip ignoring entry thesis»
+    (FX-trader 22/26 closes audit, BUILDLOG_AI_FX_TRADER.md 2026-05-26).
+    Если у позиции нет macro_thesis (открыта до v0.30, либо backward-compat
+    тестом) — возвращает None.
+    """
+    mth = (getattr(position, "macro_thesis", None) or "").strip()
+    if not mth:
+        return None
+    return f"     thesis@open: {mth}"
 
 
 def _funding_cost_hint(
@@ -497,9 +650,15 @@ def _funding_cost_hint(
         paying = True
     verb = "paying" if paying else "earning"
     sign = "-" if paying else "+"
+    # v0.30 collision-fix: если est_funding < $0.01 — показываем "<$0.01"
+    # вместо "$0.00" (LLM не путает negligible с zero/missing данными).
+    if est_funding < 0.01:
+        est_str = f"<{sign}$0.01"
+    else:
+        est_str = f"{sign}${est_funding:.2f}"
     return (
         f" | next_funding={minutes_to:.0f}m rate={rate * 100:+.4f}%/8h "
-        f"est={sign}${est_funding:.2f} ({verb} as {position.side})"
+        f"est={est_str} ({verb} as {position.side})"
     )
 
 
@@ -511,7 +670,7 @@ def format_context_for_review(ctx: MarketContext) -> str:
     символом + ticker + 1H closes + 1H индикаторы.
     """
     parts: list[str] = []
-    parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
+    parts.extend(_format_equity_block(ctx))
     parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
     parts.append("")
     parts.append("=== MARKET DATA (positions only, lite review cycle) ===")
@@ -547,6 +706,9 @@ def format_context_for_review(ctx: MarketContext) -> str:
                 f"sl=${p.sl_price or 0:.6g} tp=${p.tp_price or 0:.6g} "
                 f"lev={p.leverage}x linkid={p.order_link_id}"
             )
+            thesis_line = _format_macro_thesis_line(p)
+            if thesis_line is not None:
+                parts.append(thesis_line)
             sym_snap = next((s for s in ctx.snapshots if s.symbol == p.symbol), None)
             bars = sym_snap.bars_1h if sym_snap else []
             cur_price = sym_snap.ticker.last_price if sym_snap and sym_snap.ticker else None
@@ -615,15 +777,159 @@ def _btc_dominance_estimate(snapshots: list[SymbolSnapshot]) -> str | None:
     )
 
 
+def _format_self_reflection_block(ctx: MarketContext) -> list[str]:
+    """v0.30: SELF-REFLECTION блок — per-symbol PnL + per-(symbol×side)
+    cold-start signal + recent closed trades с reasoning.
+
+    Возвращает список строк (caller добавит к ``parts``). Если статистика
+    полностью пустая (свежий старт, пустая БД) — возвращает короткое
+    «n=0 for all symbols (cold-start mode)» уведомление.
+
+    Regime-change cutoff: указывается явно в header, чтобы LLM понимал
+    почему его «победы февраля» не учитываются.
+    """
+    lines: list[str] = []
+    total_trades = sum(int(r.get("n", 0)) for r in ctx.per_symbol_pnl)
+    cutoff_note = ""
+    if ctx.stats_window_start:
+        cutoff_note = (
+            f" (regime-change cutoff: opened_at >= {ctx.stats_window_start} "
+            "— pre-cutoff trades excluded as different strategy DGP)"
+        )
+
+    lines.append("=== SELF-REFLECTION (closed trades stats){0} ===".format(cutoff_note))
+
+    if total_trades == 0:
+        lines.append(
+            "  COLD-START: n=0 closed trades for all symbols in window. "
+            "Apply COLD-START DISCOVERY RULE: small (0.5R), guarded discovery "
+            "trades are encouraged to avoid frozen exploration."
+        )
+    else:
+        lines.append("  Per-symbol cumulative (closed positions only):")
+        for r in ctx.per_symbol_pnl:
+            n = int(r.get("n", 0))
+            wins = int(r.get("wins", 0))
+            wr = float(r.get("win_rate_pct", 0.0))
+            sum_pnl = float(r.get("sum_pnl_usd", 0.0))
+            avg_pnl = float(r.get("avg_pnl_usd", 0.0))
+            lines.append(
+                f"    {r['symbol']}: n={n} wins={wins}/{n} (WR={wr:.0f}%) "
+                f"sum_pnl=${sum_pnl:+.2f} avg=${avg_pnl:+.2f}"
+            )
+        lines.append("  Per-symbol × side (COLD-START signal: any (sym × side) with n=0):")
+        for r in ctx.per_symbol_side_pnl:
+            n = int(r.get("n", 0))
+            wins = int(r.get("wins", 0))
+            wr = float(r.get("win_rate_pct", 0.0))
+            sum_pnl = float(r.get("sum_pnl_usd", 0.0))
+            cs_tag = "  ← COLD-START candidate" if n == 0 else ""
+            lines.append(
+                f"    {r['symbol']} {r['side']}: n={n} wins={wins} "
+                f"WR={wr:.0f}% sum=${sum_pnl:+.2f}{cs_tag}"
+            )
+
+    if ctx.recent_closed_trades:
+        lines.append(
+            f"  RECENT CLOSED TRADES (last {len(ctx.recent_closed_trades)}, "
+            "oldest → newest; verify if past reasoning matched outcome):"
+        )
+        for t in ctx.recent_closed_trades:
+            pnl = float(t.get("realized_pnl_usd", 0.0))
+            dur = t.get("duration_minutes")
+            dur_str = f"{dur}min" if dur is not None else "n/a"
+            lines.append(
+                f"    [id={t['id']}] {t['symbol']} {t['side']} qty={t['qty']} "
+                f"entry=${t['entry_price']:.6g} → exit=${t['exit_price']:.6g} "
+                f"pnl=${pnl:+.2f} ({dur_str})"
+            )
+            mth = (t.get("macro_thesis") or "").strip()
+            if mth:
+                lines.append(f"        thesis_at_open: {mth}")
+            llm_r = (t.get("llm_reason") or "").strip()
+            if llm_r:
+                lines.append(f"        reason_at_open: {llm_r}")
+            cls_r = (t.get("close_reason") or "").strip()
+            if cls_r:
+                lines.append(f"        close_reason:   {cls_r}")
+    return lines
+
+
+def _format_equity_block(ctx: MarketContext) -> list[str]:
+    """v0.32 (2026-05-28): EQUITY AWARENESS блок.
+
+    До v0.32 LLM видел только статичный ``VIRTUAL CAPITAL: $500.00`` —
+    initial deposit, не living number. Теперь рендерим:
+
+    - INITIAL CAPITAL = settings.virtual_capital_usd (immutable depo).
+    - CURRENT EQUITY = initial + realized + unrealized.
+    - REALIZED PnL since start (net, включает funding).
+    - UNREALIZED PnL (live mark-based по open positions).
+    - DRAWDOWN from initial (%): где мы относительно стартовой точки.
+    - DRAWDOWN from peak (%): сколько откатились с high water mark.
+
+    Промпт (EQUITY AWARENESS секция) использует эти числа для
+    behavioural adapter — при drawdown 10-20% halve high band sizing,
+    при profit zone — можно держать чрезмерно осторожный thinking
+    отключённым.
+
+    Если БД недоступна (realized_pnl_total=None) — выводим только
+    INITIAL CAPITAL и пометку «equity tracking unavailable» (fail-safe,
+    LLM continue normal sizing).
+    """
+    initial = ctx.virtual_capital_usd
+    realized = ctx.realized_pnl_total_usd
+    unrealised = ctx.unrealised_pnl_total_usd
+    peak = ctx.peak_equity_usd
+    if realized is None:
+        return [
+            f"VIRTUAL CAPITAL: initial=${initial:.2f}  "
+            "(equity tracking unavailable this cycle)"
+        ]
+    realized_for_equity = realized
+    unrealised_for_equity = 0.0 if unrealised is None else unrealised
+    current_equity = initial + realized_for_equity + unrealised_for_equity
+    dd_initial_pct = (current_equity - initial) / initial * 100 if initial > 0 else 0.0
+    if peak is None or peak <= 0:
+        peak = max(initial, current_equity)
+    dd_peak_pct = (current_equity - peak) / peak * 100 if peak > 0 else 0.0
+    unrealised_str = (
+        f"unrealised={unrealised:+.2f}$"
+        if unrealised is not None
+        else "unrealised=n/a (API)"
+    )
+    return [
+        f"VIRTUAL CAPITAL: initial=${initial:.2f}  "
+        f"current_equity=${current_equity:.2f} ({dd_initial_pct:+.2f}% vs initial)  "
+        f"peak=${peak:.2f} ({dd_peak_pct:+.2f}% vs peak)",
+        f"  realized_since_start={realized:+.2f}$ (net: closed PnL + funding)  "
+        f"{unrealised_str} (live mark-based)",
+    ]
+
+
 def format_context_for_prompt(ctx: MarketContext) -> str:
     """Превращает MarketContext в текст для LLM."""
     parts: list[str] = []
-    parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
+    parts.extend(_format_equity_block(ctx))
     parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
-    dom_line = _btc_dominance_estimate(ctx.snapshots)
-    if dom_line is not None:
-        parts.append(f"MACRO: {dom_line}")
+    # v0.30 collision-fix: старый proxy `MACRO (relative) BTC vs alts`
+    # ДУБЛИРУЕТ актуальный `crypto_macro_block` (BTC.D snapshot). Показываем
+    # proxy ТОЛЬКО как fallback когда crypto_macro provider unavailable —
+    # иначе LLM получает две source-of-truth для BTC dominance с разной
+    # семантикой и форматом, что путает (FX-trader 2026-05-26 audit pattern).
+    if ctx.crypto_macro_block is None:
+        dom_line = _btc_dominance_estimate(ctx.snapshots)
+        if dom_line is not None:
+            parts.append(f"BTC vs ALTS proxy (24h price action, CRYPTO MACRO block unavailable): {dom_line}")
     parts.append("")
+
+    # v0.30: external macro blocks (US rates + BTC.D / total cap).
+    if ctx.macro_rates_block:
+        parts.append(ctx.macro_rates_block)
+        parts.append("")
+    if ctx.crypto_macro_block:
+        parts.append(ctx.crypto_macro_block)
+        parts.append("")
 
     if ctx.news:
         parts.append("=== RECENT CRYPTO NEWS ===")
@@ -634,6 +940,11 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
                 summary = n.summary[:200].replace("\n", " ")
                 parts.append(f"    {summary}")
         parts.append("")
+
+    # v0.30: SELF-REFLECTION — per-symbol PnL + recent closed trades.
+    reflection_lines = _format_self_reflection_block(ctx)
+    parts.extend(reflection_lines)
+    parts.append("")
 
     parts.append("=== MARKET DATA ===")
     for s in ctx.snapshots:
@@ -674,6 +985,9 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
                 f"sl=${p.sl_price or 0:.6g} tp=${p.tp_price or 0:.6g} "
                 f"lev={p.leverage}x linkid={p.order_link_id}"
             )
+            thesis_line = _format_macro_thesis_line(p)
+            if thesis_line is not None:
+                parts.append(thesis_line)
             sym_snap = next((s for s in ctx.snapshots if s.symbol == p.symbol), None)
             bars = sym_snap.bars_1h if sym_snap else []
             cur_price = sym_snap.ticker.last_price if sym_snap and sym_snap.ticker else None

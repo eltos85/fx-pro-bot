@@ -21,6 +21,8 @@ import time
 from datetime import UTC, datetime
 
 from ai_trader.config.settings import AiTraderSettings
+from ai_trader.data.crypto_macro import CryptoMacroProvider
+from ai_trader.data.macro_rates import MacroRatesProvider
 from ai_trader.llm.client import DeepSeekClient
 from ai_trader.llm.prompts import (
     SYSTEM_PROMPT_REVIEW,
@@ -316,6 +318,30 @@ def run() -> None:
             max_age_hours=settings.news_max_age_hours,
         )
 
+    # ─── v0.30: external macro providers ─────────────────────────────────
+    macro_rates_provider: MacroRatesProvider | None = None
+    if getattr(settings, "macro_rates_enabled", False):
+        macro_rates_provider = MacroRatesProvider(
+            cache_ttl_sec=getattr(settings, "macro_rates_cache_ttl_sec", 1800),
+        )
+        log.info("MacroRates provider initialized (DXY + UST10Y via yfinance)")
+
+    crypto_macro_provider: CryptoMacroProvider | None = None
+    if getattr(settings, "crypto_macro_enabled", False):
+        crypto_macro_provider = CryptoMacroProvider(
+            cache_ttl_sec=getattr(settings, "crypto_macro_cache_ttl_sec", 3600),
+        )
+        log.info("CryptoMacro provider initialized (BTC.D + total cap via CoinGecko /global)")
+
+    log.info(
+        "v0.30 features: macro_rates=%s crypto_macro=%s "
+        "stats_window=%s uncertainty_block=%.2f",
+        "ON" if macro_rates_provider else "OFF",
+        "ON" if crypto_macro_provider else "OFF",
+        getattr(settings, "stats_window_start", "") or "(legacy: no cutoff)",
+        getattr(settings, "news_uncertainty_block_threshold", 0.7),
+    )
+
     # ─── Telegram ────────────────────────────────────────────────────────
     tg: TelegramBot | None = None
     if settings.telegram_enabled and settings.telegram_bot_token:
@@ -356,7 +382,12 @@ def run() -> None:
         if last_full_ts == 0.0 or (now_mono - last_full_ts) >= settings.poll_interval_sec:
             cycle += 1
             try:
-                _run_cycle(cycle, settings, store, bybit, llm, killswitch, news_provider, tg)
+                _run_cycle(
+                    cycle, settings, store, bybit, llm, killswitch,
+                    news_provider, tg,
+                    macro_rates_provider=macro_rates_provider,
+                    crypto_macro_provider=crypto_macro_provider,
+                )
             except Exception as e:
                 log.exception("Cycle %d crashed (продолжаю)", cycle)
                 if tg:
@@ -391,6 +422,9 @@ def _run_cycle(
     killswitch: KillSwitch,
     news_provider: RssNewsProvider | None,
     tg: TelegramBot | None,
+    *,
+    macro_rates_provider: MacroRatesProvider | None = None,
+    crypto_macro_provider: CryptoMacroProvider | None = None,
 ) -> None:
     log.info("─── Cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
 
@@ -421,13 +455,21 @@ def _run_cycle(
         settings.virtual_capital_usd,
         news_provider,
         taker_fee_pct=settings.taker_fee_pct,
+        macro_rates_provider=macro_rates_provider,
+        crypto_macro_provider=crypto_macro_provider,
+        stats_window_start=getattr(settings, "stats_window_start", None) or None,
     )
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
 
+    n_recent = len(ctx.recent_closed_trades)
     log.info(
-        "LLM call: positions=%d real_equity=$%.2f news=%d",
+        "LLM call: positions=%d real_equity=$%.2f news=%d macro_rates=%s "
+        "crypto_macro=%s self_reflection=%d_trades_in_window",
         len(ctx.open_positions), ctx.real_equity_usd, len(ctx.news),
+        "yes" if ctx.macro_rates_block else "no",
+        "yes" if ctx.crypto_macro_block else "no",
+        n_recent,
     )
     resp = llm.ask(system_prompt, user_prompt)
     store.add_api_cost(resp.cost_usd)
@@ -460,6 +502,13 @@ def _run_cycle(
         resp.text,
         settings.symbols,
         risk_usd_cap=settings.virtual_capital_usd * settings.risk_per_trade_pct,
+        strict_v030_schema=True,
+        news_uncertainty_block=getattr(
+            settings, "news_uncertainty_block_threshold", 0.7
+        ),
+        position_size_cap_usd=getattr(
+            settings, "max_position_size_usd", settings.virtual_capital_usd
+        ),
     )
     if isinstance(parsed, str):
         store.log_decision(
@@ -480,7 +529,7 @@ def _run_cycle(
     apply = apply_action(
         parsed, client=bybit, store=store, settings=settings, killswitch=killswitch
     )
-    store.log_decision(
+    decision_id = store.log_decision(
         cycle=cycle,
         prompt_system=system_prompt,
         prompt_user=user_prompt,
@@ -492,6 +541,26 @@ def _run_cycle(
         tokens_output=resp.tokens_output,
         cost_usd=resp.cost_usd,
     )
+    # v0.30: audit-trail update в decisions для post-hoc анализа.
+    if decision_id and (
+        apply.thesis_status is not None
+        or apply.thesis_invalidator is not None
+    ):
+        store.update_decision_thesis(
+            decision_id,
+            thesis_status=apply.thesis_status,
+            thesis_invalidator=apply.thesis_invalidator,
+        )
+    if decision_id and (
+        apply.aggregate_uncertainty is not None
+        or apply.sentiment_items_json is not None
+    ):
+        store.update_decision_sentiment(
+            decision_id,
+            aggregate_uncertainty=apply.aggregate_uncertainty,
+            sentiment_items_json=apply.sentiment_items_json,
+            macro_rates_snapshot=ctx.macro_rates_block,
+        )
     if apply.error:
         log.error("Apply error: %s", apply.error)
     elif apply.summary:
@@ -581,6 +650,13 @@ def _run_review_cycle(
         settings.symbols,
         review_mode=True,
         risk_usd_cap=settings.virtual_capital_usd * settings.risk_per_trade_pct,
+        strict_v030_schema=True,
+        news_uncertainty_block=getattr(
+            settings, "news_uncertainty_block_threshold", 0.7
+        ),
+        position_size_cap_usd=getattr(
+            settings, "max_position_size_usd", settings.virtual_capital_usd
+        ),
     )
     if isinstance(parsed, str):
         store.log_decision(
@@ -601,7 +677,7 @@ def _run_review_cycle(
     apply = apply_action(
         parsed, client=bybit, store=store, settings=settings, killswitch=killswitch
     )
-    store.log_decision(
+    decision_id = store.log_decision(
         cycle=cycle,
         prompt_system=system_prompt,
         prompt_user=user_prompt,
@@ -613,6 +689,16 @@ def _run_review_cycle(
         tokens_output=resp.tokens_output,
         cost_usd=resp.cost_usd,
     )
+    # v0.30: thesis audit-trail для close-actions из review.
+    if decision_id and (
+        apply.thesis_status is not None
+        or apply.thesis_invalidator is not None
+    ):
+        store.update_decision_thesis(
+            decision_id,
+            thesis_status=apply.thesis_status,
+            thesis_invalidator=apply.thesis_invalidator,
+        )
     if apply.error:
         log.error("Review apply error: %s", apply.error)
     elif apply.summary:

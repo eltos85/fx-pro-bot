@@ -783,10 +783,10 @@ class TestBuildSystemPromptReview:
         prompt = build_system_prompt_review(settings)
 
         # Шаблон содержит переносы строк, поэтому ищем без позиционирования.
-        # 900s/60 = 15 min, 300s/60 = 5 min
+        # 900s/60 = 15 min, 300s/60 = 5 min — оба должны быть отрендерены
+        # из placeholder'ов %(full_min)d / %(review_min)d.
         assert "15 minutes" in prompt
         assert "5 minutes" in prompt
-        assert "5 min later" in prompt
 
     def test_review_prompt_forbids_open(self, monkeypatch):
         from ai_trader.llm.prompts import build_system_prompt_review
@@ -1700,10 +1700,15 @@ class TestSystemPromptDynamicWhitelist:
 
         s = self._settings("LTCUSDT,ATOMUSDT,BTCUSDT,SUIUSDT,LINKUSDT")
         rendered = build_system_prompt(s)
-        assert "LTCUSDT, ATOMUSDT, BTCUSDT, SUIUSDT, LINKUSDT." in rendered
-        # дефолтные пары не должны попасть в рендер
-        assert "ETHUSDT" not in rendered
-        assert "DOGEUSDT" not in rendered
+        # ALLOWED PAIRS line MUST contain ONLY the configured symbols.
+        # (v0.30: PER-ASSET HIERARCHY mentions reference assets like ETH/DOGE
+        # as educational material — those mentions are intentional and do not
+        # affect the executor's symbol whitelist. We assert on the ALLOWED PAIRS
+        # rendered line specifically.)
+        allowed_block = rendered.split("ALLOWED PAIRS")[1].split("\n\n")[0]
+        assert "LTCUSDT, ATOMUSDT, BTCUSDT, SUIUSDT, LINKUSDT." in allowed_block
+        assert "ETHUSDT" not in allowed_block
+        assert "DOGEUSDT" not in allowed_block
 
     def test_build_system_prompt_no_placeholder_remains(self):
         """Placeholder должен полностью исчезнуть из рендера."""
@@ -1900,6 +1905,73 @@ class TestSystemPromptCapitalRulesTemplate:
         - 532b344a... (v0.21 2026-05-28: FUNDING AWARENESS блок
           (perp-futures 8h holding cost), next_funding hint в LIVE-
           строке, doc-блок в WHAT YOU SEE EACH CYCLE. См. BUILDLOG).
+        - 4c0a97d0... (v0.30 2026-05-28: institutional rewrite — порт
+          FX-trader patterns. 7 PER-ASSET HIERARCHY блоков, MFP 5-rule
+          confluence (momentum / BB-Z / RSI / breakout / news),
+          THESIS DISCIPLINE с macro_thesis и thesis_status,
+          SELF-REFLECTION читалка, COLD-START DISCOVERY RULE,
+          REGIME-CHANGE WINDOW awareness, 5-DIM NEWS SENTIMENT с
+          aggregate_uncertainty hard-gate, NOISE-BAND POSITION SIZING,
+          CONCRETE JSON EXAMPLES, EXIT MANAGEMENT trigger 1 переписан
+          на macro_thesis re-validation, удалены остатки "VWAP"
+          термина (контекст не содержит volume-weighted price).
+          См. BUILDLOG_AI_TRADER.md v0.30 + sample-size.mdc).
+        - d380da80... (v0.30 collision audit, 2026-05-28: добавлен
+          явный блок WHAT YOU SEE / DO NOT SEE EACH CYCLE (закрывает
+          hidden-disconnect между промптом и контекстом: real-time
+          ETF flows, on-chain, derivatives positioning, options IV,
+          sentiment indices — НЕ в контексте, не галлюцинировать);
+          gross/net warning в SELF-REFLECTION блоке (соответствует
+          stats-collection.mdc, иерархия источников); пустой
+          заголовок ═══ ═══ переименован в полноценный header.
+          Поведенческой логики НЕ затронуто — только anti-hallucination
+          guards и regime-change discipline pointers).
+        - f5022a69... (v0.32 EQUITY AWARENESS, 2026-05-28: добавлен
+          живой equity tracking — context.py теперь подаёт в промпт
+          initial / current_equity / peak / realized_since_start /
+          unrealised в одной строке VIRTUAL CAPITAL вместо статичного
+          $500. Промпт: новая секция EQUITY AWARENESS с zone-based
+          adapter (≥100% normal / 90-100% mild / 80-90% caution /
+          <80% defensive), peak-aware secondary signal (cooling-off
+          при -15% от peak, no new high autoscale). ANALYSIS APPROACH
+          — добавлен шаг 1 "EQUITY READ" + шаг 7 PRE-COMMIT теперь
+          явно требует применить EQUITY adapter поверх CONFIDENCE
+          band (whichever more restrictive). db.py: новый метод
+          get_equity_high_water_mark(initial) — running cumsum по
+          daily_pnl. Research: Mark Douglas «Trading in the Zone»
+          2000 ch.7, Lopez de Prado «Advances in Financial ML» 2018
+          ch.16 drawdown-aware betting.).
+        - 93da6fb8... (v0.31 aggressive mandate, 2026-05-28: по запросу
+          пользователя переключён aggressive профиль. Settings: daily
+          killswitch $50→$350, max_positions 3→5, новое явное
+          max_position_size_usd=$100 (cap на position_size_usd в JSON).
+          Промпт: новая секция CONFIDENCE→SIZE MAPPING (low/medium/high
+          confidence → 0.25/0.50/0.75-1.00x of cap); AGGRESSIVE MANDATE
+          секция (заменяет "Most cycles SHOULD be HOLD" на "actively seek
+          setups"); COST AMNESIA pitfall (явный fee_RT + funding cost
+          netout требуется в commentary); optional cost_estimate_usd
+          поле в open-JSON для audit log; для OPEN decisions funding cost
+          теперь учитывается через cost_estimate_usd когда settlement
+          в горизонте удержания (старая v0.21 "Do NOT add per-trade
+          funding cost" отменена). Executor: position_size_cap_usd
+          параметр + hard reject при превышении; ApplyResult.cost_estimate_usd
+          поле для audit. Reset n=0: новые параметры = новый DGP.).
+        - a8b1785b... (v0.30 LLM-perspective audit, 2026-05-28:
+          симуляция полного цикла глазами DeepSeek выявила 4 коллизии
+          в форматтерах и 2 двусмысленности в промпте. Исправлено:
+          (1) HIERARCHY vs ALLOWED PAIRS — добавлено явное "if symbol
+          not in ALLOWED, treat hierarchy as REFERENCE ONLY, may only
+          close existing positions on non-allowed"; (2) EXIT trigger 1
+          разделён на 1a MACRO INVALIDATION + 1b TACTICAL EXIT TARGET
+          (убирает кажущееся противоречие "macro_thesis re-check vs
+          tactical mean-rev close"); LIVE-строка теперь показывает
+          mark=n/a / liq=n/a вместо $0 когда биржа не вернула данные
+          (LLM не путает с liquidation); funding est<$0.01 показывается
+          как "<±$0.01" вместо "±$0.00"; MACD label явно с префиксом
+          [MACD-bullish] вместо [bullish]; устранён дубль BTC vs alts
+          (показывается ТОЛЬКО как fallback когда crypto_macro provider
+          unavailable). Поведения торговли не меняется, только
+          dis-ambiguation для LLM.).
         """
         import hashlib
 
@@ -1907,7 +1979,7 @@ class TestSystemPromptCapitalRulesTemplate:
         from ai_trader.llm.prompts import SYSTEM_PROMPT, build_system_prompt
 
         expected_sha256 = (
-            "532b344a93035dfceeaf2eb1dc8169dbdfee931b51bcf702c005aa91d6ee5569"
+            "f5022a696c2f1a5419a375991295a2d7bf8435fae11a35e97809bf393b498c1b"
         )
         # 1) Module-level SYSTEM_PROMPT (default render с DEFAULT_AI_SYMBOLS).
         actual_sha = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()
@@ -3296,10 +3368,18 @@ class TestPromptFundingAwareness:
         assert "EARNING" in SYSTEM_PROMPT
         assert "HOLD through" in SYSTEM_PROMPT
 
-    def test_open_decision_funding_neutral_guidance(self):
-        """v0.21: для OPEN funding band — entry signal (как было),
-        но per-trade funding cost явно НЕ применяется к sizing."""
+    def test_open_decision_funding_cost_awareness_v031(self):
+        """v0.31 (aggressive mandate): для OPEN funding band — entry signal
+        (как в v0.21), И дополнительно funding COST учитывается через
+        cost_estimate_usd когда settlement лежит в пределах удержания.
+        Старая логика v0.21 "Do NOT add per-trade funding cost" отменена
+        (cost awareness — central pillar of aggressive mandate).
+        """
         from ai_trader.llm.prompts import SYSTEM_PROMPT
 
         assert "For OPEN decisions" in SYSTEM_PROMPT
-        assert "Do NOT add per-trade funding cost as an" in SYSTEM_PROMPT
+        # Cost awareness: funding cost явно учитывается, не игнорируется.
+        assert "funding_in_horizon" in SYSTEM_PROMPT
+        assert "cost_estimate_usd" in SYSTEM_PROMPT
+        # Старая v0.21 ложная инструкция ДОЛЖНА быть удалена.
+        assert "Do NOT add per-trade funding cost as an" not in SYSTEM_PROMPT

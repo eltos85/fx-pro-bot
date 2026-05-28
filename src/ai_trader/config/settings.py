@@ -82,24 +82,35 @@ class AiTraderSettings(BaseSettings):
         default=500.0, validation_alias="AI_TRADER_VIRTUAL_CAPITAL"
     )
 
-    # ─── KillSwitch ──────────────────────────────────────────────────────
-    # v0.3 (AUDIT_2026.md P1): risk-per-trade 5% → 2%, паритет с industry
-    # standard 2026 (KuCoin Risk Management 2026, Atlas Peak Research,
-    # Hyper-Quant: 1–2% — mainstream consensus, 5% соответствует full Kelly
-    # с edge ~10% и опасен из-за drawdown-риска).
-    # При risk-per-trade 2% ($10) и max-pos 3:
-    # - $50/день = 5 убыточных сделок до блока
-    # - $200 total = 40% virtual capital, кончается раньше «доедания депо»
+    # ─── KillSwitch (v0.31 aggressive mandate, 2026-05-28) ──────────────
+    # Aggressive профиль по запросу пользователя: killswitch $350/day = 70%
+    # capital. При risk-per-trade $10 и max-pos 5 это позволяет ~35
+    # убыточных сделок до блока (или ~17 циклов с 2-3 losses каждый).
+    # Risk-per-trade оставляем 2% ($10) — industry standard 2026 (KuCoin
+    # Risk Management 2026, Atlas Peak Research; 5% уже Kelly-territory с
+    # опасным drawdown). Агрессия достигается через ЧАСТОТУ setup'ов,
+    # max_positions, и mandate в промпте — НЕ через risk-per-trade.
     max_daily_loss_usd: float = Field(
-        default=50.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
+        default=350.0, validation_alias="AI_TRADER_MAX_DAILY_LOSS"
     )
     max_total_loss_usd: float = Field(
-        default=200.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
+        default=400.0, validation_alias="AI_TRADER_MAX_TOTAL_LOSS"
     )
     max_open_positions: int = Field(
-        default=3, validation_alias="AI_TRADER_MAX_POSITIONS"
+        default=5, validation_alias="AI_TRADER_MAX_POSITIONS"
     )
     max_leverage: int = Field(default=5, validation_alias="AI_TRADER_MAX_LEVERAGE")
+    # v0.31: лот (position_size_usd в JSON open) capped $100. С leverage до
+    # 5x это даёт notional до $500 = весь virtual capital — классический
+    # «aggressive but not gambling» режим. По confidence band:
+    #   - low (0.30-0.49):  $25-50  (1-3x leverage typical)
+    #   - medium (0.50-0.69): $50-75  (3-4x leverage typical)
+    #   - high (0.70-1.00):  $75-100 (4-5x leverage typical)
+    # Прежний неявный cap = virtual_capital ($500) разрешал 1x trades на
+    # весь капитал, что плохо для diversified portfolio при max_pos=5.
+    max_position_size_usd: float = Field(
+        default=100.0, validation_alias="AI_TRADER_MAX_POSITION_SIZE_USD"
+    )
     # Risk per trade в долях (0.02 = 2%). Используется LLM в промпте + для
     # будущих helper-функций position sizing.
     risk_per_trade_pct: float = Field(
@@ -150,6 +161,53 @@ class AiTraderSettings(BaseSettings):
     )
     news_max_items: int = Field(
         default=8, validation_alias="AI_TRADER_NEWS_MAX_ITEMS"
+    )
+
+    # ─── Macro context (v0.30 — institutional rewrite) ───────────────────
+    # US rates feed (DXY + UST10Y) через yfinance. Port из FX-trader D1
+    # (BUILDLOG_AI_FX_TRADER.md 2026-05-27). Crypto коррелирует с DXY на
+    # 30-day rolling −0.72…−0.90 (BitMEX 2026, Intellectia 2026-04), с
+    # UST10Y слабее: ≈ −0.55 (Convex 2026). Закрывает hidden-disconnect
+    # «промпт обещает BTC dominance / DXY, контекст не отдаёт».
+    macro_rates_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_MACRO_RATES_ENABLED"
+    )
+    macro_rates_cache_ttl_sec: int = Field(
+        default=1800, validation_alias="AI_TRADER_MACRO_RATES_CACHE_TTL_SEC"
+    )
+
+    # BTC dominance + total crypto market cap через CoinGecko /global
+    # (free tier 10k calls/month, no key). При cache 1h = 720 calls/month —
+    # с запасом. BTC.D current ≈60.3% (May 2026, BYDFi/AInvest); threshold
+    # для altseason = 59.63% support / 66.06% resistance.
+    crypto_macro_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_CRYPTO_MACRO_ENABLED"
+    )
+    crypto_macro_cache_ttl_sec: int = Field(
+        default=3600, validation_alias="AI_TRADER_CRYPTO_MACRO_CACHE_TTL_SEC"
+    )
+
+    # REGIME-CHANGE WINDOW (порт из FX-trader, BUILDLOG_AI_FX_TRADER.md
+    # 2026-05-28). Pre-deploy v0.30 trades — результат старой стратегии
+    # (без THESIS DISCIPLINE / per-asset hierarchy). SELF-REFLECTION
+    # фильтрует по этой дате чтобы не учить LLM на outcome другой DGP.
+    # Research: Lopez de Prado «Advances in Financial ML» 2018 ch.7 +
+    # Hamilton (1989) regime-switching framework. Пустая строка = legacy
+    # behavior (учитываем всю историю — для тестов backward-compat).
+    stats_window_start: str = Field(
+        default="2026-05-30T00:00:00+00:00",
+        validation_alias="AI_TRADER_STATS_WINDOW_START",
+    )
+
+    # 5-dim news sentiment: aggregate_uncertainty > этого порога → open
+    # автоматически блокируется executor'ом (`open blocked:
+    # aggregate_uncertainty=X > Y`). Default 0.7 совпадает с FX-trader
+    # (prompts.py:565 «Aggregate the news block. If aggregate_uncertainty
+    # > 0.7 — return HOLD»). COLD-START discovery trades используют
+    # более строгий порог 0.5 (см. COLD-START DISCOVERY RULE в промпте,
+    # справится сам LLM, executor не enforces — это behavior, не gate).
+    news_uncertainty_block_threshold: float = Field(
+        default=0.7, validation_alias="AI_TRADER_NEWS_UNCERTAINTY_BLOCK"
     )
 
     # ─── Misc ────────────────────────────────────────────────────────────
