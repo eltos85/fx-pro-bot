@@ -1,5 +1,84 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-05-29
+
+### feat(review-guardian): Фаза 0 — review-цикл закрывает ТОЛЬКО по locked-profit ≥1.5R
+
+`коммит при deploy`
+
+#### Контекст и симптом
+
+`fx_ai_trader` закрыл BZ=F BUY (id=30) и NG=F SELL (id=31) в минус.
+Разбор id=30 вскрыл **архитектурный конфликт двух циклов**:
+
+- **Full-цикл** (15 мин, Phase 1 thesis discipline): «держи позицию,
+  если macro-тезис цел, несмотря на 1H шум».
+- **Review-цикл** (5 мин): имел право закрыть по **Trigger 1 (1H
+  setup invalidation)** и **Trigger 3 (1H adverse technical)** —
+  то есть ровно по тому 1H-сигналу, который Phase 1 запретил
+  использовать как повод для выхода.
+
+Review «перекрывал» full: закрывал по 1H MACD-флипу позицию, которую
+full держал по интактному тезису. Вход был mean-reversion, а выход —
+по trend-following инвалидации (концептуальный mismatch).
+
+Аудит истории бота: **22 / 26 LLM-закрытий** были инициированы 1H
+техникой в одиночку — классический failure mode.
+
+#### Research basis
+
+| Источник | Положение |
+|---|---|
+| Mark Douglas, «Trading in the Zone» (2000) | реакция на шум без edge = эмоциональный выход; дисциплина тезиса важнее краткосрочной техники |
+| Наш аудит (Phase 1, 2026-05-26) | 22/26 LLM-closes по 1H технике в одиночку → systematic over-trading на шуме |
+
+Это **не новый research** — это распространение уже принятого Phase 1
+правила (thesis discipline) на review-цикл. Источник правды тот же.
+
+#### Что изменилось (только prompt, обратимо)
+
+`src/fx_ai_trader/llm/prompts.py`:
+
+- `SYSTEM_PROMPT_REVIEW`: переписана роль — **GUARDIAN, NOT
+  STRATEGIST**. Единственный авторизованный close — **locked-profit
+  ≥1.5R** (защита заработанной прибыли не требует macro-контекста).
+  Удалены как самостоятельные close-поводы: «SETUP INVALIDATION» и
+  «ADVERSE TECHNICAL EVIDENCE». Явно: убыточную позицию review **не
+  закрывает** на 1H weakness — работает broker SL (пол), а тезис
+  судит full-цикл с macro/news/EIA.
+- Примеры: «Example CLOSE on trigger 1 (partial)» → заменён на два
+  HOLD-примера (1H weakness на прибыльной <1.5R; убыточная с 1H
+  против при не сработавшем SL).
+- `build_user_prompt_review` TASK RESTATEMENT: «3 close-triggers» →
+  guardian-правило (CLOSE только ≥1.5R, иначе HOLD).
+- THESIS DISCIPLINE-маркеры сохранены (совместимость).
+
+#### Тесты
+
+- Новый `tests/test_fx_ai_trader_review_guardian.py` (13 тестов):
+  guardian-роль, единственный close-повод, удаление старых триггеров,
+  HOLD-примеры, research-цитаты, корректность `%`-форматирования.
+- Полный прогон: **1290 passed**.
+
+#### Trade-off (зафиксировано осознанно)
+
+Review больше не даёт «раннего выхода» на убыточной стороне — отдаём
+это broker SL + full-циклу. Это намеренно: ранние закрытия по 1H шуму
+статистически вредны (22/26). Контроль риска сохранён: broker SL —
+hard floor, ставится при открытии.
+
+#### Откат
+
+Вернуть прошлую версию `SYSTEM_PROMPT_REVIEW` (Trigger 1/2/3) из git
+history — изменение чисто prompt-level, без миграций БД.
+
+#### Дальше (план Фаз 1+, ещё не реализовано)
+
+Фаза 0 убирает конфликт на уровне промпта, но не делает систему
+event-driven. Следующий фундаментальный шаг — живой поток цены
+(websocket/streaming spots cTrader) вместо polling H1-close. План
+готовится отдельно.
+
 ## 2026-05-28 — feat(regime-cutoff): фильтр self-reflection trades с Phase 1 deploy ts
 
 `коммит при deploy`
