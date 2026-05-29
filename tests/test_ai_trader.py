@@ -1997,6 +1997,16 @@ class TestSystemPromptCapitalRulesTemplate:
           EXIT trigger 1a/3 — news-bullets заменены price/regime.
           DXY/UST10Y + BTC.D/total cap СОХРАНЕНЫ. См.
           BUILDLOG_AI_TRADER.md v0.40 + reset n=0 per no-data-fitting.).
+        - 1233a334... (v0.40.1 MFP RULE-5 ARITHMETIC FIX, 2026-05-29:
+          bug-fix, не tuning. Симптом: 20 анализов после v0.40 → 100%
+          HOLD, потолок 2/5. Причина: rule 5 (MACRO REGIME) требовал
+          НЕнейтрального макро, а крипто-макро почти всегда нейтрален →
+          с rules 1&4 (trend) / 2&3 (mean-revert) взаимоисключающими
+          потолок 2/5 < порога 3/5. Фикс: rule 5 фирит (+1) при
+          нейтральном ИЛИ поддерживающем режиме ("neutral counts"); 0
+          только при встречном; STRONG opposing = veto. Порог 3/5 НЕ
+          менялся. Класс: исправление явной логики (no-data-fitting.mdc).
+          См. BUILDLOG_AI_TRADER.md v0.40.1.).
         """
         import hashlib
 
@@ -2004,7 +2014,7 @@ class TestSystemPromptCapitalRulesTemplate:
         from ai_trader.llm.prompts import SYSTEM_PROMPT, build_system_prompt
 
         expected_sha256 = (
-            "43ec80ff406d6242826b4ae4ec78ce01698e532a55c52c8a2e55049cc6e63129"
+            "1233a3342e529267aa614b36b0c93b63f501e15f653dd0419067ded6c7d1f60e"
         )
         # 1) Module-level SYSTEM_PROMPT (default render с DEFAULT_AI_SYMBOLS).
         actual_sha = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()

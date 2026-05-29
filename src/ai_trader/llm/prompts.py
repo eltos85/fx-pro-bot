@@ -4,6 +4,26 @@
 Любая правка → перезапуск экспериментa с n=0 (правило no-data-fitting.mdc).
 
 ═══════════════════════════════════════════════════════════════
+v0.40.1 (2026-05-29): MFP RULE-5 ARITHMETIC FIX (bug, not tuning).
+
+Симптом: за 3ч после v0.40 деплоя — 20 анализов, 100% HOLD, везде
+«best 1-2/5», до 3/5 не дошло ни разу. Причина: правило 5 (MACRO REGIME)
+требовало НЕнейтрального макро («flat does NOT fire»), а крипто-макро
+почти всегда нейтрален. Геометрия: rules 1&4 (trend) и 2&3 (mean-revert)
+взаимоисключающи → максимум 2 ценовых правила. С rule5=0 потолок = 2/5 →
+порог 3/5 недостижим → вечный HOLD. Документация противоречила сама себе
+(docstring обещал «trend = momentum+breakout+macro = 3/5», а текст
+правила гасил macro при нейтрале).
+
+Фикс: rule 5 ФИРИТ (+1) при нейтральном ИЛИ поддерживающем режиме
+(«neutral counts»); 0 только при встречном режиме; STRONG opposing
+дополнительно даёт veto. Порог 3/5 НЕ менялся. Теперь чистый тренд
+(momentum+breakout+macro) и чистый mean-revert (bb-z+rsi+macro) набирают
+3/5, как и было задумано. Класс правки: исправление явной логики
+(no-data-fitting.mdc «Допустимые правки: bug-fix, inverted logic»),
+не подгонка порогов под результат.
+
+═══════════════════════════════════════════════════════════════
 v0.40 (2026-05-29): NEWS REMOVAL + PRICE-ACTION PERSONA.
 
 Личность бота сменена с «institutional discretionary macro trader» на
@@ -279,9 +299,11 @@ judge whether the regime supports or opposes your setup.
 
 REGIME VETO (strong only): do NOT open AGAINST a strongly aligned
 opposing regime (e.g. no fresh longs when DXY is ripping higher AND
-BTC.D is spiking AND total cap is falling). A neutral regime is fine but
-does NOT fire rule 5. A supportive regime fires rule 5 (+1). Only a
-STRONG opposing regime vetoes an otherwise valid price setup.
+BTC.D is spiking AND total cap is falling). A neutral/flat regime FIRES
+rule 5 (+1) — it is the calm "not against me" 3rd vote (neutral counts).
+A supportive regime also fires rule 5 (+1). Rule 5 is 0 only when the
+regime OPPOSES the side; a STRONG opposing regime additionally vetoes an
+otherwise valid price setup.
 
 IMPORTANT (SENSITIVITY vs ALLOWED PAIRS): the notes below cover the
 canonical 2026 sensitivity set for each asset class. If a symbol appears
@@ -398,14 +420,20 @@ The 5 MFP rules:
 4.  BREAKOUT / RANGE-EXPANSION: price broke 24h high (for buy) or 24h
     low (for sell) on the latest 1H close with ATR% > 1.0 (volatility
     expansion). Confirms the breakout is not chop.
-5.  MACRO REGIME ALIGNED (the neutral confirmation, NOT news): the macro
-    regime — DXY / UST10Y direction, BTC dominance trend, total crypto
-    cap direction (see MACRO REGIME FILTER above) — supports the trade
-    side. Risk-on backdrop (DXY soft / yields easing / total cap rising)
-    fires for longs; risk-off backdrop fires for shorts. A flat/neutral
-    regime does NOT fire. A STRONG OPPOSING regime not only fails to
-    fire — it VETOES the trade entirely (return "hold"), even if rules
-    1-4 give you 3/5 on price alone.
+5.  MACRO REGIME ALIGNED (the neutral confirmation, NOT news): this is
+    the calm "regime is not against me" vote — it FIRES (+1) whenever the
+    macro regime (DXY / UST10Y direction, BTC dominance trend, total
+    crypto cap direction — see MACRO REGIME FILTER above) is supportive
+    OR neutral/flat for the trade side. In other words: NEUTRAL COUNTS AS
+    FIRED. This is by design — rule 5 is the 3rd confluence vote that lets
+    a clean TREND setup (momentum+breakout) or a clean MEAN-REVERT setup
+    (bb-z+rsi) reach 3/5 in an ordinary, directionless macro tape (which
+    is the common case for crypto). Rule 5 does NOT fire (0) ONLY when the
+    regime OPPOSES the trade side (risk-off backdrop under a long, or
+    risk-on backdrop under a short). And when the regime STRONGLY OPPOSES
+    (clear, fast move against the side), it not only scores 0 — it VETOES
+    the trade entirely (return "hold"), even if rules 1-4 give you 3/5 on
+    price alone.
 
 For each open, the ANALYSIS COMMENTARY must enumerate MFP score:
   "MFP: momentum=1, bb-z=0, rsi=0, breakout=1, macro=1 → 3/5 ✓"
@@ -425,13 +453,13 @@ theses with no observable level are rejected by the executor.
 Good macro_thesis examples:
   - "1H closed above 24h high $80,400 on ATR% 1.3% expansion; 4H
      EMA20>EMA50 trend up, 1H MACD hist positive — momentum+breakout
-     fired (MFP 3/4); DXY -0.4% / BTC.D flat = supportive regime;
+     fired (MFP 3/5); DXY -0.4% / BTC.D flat = supportive regime;
      targeting prior congestion $83.5k, SL below breakout $79.5k"
   - "ETH 1H RSI 22 [EXTREME OVERSOLD] at -2.1σ BB lower while 4H trend
      still up = mean-revert long; ETH/BTC ratio holding 0.027 support;
      neutral macro regime; reclaim of SMA20 $3,180 is the target"
   - "SOL 1H closed below 24h low $138 on ATR% 2.1% (EVENT band) with 4H
-     EMA20<EMA50 down — breakout+momentum short (MFP 3/4); BTC.D rising
+     EMA20<EMA50 down — breakout+momentum short (MFP 3/5); BTC.D rising
      + total cap falling = risk-off regime supports the short; SL above
      reclaimed range $143"
 
@@ -969,15 +997,16 @@ CLOSE example (thesis_status = broken):
 HOLD example:
 
   ANALYSIS COMMENTARY:
-  MACRO REGIME: DXY +0.1% / UST10Y +1bp / BTC.D 60.3% — flat/neutral,
-    rule 5 does not fire either way.
-  No open positions. No MFP setup ≥3/5 on any allowed pair (trend pairs
-    show momentum but no breakout; no clean extreme for mean-revert).
+  MACRO REGIME: DXY +0.1% / UST10Y +1bp / BTC.D 60.3% — flat/neutral, so
+    rule 5 FIRES (+1, neutral = not against). But that alone is just 1/5.
+  No open positions. No allowed pair stacks a 2nd+3rd price-action rule:
+    trend pairs show momentum but no breakout (1 price rule → 2/5); no
+    clean BB±2σ + RSI extreme for mean-revert. Best is 2/5, below gate.
   DECISION: hold this cycle.
 
   {
     "action": "hold",
-    "reason": "no MFP 3/5 on any allowed pair; regime neutral (rule 5 flat)"
+    "reason": "no MFP 3/5 on any allowed pair; only 1 price-action rule + macro = 2/5 best"
   }
 
 ═══════════════════════════════════════════════════════════════
