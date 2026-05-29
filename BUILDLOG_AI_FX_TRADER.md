@@ -64,6 +64,17 @@ sentiment и event-proximity (хотя промпт требует «scale size 
   calendar (EIA Wed/Thu в окне). GDELT 429 при ручном бёрсте → graceful None
   (в проде 3 запроса/3ч).
 
+#### Follow-up hardening (GDELT, тот же деплой)
+
+На VPS GDELT отдал SSL-handshake/read timeout (api.gdeltproject.org медленный/
+egress-slow с этого хоста). Graceful-degrade отработал (цикл не упал), но: (1)
+полный traceback на **ожидаемый** сетевой сбой опционального фида = шум; (2)
+20s read-timeout × 3 символа тормозил full-цикл. Фикс: `timeout=(5,10)`
+(connect,read) — быстрый отказ; `log.warning` без traceback; **break** на
+первом сетевом сбое (если первый символ не достучался — остальные тоже не
+успеют, пробуем на след. цикле). Если GDELT стабильно недоступен с VPS —
+отключается `AI_FX_TRADER_GDELT_ENABLED=false` (остальные 4 фида не зависят).
+
 #### Compliance
 
 - `api-docs.mdc`: CFTC `72hh-3qpy`, FRED series_observations, GDELT DOC 2.0,

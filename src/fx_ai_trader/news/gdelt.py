@@ -54,7 +54,7 @@ class GdeltProvider:
     def __init__(
         self,
         cache_ttl_sec: int = 10800,
-        timeout: int = 20,
+        timeout: int = 10,
         timespan: str = "3d",
         request_spacing_sec: float = 1.5,
     ) -> None:
@@ -88,9 +88,17 @@ class GdeltProvider:
             first = False
             try:
                 snap = self._fetch_one(sym, query)
-            except Exception:
-                log.exception("GDELT fetch failed для %s", sym)
-                snap = self._cache.get(sym)
+            except Exception as exc:
+                # Ожидаемый сбой опционального фида (GDELT часто медленный /
+                # rate-limited) → краткий warning без traceback. Если первый
+                # запрос упал по сети — остальные символы почти наверняка
+                # тоже не успеют: прерываем раунд, чтобы не тормозить цикл
+                # на timeout×N. На след. full-цикле (15 мин) попробуем снова.
+                log.warning(
+                    "GDELT fetch failed для %s (%s) — пропускаю GDELT в этом цикле",
+                    sym, type(exc).__name__,
+                )
+                break
             if snap is not None:
                 fresh[sym] = snap
         if fresh:
@@ -107,7 +115,11 @@ class GdeltProvider:
             "format": "json",
             "timespan": self._timespan,
         }
-        resp = requests.get(_GDELT_URL, params=params, timeout=self._timeout)
+        # (connect, read) — быстрый отказ на медленном SSL-handshake/egress,
+        # не блокируем full-цикл на полный read-timeout.
+        resp = requests.get(
+            _GDELT_URL, params=params, timeout=(5, self._timeout)
+        )
         resp.raise_for_status()
         payload = resp.json()
         timeline = payload.get("timeline") or []
