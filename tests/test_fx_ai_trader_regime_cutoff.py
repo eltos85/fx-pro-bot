@@ -293,10 +293,13 @@ class TestSystemPromptRegimeChangeSection:
 
 
 class TestSettingsStatsWindowStart:
-    def test_default_is_phase1_deploy_ts(self):
+    def test_default_is_phase03_deploy_ts(self):
+        """Cutoff advanced to Phase 0-3 deploy (2026-05-29), event-driven
+        architecture structural break. См. BUILDLOG_AI_FX_TRADER.md 2026-05-29.
+        """
         from fx_ai_trader.config.settings import AiFxTraderSettings
         s = AiFxTraderSettings()
-        assert s.stats_window_start == "2026-05-26T07:42:00+00:00"
+        assert s.stats_window_start == "2026-05-29T08:26:00+00:00"
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv(

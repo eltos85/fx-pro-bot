@@ -330,24 +330,34 @@ class AiFxTraderSettings(BaseSettings):
         default=4, validation_alias="AI_FX_TRADER_ADVERSE_MOVE_MAX_PER_HOUR"
     )
 
-    # ─── Self-reflection regime change cutoff (2026-05-28) ───────────────
+    # ─── Self-reflection regime change cutoff (2026-05-28; advanced 2026-05-29) ─
     # Фильтрует closed trades в SELF-REFLECTION блоках USER_PROMPT
     # (get_pnl_by_symbol / get_pnl_by_symbol_side / get_recent_closed_trades).
     # Trades с opened_at < этой метки НЕ показываются LLM, хотя физически
     # ОСТАЮТСЯ в БД (для аудита и анализа).
     #
-    # Зачем: 2026-05-26 07:42 UTC задеплоен Phase 1 (persistent thesis
-    # discipline) — это первое фундаментальное изменение reasoning-rules
-    # после старта эксперимента. Pre-26.05 trades — outcome ДРУГОЙ
-    # стратегии (бот закрывал 22/26 позиций на 1H technical noise без
-    # macro reference); использовать их как evidence для SELF-REFLECTION
-    # текущей стратегии = systematic bias (бот «наказывает» себя за уже
-    # исправленное поведение). См. BUILDLOG_AI_FX_TRADER.md 2026-05-28.
+    # Зачем: 2026-05-29 08:26 UTC завершён деплой Phase 0–3 (event-driven
+    # архитектура) — самый крупный structural break reasoning/exit-rules
+    # после старта эксперимента:
+    #   • Phase 0 (Review Guardian): review-цикл больше НЕ закрывает по 1H
+    #     техническому шуму — только locked-profit ≥1.5R. Все pre-Phase-0
+    #     убытки (22/26 закрытий на 1H noise) — outcome УЖЕ исправленной
+    #     логики и пугают бота за поведение, которого больше нет.
+    #   • Phase 1 (live spot) / Phase 2 (locked-profit sensor) / Phase 3
+    #     (event-driven analyst) — full/review теперь реагируют на события,
+    #     а не только на таймер.
+    # Использовать pre-cutoff trades как evidence для SELF-REFLECTION текущей
+    # стратегии = systematic bias. Ранее cutoff стоял на 2026-05-26 07:42
+    # (Phase 1 persistent-thesis deploy) — историческая запись.
     #
     # Research basis: Lopez de Prado "Advances in Financial ML" (2018)
     # ch.7 «Cross-Validation in Finance» — structural breaks invalidate
     # use of pre-break outcomes as evidence for post-break performance.
     # Hamilton (1989) regime-switching framework.
+    #
+    # ВАЖНО (sample-size.mdc): сдвиг cutoff обнуляет выборку (n=0 → re-trigger
+    # cold-start). Двигать ТОЛЬКО на реальный structural break, НЕ на каждую
+    # мелкую правку — иначе выборка никогда не накопится до порога валидации.
     #
     # Compliance: НЕ отключает инструменты (sample-size.mdc), НЕ меняет
     # торговую логику (strategy-guard.mdc), НЕ удаляет данные
@@ -356,7 +366,7 @@ class AiFxTraderSettings(BaseSettings):
     # Format: ISO 8601 с timezone. Empty string ("") = фильтр отключён,
     # бот видит всю историю (legacy v1.X behavior).
     stats_window_start: str = Field(
-        default="2026-05-26T07:42:00+00:00",
+        default="2026-05-29T08:26:00+00:00",
         validation_alias="AI_FX_TRADER_STATS_WINDOW_START",
     )
 

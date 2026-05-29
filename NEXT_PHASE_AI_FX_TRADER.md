@@ -190,6 +190,17 @@ loss-aversion / disposition effect (Kahneman & Tversky 1979; Shefrin
 post-Phase-2 (по правилу sample-size). Зафиксировано по просьбе
 пользователя «сперва заверши все фазы, потом учесть».
 
+**Частично закрыто (2026-05-29, clean slate).** По запросу пользователя
+сдвинут regime-change cutoff на деплой Phase 0–3
+(`stats_window_start = 2026-05-29T08:26`). Все pre-Phase-0 минусы
+(закрытия по 1H-шуму до Review Guardian) убраны из self-reflection →
+острая фаза loss-aversion на «уже исправленном» поведении снята, бот
+стартует с чистого листа (cold-start по всем парам). Это НЕ отменяет
+структурный fix (пункты 1–3 выше): post-cutoff минусы снова начнут
+накапливаться, и без разделения `SL-hit / thesis-broken / noise` риск
+вернётся. Пункт остаётся открытым — взять после накопления
+post-Phase-0–3 выборки. См. BUILDLOG_AI_FX_TRADER.md 2026-05-29.
+
 ---
 
 ## Когда возвращаться к Phase 2

@@ -2,6 +2,54 @@
 
 ## 2026-05-29
 
+### chore(self-reflection): сдвиг regime-change cutoff на деплой Phase 0–3 (clean slate)
+
+`коммит при deploy`
+
+#### Контекст (запрос пользователя)
+
+«А не будет ли лучше чтобы бот начал с чистого листа, чтобы предыдущие
+решения не путали новую логику?» После выкатки Фаз 0–3 (event-driven
+архитектура, завершено 2026-05-29 08:26 UTC) reasoning/exit-rules
+изменились фундаментально. Главное — Phase 0 (Review Guardian): review
+больше НЕ закрывает по 1H-шуму. Все pre-Phase-0 убытки (закрытия 22/26
+позиций на техническом шуме) — outcome уже исправленной логики и в
+self-reflection «пугают» бота за поведение, которого больше нет
+(loss-aversion bias, ранее зафиксирован как пункт E в
+NEXT_PHASE_AI_FX_TRADER.md).
+
+#### Что изменено
+
+- `stats_window_start` default: `2026-05-26T07:42` (Phase 1 deploy) →
+  `2026-05-29T08:26:00+00:00` (Phase 0–3 deploy). Closed trades с
+  `opened_at` < cutoff не показываются LLM в SELF-REFLECTION блоках.
+- **Данные НЕ удаляются** — full audit trail остаётся в БД, фильтр
+  только query-time (механизм regime-change cutoff из 2026-05-28,
+  «вариант 2»). Полностью обратимо через env / откат default.
+- Выбран **non-destructive** путь (не wipe БД): сохраняет аудит,
+  счётчик эксперимента и reconcile открытых позиций. На момент сдвига
+  открытых позиций нет (`positions=0`).
+
+#### Эффект
+
+- По всем парам symbol×side `n=0` → повторно активируется COLD-START
+  DISCOVERY RULE (Sutton & Barto 2018 §2.7) — бот может брать малые
+  разведочные сделки под новой логикой.
+- `window_label` в промпте автоматически рендерит «since 2026-05-29
+  regime-change cutoff» (строится из timestamp, хардкода нет).
+
+#### Research / compliance
+
+- Lopez de Prado «Advances in Financial ML» (2018) ch.7 — structural
+  breaks инвалидируют pre-break outcomes как evidence; Hamilton (1989)
+  regime-switching. Фазы 0–3 — реальный structural break.
+- sample-size.mdc: cutoff двигаем **один раз** на реальный слом, НЕ на
+  каждую правку (иначе выборка никогда не накопится до порога). Зафиксировано
+  в комментарии у поля. strategy-guard.mdc: торговая логика не тронута.
+
+**Файлы:** `src/fx_ai_trader/config/settings.py` (default + rationale),
+`tests/test_fx_ai_trader_regime_cutoff.py` (assert нового default)
+
 ### feat(event-full): Фаза 3 — event-driven вызов аналитика (entry-breakout + adverse-move)
 
 `коммит при deploy`
