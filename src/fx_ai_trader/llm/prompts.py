@@ -409,6 +409,31 @@ Wait for full confluence. This is the discipline that separates
 professional desks from retail chart-pattern guessing.
 
 ═══════════════════════════════════════════════════════════════════════
+EVENT TRIGGER — when an `=== EVENT TRIGGER ===` block appears in input
+═══════════════════════════════════════════════════════════════════════
+
+Most cycles run on a timer. Some are woken EARLY by a price-event sensor
+(a Donchian breakout on the live price, or an open position moving
+adversely). When that happens the input carries an `=== EVENT TRIGGER ===`
+block naming WHAT fired and WHERE.
+
+Treat it as an ATTENTION CUE — the reason you are being consulted right
+now — NOT as a recommendation or a signal to act:
+- A breakout is momentum INTO a level. Your edge (MFP) is a structural
+  PULLBACK, not chasing continuation into a high (SETUP rule 3). A fresh
+  breakout most often means "watch for the pullback", not "enter now".
+- An adverse-move cue means re-judge the macro thesis (broken / intact),
+  exactly as on a scheduled full cycle — with macro + news, not on the
+  1H move alone.
+- The sensor sees ONLY price geometry; it has NO macro/news/structure
+  context. You do. Weigh the cue against YOUR data and decide
+  independently. A breakout with no confluence is a HOLD (or a fakeout to
+  ignore) — that is a correct, expected outcome, not a missed trade.
+
+The event changes only the TIMING of this consultation. It does NOT lower
+the confluence bar, and it is NEVER, by itself, a reason to open.
+
+═══════════════════════════════════════════════════════════════════════
 COLD-START DISCOVERY RULE — exploring untested (symbol × side) pairs
 ═══════════════════════════════════════════════════════════════════════
 
@@ -1053,12 +1078,59 @@ def format_recent_trades(
     return f"{header}\n{body}"
 
 
+def format_event_trigger(triggers: list[str] | None) -> str:
+    """Render нейтральный EVENT TRIGGER блок для USER_PROMPT.
+
+    ``triggers`` — human-readable строки от датчиков (``price_sensor.py``):
+    EntryBreakoutSensor («… up-break @… > Donchian hi»), AdverseMoveSensor
+    («#id …R adverse»), LockedProfitSensor («#id …R locked-profit»).
+    Пусто / None → "" (плановый цикл, блока нет).
+
+    Phase 3.1 (2026-05-29): датчик передаёт аналитику ЧТО и ГДЕ сработало,
+    чтобы он сопоставлял сигнал датчика со своими macro/structure данными,
+    а не просыпался «вслепую». Рамка НЕЙТРАЛЬНАЯ: cue, не рекомендация —
+    иначе пробойный сигнал толкает в FOMO против MFP-философии (вход на
+    структурном откате, а не на пробое; см. SETUP rule 3).
+    """
+    if not triggers:
+        return ""
+    lines = ["=== EVENT TRIGGER (why you are being consulted now) ==="]
+    lines.extend(f"- {t}" for t in triggers)
+    lines.append("")
+    joined = " ".join(triggers).lower()
+    if "break" in joined:
+        lines.append(
+            "A breakout is momentum INTO a level, not a structural pullback. "
+            "Your edge (MFP rule 3) is a pullback to support — judge with "
+            "macro/structure whether to act, wait for the pullback, or ignore "
+            "as a fakeout. Breakout alone is NOT an entry."
+        )
+    if "adverse" in joined:
+        lines.append(
+            "An adverse-move cue means re-judge the macro thesis "
+            "(broken/intact) WITH macro+news — not on the 1H move alone."
+        )
+    if "locked-profit" in joined:
+        lines.append(
+            "A locked-profit cue means a position reached the lock zone; "
+            "verify R from |entry − SL| yourself and apply the guard rule."
+        )
+    lines.append(
+        "This is an ATTENTION CUE, NOT a recommendation. The sensor sees only "
+        "price geometry — it has NO macro, news, or structure context; you do. "
+        "Weigh it against YOUR data and decide independently. HOLD is a correct, "
+        "expected outcome when there is no confluence."
+    )
+    return "\n".join(lines)
+
+
 def build_user_prompt(
     market_context: str,
     *,
     performance_by_symbol: str | None = None,
     performance_by_symbol_side: str | None = None,
     recent_trades: str | None = None,
+    event_trigger: str = "",
 ) -> str:
     """Full-cycle USER_PROMPT.
 
@@ -1097,12 +1169,18 @@ def build_user_prompt(
     if recent_trades:
         parts.append(recent_trades)
     history_block = ("\n\n".join(parts) + "\n\n") if parts else ""
+    # Phase 3.1 (2026-05-29): если цикл разбужен датчиком — сигнал идёт
+    # первым блоком (framing «почему тебя позвали»), ПЕРЕД историей и
+    # рынком. Плановый цикл → "" (блока нет). Нейтральная рамка задана
+    # в format_event_trigger + EVENT TRIGGER секции SYSTEM_PROMPT.
+    event_block = (f"{event_trigger}\n\n") if event_trigger else ""
     # Task-sandwich (deepseekai.guide Practitioner's Guide, 2026-05-26
     # research artifact в BUILDLOG): повторяем task ПОСЛЕ длинного
     # context'а (история + market_context могут быть 2-4k tokens),
     # чтобы инструкция не «потерялась». «Prime expected output»
     # снижает preamble drift на V4-Flash.
     return (
+        f"{event_block}"
         f"{history_block}"
         "Current market state, news, and your open positions:\n\n"
         f"{market_context}\n\n"
@@ -1181,6 +1259,13 @@ panicked manual exit on noise. Closing manually before the SL on 1H
 weakness throws away that discipline. If the macro thesis is truly
 broken, the full cycle (every %(full_min)d min) will close it with a
 cited news/EIA invalidator. Until then: HOLD.
+
+EVENT TRIGGER: this review may have been woken EARLY by a locked-profit
+sensor — an `=== EVENT TRIGGER ===` block will name the position and its
+R. That is only TIMING; it does NOT change the rule and is NOT a close
+order. Verify R from |entry − SL| yourself: close ONLY if it is genuinely
+≥ 1.5R, otherwise HOLD. The sensor can be slightly ahead of your own
+read — your computation wins.
 
 DECISION RULE (simple):
 - Unrealised ≥ 1.5R                     → CLOSE (locked-profit).
@@ -1263,6 +1348,7 @@ def build_user_prompt_review(
     market_context: str,
     *,
     performance_by_symbol: str | None = None,
+    event_trigger: str = "",
 ) -> str:
     """Review-cycle USER_PROMPT.
 
@@ -1279,9 +1365,13 @@ def build_user_prompt_review(
     header = (
         f"{performance_by_symbol}\n\n" if performance_by_symbol else ""
     )
+    # Phase 3.1 (2026-05-29): event-разбуженный review несёт сигнал датчика
+    # (обычно locked-profit) первым блоком. Плановый review → "".
+    event_block = (f"{event_trigger}\n\n") if event_trigger else ""
     # Task-sandwich + prime expected output (deepseekai.guide
     # Practitioner's Guide, 2026-05-26).
     return (
+        f"{event_block}"
         f"{header}"
         "Mid-cycle review of your open positions:\n\n"
         f"{market_context}\n\n"

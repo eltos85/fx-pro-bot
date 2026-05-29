@@ -24,6 +24,7 @@ from fx_ai_trader.llm.prompts import (
     build_system_prompt_review,
     build_user_prompt,
     build_user_prompt_review,
+    format_event_trigger,
     format_performance_by_symbol,
     format_performance_by_symbol_side,
     format_recent_trades,
@@ -318,7 +319,7 @@ def run() -> None:
                         cycle, settings, store, adapter, llm, killswitch,
                         news_provider, eia_provider, noaa_provider,
                         macro_rates_provider, entry_sensor=entry_sensor,
-                        trigger="event",
+                        trigger="event", event_triggers=full_dec.triggers,
                     )
                 except Exception:
                     log.exception("Event full %d crashed (продолжаю)", cycle)
@@ -333,7 +334,7 @@ def run() -> None:
                 try:
                     _run_review_cycle(
                         cycle, settings, store, adapter, llm, killswitch,
-                        trigger="event",
+                        trigger="event", event_triggers=review_dec.triggers,
                     )
                 except Exception:
                     log.exception("Event review %d crashed (продолжаю)", cycle)
@@ -411,6 +412,7 @@ def _run_full_cycle(
     *,
     entry_sensor: EntryBreakoutSensor | None = None,
     trigger: str = "scheduled",
+    event_triggers: list[str] | None = None,
 ) -> None:
     log.info(
         "─── Full cycle %d (%s) @ %s ───",
@@ -486,6 +488,7 @@ def _run_full_cycle(
         recent_trades=format_recent_trades(
             recent_trades, window_label=window_label
         ),
+        event_trigger=format_event_trigger(event_triggers),
     )
 
     log.info(
@@ -581,6 +584,7 @@ def _run_review_cycle(
     killswitch: KillSwitch,
     *,
     trigger: str = "scheduled",
+    event_triggers: list[str] | None = None,
 ) -> None:
     log.info(
         "─── Review %d (%s) @ %s ───",
@@ -626,6 +630,7 @@ def _run_review_cycle(
         performance_by_symbol=format_performance_by_symbol(
             symbol_stats, window_label=window_label
         ),
+        event_trigger=format_event_trigger(event_triggers),
     )
 
     log.info("Review LLM call: positions=%d", len(ctx.open_positions))

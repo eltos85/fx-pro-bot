@@ -2,6 +2,68 @@
 
 ## 2026-05-29
 
+### feat(event-trigger): Phase 3.1 — передавать сигнал датчика аналитику (EVENT TRIGGER блок)
+
+`коммит при deploy`
+
+#### Контекст (вопрос пользователя)
+
+«А разве не должен аналитик принимать данные датчика и сопоставлять со
+своими данными?» Аудит показал реальный пробел: Phase 3 датчики
+(entry-breakout / adverse-move / locked-profit) будили внеплановый цикл,
+но **триггер шёл только в лог** — в `_run_full_cycle` передавалась голая
+метка `trigger="event"`, а контекст и USER_PROMPT собирались идентично
+плановому циклу. Аналитик просыпался «вслепую»: заново выводил всё из
+баров и НЕ знал, что именно сработало (символ, направление, уровень).
+Сигнал датчика выбрасывался до промпта.
+
+#### Что добавлено
+
+- `prompts.py::format_event_trigger(triggers)` — рендерит блок
+  `=== EVENT TRIGGER (why you are being consulted now) ===` со списком
+  сработавших сигналов и **нейтральной** guidance по категориям
+  (breakout / adverse / locked-profit). Пусто/None → "" (плановый цикл).
+- `build_user_prompt` / `build_user_prompt_review` — новый параметр
+  `event_trigger`, блок идёт ПЕРВЫМ (framing «почему тебя позвали»),
+  перед историей и рынком.
+- `SYSTEM_PROMPT` — секция EVENT TRIGGER: как трактовать блок (cue, не
+  рекомендация; breakout = момент INTO level, а edge = pullback по MFP
+  rule 3). `SYSTEM_PROMPT_REVIEW` — нота: locked-profit cue это только
+  timing, своя R главнее датчика.
+- `main.py` — прокинут `event_triggers` из `full_dec.triggers` /
+  `review_dec.triggers` в соответствующие циклы.
+
+#### Анти-FOMO рамка (compliance)
+
+Ключевой риск: пробойный сигнал толкает аналитика в FOMO-вход на хаях,
+что противоречит его MFP-философии (вход на структурном откате, не на
+пробое). Поэтому блок подан НЕЙТРАЛЬНО: «ATTENTION CUE, NOT a
+recommendation», «Breakout alone is NOT an entry», «event … NEVER, by
+itself, a reason to open». Событие меняет только TIMING консультации, не
+понижает confluence-планку.
+
+#### Research basis
+
+- KenMacro MFP (SETUP rule 3): вход на pullback, не на momentum INTO high.
+- Lopez de Prado «Advances in Financial ML» (2018) ch.2 — event-based
+  sampling: значимое ценовое событие = повод посмотреть, не повод войти.
+
+#### Тесты
+
+`tests/test_fx_ai_trader_event_trigger.py` (12): format_event_trigger по
+категориям + нейтральная рамка; builders include/omit блок (scheduled →
+нет блока); SYSTEM_PROMPT секция + анти-FOMO инвариант. Полный
+fx_ai_trader-набор: 284 passed.
+
+#### Rollback
+
+Параметр `event_trigger` по дефолту "" — при откате call-site'ов в main.py
+поведение возвращается к Phase 3 (блока нет). Промпт-секции изолированы.
+
+**Файлы:** `src/fx_ai_trader/llm/prompts.py`,
+`src/fx_ai_trader/app/main.py`,
+`tests/test_fx_ai_trader_event_trigger.py`
+
 ### chore(self-reflection): сдвиг regime-change cutoff на деплой Phase 0–3 (clean slate)
 
 `коммит при deploy`
