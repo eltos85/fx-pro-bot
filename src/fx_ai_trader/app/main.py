@@ -44,6 +44,8 @@ from fx_ai_trader.trading.broker_reconcile import reconcile_broker_positions
 from fx_ai_trader.trading.executor import apply_action, parse_action
 from fx_ai_trader.trading.paper_reconcile import reconcile_paper_positions
 from fx_ai_trader.trading.price_sensor import (
+    AdverseMoveSensor,
+    EntryBreakoutSensor,
     EventDecision,
     LockedProfitSensor,
     compute_unrealised_r,
@@ -235,8 +237,45 @@ def run() -> None:
             settings.event_review_max_per_hour,
         )
 
+    # Phase 3 (2026-05-29): event-driven FULL-цикл. Будит аналитика по
+    # событиям — пробой Donchian (entry) и движение против позиции
+    # (adverse). Активны только при live price. См. price_sensor.py.
+    entry_sensor: EntryBreakoutSensor | None = None
+    adverse_sensor: AdverseMoveSensor | None = None
+    if settings.event_full_enabled and settings.live_price_enabled:
+        if settings.entry_breakout_enabled:
+            entry_sensor = EntryBreakoutSensor(
+                buffer_atr=settings.entry_breakout_buffer_atr,
+                cooldown_sec=float(settings.entry_breakout_cooldown_sec),
+                max_events_per_hour=settings.entry_breakout_max_per_hour,
+            )
+        if settings.adverse_move_enabled:
+            adverse_sensor = AdverseMoveSensor(
+                threshold_r=settings.adverse_move_threshold_r,
+                hysteresis_r=settings.adverse_move_hysteresis_r,
+                cooldown_sec=float(settings.adverse_move_cooldown_sec),
+                max_events_per_hour=settings.adverse_move_max_per_hour,
+            )
+        log.info(
+            "Event-full датчики ON: entry-breakout=%s (Donchian-%d, buf=%.2fATR, "
+            "max/h=%d) | adverse-move=%s (≤−%.2fR, max/h=%d)",
+            "on" if entry_sensor else "off",
+            settings.entry_breakout_lookback,
+            settings.entry_breakout_buffer_atr,
+            settings.entry_breakout_max_per_hour,
+            "on" if adverse_sensor else "off",
+            settings.adverse_move_threshold_r,
+            settings.adverse_move_max_per_hour,
+        )
+
     while not _shutdown:
         now_mono = time.monotonic()
+
+        any_sensor = (
+            event_sensor is not None
+            or entry_sensor is not None
+            or adverse_sensor is not None
+        )
 
         if last_full_ts == 0.0 or (now_mono - last_full_ts) >= settings.poll_interval_sec:
             cycle += 1
@@ -244,7 +283,7 @@ def run() -> None:
                 _run_full_cycle(
                     cycle, settings, store, adapter, llm, killswitch,
                     news_provider, eia_provider, noaa_provider,
-                    macro_rates_provider,
+                    macro_rates_provider, entry_sensor=entry_sensor,
                 )
             except Exception:
                 log.exception("Full cycle %d crashed (продолжаю)", cycle)
@@ -259,17 +298,38 @@ def run() -> None:
             except Exception:
                 log.exception("Review cycle %d crashed (продолжаю)", cycle)
             last_review_ts = time.monotonic()
-        elif event_sensor is not None and (
+        elif any_sensor and (
             now_mono - last_sensor_ts
         ) >= settings.event_review_sensor_interval_sec:
             last_sensor_ts = now_mono
-            decision = _check_event_review(event_sensor, settings, store, adapter)
-            if decision.fire:
+            full_dec, review_dec = _check_event_sensors(
+                settings, store, adapter,
+                event_sensor=event_sensor,
+                entry_sensor=entry_sensor,
+                adverse_sensor=adverse_sensor,
+            )
+            if full_dec.fire:
                 cycle += 1
-                trig = ", ".join(
-                    f"#{pid} {r:+.2f}R" for pid, r in decision.positions
+                log.info(
+                    "EVENT-FULL trigger: %s", "; ".join(full_dec.triggers)
                 )
-                log.info("EVENT-REVIEW trigger (locked-profit zone): %s", trig)
+                try:
+                    _run_full_cycle(
+                        cycle, settings, store, adapter, llm, killswitch,
+                        news_provider, eia_provider, noaa_provider,
+                        macro_rates_provider, entry_sensor=entry_sensor,
+                        trigger="event",
+                    )
+                except Exception:
+                    log.exception("Event full %d crashed (продолжаю)", cycle)
+                last_full_ts = time.monotonic()
+                last_review_ts = last_full_ts
+            elif review_dec.fire:
+                cycle += 1
+                log.info(
+                    "EVENT-REVIEW trigger (locked-profit zone): %s",
+                    ", ".join(review_dec.triggers),
+                )
                 try:
                     _run_review_cycle(
                         cycle, settings, store, adapter, llm, killswitch,
@@ -285,17 +345,24 @@ def run() -> None:
     log.info("FX AI Trader остановлен")
 
 
-def _check_event_review(
-    sensor: LockedProfitSensor,
+def _check_event_sensors(
     settings: AiFxTraderSettings,
     store: AiFxTraderStore,
     adapter: CTraderFxAdapter,
-) -> EventDecision:
-    """Опросить датчик locked-profit (без API: локальная БД + spot-кэш).
+    *,
+    event_sensor: LockedProfitSensor | None,
+    entry_sensor: EntryBreakoutSensor | None,
+    adverse_sensor: AdverseMoveSensor | None,
+) -> tuple[EventDecision, EventDecision]:
+    """Опросить все event-датчики (без API: локальная БД + spot-кэш).
 
-    Для каждой открытой позиции берёт живую цену из in-memory spot-кэша
-    (``get_live_spot_mid`` — БЕЗ фолбэка на trendbars) и считает R.
-    Позиции без живой цены передаются как R=None (датчик их игнорит).
+    Возвращает (full_decision, review_decision):
+    - full_decision.fire → нужен внеплановый FULL-цикл (entry-breakout
+      и/или adverse-move). FULL приоритетнее review (делает всё + macro).
+    - review_decision.fire → нужен внеплановый REVIEW (locked-profit).
+
+    Все цены берутся из in-memory spot-кэша (``get_live_spot_mid`` —
+    БЕЗ фолбэка на trendbars), поэтому опрос бесплатен по API.
     """
     positions = store.get_open_positions()
     pos_r: list[tuple[int, float | None]] = []
@@ -303,7 +370,31 @@ def _check_event_review(
         price = adapter.get_live_spot_mid(p.symbol)
         r = compute_unrealised_r(p.side, p.entry_price, p.sl_price, price)
         pos_r.append((p.id, r))
-    return sensor.evaluate(pos_r)
+
+    # ── FULL-cycle события (Phase 3): adverse-move + entry-breakout ──
+    full_triggers: list[str] = []
+    if adverse_sensor is not None:
+        adv = adverse_sensor.evaluate(pos_r)
+        if adv.fire:
+            full_triggers.extend(adv.triggers)
+    if entry_sensor is not None:
+        live_prices = {
+            sym: adapter.get_live_spot_mid(sym) for sym in settings.symbols
+        }
+        slots_free = len(positions) < settings.max_open_positions
+        ent = entry_sensor.evaluate(live_prices, slots_free)
+        if ent.fire:
+            full_triggers.extend(ent.triggers)
+    if full_triggers:
+        return EventDecision(fire=True, triggers=full_triggers), EventDecision(fire=False)
+
+    # ── REVIEW-cycle событие (Phase 2): locked-profit ──
+    if event_sensor is not None:
+        review_dec = event_sensor.evaluate(pos_r)
+        if review_dec.fire:
+            return EventDecision(fire=False), review_dec
+
+    return EventDecision(fire=False), EventDecision(fire=False)
 
 
 def _run_full_cycle(
@@ -317,8 +408,14 @@ def _run_full_cycle(
     eia_provider: EiaProvider,
     noaa_provider: NoaaOutlookProvider | None,
     macro_rates_provider: MacroRatesProvider | None,
+    *,
+    entry_sensor: EntryBreakoutSensor | None = None,
+    trigger: str = "scheduled",
 ) -> None:
-    log.info("─── Full cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
+    log.info(
+        "─── Full cycle %d (%s) @ %s ───",
+        cycle, trigger, datetime.now(tz=UTC).isoformat(),
+    )
 
     # 1a. Paper-reconcile (SL/TP hit detection через M1) — для paper-позиций.
     closed = reconcile_paper_positions(adapter, store)
@@ -345,6 +442,19 @@ def _run_full_cycle(
         noaa_provider=noaa_provider,
         macro_rates_provider=macro_rates_provider,
     )
+
+    # Phase 3: обновить Donchian-референс датчика входа из уже добытых
+    # 1H-баров (бесплатно — full-цикл их и так тянет). Датчик далее
+    # сравнивает живую цену с этими уровнями БЕЗ API-вызовов.
+    if entry_sensor is not None:
+        lookback = settings.entry_breakout_lookback
+        for s in ctx.snapshots:
+            if len(s.bars_1h) >= lookback:
+                recent = s.bars_1h[-lookback:]
+                hi = max(b.high for b in recent)
+                lo = min(b.low for b in recent)
+                atr = s.ind_1h.atr14 if s.ind_1h else None
+                entry_sensor.update_reference(s.symbol, hi, lo, atr)
     # v1.X self-reflection (2026-05-26): per-symbol perf + последние
     # closed live trades в USER_PROMPT. Источник правды: store.
     # См. BUILDLOG_AI_FX_TRADER.md v1.X запись и плановый файл.

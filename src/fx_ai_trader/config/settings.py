@@ -285,6 +285,51 @@ class AiFxTraderSettings(BaseSettings):
         default=6, validation_alias="AI_FX_TRADER_EVENT_REVIEW_MAX_PER_HOUR"
     )
 
+    # ─── Event-driven FULL cycle (2026-05-29 Phase 3) ───────────────────
+    # Будит ВНЕплановый full-цикл (аналитик с macro+news) по событиям:
+    #  (1) entry-breakout: живая цена пробила Donchian-канал → аналитик
+    #      решает open/hold («график показал сетап → позвали аналитика»);
+    #  (2) adverse-move: открытая позиция ушла в минус на ≥ threshold_r →
+    #      стратег с macro пересматривает тезис (Phase 0: тезис судит full).
+    # Плановый full остаётся пульс-страховкой. НЕ меняет правила
+    # входа/выхода — решает LLM. См. price_sensor.py.
+    event_full_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_EVENT_FULL_ENABLED"
+    )
+    # Entry-breakout (Donchian channel, lookback 20 — Donchian/Turtle
+    # canonical, Faith 2003). buffer_atr — confirmation band (анти-шум).
+    entry_breakout_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_ENTRY_BREAKOUT_ENABLED"
+    )
+    entry_breakout_lookback: int = Field(
+        default=20, validation_alias="AI_FX_TRADER_ENTRY_BREAKOUT_LOOKBACK"
+    )
+    entry_breakout_buffer_atr: float = Field(
+        default=0.05, validation_alias="AI_FX_TRADER_ENTRY_BREAKOUT_BUFFER_ATR"
+    )
+    entry_breakout_cooldown_sec: int = Field(
+        default=300, validation_alias="AI_FX_TRADER_ENTRY_BREAKOUT_COOLDOWN_SEC"
+    )
+    entry_breakout_max_per_hour: int = Field(
+        default=4, validation_alias="AI_FX_TRADER_ENTRY_BREAKOUT_MAX_PER_HOUR"
+    )
+    # Adverse-move: 1R = натуральная единица риска (дистанция до SL).
+    adverse_move_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_ADVERSE_MOVE_ENABLED"
+    )
+    adverse_move_threshold_r: float = Field(
+        default=1.0, validation_alias="AI_FX_TRADER_ADVERSE_MOVE_THRESHOLD_R"
+    )
+    adverse_move_hysteresis_r: float = Field(
+        default=0.3, validation_alias="AI_FX_TRADER_ADVERSE_MOVE_HYSTERESIS_R"
+    )
+    adverse_move_cooldown_sec: int = Field(
+        default=300, validation_alias="AI_FX_TRADER_ADVERSE_MOVE_COOLDOWN_SEC"
+    )
+    adverse_move_max_per_hour: int = Field(
+        default=4, validation_alias="AI_FX_TRADER_ADVERSE_MOVE_MAX_PER_HOUR"
+    )
+
     # ─── Self-reflection regime change cutoff (2026-05-28) ───────────────
     # Фильтрует closed trades в SELF-REFLECTION блоках USER_PROMPT
     # (get_pnl_by_symbol / get_pnl_by_symbol_side / get_recent_closed_trades).

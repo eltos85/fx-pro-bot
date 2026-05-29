@@ -2,6 +2,81 @@
 
 ## 2026-05-29
 
+### feat(event-full): Фаза 3 — event-driven вызов аналитика (entry-breakout + adverse-move)
+
+`коммит при deploy`
+
+#### Контекст (идея пользователя)
+
+«Почему сразу не слушать датчики, а когда срабатывают — звать аналитика?
+График показал сетап → аналитик изучил глобальные новости → решил
+входить или нет». До Фазы 3 OPEN-решения были только по расписанию
+(раз в 15 мин); event-датчик (Фаза 2) будил лишь review-guardian
+(open запрещён). Фаза 3 даёт event-driven вызов **аналитика** (full).
+
+#### Что добавлено (две event-ветки к full-циклу)
+
+1. **EntryBreakoutSensor** — пробой Donchian-канала живой ценой будит
+   ранний full-цикл, аналитик решает open/hold. Уровни (20-баровый 1H
+   hi/lo + ATR) кэшируются из full-цикла (бесплатно), датчик сравнивает
+   живую цену без API. `slots_free`-gate: будим только если есть слот
+   под позицию. buffer_atr — confirmation band (анти-шум).
+2. **AdverseMoveSensor** — открытая позиция ушла в минус ≥ threshold_r
+   → ранний full-цикл, стратег с macro пересматривает тезис. Согласуется
+   с Phase 0 (тезис судит full с macro, не review-guardian по 1H).
+
+Плановый full-цикл остаётся пульс-страховкой (каждые 15 мин), события
+сверху (пользователь выбрал keep15). FULL приоритетнее event-review:
+если сработали и full-датчик, и locked-profit — идёт full (делает всё +
+macro). Datчики бесплатны по API (spot-кэш + локальная БД).
+
+#### Research basis
+
+| Источник | Положение |
+|---|---|
+| Donchian (1960s); Faith «Way of the Turtle» (2003) | 20-period channel breakout — каноничный lookback |
+| Lopez de Prado «Advances in Financial ML» (2018) ch.2 | event-based sampling по значимым ценовым событиям |
+| Phase 0 (наш audit) | тезис судит full-цикл с macro, не review на 1H |
+
+threshold_r=1.0 (adverse) и lookback=20 (Donchian) — натуральные/
+каноничные единицы, не подгонка под результат (no-data-fitting.mdc).
+
+#### Файлы
+
+- `price_sensor.py`: `AdverseMoveSensor`, `EntryBreakoutSensor`,
+  `ReferenceLevels`, `EventDecision.triggers`.
+- `app/main.py`: инициализация датчиков, `_check_event_sensors`
+  (full vs review маршрутизация), обновление Donchian-референса в
+  `_run_full_cycle` (param `entry_sensor`), `trigger=scheduled/event`.
+- `config/settings.py` + `.env.example`: `event_full_enabled`,
+  `entry_breakout_*` (lookback 20, buffer 0.05ATR, cooldown 300s,
+  max 4/ч), `adverse_move_*` (threshold 1.0R, cooldown 300s, max 4/ч).
+
+#### Стоимость
+
+Worst case: +4 entry +4 adverse = +8 внеплановых full/час поверх 4
+плановых = ≤12 full/час (≈$0.018/ч) и только при реальных пробоях/
+движениях. Cooldown 300s + rate-cap на каждый датчик.
+
+#### Тесты
+
+- Новый `tests/test_fx_ai_trader_event_full.py` (14 тестов): adverse
+  rising-edge/re-arm/cooldown/prune; entry up/down-break, buffer,
+  slots-gate, re-arm, cooldown+rate-cap, missing price.
+- Полный прогон: **1335 passed**.
+
+#### Откат
+
+`AI_FX_TRADER_EVENT_FULL_ENABLED=false` → только плановый full
+(поведение Phase 0/1/2). Sub-флаги `ENTRY_BREAKOUT_ENABLED` /
+`ADVERSE_MOVE_ENABLED` отключают ветки по отдельности.
+
+#### Связанное (отложено)
+
+Loss-aversion bias на собственных закрытиях-в-минус — записан в
+`NEXT_PHASE_AI_FX_TRADER.md` раздел E (по просьбе пользователя: сперва
+все фазы, потом учесть; требует post-Phase-2/3 выборки по sample-size).
+
 ### feat(event-review): Фаза 2 — событийный датчик locked-profit (внеплановый review)
 
 `коммит при deploy`
