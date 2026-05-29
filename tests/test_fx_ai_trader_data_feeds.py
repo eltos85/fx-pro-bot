@@ -260,6 +260,20 @@ class TestGdelt:
         assert snap.avg_tone == pytest.approx(1.0, abs=0.01)
         assert snap.n_points == 3
 
+    def test_failure_triggers_backoff_no_immediate_retry(self, monkeypatch):
+        from fx_ai_trader.news.gdelt import GdeltProvider
+        prov = GdeltProvider(request_spacing_sec=0, fail_backoff_sec=1800)
+        calls = {"n": 0}
+
+        def _boom(sym, query):
+            calls["n"] += 1
+            raise TimeoutError("net")
+
+        monkeypatch.setattr(prov, "_fetch_one", _boom)
+        prov.get_snapshots(("XAUUSD", "BZ=F"))  # первый символ падает → break
+        prov.get_snapshots(("XAUUSD", "BZ=F"))  # backoff → не дёргаем _fetch_one
+        assert calls["n"] == 1
+
 
 # ─── E: economic calendar ──────────────────────────────────────────────
 

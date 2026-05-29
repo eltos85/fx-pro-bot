@@ -57,6 +57,7 @@ class GdeltProvider:
         timeout: int = 10,
         timespan: str = "3d",
         request_spacing_sec: float = 1.5,
+        fail_backoff_sec: int = 1800,
     ) -> None:
         self._cache_ttl = cache_ttl_sec
         self._timeout = timeout
@@ -64,6 +65,11 @@ class GdeltProvider:
         # GDELT просит не «долбить» API (429 при бёрсте). Разносим
         # per-symbol запросы паузой. Кэш 3ч → в проде 3 запроса/3ч.
         self._spacing = request_spacing_sec
+        # После сетевого сбоя / 429 не ретраим минимум fail_backoff_sec,
+        # иначе при 15-мин цикле сами подогреваем rate-limit. 30 мин по
+        # умолчанию (фид опциональный, freshness не критична).
+        self._fail_backoff = fail_backoff_sec
+        self._last_fail_ts: float = 0.0
         self._cache: dict[str, GdeltToneSnapshot] = {}
         self._cache_ts: float = 0.0
 
@@ -76,6 +82,9 @@ class GdeltProvider:
     ) -> dict[str, GdeltToneSnapshot]:
         now = time.time()
         if self._cache and (now - self._cache_ts) < self._cache_ttl:
+            return {s: self._cache[s] for s in symbols if s in self._cache}
+        # Backoff после недавнего сбоя — не ретраим (защита от self-429).
+        if (now - self._last_fail_ts) < self._fail_backoff:
             return {s: self._cache[s] for s in symbols if s in self._cache}
         fresh: dict[str, GdeltToneSnapshot] = {}
         first = True
@@ -95,9 +104,10 @@ class GdeltProvider:
                 # тоже не успеют: прерываем раунд, чтобы не тормозить цикл
                 # на timeout×N. На след. full-цикле (15 мин) попробуем снова.
                 log.warning(
-                    "GDELT fetch failed для %s (%s) — пропускаю GDELT в этом цикле",
-                    sym, type(exc).__name__,
+                    "GDELT fetch failed для %s (%s) — backoff %ds",
+                    sym, type(exc).__name__, self._fail_backoff,
                 )
+                self._last_fail_ts = now
                 break
             if snap is not None:
                 fresh[sym] = snap
