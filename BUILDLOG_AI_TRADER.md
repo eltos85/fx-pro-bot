@@ -1,5 +1,71 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-29 — v0.40: убраны RSS-новости, новая личность price-action trader
+
+`хеш коммита`
+
+**Запрос пользователя:** «отключить новости в боте по байбиту, чтобы он
+торговал только по свечам и сигналам с байбит в реальном времени; ИИ
+выступает трейдером; новости только вредят». Уточнено: убрать **только
+RSS-новости** (DXY/US10Y + BTC.D/total cap оставить), жёстко (без флага),
++ «переработать промпт, сменить личность ИИ и его поведение».
+
+**Что изменилось (личность и поведение):**
+- Личность: «institutional discretionary macro trader» → **«systematic
+  crypto-futures PRICE-ACTION trader»**. Решения PRICE FIRST (мультиТФ
+  свечи/индикаторы + Bybit-микроструктура). Макро (DXY/UST10Y/BTC.D/
+  total cap) — **regime-фильтр**, не триггер. Заголовков/нарративов нет.
+- MFP confluence: правило 5 «NEWS / MACRO CATALYST» → **«MACRO REGIME
+  ALIGNED»** — нейтральный confluence-голос, поддерживает и trend
+  (momentum+breakout+macro=3/5), и mean-revert (bb-z+rsi+macro=3/5),
+  плюс soft-veto при сильно встречном режиме. **Порог ≥3/5 без
+  изменений** (важно: при буквальном «4 правила, ≥3/4» вход стал бы
+  недостижим — trend и mean-revert правила взаимоисключающие, см. ниже).
+- 5-DIM NEWS SENTIMENT раздел + `sentiment{}` в open-JSON +
+  hard-gate `aggregate_uncertainty > 0.7` **удалены** (промпт + executor
+  strict-валидация + парсинг).
+- `macro_thesis` (имя поля сохранено для DB/schema/executor) переосмыслен
+  в **PRICE-ACTION trade-thesis**: MFP-сетап + конкретный price level +
+  macro-regime контекст. Pattern-only больше не «запрещён» — это триггер.
+- PER-ASSET «MACRO DRIVER HIERARCHY» → **«MACRO REGIME FILTER &
+  SENSITIVITY»**: убраны news-драйверы (ETF-flow headlines, regulatory
+  news, Elon-tweets, «catalyst in news»); оставлены DXY/UST10Y/BTC.D/
+  ratios/betas/halving/burn как regime-sensitivity.
+- EXIT trigger 1a (INVALIDATION) и 3 (ADVERSE): news-bullets заменены
+  на price/regime сигналы (trend flip / breakout fail / regime shift).
+- Confidence-тиры, COLD-START, counter-trend, AGGRESSIVE MANDATE,
+  ANALYSIS APPROACH, CRITICAL CONSTRAINTS — переписаны под 4 price-
+  правила + macro как rule 5, без news/uncertainty.
+
+**Дизайн-решение (согласовано с пользователем):** на вопрос «как заменить
+третий голос новостей» выбран вариант «макро-фон = rule 5». Это сохраняет
+работающую арифметику входа ≥3/5 для обоих стилей сделок и оставляет
+макро-данные, которые пользователь хотел сохранить. RSS-фид удалён
+полностью; ETF-flow/headlines бот больше не упоминает (раздел WHAT YOU
+DO NOT SEE явно это запрещает).
+
+**Research basis:** price-action confluence как primary edge —
+Al Brooks «Trading Price Action» 2012; макро как regime-filter, не
+trigger. (strategy-guard.mdc: изменение торговой логики согласовано;
+no-data-fitting.mdc: пороги не тюнились — ≥3/5 сохранён, изменён лишь
+смысл 5-го слота.)
+
+**Файлы:** `src/ai_trader/llm/prompts.py` (полная переработка
+SYSTEM_PROMPT + docstring + build_user_prompt; review-промпт — чистка
+упоминаний news), `src/ai_trader/trading/executor.py` (убран sentiment-
+блок + uncertainty-gate из strict-схемы + `_REQUIRED_SENTIMENT_FIELDS` +
+параметр `news_uncertainty_block`), `src/ai_trader/trading/context.py`
+(удалён news-блок и `news` поле MarketContext, макро оставлено),
+`src/ai_trader/app/main.py` (убран RssNewsProvider + news-логи +
+sentiment-update оставляет только macro-snapshot), `src/ai_trader/config/
+settings.py` (убраны news_* настройки), **удалён** `src/ai_trader/news/`
+(rss.py + __init__.py), удалён `tests/test_ai_trader_news.py`,
+обновлены `tests/test_ai_trader.py` (SHA baseline
+`f5022a69…`→`43ec80ff…`), `tests/test_ai_trader_thesis_discipline.py`
+(сняты sentiment/uncertainty-тесты), `tests/test_ai_trader_llm_perspective.py`
+(убран NewsItem), `.env.example`. **1409 passed.** Промпт изменён →
+reset n=0 для 14-day эксперимента (no-data-fitting.mdc).
+
 ## 2026-05-29 — v0.34.1 fix: данные датчика доходят до аналитика (event_note в промпт)
 
 `хеш коммита`

@@ -166,15 +166,9 @@ class AiTraderSettings(BaseSettings):
     )
 
     # ─── News ────────────────────────────────────────────────────────────
-    news_enabled: bool = Field(
-        default=True, validation_alias="AI_TRADER_NEWS_ENABLED"
-    )
-    news_max_age_hours: int = Field(
-        default=6, validation_alias="AI_TRADER_NEWS_MAX_AGE_HOURS"
-    )
-    news_max_items: int = Field(
-        default=8, validation_alias="AI_TRADER_NEWS_MAX_ITEMS"
-    )
+    # v0.40 (2026-05-29): RSS-новости УБРАНЫ полностью. Бот торгует
+    # price-action + macro-regime. Настройки AI_TRADER_NEWS_* в .env
+    # игнорируются (pydantic extra="ignore").
 
     # ─── Macro context (v0.30 — institutional rewrite) ───────────────────
     # US rates feed (DXY + UST10Y) через yfinance. Port из FX-trader D1
@@ -212,16 +206,8 @@ class AiTraderSettings(BaseSettings):
         validation_alias="AI_TRADER_STATS_WINDOW_START",
     )
 
-    # 5-dim news sentiment: aggregate_uncertainty > этого порога → open
-    # автоматически блокируется executor'ом (`open blocked:
-    # aggregate_uncertainty=X > Y`). Default 0.7 совпадает с FX-trader
-    # (prompts.py:565 «Aggregate the news block. If aggregate_uncertainty
-    # > 0.7 — return HOLD»). COLD-START discovery trades используют
-    # более строгий порог 0.5 (см. COLD-START DISCOVERY RULE в промпте,
-    # справится сам LLM, executor не enforces — это behavior, не gate).
-    news_uncertainty_block_threshold: float = Field(
-        default=0.7, validation_alias="AI_TRADER_NEWS_UNCERTAINTY_BLOCK"
-    )
+    # v0.40: news_uncertainty_block_threshold УДАЛЁН вместе с 5-dim news
+    # sentiment (нет news-фида → нет uncertainty-gate).
 
     # ─── Event-driven analyst (v0.34, 2026-05-29; порт fx Фаз 1-3) ──────
     # Живой поток цены (pybit WebSocket public ticker, см. price_stream.py)

@@ -31,7 +31,6 @@ from ai_trader.llm.prompts import (
     build_user_prompt,
     build_user_prompt_review,
 )
-from ai_trader.news.rss import RssNewsProvider
 from ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
 from ai_trader.state.db import AiTraderStore
 from ai_trader.telegram.bot import TelegramBot, TelegramConfig, build_command_handlers
@@ -299,7 +298,7 @@ def run() -> None:
     )
 
     log.info("=" * 60)
-    log.info("AI-Trader v0.2 запущен (DeepSeek-V4 + indicators + news + telegram)")
+    log.info("AI-Trader v0.40 запущен (DeepSeek-V4 + price-action + macro-regime + telegram)")
     log.info("Demo: %s | Symbols: %s", settings.bybit_demo, ", ".join(settings.symbols))
     log.info(
         "Virtual capital: $%.2f | Full poll: %ds | Review poll: %ds",
@@ -313,8 +312,7 @@ def run() -> None:
         settings.max_open_positions, settings.max_leverage,
     )
     log.info("Trading mode: %s", "LIVE" if settings.trading_enabled else "PAPER (decisions only)")
-    log.info("News: %s | Telegram: %s",
-             "ON" if settings.news_enabled else "OFF",
+    log.info("Telegram: %s",
              "ON" if (settings.telegram_enabled and settings.telegram_bot_token) else "OFF")
     log.info("=" * 60)
 
@@ -349,15 +347,6 @@ def run() -> None:
         store,
     )
 
-    # ─── News ────────────────────────────────────────────────────────────
-    news_provider: RssNewsProvider | None = None
-    if settings.news_enabled:
-        news_provider = RssNewsProvider(
-            cache_ttl_sec=600,
-            max_items=settings.news_max_items,
-            max_age_hours=settings.news_max_age_hours,
-        )
-
     # ─── v0.30: external macro providers ─────────────────────────────────
     macro_rates_provider: MacroRatesProvider | None = None
     if getattr(settings, "macro_rates_enabled", False):
@@ -374,12 +363,11 @@ def run() -> None:
         log.info("CryptoMacro provider initialized (BTC.D + total cap via CoinGecko /global)")
 
     log.info(
-        "v0.30 features: macro_rates=%s crypto_macro=%s "
-        "stats_window=%s uncertainty_block=%.2f",
+        "v0.40 features: macro_rates=%s crypto_macro=%s stats_window=%s "
+        "(news REMOVED — price-action + macro-regime only)",
         "ON" if macro_rates_provider else "OFF",
         "ON" if crypto_macro_provider else "OFF",
         getattr(settings, "stats_window_start", "") or "(legacy: no cutoff)",
-        getattr(settings, "news_uncertainty_block_threshold", 0.7),
     )
 
     # ─── Telegram ────────────────────────────────────────────────────────
@@ -480,8 +468,7 @@ def run() -> None:
             cycle += 1
             try:
                 _run_cycle(
-                    cycle, settings, store, bybit, llm, killswitch,
-                    news_provider, tg,
+                    cycle, settings, store, bybit, llm, killswitch, tg,
                     macro_rates_provider=macro_rates_provider,
                     crypto_macro_provider=crypto_macro_provider,
                     entry_sensor=entry_sensor,
@@ -516,8 +503,7 @@ def run() -> None:
                 log.info("EVENT-FULL trigger: %s", "; ".join(full_dec.triggers))
                 try:
                     _run_cycle(
-                        cycle, settings, store, bybit, llm, killswitch,
-                        news_provider, tg,
+                        cycle, settings, store, bybit, llm, killswitch, tg,
                         macro_rates_provider=macro_rates_provider,
                         crypto_macro_provider=crypto_macro_provider,
                         entry_sensor=entry_sensor,
@@ -622,7 +608,6 @@ def _run_cycle(
     bybit: AiBybitClient,
     llm: DeepSeekClient,
     killswitch: KillSwitch,
-    news_provider: RssNewsProvider | None,
     tg: TelegramBot | None,
     *,
     macro_rates_provider: MacroRatesProvider | None = None,
@@ -661,7 +646,6 @@ def _run_cycle(
         store,
         settings.symbols,
         settings.virtual_capital_usd,
-        news_provider,
         taker_fee_pct=settings.taker_fee_pct,
         macro_rates_provider=macro_rates_provider,
         crypto_macro_provider=crypto_macro_provider,
@@ -688,9 +672,9 @@ def _run_cycle(
 
     n_recent = len(ctx.recent_closed_trades)
     log.info(
-        "LLM call: positions=%d real_equity=$%.2f news=%d macro_rates=%s "
+        "LLM call: positions=%d real_equity=$%.2f macro_rates=%s "
         "crypto_macro=%s self_reflection=%d_trades_in_window",
-        len(ctx.open_positions), ctx.real_equity_usd, len(ctx.news),
+        len(ctx.open_positions), ctx.real_equity_usd,
         "yes" if ctx.macro_rates_block else "no",
         "yes" if ctx.crypto_macro_block else "no",
         n_recent,
@@ -727,9 +711,6 @@ def _run_cycle(
         settings.symbols,
         risk_usd_cap=settings.virtual_capital_usd * settings.risk_per_trade_pct,
         strict_v030_schema=True,
-        news_uncertainty_block=getattr(
-            settings, "news_uncertainty_block_threshold", 0.7
-        ),
         position_size_cap_usd=getattr(
             settings, "max_position_size_usd", settings.virtual_capital_usd
         ),
@@ -775,14 +756,13 @@ def _run_cycle(
             thesis_status=apply.thesis_status,
             thesis_invalidator=apply.thesis_invalidator,
         )
-    if decision_id and (
-        apply.aggregate_uncertainty is not None
-        or apply.sentiment_items_json is not None
-    ):
+    # v0.40: news sentiment УДАЛЁН; сохраняем только macro-snapshot для
+    # audit (DXY/UST10Y текст на момент решения). sentiment-поля = None.
+    if decision_id and ctx.macro_rates_block:
         store.update_decision_sentiment(
             decision_id,
-            aggregate_uncertainty=apply.aggregate_uncertainty,
-            sentiment_items_json=apply.sentiment_items_json,
+            aggregate_uncertainty=None,
+            sentiment_items_json=None,
             macro_rates_snapshot=ctx.macro_rates_block,
         )
     if apply.error:
@@ -883,9 +863,6 @@ def _run_review_cycle(
         review_mode=True,
         risk_usd_cap=settings.virtual_capital_usd * settings.risk_per_trade_pct,
         strict_v030_schema=True,
-        news_uncertainty_block=getattr(
-            settings, "news_uncertainty_block_threshold", 0.7
-        ),
         position_size_cap_usd=getattr(
             settings, "max_position_size_usd", settings.virtual_capital_usd
         ),

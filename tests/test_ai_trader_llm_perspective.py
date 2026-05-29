@@ -17,7 +17,6 @@ import pytest
 
 from ai_trader.config.settings import AiTraderSettings
 from ai_trader.llm.prompts import build_system_prompt, build_user_prompt
-from ai_trader.news.rss import NewsItem
 from ai_trader.state.db import AiPosition
 from ai_trader.trading.client import Bar, Position, Ticker
 from ai_trader.trading.context import (
@@ -146,30 +145,6 @@ def test_render_full_llm_input(tmp_path: Path):
         ),
     }
 
-    # 3 news items: mixed sentiment.
-    news = [
-        NewsItem(
-            title="BTC Spot ETF Sees $890M Net Inflow on Tuesday, Largest in 3 Weeks",
-            summary="BlackRock IBIT led with $620M of inflows; institutional appetite returning amid Fed dovish pivot.",
-            source="Coindesk", published_iso=datetime.now(tz=UTC).isoformat(),
-            url="https://example.com/btc-etf", symbols=["BTCUSDT"],
-        ),
-        NewsItem(
-            title="Solana DeFi TVL Tops $9B as Alpenglow Upgrade Launches",
-            summary="Bullish for SOL DeFi but unclear if sufficient to reverse short-term BTC.D rise.",
-            source="CryptoSlate",
-            published_iso=(datetime.now(tz=UTC) - timedelta(minutes=45)).isoformat(),
-            url="https://example.com/sol", symbols=["SOLUSDT"],
-        ),
-        NewsItem(
-            title="ECB Surprise: Holds Rates, Signals Possible 2026 Cut",
-            summary="DXY -0.4% on the news; risk-on rally in equities. Crypto reaction muted so far.",
-            source="Reuters",
-            published_iso=(datetime.now(tz=UTC) - timedelta(hours=2)).isoformat(),
-            url="https://example.com/ecb", symbols=[],
-        ),
-    ]
-
     # SELF-REFLECTION mock data.
     per_symbol_pnl = [
         {"symbol": "BTCUSDT", "n": 8, "wins": 5, "win_rate_pct": 62.5,
@@ -226,7 +201,6 @@ def test_render_full_llm_input(tmp_path: Path):
         open_positions=open_positions,
         virtual_capital_usd=settings.virtual_capital_usd,
         real_equity_usd=487.50,
-        news=news,
         live_positions=live_positions,
         taker_fee_pct=settings.taker_fee_pct,
         macro_rates_block=(
@@ -272,7 +246,7 @@ def test_render_full_llm_input(tmp_path: Path):
     assert len(system_prompt) > 1000
     assert len(user_prompt) > 1000
     assert "BTCUSDT" in user_prompt
-    assert "PER-ASSET MACRO DRIVER HIERARCHY" in system_prompt
+    assert "MACRO REGIME FILTER" in system_prompt
     assert "WHAT YOU DO NOT SEE" in system_prompt
     assert "SELF-REFLECTION" in user_prompt
     assert "macro_thesis" in user_prompt  # должен быть рядом с открытыми позициями

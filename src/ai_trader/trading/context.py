@@ -4,8 +4,8 @@ Wave 2: добавлены технические индикаторы на дв
 - 1h × 100 свечей: RSI(14), MACD(12/26/9), ATR(14), EMA20/50, BB(20,2)
 - 4h × 50 свечей: те же индикаторы, для оценки крупного тренда
 
-Wave 3: добавляется блок NEWS (последние 1-3 ч заголовков, фильтр по
-символам). Если news-feed недоступен — блок пропускается.
+v0.40 (2026-05-29): блок NEWS полностью УДАЛЁН — бот price-action +
+macro-regime, без RSS-новостей. DXY/UST10Y + BTC.D/total cap остаются.
 
 На каждом цикле:
 - Текущая цена + 24h изменение + funding rate по каждому символу
@@ -14,7 +14,7 @@ Wave 3: добавляется блок NEWS (последние 1-3 ч заго
 - 24h high/low
 - Открытые позиции AI (из БД)
 - Реальный equity (для контекста, qty считается от virtual_capital)
-- Новости за последний час (если включены)
+- External macro: DXY/UST10Y (rates) + BTC.D/total cap (crypto-macro)
 """
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from ai_trader.analysis.indicators import IndicatorSnapshot, compute_snapshot, format_snapshot
-from ai_trader.news.rss import NewsItem
 from ai_trader.state.db import AiPosition, AiTraderStore
 from ai_trader.trading.client import AiBybitClient, Bar, Position, Ticker
 
@@ -73,7 +72,6 @@ class MarketContext:
     open_positions: list[AiPosition]
     virtual_capital_usd: float
     real_equity_usd: float
-    news: list[NewsItem] = field(default_factory=list)
     # v0.17 (2026-05-25, Шаг 2a): live данные с биржи по открытым
     # позициям — mapping ``symbol -> Position`` (Position dataclass
     # из ``trading.client``). Используется в format_context_for_prompt
@@ -134,7 +132,6 @@ def collect_market_context(
     store: AiTraderStore,
     symbols: tuple[str, ...],
     virtual_capital_usd: float,
-    news_provider=None,
     *,
     taker_fee_pct: float = 0.0,
     macro_rates_provider=None,
@@ -200,14 +197,6 @@ def collect_market_context(
             live_positions = None
         else:
             live_positions = {p.symbol: p for p in exchange_positions}
-
-    news: list[NewsItem] = []
-    if news_provider is not None:
-        try:
-            news = news_provider.get_recent_news(symbols)
-        except Exception:
-            log.exception("news_provider failed (продолжаю без новостей)")
-            news = []
 
     # v0.30 macro blocks (опциональные, fail-safe).
     macro_rates_block: str | None = None
@@ -284,7 +273,6 @@ def collect_market_context(
         open_positions=open_positions,
         virtual_capital_usd=virtual_capital_usd,
         real_equity_usd=real_equity,
-        news=news,
         live_positions=live_positions,
         taker_fee_pct=taker_fee_pct,
         macro_rates_block=macro_rates_block,
@@ -453,7 +441,7 @@ def collect_review_context(
     """Lite-сборка контекста для review-цикла (5 мин). v0.10-backport на v0.3.
 
     В отличие от `collect_market_context` (full): фетчит только символы
-    с open positions, не дёргает 4H бары, news. Цель: дёшево обновить
+    с open positions, не дёргает 4H бары. Цель: дёшево обновить
     LLM-у картинку по уже открытым позициям, чтобы она могла принять
     early-close решение между full-cycle'ами (раз в 5 мин против 15 мин).
 
@@ -473,7 +461,6 @@ def collect_review_context(
             open_positions=[],
             virtual_capital_usd=virtual_capital_usd,
             real_equity_usd=real_equity,
-            news=[],
             taker_fee_pct=taker_fee_pct,
         )
 
@@ -516,7 +503,6 @@ def collect_review_context(
         open_positions=open_positions,
         virtual_capital_usd=virtual_capital_usd,
         real_equity_usd=real_equity,
-        news=[],
         live_positions=live_positions,
         taker_fee_pct=taker_fee_pct,
     )
@@ -665,7 +651,7 @@ def _funding_cost_hint(
 def format_context_for_review(ctx: MarketContext) -> str:
     """Lite-форматтер: только текущее состояние открытых позиций. v0.3-вариант.
 
-    Без macro/news/options/4H/positioning — review-цикл фокусируется на
+    Без macro/4H/positioning — review-цикл фокусируется на
     быстрых сигналах для exit-решения. Каждая позиция получает блок с её
     символом + ticker + 1H closes + 1H индикаторы.
     """
@@ -929,16 +915,6 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
         parts.append("")
     if ctx.crypto_macro_block:
         parts.append(ctx.crypto_macro_block)
-        parts.append("")
-
-    if ctx.news:
-        parts.append("=== RECENT CRYPTO NEWS ===")
-        for n in ctx.news:
-            tags = f" [{','.join(n.symbols)}]" if n.symbols else ""
-            parts.append(f"  • [{n.source}] {n.title}{tags}")
-            if n.summary and n.summary != n.title:
-                summary = n.summary[:200].replace("\n", " ")
-                parts.append(f"    {summary}")
         parts.append("")
 
     # v0.30: SELF-REFLECTION — per-symbol PnL + recent closed trades.

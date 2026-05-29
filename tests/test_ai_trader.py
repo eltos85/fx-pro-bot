@@ -1983,6 +1983,20 @@ class TestSystemPromptCapitalRulesTemplate:
           (показывается ТОЛЬКО как fallback когда crypto_macro provider
           unavailable). Поведения торговли не меняется, только
           dis-ambiguation для LLM.).
+        - 43ec80ff... (v0.40 NEWS REMOVAL + PRICE-ACTION PERSONA,
+          2026-05-29: личность сменена на "systematic crypto-futures
+          price-action trader" (price first, macro = regime filter).
+          RSS-новости УБРАНЫ полностью (код+промпт+executor-gate).
+          MFP rule 5 "NEWS / MACRO CATALYST" → "MACRO REGIME ALIGNED"
+          (нейтральный confluence-голос, поддерживает trend и mean-revert;
+          порог ≥3/5 без изменений). 5-DIM NEWS SENTIMENT + sentiment{}
+          JSON + aggregate_uncertainty hard-gate УДАЛЕНЫ. macro_thesis
+          переосмыслен в price-action trade-thesis. PER-ASSET MACRO
+          DRIVER HIERARCHY → MACRO REGIME FILTER & SENSITIVITY (убраны
+          news-драйверы: ETF-flow headlines, regulatory, Elon-tweets).
+          EXIT trigger 1a/3 — news-bullets заменены price/regime.
+          DXY/UST10Y + BTC.D/total cap СОХРАНЕНЫ. См.
+          BUILDLOG_AI_TRADER.md v0.40 + reset n=0 per no-data-fitting.).
         """
         import hashlib
 
@@ -1990,7 +2004,7 @@ class TestSystemPromptCapitalRulesTemplate:
         from ai_trader.llm.prompts import SYSTEM_PROMPT, build_system_prompt
 
         expected_sha256 = (
-            "f5022a696c2f1a5419a375991295a2d7bf8435fae11a35e97809bf393b498c1b"
+            "43ec80ff406d6242826b4ae4ec78ce01698e532a55c52c8a2e55049cc6e63129"
         )
         # 1) Module-level SYSTEM_PROMPT (default render с DEFAULT_AI_SYMBOLS).
         actual_sha = hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()

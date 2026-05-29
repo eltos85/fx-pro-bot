@@ -84,15 +84,6 @@ class ApplyResult:
 # v0.30 thesis_status enum для close-action audit.
 _ALLOWED_THESIS_STATUS = {"broken", "intact", "partial"}
 
-# v0.30 5-dim news sentiment поля (см. SYSTEM_PROMPT NEWS SENTIMENT блок).
-_REQUIRED_SENTIMENT_FIELDS = (
-    "aggregate_relevance",
-    "aggregate_polarity",
-    "aggregate_intensity",
-    "aggregate_uncertainty",
-    "aggregate_forwardness",
-)
-
 
 def parse_action(
     text: str,
@@ -101,7 +92,6 @@ def parse_action(
     review_mode: bool = False,
     risk_usd_cap: float = 10.0,
     strict_v030_schema: bool = False,
-    news_uncertainty_block: float = 0.7,
     position_size_cap_usd: float = 500.0,
 ) -> ParsedAction | str:
     """Возвращает ParsedAction или строку с описанием ошибки.
@@ -127,14 +117,10 @@ def parse_action(
     backward-compat с существующими тестами):
 
     - ``action=open`` требует ДОПОЛНИТЕЛЬНО:
-      * ``macro_thesis`` (string, ≥50 ≤500 chars) — pre-registered
-        dominant macro driver(s) из per-asset hierarchy.
-      * ``sentiment`` блок с 5 числовыми полями (0.0-1.0):
-        aggregate_relevance, aggregate_polarity (-1..+1 допустим),
-        aggregate_intensity, aggregate_uncertainty, aggregate_forwardness.
-      * Hard gate: если ``sentiment.aggregate_uncertainty >
-        news_uncertainty_block`` → reject с явной ошибкой (промпт сам
-        должен возвращать hold; gate — safety net).
+      * ``macro_thesis`` (string, ≥50 ≤500 chars) — PRICE-ACTION
+        trade-thesis (MFP-сетап + конкретный price level + macro
+        regime). v0.40: ``sentiment`` блок и uncertainty-gate УДАЛЕНЫ
+        (нет news-фида).
     - ``action=close`` требует ДОПОЛНИТЕЛЬНО:
       * ``thesis_status`` ∈ {"broken", "intact", "partial"} —
         классификация что произошло с тезисом (THESIS DISCIPLINE).
@@ -256,47 +242,27 @@ def parse_action(
                 f"Per-trade cap = ${risk_usd_cap:g}."
             )
 
-        # v0.30 strict schema: macro_thesis + sentiment block + gate.
+        # v0.40 strict schema: macro_thesis (reframed as PRICE-ACTION
+        # trade-thesis) — sentiment block + uncertainty gate REMOVED
+        # (no news feed). macro_thesis stays mandatory (≥50 ≤500 chars).
         if strict_v030_schema:
             mth = obj.get("macro_thesis")
             if not isinstance(mth, str):
                 return (
                     f"macro_thesis required (string), got {type(mth).__name__}. "
-                    "Cite dominant macro driver(s) from per-asset hierarchy."
+                    "State the price-action setup + a specific level + regime."
                 )
             mth_stripped = mth.strip()
             if len(mth_stripped) < 50:
                 return (
                     f"macro_thesis too short (min 50 chars, got "
-                    f"{len(mth_stripped)}). Cite ≥1 driver from per-asset "
-                    "hierarchy + specific level/number (e.g. \"ETF net inflow "
-                    "$1.2B last 5d + DXY -0.8% testing 98.5\")."
+                    f"{len(mth_stripped)}). State the MFP setup + a specific "
+                    "price level + macro regime context (e.g. \"1H broke 24h "
+                    "high $79.8k on ATR% expansion, 4H trend up, risk-on "
+                    "regime; SL below the broken high\")."
                 )
             if len(mth_stripped) > 500:
                 return f"macro_thesis too long (max 500 chars): got {len(mth_stripped)}"
-
-            sent = obj.get("sentiment")
-            if not isinstance(sent, dict):
-                return (
-                    f"sentiment required (object with 5 fields: "
-                    f"{', '.join(_REQUIRED_SENTIMENT_FIELDS)}), got "
-                    f"{type(sent).__name__}"
-                )
-            for fld in _REQUIRED_SENTIMENT_FIELDS:
-                v = sent.get(fld)
-                if not isinstance(v, (int, float)) or isinstance(v, bool):
-                    return (
-                        f"sentiment.{fld} required (number 0.0-1.0, "
-                        f"polarity allows -1..+1), got {v!r}"
-                    )
-            # Hard gate: aggregate_uncertainty > threshold → блокируем open.
-            au = float(sent["aggregate_uncertainty"])
-            if au > news_uncertainty_block:
-                return (
-                    f"open_blocked_by_uncertainty: aggregate_uncertainty="
-                    f"{au:.2f} > threshold={news_uncertainty_block:.2f}. "
-                    "Promote to HOLD (NEWS UNCERTAINTY GATE)."
-                )
 
     if action == "close":
         if not isinstance(obj.get("position_id"), int):
@@ -316,7 +282,7 @@ def parse_action(
                 return (
                     f"thesis_invalidator required (non-empty string), got "
                     f"{inv!r}. Specify what broke / confirmed the thesis "
-                    "(price level / news / indicator)."
+                    "(price level / trend flip / regime shift / indicator)."
                 )
             if len(inv) > 500:
                 return f"thesis_invalidator too long (max 500 chars): got {len(inv)}"
@@ -474,18 +440,11 @@ def _apply_open(
         if isinstance(macro_thesis_raw, str) and macro_thesis_raw.strip()
         else None
     )
-    # v0.30: 5-dim sentiment block для audit-trail в decisions.
-    sent_block = raw.get("sentiment") if isinstance(raw.get("sentiment"), dict) else None
+    # v0.40: 5-dim news sentiment УДАЛЁН (нет news-фида). Поля оставлены
+    # в ApplyResult/БД для backward-compat со старыми decision-строками,
+    # но всегда None — sentiment больше не парсится.
     aggregate_uncertainty: float | None = None
     sentiment_items_json: str | None = None
-    if sent_block:
-        au_v = sent_block.get("aggregate_uncertainty")
-        if isinstance(au_v, (int, float)) and not isinstance(au_v, bool):
-            aggregate_uncertainty = float(au_v)
-        try:
-            sentiment_items_json = json.dumps(sent_block, ensure_ascii=False)[:2000]
-        except (TypeError, ValueError):
-            sentiment_items_json = None
 
     # v0.31 (aggressive mandate): cost_estimate_usd — optional audit поле.
     # LLM ожидает посчитать fee_RT + funding-to-settlement и сравнить с
