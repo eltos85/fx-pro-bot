@@ -2,6 +2,32 @@
 
 ## 2026-05-29
 
+### chore(repo): удаление ботов bybit_bot и ai_arena (оставлены только ai_trader + fx_ai_trader + advisor-инфра)
+
+`69ac275`
+
+Чистка репозитория по запросу: убраны два неиспользуемых бота со всем
+обвесом, при этом advisor (`fx_pro_bot`) сохранён целиком как cTrader-движок,
+от которого зависит `fx_ai_trader` (`trading.{client,symbols,auth}`).
+
+Проверено через граф зависимостей: ни `ai_trader`, ни `fx_ai_trader`, ни
+`fx_pro_bot` не импортируют `bybit_bot`/`ai_arena`. `scripts/collect_bybit_3bots_stats.py`
+**оставлен** — это Bybit-API stats-инструмент для `ai_trader` (не импортирует
+удалённые пакеты). Все 923 теста зелёные после удаления.
+
+**Удалено:** `src/bybit_bot/`, `src/ai_arena/`; их тесты (2 bybit + 13 ai_arena
++ `test_ab_test_snapshot.py`); bybit/ai_arena-скрипты (8); `Dockerfile.bybit`,
+`Dockerfile.ai-arena`, `docker/bybit-entrypoint.sh`; доки (`BUILDLOG_BYBIT.md`,
+`BUILDLOG_AI_ARENA.md`, `BYBIT_AB_TEST.md`, `AI_TRADER_PROPOSAL_ALPHA_ARENA.md`,
+`MIGRATION_AI_ARENA_TO_REAL_MONEY.md`); rules (`bybit-*`, `ai-arena-sources`).
+
+**Изменено:** `docker-compose.yml` (убраны сервисы bybit-bot/ai-arena +
+volumes bybit_data/ai_arena_data), `pyproject.toml` (packages + console-scripts),
+`.env.example` (-99 строк BYBIT/AI_ARENA), rules `deploy-vps`/`buildlog`/
+`stats-collection`/`strategy-guard` (сняты ссылки на удалённые боты).
+
+**Файлы:** docker-compose.yml, pyproject.toml, .env.example, .cursor/rules/*
+
 ### feat(data-feeds): 5 бесплатных усилений контекста — FRED real-yields / VIX / CFTC COT / GDELT / econ-calendar
 
 `коммит при deploy`

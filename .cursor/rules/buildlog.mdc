@@ -1,22 +1,23 @@
 ---
-description: Ведение BUILDLOG при каждом коммите и деплое. Для fx_pro_bot/advisor — BUILDLOG.md, для bybit_bot — BUILDLOG_BYBIT.md.
+description: Ведение BUILDLOG при каждом коммите и деплое. Для fx_pro_bot/advisor — BUILDLOG.md, для ai_trader — BUILDLOG_AI_TRADER.md, для fx_ai_trader — BUILDLOG_AI_FX_TRADER.md.
 alwaysApply: true
 ---
 
 # Build Log
 
 При каждом коммите и деплое на VPS — дополнять соответствующий BUILDLOG
-новой записью. В репозитории два отдельных лога, по одному на бот:
+новой записью. В репозитории отдельные логи, по одному на бот:
 
 | Бот | Лог | Когда писать |
 |---|---|---|
-| `fx_pro_bot` / advisor (cTrader) | `BUILDLOG.md` | правки в `src/fx_pro_bot/`, `scripts/`, FxPro-стратегии, advisor-деплой |
-| `bybit_bot` | `BUILDLOG_BYBIT.md` | правки в `src/bybit_bot/`, bybit-тесты, bybit-скрипты, bybit-деплой |
+| `fx_pro_bot` / advisor (cTrader) | `BUILDLOG.md` | правки в `src/fx_pro_bot/`, FxPro-стратегии, advisor-деплой |
+| `ai_trader` (DeepSeek + Bybit) | `BUILDLOG_AI_TRADER.md` | правки в `src/ai_trader/`, ai_trader-тесты/скрипты |
+| `fx_ai_trader` (DeepSeek + cTrader) | `BUILDLOG_AI_FX_TRADER.md` | правки в `src/fx_ai_trader/`, fx_ai_trader-тесты/скрипты |
 
-Если коммит затрагивает **оба** бота (кросс-cutting, например правка
-общих тестов или docker-compose.yml) — добавить запись в **оба** лога
-с общим хешем, но разными акцентами (что изменилось именно в этой
-кодовой базе).
+Если коммит затрагивает **несколько** ботов (кросс-cutting, например правка
+общих тестов или docker-compose.yml) — добавить запись в **каждый**
+соответствующий лог с общим хешем, но разными акцентами (что изменилось
+именно в этой кодовой базе).
 
 ## Формат записи
 
@@ -36,5 +37,5 @@ alwaysApply: true
 - Для багов: описать симптом → причину → решение
 - Для фич: описать что добавлено и на что влияет
 - Обновлять BUILDLOG (нужный!) в том же коммите что и основные изменения
-- Нельзя путать логи: FxPro-правки не пишем в `BUILDLOG_BYBIT.md` и
-  наоборот — это ломает контекст для stats-baseline правил.
+- Нельзя путать логи: правки одного бота не пишем в лог другого —
+  это ломает контекст для stats-baseline правил.

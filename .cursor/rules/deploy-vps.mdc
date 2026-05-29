@@ -27,11 +27,11 @@ alwaysApply: true
    # Для fx_pro_bot / advisor (cTrader):
    ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-advisor-1 --tail 20"
 
-   # Для bybit_bot:
-   ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-bybit-bot-1 --tail 20"
-
    # Для ai_trader:
    ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-ai-trader-1 --tail 20"
+
+   # Для fx_ai_trader:
+   ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-fx-ai-trader-1 --tail 20"
 
    # Если правки затронули несколько ботов — проверить все соответствующие контейнеры.
    ```
@@ -45,8 +45,6 @@ alwaysApply: true
 - **fx_pro_bot / advisor**: in-flight ордера/позиции переподтягиваются из
  SQLite `advisor_data` при старте — рестарт безопасен, но возможна
  миллисекундная пауза.
-- **bybit_bot**: позиции синкаются с биржи при старте (`_sync_positions_on_startup`) —
- рестарт безопасен.
 - **ai_trader**: БД `ai_trader_data` сохраняется, открытые позиции
  reconcile-ятся с биржей при следующем цикле, **но in-memory cycle
  counter сбрасывается на 1** (используй `decisions.id` из БД для
@@ -63,11 +61,11 @@ alwaysApply: true
 # Только advisor:
 ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -d --no-deps --build advisor"
 
-# Только bybit-bot:
-ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -d --no-deps --build bybit-bot"
-
 # Только ai-trader:
 ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -d --no-deps --build ai-trader"
+
+# Только fx-ai-trader:
+ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -d --no-deps --build fx-ai-trader"
 ```
 
 `--no-deps` запрещает compose трогать зависимые сервисы, `--build`
@@ -89,12 +87,13 @@ ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -
 - Путь: `/root/fx-pro-bot`
 - Репозиторий на VPS — git clone с `origin git@github.com:eltos85/fx-pro-bot.git`
 - Контейнеры:
-  - `fx-pro-bot-advisor-1` — fx_pro_bot (cTrader)
-  - `fx-pro-bot-bybit-bot-1` — bybit_bot
+  - `fx-pro-bot-ctrader-token-service-1` — OAuth refresh-сервис (cTrader)
+  - `fx-pro-bot-advisor-1` — fx_pro_bot (cTrader, profile `disabled`)
   - `fx-pro-bot-ai-trader-1` — ai_trader (DeepSeek + Bybit demo)
+  - `fx-pro-bot-fx-ai-trader-1` — fx_ai_trader (DeepSeek + cTrader demo)
 - Docker volumes:
-  - `advisor_data` — SQLite advisor'а (не удалять)
-  - `ai_trader_data` — SQLite ai_trader'а с историей decisions/positions/PnL (не удалять — сброс = потеря 14-дневного эксперимента)
+  - `ai_trader_data` — SQLite ai_trader'а с историей decisions/positions/PnL (не удалять — сброс = потеря эксперимента)
+  - bind `./data:/data` — SQLite advisor + fx_ai_trader + cTrader-токены
 
 ## Секреты GitHub Actions
 

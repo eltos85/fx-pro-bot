@@ -32,19 +32,15 @@ token-service = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 fx-pro-bot = "fx_pro_bot.app.main:main"
 fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
 fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
-bybit-bot = "bybit_bot.app.main:main"
 ai-trader = "ai_trader.app.main:run"
 fx-ai-trader = "fx_ai_trader.app.main:run"
-ai-arena = "ai_arena.app.main:run"
 ctrader-token-service = "ctrader_token_service.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = [
   "src/fx_pro_bot",
-  "src/bybit_bot",
   "src/ai_trader",
   "src/fx_ai_trader",
-  "src/ai_arena",
   "src/shared_oauth",
   "src/ctrader_token_service",
 ]

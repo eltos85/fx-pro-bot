@@ -1,13 +1,13 @@
 ---
-description: Методология сбора статистики ботов (ai-trader, ai-arena, bybit-bot). Иерархия источников + запрет на ad-hoc API без pagination.
+description: Методология сбора статистики ботов (ai-trader, fx_ai_trader, advisor). Иерархия источников + запрет на ad-hoc API без pagination.
 alwaysApply: true
 ---
 
 # Сбор статистики: иерархия источников и обязательная сверка
 
 Правило обязательно для любых stat-сводок (последние 24h, неделя, месяц)
-по любому боту: `ai-trader`, `ai-arena`, `bybit-bot`, `fx_pro_bot/advisor`,
-`fx_ai_trader`. Цель — устранить путаницу когда разные источники дают
+по любому боту: `ai-trader`, `fx_ai_trader`, `fx_pro_bot/advisor`.
+Цель — устранить путаницу когда разные источники дают
 разные числа (был случай 2026-05-25: БД +$14.92, my API call +$2.35,
 выписка показала net +$14.4 — БД была близка к истине, но мой быстрый
 API call пропустил половину trades).
@@ -64,11 +64,11 @@ API call пропустил половину trades).
 
 ## Готовые источники в проекте
 
-- `scripts/collect_bybit_3bots_stats.py` — full pagination, split shared
-  subaccount по `orderLinkId starts with "ai_"`. Запуск см. docstring
-  скрипта (через `docker run` с volume-mounts).
-- `bybit-pnl.mdc` — частное правило для `bybit_bot` (`closedPnl` уже
-  net). Текущее правило — мета-уровневое, не отменяет частные.
+- `scripts/collect_bybit_3bots_stats.py` — full pagination для Bybit
+  (ai_trader), split shared subaccount по `orderLinkId starts with "ai_"`.
+  Запуск см. docstring скрипта (через `docker run` с volume-mounts).
+- Bybit `get_closed_pnl` отдаёт `closedPnl` уже **net** (с учётом fees и
+  funding) — это ground truth для ai_trader, приоритетнее локальной БД.
 
 ## Связь с другими правилами
 
@@ -76,4 +76,3 @@ API call пропустил половину trades).
   если выписка показывает loss, не «исправлять» через БД-цифры.
 - `sample-size.mdc` — в любом случае выборка <100 trades = noise, даже
   при идеально точной стате.
-- `bybit-pnl.mdc` — детали `closedPnl` semantics для bybit-bot.

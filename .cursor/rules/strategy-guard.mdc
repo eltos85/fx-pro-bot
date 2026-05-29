@@ -36,37 +36,6 @@ alwaysApply: true
   3. Обновить таблицу в `STRATEGIES.md` с новым значением + источником.
 - **Ключевые research-инварианты** (не трогать без обсуждения):
 
-  **Bybit (`src/bybit_bot/strategies/`):**
-  - `BtcLeadLagStrategy`: корреляция считается по **log-returns**, не по
-    ценам (Asia-Pacific Financial Markets 2026).
-  - `SessionOrbStrategy` (crypto-версия): 15-минутная коробка, volume
-    1.3× 20-bar avg (FMZQuant 2024).
-  - `TurtleSoupStrategy`: 20-period lookback, RSI-confirmation
-    (Connors/Raschke 1995; Enhanced Sword Red 2024).
-  - `VwapCryptoStrategy`: 2 ATR порог отклонения (95% boundary HFT).
-  - `StatArbCryptoStrategy`: **Z_entry=2.0σ**, Z_exit=0.5σ, ADF p≤0.05
-    (5% level). Параметры обновлены по AUDIT_2026.md (P0): research
-    [GitHub abailey81/Crypto-Statistical-Arbitrage 2025] для CEX altcoins
-    указывает Z=±2.0 / exit 0.0 / stop ±3.0 как live live-baseline. Ранее
-    в правиле было Z=2.5 — это историческая запись, расходилась с
-    реально работающим кодом (`Z_ENTRY = 2.0`).
-  - `CryptoOverboughtFaderStrategy` (Wave 5): DUO-SHORT (Turtle + VWAP
-    agree), NY сессия (13:00–20:59 UTC, ``range(13, 21)``), RSI ≥ 65,
-    ATR% ≥ 0.3 — параметры из mining 90-дневного OOS backtest, Variant E.
-  - `FundingScalpStrategy`: contrarian-вход за 30 мин до funding при
-    `|rate| ≥ 0.0003` (0.03%); short при положительном funding, long
-    при отрицательном. Funding bands (Lambda Finance 2026):
-    `<0.05%` нейтрально, `0.05–0.20%` лёгкий перекос, `>0.20%` сильный.
-    Bybit funding schedule: 00:00 / 08:00 / 16:00 UTC. **Известное
-    ограничение** (AUDIT_2026.md P3): не учитывает OI delta, который
-    в 2026 framework сильнее funding в одиночку.
-  - `VolumeSpikeStrategy`: вход по направлению тела бара при
-    `volume ≥ 2.0× avg(20)`, `ADX ≥ 20`, RSI не блокирует. SL/TP =
-    2.0/2.0 ATR (Quant Signals 2025, бэктест n=9433, PF=1.72, DD=4.6%).
-    Cooldown 5 баров. **Известное ограничение** (AUDIT_2026.md P3):
-    голый OHLCV-объём без orderflow / DOM, что чувствительно к slippage
-    (r/algotrading stress-test 2026: 34–67% разрыва backtest↔live).
-
   **FxPro / advisor (`src/fx_pro_bot/strategies/`):**
   - `SessionOrbStrategy` (FX-версия): confirm bar на close пробойной свечи
     (Al Brooks 2012, ch.5); R:R 2:1 (SL 1.5 ATR / TP 3.0 ATR, John Carter
@@ -100,8 +69,11 @@ alwaysApply: true
 
 ## Изоляция кодовых баз
 
-- `fx_pro_bot.*` и `bybit_bot.*` — **две независимые экосистемы**.
-- **ЗАПРЕЩЕНО** импортировать `fx_pro_bot.*` из `bybit_bot.*` и наоборот.
-- Стратегии с одинаковыми именами (например `session_orb.py`) допустимы в
-  обоих модулях — они эволюционируют независимо, сверяясь с research
-  каноном (а не друг с другом).
+- В проекте живут боты `fx_pro_bot` (advisor, cTrader), `ai_trader`
+  (DeepSeek + Bybit) и `fx_ai_trader` (DeepSeek + cTrader).
+- `fx_ai_trader` **намеренно** переиспользует cTrader-движок
+  `fx_pro_bot.trading.{client,symbols,auth}` и LLM/indicators из
+  `ai_trader` — это shared-инфраструктура, не нарушение изоляции.
+- В остальном торговая логика ботов независима: не тащи стратегические
+  параметры одного бота в другой, сверяйся с research-каноном
+  (а не с соседним ботом).
