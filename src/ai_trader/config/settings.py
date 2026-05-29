@@ -223,6 +223,83 @@ class AiTraderSettings(BaseSettings):
         default=0.7, validation_alias="AI_TRADER_NEWS_UNCERTAINTY_BLOCK"
     )
 
+    # ─── Event-driven analyst (v0.34, 2026-05-29; порт fx Фаз 1-3) ──────
+    # Живой поток цены (pybit WebSocket public ticker, см. price_stream.py)
+    # + датчики (price_sensor.py) будят внеплановый вызов аналитика по
+    # факту рыночного события, не дожидаясь планового таймера. Датчики
+    # читают in-memory кэш живой цены — БЕЗ доп. API-запросов. НЕ меняют
+    # правила входа/выхода: решение по-прежнему за LLM. Откат: выключить
+    # флаги ниже → чистый polling (full 15min + review 5min).
+    event_full_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_EVENT_FULL_ENABLED"
+    )
+    # Интервал опроса датчиков (live-кэш) между плановыми циклами.
+    event_sensor_interval_sec: int = Field(
+        default=15, validation_alias="AI_TRADER_EVENT_SENSOR_INTERVAL_SEC"
+    )
+    # Макс. возраст live-цены: старше → датчики на символе молчат
+    # (безопасная деградация при обрыве WS).
+    event_price_max_age_sec: int = Field(
+        default=60, validation_alias="AI_TRADER_EVENT_PRICE_MAX_AGE_SEC"
+    )
+
+    # LockedProfit → внеплановый REVIEW (guardian фиксирует прибыль).
+    # threshold_r ДОЛЖЕН совпадать с locked-profit порогом в
+    # SYSTEM_PROMPT_REVIEW (1.5R) — датчик будит review ровно когда у
+    # guardian появляется право зафиксировать прибыль.
+    locked_profit_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_LOCKED_PROFIT_ENABLED"
+    )
+    locked_profit_threshold_r: float = Field(
+        default=1.5, validation_alias="AI_TRADER_LOCKED_PROFIT_THRESHOLD_R"
+    )
+    locked_profit_hysteresis_r: float = Field(
+        default=0.3, validation_alias="AI_TRADER_LOCKED_PROFIT_HYSTERESIS_R"
+    )
+    locked_profit_cooldown_sec: int = Field(
+        default=120, validation_alias="AI_TRADER_LOCKED_PROFIT_COOLDOWN_SEC"
+    )
+    locked_profit_max_per_hour: int = Field(
+        default=6, validation_alias="AI_TRADER_LOCKED_PROFIT_MAX_PER_HOUR"
+    )
+
+    # AdverseMove → внеплановый FULL (стратег с macro пересматривает
+    # тезис). 1R = натуральная единица риска (дистанция до SL).
+    adverse_move_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_ADVERSE_MOVE_ENABLED"
+    )
+    adverse_move_threshold_r: float = Field(
+        default=1.0, validation_alias="AI_TRADER_ADVERSE_MOVE_THRESHOLD_R"
+    )
+    adverse_move_hysteresis_r: float = Field(
+        default=0.3, validation_alias="AI_TRADER_ADVERSE_MOVE_HYSTERESIS_R"
+    )
+    adverse_move_cooldown_sec: int = Field(
+        default=300, validation_alias="AI_TRADER_ADVERSE_MOVE_COOLDOWN_SEC"
+    )
+    adverse_move_max_per_hour: int = Field(
+        default=4, validation_alias="AI_TRADER_ADVERSE_MOVE_MAX_PER_HOUR"
+    )
+
+    # EntryBreakout → внеплановый FULL (аналитик решает open/hold по
+    # пробою Donchian-канала). lookback 20 — Donchian/Turtle canonical
+    # (Faith 2003). buffer_atr — confirmation band (анти-шум).
+    entry_breakout_enabled: bool = Field(
+        default=True, validation_alias="AI_TRADER_ENTRY_BREAKOUT_ENABLED"
+    )
+    entry_breakout_lookback: int = Field(
+        default=20, validation_alias="AI_TRADER_ENTRY_BREAKOUT_LOOKBACK"
+    )
+    entry_breakout_buffer_atr: float = Field(
+        default=0.05, validation_alias="AI_TRADER_ENTRY_BREAKOUT_BUFFER_ATR"
+    )
+    entry_breakout_cooldown_sec: int = Field(
+        default=300, validation_alias="AI_TRADER_ENTRY_BREAKOUT_COOLDOWN_SEC"
+    )
+    entry_breakout_max_per_hour: int = Field(
+        default=4, validation_alias="AI_TRADER_ENTRY_BREAKOUT_MAX_PER_HOUR"
+    )
+
     # ─── Misc ────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", validation_alias="AI_TRADER_LOG_LEVEL")
     trading_enabled: bool = Field(

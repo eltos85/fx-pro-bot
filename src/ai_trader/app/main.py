@@ -45,6 +45,14 @@ from ai_trader.trading.context import (
 from ai_trader.trading.executor import apply_action, parse_action
 from ai_trader.trading.funding_reconcile import fetch_position_funding
 from ai_trader.trading.pnl_reconcile import fetch_net_pnl
+from ai_trader.trading.price_sensor import (
+    AdverseMoveSensor,
+    EntryBreakoutSensor,
+    EventDecision,
+    LockedProfitSensor,
+    compute_unrealised_r,
+)
+from ai_trader.trading.price_stream import BybitPriceStream
 
 log = logging.getLogger("ai_trader")
 
@@ -375,7 +383,64 @@ def run() -> None:
     cycle = 0
     last_full_ts = 0.0  # monotonic timestamp последнего full-cycle (0 = ещё не было)
     last_review_ts = 0.0
+    last_sensor_ts = 0.0
     review_enabled = settings.review_interval_sec > 0
+
+    # ─── v0.34: event-driven analyst (живой поток цены + датчики) ────────
+    price_stream: BybitPriceStream | None = None
+    locked_profit_sensor: LockedProfitSensor | None = None
+    entry_sensor: EntryBreakoutSensor | None = None
+    adverse_sensor: AdverseMoveSensor | None = None
+    if settings.event_full_enabled:
+        price_stream = BybitPriceStream(
+            list(settings.symbols),
+            category=settings.bybit_category,
+            testnet=False,  # public market-data одинаковы для demo/live
+            max_age_sec=float(settings.event_price_max_age_sec),
+        )
+        price_stream.start()
+        # LockedProfit → внеплановый REVIEW (только если review включён).
+        if settings.locked_profit_enabled and review_enabled:
+            locked_profit_sensor = LockedProfitSensor(
+                threshold_r=settings.locked_profit_threshold_r,
+                hysteresis_r=settings.locked_profit_hysteresis_r,
+                cooldown_sec=float(settings.locked_profit_cooldown_sec),
+                max_events_per_hour=settings.locked_profit_max_per_hour,
+            )
+        # EntryBreakout + AdverseMove → внеплановый FULL.
+        if settings.entry_breakout_enabled:
+            entry_sensor = EntryBreakoutSensor(
+                buffer_atr=settings.entry_breakout_buffer_atr,
+                cooldown_sec=float(settings.entry_breakout_cooldown_sec),
+                max_events_per_hour=settings.entry_breakout_max_per_hour,
+            )
+        if settings.adverse_move_enabled:
+            adverse_sensor = AdverseMoveSensor(
+                threshold_r=settings.adverse_move_threshold_r,
+                hysteresis_r=settings.adverse_move_hysteresis_r,
+                cooldown_sec=float(settings.adverse_move_cooldown_sec),
+                max_events_per_hour=settings.adverse_move_max_per_hour,
+            )
+        log.info(
+            "v0.34 EVENT-DRIVEN: stream=on interval=%ds | locked-profit=%s "
+            "(%.2fR, max/h=%d) | adverse=%s (≤−%.2fR, max/h=%d) | "
+            "entry-breakout=%s (Donchian-%d, buf=%.2fATR, max/h=%d)",
+            settings.event_sensor_interval_sec,
+            "on" if locked_profit_sensor else "off",
+            settings.locked_profit_threshold_r, settings.locked_profit_max_per_hour,
+            "on" if adverse_sensor else "off",
+            settings.adverse_move_threshold_r, settings.adverse_move_max_per_hour,
+            "on" if entry_sensor else "off",
+            settings.entry_breakout_lookback, settings.entry_breakout_buffer_atr,
+            settings.entry_breakout_max_per_hour,
+        )
+
+    any_sensor = (
+        locked_profit_sensor is not None
+        or entry_sensor is not None
+        or adverse_sensor is not None
+    )
+
     while not _shutdown:
         now_mono = time.monotonic()
         # full-cycle: первый запуск сразу, дальше — каждые poll_interval_sec
@@ -387,6 +452,7 @@ def run() -> None:
                     news_provider, tg,
                     macro_rates_provider=macro_rates_provider,
                     crypto_macro_provider=crypto_macro_provider,
+                    entry_sensor=entry_sensor,
                 )
             except Exception as e:
                 log.exception("Cycle %d crashed (продолжаю)", cycle)
@@ -403,14 +469,112 @@ def run() -> None:
                 if tg:
                     tg.notify_error(f"review {cycle}", str(e))
             last_review_ts = time.monotonic()
+        elif any_sensor and price_stream is not None and (
+            now_mono - last_sensor_ts
+        ) >= settings.event_sensor_interval_sec:
+            last_sensor_ts = now_mono
+            full_dec, review_dec = _check_event_sensors(
+                settings, store, price_stream,
+                locked_profit_sensor=locked_profit_sensor,
+                entry_sensor=entry_sensor,
+                adverse_sensor=adverse_sensor,
+            )
+            if full_dec.fire:
+                cycle += 1
+                log.info("EVENT-FULL trigger: %s", "; ".join(full_dec.triggers))
+                try:
+                    _run_cycle(
+                        cycle, settings, store, bybit, llm, killswitch,
+                        news_provider, tg,
+                        macro_rates_provider=macro_rates_provider,
+                        crypto_macro_provider=crypto_macro_provider,
+                        entry_sensor=entry_sensor,
+                        trigger="event",
+                    )
+                except Exception as e:
+                    log.exception("Event full %d crashed (продолжаю)", cycle)
+                    if tg:
+                        tg.notify_error(f"event full {cycle}", str(e))
+                last_full_ts = time.monotonic()
+                last_review_ts = last_full_ts
+            elif review_dec.fire:
+                cycle += 1
+                log.info(
+                    "EVENT-REVIEW trigger (locked-profit zone): %s",
+                    ", ".join(review_dec.triggers),
+                )
+                try:
+                    _run_review_cycle(
+                        cycle, settings, store, bybit, llm, killswitch, tg,
+                        trigger="event",
+                    )
+                except Exception as e:
+                    log.exception("Event review %d crashed (продолжаю)", cycle)
+                    if tg:
+                        tg.notify_error(f"event review {cycle}", str(e))
+                last_review_ts = time.monotonic()
 
         # Спим короткими отрезками (1с) чтобы быстро реагировать на
         # SIGTERM. Между full и review проверяем таймеры каждую секунду.
         time.sleep(1)
 
+    if price_stream is not None:
+        price_stream.stop()
     if tg:
         tg.stop()
     log.info("AI-Trader остановлен")
+
+
+def _check_event_sensors(
+    settings: AiTraderSettings,
+    store: AiTraderStore,
+    price_stream: BybitPriceStream,
+    *,
+    locked_profit_sensor: LockedProfitSensor | None,
+    entry_sensor: EntryBreakoutSensor | None,
+    adverse_sensor: AdverseMoveSensor | None,
+) -> tuple[EventDecision, EventDecision]:
+    """Опросить event-датчики по живому кэшу цены (БЕЗ API-вызовов).
+
+    Возвращает (full_decision, review_decision):
+    - full_decision.fire → внеплановый FULL-цикл (adverse-move и/или
+      entry-breakout). FULL приоритетнее review (делает всё + macro).
+    - review_decision.fire → внеплановый REVIEW (locked-profit).
+
+    Цены берутся из in-memory кэша ``price_stream.get_live_mid`` —
+    стейл/обрыв даёт None, и датчики на символе молчат.
+    """
+    positions = store.get_open_positions()
+    pos_r: list[tuple[int, float | None]] = []
+    for p in positions:
+        price = price_stream.get_live_mid(p.symbol)
+        r = compute_unrealised_r(p.side, p.entry_price, p.sl_price, price)
+        pos_r.append((p.id, r))
+
+    # ── FULL-cycle события: adverse-move + entry-breakout ──
+    full_triggers: list[str] = []
+    if adverse_sensor is not None:
+        adv = adverse_sensor.evaluate(pos_r)
+        if adv.fire:
+            full_triggers.extend(adv.triggers)
+    if entry_sensor is not None:
+        live_prices = {
+            sym: price_stream.get_live_mid(sym) for sym in settings.symbols
+        }
+        slots_free = len(positions) < settings.max_open_positions
+        ent = entry_sensor.evaluate(live_prices, slots_free)
+        if ent.fire:
+            full_triggers.extend(ent.triggers)
+    if full_triggers:
+        return EventDecision(fire=True, triggers=full_triggers), EventDecision(fire=False)
+
+    # ── REVIEW-cycle событие: locked-profit ──
+    if locked_profit_sensor is not None:
+        review_dec = locked_profit_sensor.evaluate(pos_r)
+        if review_dec.fire:
+            return EventDecision(fire=False), review_dec
+
+    return EventDecision(fire=False), EventDecision(fire=False)
 
 
 def _run_cycle(
@@ -425,8 +589,13 @@ def _run_cycle(
     *,
     macro_rates_provider: MacroRatesProvider | None = None,
     crypto_macro_provider: CryptoMacroProvider | None = None,
+    entry_sensor: EntryBreakoutSensor | None = None,
+    trigger: str = "scheduled",
 ) -> None:
-    log.info("─── Cycle %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
+    log.info(
+        "─── Cycle %d (%s) @ %s ───",
+        cycle, trigger, datetime.now(tz=UTC).isoformat(),
+    )
 
     _reconcile_closed_positions(bybit, store, tg)
     # v0.18: после reconcile через get_positions догоняем те gross-PnL
@@ -459,6 +628,20 @@ def _run_cycle(
         crypto_macro_provider=crypto_macro_provider,
         stats_window_start=getattr(settings, "stats_window_start", None) or None,
     )
+
+    # v0.34: обновить Donchian-референс датчика входа из уже добытых
+    # 1H-баров (бесплатно — full-цикл их и так тянет). Датчик далее
+    # сравнивает живую цену с этими уровнями БЕЗ API-вызовов.
+    if entry_sensor is not None:
+        lookback = settings.entry_breakout_lookback
+        for s in ctx.snapshots:
+            if len(s.bars_1h) >= lookback:
+                recent = s.bars_1h[-lookback:]
+                hi = max(b.high for b in recent)
+                lo = min(b.low for b in recent)
+                atr = s.ind_1h.atr14 if s.ind_1h else None
+                entry_sensor.update_reference(s.symbol, hi, lo, atr)
+
     system_prompt = build_system_prompt(settings)
     user_prompt = build_user_prompt(format_context_for_prompt(ctx))
 
@@ -580,6 +763,8 @@ def _run_review_cycle(
     llm: DeepSeekClient,
     killswitch: KillSwitch,
     tg: TelegramBot | None,
+    *,
+    trigger: str = "scheduled",
 ) -> None:
     """Lite-цикл review (v0.10, 2026-05-10).
 
@@ -592,7 +777,10 @@ def _run_review_cycle(
     - Killswitch → пропускаем (no trading allowed).
     - Нет открытых позиций → пропускаем (нечего ревьюить).
     """
-    log.info("─── Review %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
+    log.info(
+        "─── Review %d (%s) @ %s ───",
+        cycle, trigger, datetime.now(tz=UTC).isoformat(),
+    )
 
     _reconcile_closed_positions(bybit, store, tg)
 

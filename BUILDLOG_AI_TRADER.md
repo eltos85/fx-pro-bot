@@ -1,5 +1,87 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-29 — v0.34: событийный вызов аналитика (порт fx Фаз 0-3)
+
+Перенёс на байбит (`ai_trader`) событийную архитектуру `fx_ai_trader`:
+живой поток цены через pybit WebSocket + три датчика, которые будят
+**внеплановый** вызов аналитика по факту рыночного события (а не по
+календарному таймеру), плюс одобренный Phase 0 (review-цикл = guardian).
+Изоляция соблюдена: новые модули — самостоятельные копии, без импорта
+`fx_ai_trader.*` (strategy-guard.mdc). Форекс не затронут.
+
+### Phase 0 — review = GUARDIAN, не strategist (prompt-only, обратимо)
+`хеш коммита`
+
+**Проблема (архитектурная асимметрия):** review-цикл (lite, видит только
+1H+funding, НЕ видит macro/news/4H/crypto-macro) мог закрывать позиции
+по 4 триггерам (SETUP INVALIDATION / LOCKED-PROFIT / ADVERSE EVIDENCE /
+PEAK-DRAWDOWN). Но судить «сломан ли macro-тезис» он структурно не может —
+это противоречит full-cycle thesis discipline. Sibling FX-bot аудит:
+22/26 LLM-закрытий были по 1H технике в одиночку (Mark Douglas «Trading
+in the Zone»: реакция на шум без edge).
+
+**Фикс:** review закрывает ТОЛЬКО по locked-profit (gross `peak_pnl_r`
+≥1.5R, fee-aware через `close_net`). Триггеры SETUP INVALIDATION /
+ADVERSE / PEAK-DRAWDOWN и funding-timing убраны как самостоятельные
+close-поводы → HOLD. Убыточную позицию держит exchange SL (пол); тезис
+судит full-цикл с macro. Full-cycle EXIT (4 триггера) не тронут.
+Bybit-специфика (fee/funding awareness display) сохранена.
+
+**Файлы:** `src/ai_trader/llm/prompts.py` (`SYSTEM_PROMPT_REVIEW` →
+guardian, 1 locked-profit CLOSE + 2 HOLD-примера; `build_user_prompt_review`
+TASK RESTATEMENT). SHA `SYSTEM_PROMPT` (full) не менялся.
+
+### Живой поток цены + датчики (порт fx Фаз 1-3)
+`хеш коммита`
+
+**Что добавлено:**
+- `src/ai_trader/trading/price_stream.py` — `BybitPriceStream` поверх
+  pybit `WebSocket(channel_type="linear")` public ticker-стрима. In-memory
+  mid-кэш с snapshot/delta merge (linear шлёт частичные delta — мёржим
+  только присутствующие `markPrice`/`lastPrice`), `threading.Lock`,
+  `get_live_mid/start/stop/is_connected`. Стейл-цена (>`max_age_sec`) →
+  None, датчики молчат → безопасная деградация к таймерам.
+  api-docs.mdc: ping_interval=20/ping_timeout=10/retries=10/
+  restart_on_error (Bybit v5 WS ticker + pybit auto-reconnect). Public
+  market-data одинаковы для demo/live → demo-флаг не нужен.
+- `src/ai_trader/trading/price_sensor.py` — копия fx (instrument-agnostic):
+  `compute_unrealised_r`, `LockedProfitSensor` (1.5R → review),
+  `AdverseMoveSensor` (1.0R → full), `EntryBreakoutSensor` (Donchian-20 +
+  0.05ATR buffer → full), `ReferenceLevels`, `EventDecision`. Rising-edge
+  + гистерезис + cooldown + rate-cap + prune.
+
+**Главный цикл** (`src/ai_trader/app/main.py`): 3-я ветка
+`_check_event_sensors` каждые `event_sensor_interval_sec` (15с) по
+in-memory кэшу (БЕЗ API). FULL-событие (adverse/entry) приоритетнее
+review-события (locked-profit). Donchian-референс обновляется в `_run_cycle`
+из уже добытых 1H-баров (бесплатно). Тег `trigger=scheduled|event` в
+логах. `stream.stop()` в SIGTERM. Плановые таймеры — пульс-страховка.
+
+**Настройки** (`settings.py` + `.env.example`): флаги `AI_TRADER_*`
+(`event_full_enabled`, `event_sensor_interval_sec`, `locked_profit_*`,
+`adverse_move_*`, `entry_breakout_*`). Sub-флаги enable на каждый датчик
+(откат по отдельности). По умолчанию ON.
+
+**Research basis:** Lopez de Prado «Advances in Financial ML» 2018 ch.2
+(event-based sampling); Donchian/Faith «Way of the Turtle» 2003 (20-period
+channel); Sutton & Barto 2018 (event-driven реакция). Датчики — execution-
+timing (не торговая логика, порогов входа/выхода не меняют) → вне scope
+sample-size.mdc.
+
+**Тесты:** `tests/test_ai_trader_event_full.py` (датчики + stream merge),
+`tests/test_ai_trader_review_guardian.py` (guardian-роль). Обновлены 3
+существующих review-теста под guardian-поведение (peak-drawdown/funding
+больше не close-поводы). `pytest tests/ -q` — 1386 passed.
+
+**Откат:** `AI_TRADER_EVENT_FULL_ENABLED=false` → чистый polling.
+Phase 0 — prompt-only, обратим git-revert'ом.
+
+**Файлы:** `src/ai_trader/trading/price_stream.py` (new),
+`src/ai_trader/trading/price_sensor.py` (new), `src/ai_trader/app/main.py`,
+`src/ai_trader/config/settings.py`, `src/ai_trader/llm/prompts.py`,
+`.env.example`, `tests/test_ai_trader_event_full.py` (new),
+`tests/test_ai_trader_review_guardian.py` (new), `tests/test_ai_trader.py`.
+
 ## 2026-05-28 — v0.33 hotfix: max_tokens 4096→8192 + DB reset для чистого v0.31 старта
 
 Два production-фикса после деплоя v0.30+v0.31+v0.32 на VPS.

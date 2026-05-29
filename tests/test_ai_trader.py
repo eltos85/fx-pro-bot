@@ -822,7 +822,8 @@ class TestBuildSystemPromptReview:
         prompt = build_system_prompt_review(settings)
         assert "10 minutes" in prompt
         assert "2 minutes" in prompt
-        assert "2 min later" in prompt
+        # v0.34 guardian-rewrite убрал флейвор «N min later than the
+        # previous cycle»; рендер минут валидируется строками выше.
 
 
 class TestFormatContextForReview:
@@ -1294,12 +1295,22 @@ class TestPeakDrawdownTriggerInPrompts:
         assert "0.45R" in SYSTEM_PROMPT
         assert "1/2/3/4" in SYSTEM_PROMPT
 
-    def test_review_system_prompt_has_peak_drawdown(self):
+    def test_review_peak_drawdown_no_longer_a_close_trigger(self):
+        """v0.34 Phase 0 (guardian): peak-drawdown БОЛЬШЕ не close-повод
+        в review. Числовые пороги 0.8R/0.45R удалены — review закрывает
+        ТОЛЬКО по locked-profit ≥1.5R, остальное (включая peak-drawdown)
+        → HOLD (full-цикл судит с macro). Full-цикл peak-drawdown сохраняет.
+        """
         from ai_trader.llm.prompts import SYSTEM_PROMPT_REVIEW
-        assert "PEAK-DRAWDOWN" in SYSTEM_PROMPT_REVIEW
+        # peak_pnl_r всё ещё отображается (WHAT YOU SEE + DECISION RULE),
+        # но как НАБЛЮДАЕМАЯ метрика, не как trigger.
         assert "peak_pnl_r" in SYSTEM_PROMPT_REVIEW
-        assert "0.8R" in SYSTEM_PROMPT_REVIEW
-        assert "0.45R" in SYSTEM_PROMPT_REVIEW
+        # Старые числовые пороги peak-drawdown-триггера удалены.
+        assert "0.8R" not in SYSTEM_PROMPT_REVIEW
+        assert "0.45R" not in SYSTEM_PROMPT_REVIEW
+        # И peak-drawdown явно помечен как НЕ close-повод.
+        assert "PEAK-DRAWDOWN" in SYSTEM_PROMPT_REVIEW
+        assert "NOT a close trigger here" in SYSTEM_PROMPT_REVIEW
 
 
 class TestDropIncompleteBar:
@@ -3346,18 +3357,24 @@ class TestPromptFundingAwareness:
         assert "paying|earning" in SYSTEM_PROMPT
         assert "next_funding <= 30m" in SYSTEM_PROMPT
 
-    def test_review_prompt_has_funding_awareness_section(self):
+    def test_review_prompt_defers_funding_to_full_cycle(self):
+        """v0.34 Phase 0 (guardian): review больше НЕ закрывает по funding-
+        timing — это отдано full-циклу (бежит каждые 15м, внутри 8h-окна).
+        Review закрывает ТОЛЬКО locked-profit. Проверяем что funding явно
+        deferred, и что %%/%(...) форматтер отработал без утечек.
+        """
         from ai_trader.config.settings import AiTraderSettings
         from ai_trader.llm.prompts import build_system_prompt_review
 
         rendered = build_system_prompt_review(AiTraderSettings())
-        assert "FUNDING AWARENESS (v0.21" in rendered
-        assert "00:00 / 08:00" in rendered
-        assert "next_funding=" in rendered
-        # %% должно превратиться в % после форматтера
-        assert "rate=±Y%/8h" in rendered
-        # А %% literal в шаблоне не должен утечь в финал
+        # funding явно отложен на full-цикл (не close-повод в review).
+        assert "FUNDING timing" in rendered
+        assert "defer to the full" in rendered
+        # %% literal в шаблоне (taker fee) должен свернуться в финале.
         assert "%%" not in rendered
+        assert "%(" not in rendered
+        # taker-fee placeholder отрендерился.
+        assert "0.055% per side" in rendered
 
     def test_full_prompt_explains_close_decision_rules(self):
         from ai_trader.llm.prompts import SYSTEM_PROMPT
