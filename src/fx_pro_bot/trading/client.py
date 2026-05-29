@@ -63,6 +63,11 @@ STABLE_UPTIME_SEC = 300
 # конкретного ответа — тогда триггерим refresh, а не общий reconnect.
 _ACCOUNT_LIST_RES_TYPE = 2150
 
+# Spot bid/ask приходят в 1/100000 единицы цены независимо от digits символа
+# (help.ctrader.com/open-api/messages/#protooaspotevent: «123000 means 1.23,
+# 53423782 means 534.23782»). Совпадает с trendbar precision 10⁻⁵.
+_SPOT_PRICE_SCALE = 100_000
+
 
 def _ensure_reactor() -> None:
     """Запустить Twisted reactor в фоновом потоке (один раз на процесс)."""
@@ -146,6 +151,21 @@ class CTraderClient:
         # ≥STABLE_UPTIME_SEC — реальный network drop, сброс attempt
         # counter; иначе — server reject, накапливаем backoff.
         self._last_successful_connect_ts: float = 0.0
+
+        # ─── Live spot-price stream (ProtoOASubscribeSpotsReq) ───────────
+        # Кэш последней живой цены по symbol_id, обновляется из
+        # ProtoOASpotEvent в _on_message (асинхронно, без waiter'а).
+        # Док: help.ctrader.com/open-api/messages/#protooaspotevent —
+        # bid/ask в 1/100000 единицы цены; первый event после подписки
+        # содержит latest price даже при закрытом рынке.
+        # Отдельный lock, чтобы high-frequency spot-апдейты не конкурировали
+        # за self._lock с waiter-диспетчером.
+        self._spot_lock = threading.Lock()
+        self._spot_prices: dict[int, dict[str, float]] = {}
+        self._subscribed_symbols: set[int] = set()
+        # Кэшируем payloadType ProtoOASpotEvent один раз (события частые,
+        # инстанцировать proto на каждое сообщение дорого).
+        self._spot_event_type: int | None = None
 
     @property
     def is_ready(self) -> bool:
@@ -337,6 +357,11 @@ class CTraderClient:
         # дыру, как только клиент успешно подключится с in-memory свежим
         # токеном. См. BUILDLOG.md 2026-05-12 «token rotation hardening».
         self._save_current_tokens()
+        # Spot-подписки account-scoped: после нового TCP/account auth они
+        # сбрасываются на серверной стороне. Переоформляем, если были.
+        # No-op при первом старте (_subscribed_symbols пуст до явного
+        # subscribe_spots от адаптера).
+        self._resubscribe_spots()
 
     def _save_current_tokens(self) -> None:
         """Sync in-memory OAuth-state в shared token-store через callback.
@@ -571,6 +596,169 @@ class CTraderClient:
         )
         return list(res.trendbar)
 
+    # -- live spot stream ---------------------------------------------------------
+
+    def subscribe_spots(self, symbol_ids: list[int], timeout: float = 30) -> Any:
+        """Подписаться на поток спот-цен (ProtoOASubscribeSpotsReq).
+
+        После успешного ответа сервер шлёт первый ProtoOASpotEvent с
+        текущей ценой (даже при закрытом рынке), далее — обновления
+        bid/ask потоком. События ловит ``_on_message`` → ``_handle_spot_event``
+        и кладёт в ``_spot_prices``. Прочитать последнюю цену:
+        ``get_spot_price(symbol_id)``.
+
+        Подписки переживают reconnect: symbol_ids запоминаются и
+        переоформляются в ``_do_auth`` после успешной переавторизации.
+
+        Док: help.ctrader.com/open-api/messages/#protooasubscribespotsreq
+        («After successful subscription you'll receive technical
+        ProtoOASpotEvent with latest price»).
+        """
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOASubscribeSpotsReq,
+            ProtoOASubscribeSpotsRes,
+        )
+
+        req = ProtoOASubscribeSpotsReq()
+        req.ctidTraderAccountId = self._account_id
+        for sid in symbol_ids:
+            req.symbolId.append(int(sid))
+        # subscribeToSpotTimestamp=True — получаем ts каждого spot-события
+        # (нужно для оценки свежести цены в get_spot_price).
+        req.subscribeToSpotTimestamp = True
+
+        res = self._send_and_wait(
+            req, ProtoOASubscribeSpotsRes().payloadType, timeout=timeout,
+        )
+        with self._spot_lock:
+            self._subscribed_symbols.update(int(s) for s in symbol_ids)
+        log.info("cTrader: подписка на споты symbol_ids=%s", list(symbol_ids))
+        return res
+
+    def unsubscribe_spots(self, symbol_ids: list[int], timeout: float = 30) -> Any:
+        """Отписаться от потока спот-цен (ProtoOAUnsubscribeSpotsReq)."""
+        from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+            ProtoOAUnsubscribeSpotsReq,
+            ProtoOAUnsubscribeSpotsRes,
+        )
+
+        req = ProtoOAUnsubscribeSpotsReq()
+        req.ctidTraderAccountId = self._account_id
+        for sid in symbol_ids:
+            req.symbolId.append(int(sid))
+        res = self._send_and_wait(
+            req, ProtoOAUnsubscribeSpotsRes().payloadType, timeout=timeout,
+        )
+        with self._spot_lock:
+            for sid in symbol_ids:
+                self._subscribed_symbols.discard(int(sid))
+                self._spot_prices.pop(int(sid), None)
+        log.info("cTrader: отписка от спотов symbol_ids=%s", list(symbol_ids))
+        return res
+
+    def get_spot_price(
+        self, symbol_id: int, max_age_sec: float | None = None,
+    ) -> dict[str, float] | None:
+        """Последняя живая цена из spot-стрима для symbol_id.
+
+        Returns dict ``{"bid", "ask", "mid", "ts", "age_sec"}`` или
+        ``None`` если цены нет в кэше / устарела (старше ``max_age_sec``).
+
+        ``mid`` = (bid+ask)/2 если обе стороны есть, иначе доступная.
+        ``ts`` — wall-clock получения события (time.time()).
+
+        Замечание про свежесть: при живом TCP (heartbeat 8s) и открытом
+        рынке spot обновляется суб-секундно; «устаревший» кэш при живом
+        соединении = рынок реально не двигался, т.е. цена корректна.
+        ``max_age_sec`` — лишь backstop на случай молчащего соединения до
+        срабатывания reconnect.
+        """
+        sid = int(symbol_id)
+        with self._spot_lock:
+            entry = self._spot_prices.get(sid)
+            if not entry:
+                return None
+            bid = entry.get("bid")
+            ask = entry.get("ask")
+            ts = entry.get("ts", 0.0)
+        age = time.time() - ts
+        if max_age_sec is not None and age > max_age_sec:
+            return None
+        if bid is None and ask is None:
+            return None
+        if bid is not None and ask is not None:
+            mid = (bid + ask) / 2.0
+        else:
+            mid = bid if bid is not None else ask
+        return {"bid": bid, "ask": ask, "mid": mid, "ts": ts, "age_sec": age}
+
+    def _handle_spot_event(self, event: Any) -> None:
+        """Обработать ProtoOASpotEvent → обновить _spot_prices.
+
+        bid/ask опциональны: событие может нести только изменившуюся
+        сторону. Сохраняем последнее известное значение каждой стороны,
+        обновляя только пришедшие поля.
+        """
+        try:
+            sid = int(getattr(event, "symbolId", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if not sid:
+            return
+
+        def _field(name: str) -> float | None:
+            # bid/ask — proto2 optional scalar: HasField различает
+            # «не пришло» от «0». Падать на отсутствии HasField нельзя.
+            try:
+                if event.HasField(name):
+                    return getattr(event, name) / _SPOT_PRICE_SCALE
+                return None
+            except (ValueError, AttributeError):
+                raw = getattr(event, name, 0) or 0
+                return (raw / _SPOT_PRICE_SCALE) if raw else None
+
+        bid = _field("bid")
+        ask = _field("ask")
+        now = time.time()
+        with self._spot_lock:
+            entry = self._spot_prices.setdefault(sid, {})
+            if bid is not None:
+                entry["bid"] = bid
+            if ask is not None:
+                entry["ask"] = ask
+            entry["ts"] = now
+
+    def _resubscribe_spots(self) -> None:
+        """Переоформить подписки на споты после reconnect/reauth.
+
+        Вызывается из ``_do_auth`` после успешной авторизации аккаунта.
+        Кэш цен сбрасывается (он stale после нового TCP-сеанса); первый
+        ProtoOASpotEvent сразу его наполнит. Никогда не пробрасывает
+        исключение наружу (не должен ломать auth-handshake).
+        """
+        with self._spot_lock:
+            symbol_ids = list(self._subscribed_symbols)
+            self._spot_prices.clear()
+        if not symbol_ids:
+            return
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+                ProtoOASubscribeSpotsReq,
+                ProtoOASubscribeSpotsRes,
+            )
+
+            req = ProtoOASubscribeSpotsReq()
+            req.ctidTraderAccountId = self._account_id
+            for sid in symbol_ids:
+                req.symbolId.append(int(sid))
+            req.subscribeToSpotTimestamp = True
+            self._send_and_wait(
+                req, ProtoOASubscribeSpotsRes().payloadType, timeout=30,
+            )
+            log.info("cTrader: re-subscribed споты после reconnect: %s", symbol_ids)
+        except Exception:
+            log.exception("cTrader: re-subscribe спотов не удался (продолжаю)")
+
     def amend_position_sl_tp(
         self,
         position_id: int,
@@ -797,6 +985,19 @@ class CTraderClient:
 
         extracted = Protobuf.extract(message)
         payload_type = message.payloadType
+
+        # Spot-события — самые частые non-heartbeat сообщения. Ловим их
+        # ПЕРВЫМИ и не инстанцируем proto-типы каждый раз (payloadType
+        # закэширован), чтобы не нагружать диспетчер на high-frequency
+        # потоке. ProtoOASpotEvent НЕ имеет waiter'а — это асинхронный поток.
+        if self._spot_event_type is None:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import (
+                ProtoOASpotEvent,
+            )
+            self._spot_event_type = ProtoOASpotEvent().payloadType
+        if payload_type == self._spot_event_type:
+            self._handle_spot_event(extracted)
+            return
 
         if payload_type == ProtoOAAccountDisconnectEvent().payloadType:
             acct = getattr(extracted, "ctidTraderAccountId", "?")

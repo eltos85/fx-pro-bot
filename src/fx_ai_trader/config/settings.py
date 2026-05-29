@@ -239,6 +239,24 @@ class AiFxTraderSettings(BaseSettings):
         validation_alias="AI_FX_TRADER_MACRO_RATES_CACHE_TTL_SEC",
     )  # 30 минут — достаточно freshness, без HTTP-перегруза
 
+    # ─── Live price stream (2026-05-29 Phase 1) ─────────────────────────
+    # Подписка на ProtoOASubscribeSpotsReq → реальная текущая цена из
+    # spot-стрима cTrader вместо H1-close (которая могла отставать до часа).
+    # get_current_price() предпочитает живой mid (bid+ask)/2, fallback на
+    # последний M1-close если стрима ещё/уже нет.
+    # Док: help.ctrader.com/open-api/messages/#protooasubscribespotsreq
+    live_price_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_LIVE_PRICE_ENABLED"
+    )
+    # Backstop на «молчащее» соединение: если последний spot старше этого
+    # порога — get_current_price падает на M1-close. При живом TCP
+    # (heartbeat 8s) и открытом рынке spot обновляется суб-секундно;
+    # порог защищает только от dead-connection до срабатывания reconnect.
+    # 300s = с запасом покрывает паузы низкой ликвидности (gas off-hours).
+    live_price_max_age_sec: int = Field(
+        default=300, validation_alias="AI_FX_TRADER_LIVE_PRICE_MAX_AGE_SEC"
+    )
+
     # ─── Self-reflection regime change cutoff (2026-05-28) ───────────────
     # Фильтрует closed trades в SELF-REFLECTION блоках USER_PROMPT
     # (get_pnl_by_symbol / get_pnl_by_symbol_side / get_recent_closed_trades).

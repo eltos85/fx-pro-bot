@@ -2,6 +2,86 @@
 
 ## 2026-05-29
 
+### feat(live-price): Фаза 1 — живой spot-стрим цены (ProtoOASubscribeSpots) вместо H1-close
+
+`коммит при deploy`
+
+#### Контекст и симптом
+
+`get_current_price` отдавал **последний M1-close** через
+`ProtoOAGetTrendbarsReq` (discrete polling). Это давало две боли:
+- устаревшая цена в решениях (между запросами цена не обновлялась);
+- наблюдали «current price unavailable for BZ=F» во время illiquid
+  часов — discrete-запрос баров мог вернуть пусто.
+
+Фаза 1 переводит цену на **живой поток**. Хорошая новость из доки:
+отдельный websocket НЕ нужен — cTrader Open API отдаёт спот по тому же
+TCP+protobuf соединению, что уже держит `client.py` (Twisted reactor).
+Нужна лишь подписка.
+
+#### Источник правды (api-docs.mdc)
+
+| Док | Положение |
+|---|---|
+| [help.ctrader.com/open-api/messages/#protooasubscribespotsreq](https://help.ctrader.com/open-api/messages/) | «After successful subscription you'll receive technical ProtoOASpotEvent with latest price, after which you'll start receiving updates» |
+| ProtoOASpotEvent | bid/ask `Optional`, в 1/100000 единицы цены (`123000`→`1.23`, `53423782`→`534.23782`); первый event содержит latest price даже при закрытом рынке |
+| ProtoOAUnsubscribeSpotsReq | остановка потока по символам |
+
+#### Что изменилось
+
+`src/fx_pro_bot/trading/client.py` (общий cTrader-клиент; Advisor
+остановлен, на клиенте остаётся только fx_ai_trader):
+- spot-кэш `_spot_prices: {symbol_id → {bid, ask, ts}}` под отдельным
+  `_spot_lock` (чтобы high-frequency spot-апдейты не конкурировали с
+  waiter-диспетчером за `_lock`).
+- `subscribe_spots(symbol_ids)` / `unsubscribe_spots(...)` —
+  `ProtoOASubscribeSpotsReq` с `subscribeToSpotTimestamp=True`.
+- `get_spot_price(symbol_id, max_age_sec)` → `{bid, ask, mid, ts,
+  age_sec}` или None (нет/устарела). `mid`=(bid+ask)/2.
+- `_handle_spot_event` в диспетчере `_on_message` (ловится ПЕРВЫМ среди
+  non-heartbeat, payloadType закэширован); merge частичных bid/ask.
+- `_resubscribe_spots` в `_do_auth` — подписки account-scoped, после
+  reconnect/reauth переоформляются; кэш цен сбрасывается (stale).
+
+`src/fx_ai_trader/trading/client_adapter.py`:
+- `subscribe_live_prices()` — подписка по всем торгуемым символам.
+- `get_current_price()` — предпочитает spot `mid`; фолбэк на M1-close
+  (нет стрима / устарел / live disabled). Graceful во всех ветках.
+
+`config/settings.py`: `live_price_enabled=True`,
+`live_price_max_age_sec=300` (backstop на молчащее соединение).
+`app/main.py`: `adapter.subscribe_live_prices()` после старта.
+`.env.example`: документированы новые переменные.
+
+#### Свежесть и reconnect (важно)
+
+При живом TCP (heartbeat 8s) и открытом рынке spot обновляется
+суб-секундно. «Устаревший» кэш при живом соединении = рынок реально не
+двигался → цена корректна. `max_age_sec` — лишь backstop на dead-connection
+до срабатывания reconnect (heartbeat ловит обрыв за ~10-20s). После
+reconnect `_resubscribe_spots` переоформляет подписку и чистит кэш;
+первый SpotEvent сразу наполняет его заново, в окне пустого кэша
+`get_current_price` падает на M1-close.
+
+#### Тесты
+
+- Новый `tests/test_fx_ai_trader_live_price.py` (14 тестов): scaling
+  /100000, merge частичных bid/ask, mid, свежесть, unknown symbol,
+  resubscribe-clear; adapter prefers spot / fallback / disabled / none.
+- Полный прогон: **1304 passed**.
+
+#### Откат
+
+Флаг `AI_FX_TRADER_LIVE_PRICE_ENABLED=false` → `get_current_price`
+возвращается к M1-close, spot-стрим не используется (код подписки
+остаётся, но neutral). Полный откат — revert коммита.
+
+#### Дальше (Фазы 2-3, не реализовано)
+
+На свежей цене — событийные датчики: резкое движение против позиции,
+близость к SL/TP, новостной триггер. Без живого потока (Фаза 1) они
+смысла не имели.
+
 ### feat(review-guardian): Фаза 0 — review-цикл закрывает ТОЛЬКО по locked-profit ≥1.5R
 
 `коммит при deploy`

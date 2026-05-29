@@ -266,8 +266,54 @@ class CTraderFxAdapter:
         bars.sort(key=lambda b: b.ts)
         return bars[-count:] if count else bars
 
+    def subscribe_live_prices(self) -> None:
+        """Подписаться на spot-стрим по всем торгуемым символам (Phase 1).
+
+        Вызывается один раз после ``start()``. Живая цена далее доступна
+        через ``get_current_price`` (предпочитает spot mid над H1-close).
+        Подписки переживают reconnect (клиент переоформляет их сам в
+        ``_do_auth``). Graceful: при ошибке логируем и продолжаем — фолбэк
+        на M1-close в ``get_current_price`` сохраняет работоспособность.
+        """
+        if self._client is None:
+            log.warning("subscribe_live_prices: client не запущен")
+            return
+        if not self._settings.live_price_enabled:
+            log.info("subscribe_live_prices: live_price disabled, skip")
+            return
+        symbol_ids: list[int] = []
+        for internal in self._settings.symbols:
+            info = self.get_symbol_info(internal)
+            if info is not None:
+                symbol_ids.append(info.symbol_id)
+            else:
+                log.warning("subscribe_live_prices: %s не найден", internal)
+        if not symbol_ids:
+            log.warning("subscribe_live_prices: нет символов для подписки")
+            return
+        try:
+            self._client.subscribe_spots(symbol_ids)
+        except Exception:
+            log.exception(
+                "subscribe_live_prices failed (фолбэк на M1-close сохранён)"
+            )
+
     def get_current_price(self, internal_symbol: str) -> float | None:
-        """Последняя close M1 — proxy для current market price."""
+        """Текущая рыночная цена.
+
+        Phase 1 (2026-05-29): предпочитает живой spot mid (bid+ask)/2 из
+        ProtoOASubscribeSpots-стрима; фолбэк на последний M1-close, если
+        стрима ещё нет / цена устарела / live_price отключён.
+        """
+        if self._client is not None and self._settings.live_price_enabled:
+            info = self.get_symbol_info(internal_symbol)
+            if info is not None:
+                spot = self._client.get_spot_price(
+                    info.symbol_id,
+                    max_age_sec=float(self._settings.live_price_max_age_sec),
+                )
+                if spot is not None and spot.get("mid"):
+                    return float(spot["mid"])
         bars = self.get_bars(internal_symbol, period_minutes=1, count=3)
         if not bars:
             return None

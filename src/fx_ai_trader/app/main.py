@@ -132,6 +132,11 @@ def run() -> None:
         adapter.stop()
         return
 
+    # Phase 1 (2026-05-29): подписка на live spot-стрим. get_current_price
+    # далее использует реальную цену вместо H1-close. Graceful — при сбое
+    # фолбэк на M1-close сохраняется.
+    adapter.subscribe_live_prices()
+
     # Token-status log на старте: видимость в `docker logs` про сколько
     # дней до expiration. WARNING при <7d, ERROR при expired (детали в
     # auth.log_token_status). Часть «защиты от просрочки» 2026-05-12.
