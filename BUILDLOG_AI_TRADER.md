@@ -1,5 +1,38 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-05-29 — v0.34.1 fix: данные датчика доходят до аналитика (event_note в промпт)
+
+`хеш коммита`
+
+**Симптом (нашёл пользователь):** событийный датчик срабатывал, писал
+триггер в лог (`EVENT-FULL trigger: ...`), будил внеплановый цикл — но
+в **промпт LLM** причина пробуждения не попадала. Аналитик получал
+обычный «плановый» контекст и не знал, ЧТО его разбудило и по какому
+символу/позиции. Идея «график показал сетап → позвали аналитика»
+работала только наполовину: аналитика звали, но не говорили зачем.
+
+**Причина:** `full_dec.triggers` логировался, но `trigger="event"` в
+`_run_cycle`/`_run_review_cycle` влиял только на лог-строку. В
+`build_user_prompt`/`build_user_prompt_review` контекст события не
+передавался. Тот же разрыв есть в `fx_ai_trader` (не трогаем здесь).
+
+**Фикс:** `_format_event_note(triggers, kind)` формирует контекст-блок
+(что сработало + дисциплина), он вставляется в НАЧАЛО user-prompt:
+- `kind="full"`: список триггеров (Donchian break / adverse move), приказ
+  анализировать триггернувший символ/позицию первым, **но** decision-
+  правила неизменны (open только MFP ≥3/5 + confluence; re-validate
+  macro_thesis для adverse). Явно: «Do NOT force a trade».
+- `kind="review"`: guardian-формулировка (locked-profit зона ≥1.5R →
+  CLOSE по close_net или HOLD; прочие позиции HOLD).
+Информационный prime, без изменения порогов (no-data-fitting.mdc).
+
+**Файлы:** `src/ai_trader/app/main.py` (`_format_event_note` + проброс
+`event_note` в оба цикла + event-ветка), `src/ai_trader/llm/prompts.py`
+(`build_user_prompt`/`build_user_prompt_review` — опц. `event_note`,
+backward-compat: без note промпт не меняется),
+`tests/test_ai_trader_event_full.py` (+7 тестов). SHA `SYSTEM_PROMPT`
+не менялся (event_note в USER-промпте). 1405 passed.
+
 ## 2026-05-29 — v0.34: событийный вызов аналитика (порт fx Фаз 0-3)
 
 Перенёс на байбит (`ai_trader`) событийную архитектуру `fx_ai_trader`:

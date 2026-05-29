@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import pytest
 
+from ai_trader.llm.prompts import build_user_prompt, build_user_prompt_review
 from ai_trader.trading.price_sensor import (
     AdverseMoveSensor,
     EntryBreakoutSensor,
@@ -358,3 +359,63 @@ class TestBybitPriceStream:
             "data": {"symbol": "BTCUSDT", "markPrice": "0", "lastPrice": "0"},
         })
         assert s.get_live_mid("BTCUSDT") is None
+
+
+# ─── Event note → prompt (датчик доходит до аналитика) ──────────────────
+
+
+class TestEventNoteReachesPrompt:
+    """Регресс: сработавший датчик должен ПОПАСТЬ В ПРОМПТ LLM, а не
+    только в лог. event_note вставляется в начало user-prompt.
+    """
+
+    def test_full_prompt_without_note_unchanged(self):
+        base = build_user_prompt("CTX")
+        assert "UNSCHEDULED" not in base
+        assert base.startswith("Current market state")
+
+    def test_full_prompt_with_note_prepends_event(self):
+        note = "⚡ UNSCHEDULED EVENT CYCLE\n  - SUIUSDT up-break"
+        out = build_user_prompt("CTX", event_note=note)
+        assert out.startswith(note)
+        assert "SUIUSDT up-break" in out
+        assert "CTX" in out  # рыночный контекст по-прежнему присутствует
+
+    def test_review_prompt_without_note_unchanged(self):
+        base = build_user_prompt_review("CTX")
+        assert "UNSCHEDULED" not in base
+        assert base.startswith("Mid-cycle review")
+
+    def test_review_prompt_with_note_prepends_event(self):
+        note = "⚡ UNSCHEDULED GUARDIAN CHECK\n  - #27 +1.60R locked-profit"
+        out = build_user_prompt_review("CTX", event_note=note)
+        assert out.startswith(note)
+        assert "locked-profit" in out
+        assert "GUARDIAN" in out  # task-restatement сохранён
+
+    def test_format_event_note_full_lists_triggers_and_discipline(self):
+        from ai_trader.app.main import _format_event_note
+
+        note = _format_event_note(
+            ["SUIUSDT up-break @3.45 > Donchian hi", "#27 -1.20R adverse"],
+            kind="full",
+        )
+        assert "UNSCHEDULED EVENT CYCLE" in note
+        assert "SUIUSDT up-break @3.45 > Donchian hi" in note
+        assert "#27 -1.20R adverse" in note
+        # discipline: не форсировать сделку.
+        assert "Do NOT force a trade" in note
+        assert "MFP" in note
+
+    def test_format_event_note_review_is_guardian(self):
+        from ai_trader.app.main import _format_event_note
+
+        note = _format_event_note(["#27 +1.60R locked-profit"], kind="review")
+        assert "GUARDIAN" in note
+        assert "#27 +1.60R locked-profit" in note
+        assert "close_net" in note
+
+    def test_format_event_note_empty_triggers_safe(self):
+        from ai_trader.app.main import _format_event_note
+
+        assert "(n/a)" in _format_event_note([], kind="full")

@@ -1119,8 +1119,10 @@ def _render_default_system_prompt() -> str:
 SYSTEM_PROMPT = _render_default_system_prompt()
 
 
-def build_user_prompt(market_context: str) -> str:
+def build_user_prompt(market_context: str, *, event_note: str | None = None) -> str:
+    header = f"{event_note}\n\n" if event_note else ""
     return (
+        f"{header}"
         "Current market state and your open positions:\n\n"
         f"{market_context}\n\n"
         "Now produce the structured analysis commentary (8-15 lines) "
@@ -1330,8 +1332,12 @@ def build_system_prompt_review(settings: AiTraderSettings) -> str:
     }
 
 
-def build_user_prompt_review(market_context: str) -> str:
+def build_user_prompt_review(
+    market_context: str, *, event_note: str | None = None,
+) -> str:
+    header = f"{event_note}\n\n" if event_note else ""
     return (
+        f"{header}"
         "Mid-cycle review of your open positions:\n\n"
         f"{market_context}\n\n"
         "=== TASK RESTATEMENT ===\n"

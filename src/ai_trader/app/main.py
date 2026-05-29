@@ -65,6 +65,38 @@ def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
     log.info("Получен сигнал %d, завершаю...", signum)
 
 
+def _format_event_note(triggers: list[str], *, kind: str) -> str:
+    """Контекст-блок для LLM при ВНЕплановом (событийном) цикле.
+
+    Сообщает аналитику ЧТО его разбудило и по какому символу/позиции, не
+    меняя decision-правил (open по MFP/confluence, close по guardian).
+    Чисто информационный prime — без форсирования сделки (no-data-fitting).
+    """
+    bullets = "\n".join(f"  - {t}" for t in triggers) if triggers else "  - (n/a)"
+    if kind == "full":
+        return (
+            "⚡ UNSCHEDULED EVENT CYCLE — you were woken early by a LIVE "
+            "market event (not the regular 15-min timer). What fired:\n"
+            f"{bullets}\n"
+            "A Donchian up/down-break flags a POSSIBLE new entry on that "
+            "symbol; an adverse move (≤−1R) flags an open position to "
+            "re-judge against macro. Analyse the TRIGGERING symbol/position "
+            "FIRST, then scan the rest. Decision rules are UNCHANGED: open "
+            "only on MFP ≥3/5 + confluence; re-validate macro_thesis@open "
+            "for adverse moves. Do NOT force a trade just because you were "
+            "woken — if the event does not meet your criteria, HOLD."
+        )
+    return (
+        "⚡ UNSCHEDULED GUARDIAN CHECK — you were woken early by the "
+        "locked-profit sensor (not the regular review timer). What fired:\n"
+        f"{bullets}\n"
+        "The flagged position just entered the locked-profit zone "
+        "(gross ≥1.5R). As GUARDIAN: decide whether to lock in (CLOSE, "
+        "using close_net as the realise-now number) or HOLD if it can run "
+        "further. Any other position stays HOLD unless it is also ≥1.5R."
+    )
+
+
 def _reconcile_closed_positions(
     client: AiBybitClient, store: AiTraderStore, tg: TelegramBot | None = None
 ) -> None:
@@ -490,6 +522,9 @@ def run() -> None:
                         crypto_macro_provider=crypto_macro_provider,
                         entry_sensor=entry_sensor,
                         trigger="event",
+                        event_note=_format_event_note(
+                            full_dec.triggers, kind="full"
+                        ),
                     )
                 except Exception as e:
                     log.exception("Event full %d crashed (продолжаю)", cycle)
@@ -507,6 +542,9 @@ def run() -> None:
                     _run_review_cycle(
                         cycle, settings, store, bybit, llm, killswitch, tg,
                         trigger="event",
+                        event_note=_format_event_note(
+                            review_dec.triggers, kind="review"
+                        ),
                     )
                 except Exception as e:
                     log.exception("Event review %d crashed (продолжаю)", cycle)
@@ -591,6 +629,7 @@ def _run_cycle(
     crypto_macro_provider: CryptoMacroProvider | None = None,
     entry_sensor: EntryBreakoutSensor | None = None,
     trigger: str = "scheduled",
+    event_note: str | None = None,
 ) -> None:
     log.info(
         "─── Cycle %d (%s) @ %s ───",
@@ -643,7 +682,9 @@ def _run_cycle(
                 entry_sensor.update_reference(s.symbol, hi, lo, atr)
 
     system_prompt = build_system_prompt(settings)
-    user_prompt = build_user_prompt(format_context_for_prompt(ctx))
+    user_prompt = build_user_prompt(
+        format_context_for_prompt(ctx), event_note=event_note
+    )
 
     n_recent = len(ctx.recent_closed_trades)
     log.info(
@@ -765,6 +806,7 @@ def _run_review_cycle(
     tg: TelegramBot | None,
     *,
     trigger: str = "scheduled",
+    event_note: str | None = None,
 ) -> None:
     """Lite-цикл review (v0.10, 2026-05-10).
 
@@ -805,7 +847,9 @@ def _run_review_cycle(
         taker_fee_pct=settings.taker_fee_pct,
     )
     system_prompt = build_system_prompt_review(settings)
-    user_prompt = build_user_prompt_review(format_context_for_review(ctx))
+    user_prompt = build_user_prompt_review(
+        format_context_for_review(ctx), event_note=event_note
+    )
 
     log.info("Review LLM call: positions=%d", len(ctx.open_positions))
     resp = llm.ask(system_prompt, user_prompt)
