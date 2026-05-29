@@ -43,6 +43,11 @@ from fx_ai_trader.trading.context import (
 from fx_ai_trader.trading.broker_reconcile import reconcile_broker_positions
 from fx_ai_trader.trading.executor import apply_action, parse_action
 from fx_ai_trader.trading.paper_reconcile import reconcile_paper_positions
+from fx_ai_trader.trading.price_sensor import (
+    EventDecision,
+    LockedProfitSensor,
+    compute_unrealised_r,
+)
 
 log = logging.getLogger("fx_ai_trader")
 
@@ -201,7 +206,34 @@ def run() -> None:
     cycle = 0
     last_full_ts = 0.0
     last_review_ts = 0.0
+    last_sensor_ts = 0.0
     review_enabled = settings.review_interval_sec > 0
+
+    # Phase 2 (2026-05-29): event-driven locked-profit датчик. Активен
+    # только если включён review + live price (датчик читает живую цену
+    # из spot-кэша). Будит внеплановый review при входе позиции в зону
+    # ≥ threshold_r. См. price_sensor.py.
+    event_sensor: LockedProfitSensor | None = None
+    if (
+        settings.event_review_enabled
+        and review_enabled
+        and settings.live_price_enabled
+    ):
+        event_sensor = LockedProfitSensor(
+            threshold_r=settings.event_review_threshold_r,
+            hysteresis_r=settings.event_review_hysteresis_r,
+            cooldown_sec=float(settings.event_review_cooldown_sec),
+            max_events_per_hour=settings.event_review_max_per_hour,
+        )
+        log.info(
+            "Event-review датчик ON: threshold=%.2fR hysteresis=%.2fR "
+            "cooldown=%ds interval=%ds max/h=%d",
+            settings.event_review_threshold_r,
+            settings.event_review_hysteresis_r,
+            settings.event_review_cooldown_sec,
+            settings.event_review_sensor_interval_sec,
+            settings.event_review_max_per_hour,
+        )
 
     while not _shutdown:
         now_mono = time.monotonic()
@@ -227,11 +259,51 @@ def run() -> None:
             except Exception:
                 log.exception("Review cycle %d crashed (продолжаю)", cycle)
             last_review_ts = time.monotonic()
+        elif event_sensor is not None and (
+            now_mono - last_sensor_ts
+        ) >= settings.event_review_sensor_interval_sec:
+            last_sensor_ts = now_mono
+            decision = _check_event_review(event_sensor, settings, store, adapter)
+            if decision.fire:
+                cycle += 1
+                trig = ", ".join(
+                    f"#{pid} {r:+.2f}R" for pid, r in decision.positions
+                )
+                log.info("EVENT-REVIEW trigger (locked-profit zone): %s", trig)
+                try:
+                    _run_review_cycle(
+                        cycle, settings, store, adapter, llm, killswitch,
+                        trigger="event",
+                    )
+                except Exception:
+                    log.exception("Event review %d crashed (продолжаю)", cycle)
+                last_review_ts = time.monotonic()
 
         time.sleep(1)
 
     adapter.stop()
     log.info("FX AI Trader остановлен")
+
+
+def _check_event_review(
+    sensor: LockedProfitSensor,
+    settings: AiFxTraderSettings,
+    store: AiFxTraderStore,
+    adapter: CTraderFxAdapter,
+) -> EventDecision:
+    """Опросить датчик locked-profit (без API: локальная БД + spot-кэш).
+
+    Для каждой открытой позиции берёт живую цену из in-memory spot-кэша
+    (``get_live_spot_mid`` — БЕЗ фолбэка на trendbars) и считает R.
+    Позиции без живой цены передаются как R=None (датчик их игнорит).
+    """
+    positions = store.get_open_positions()
+    pos_r: list[tuple[int, float | None]] = []
+    for p in positions:
+        price = adapter.get_live_spot_mid(p.symbol)
+        r = compute_unrealised_r(p.side, p.entry_price, p.sl_price, price)
+        pos_r.append((p.id, r))
+    return sensor.evaluate(pos_r)
 
 
 def _run_full_cycle(
@@ -397,8 +469,13 @@ def _run_review_cycle(
     adapter: CTraderFxAdapter,
     llm: DeepSeekClient,
     killswitch: KillSwitch,
+    *,
+    trigger: str = "scheduled",
 ) -> None:
-    log.info("─── Review %d @ %s ───", cycle, datetime.now(tz=UTC).isoformat())
+    log.info(
+        "─── Review %d (%s) @ %s ───",
+        cycle, trigger, datetime.now(tz=UTC).isoformat(),
+    )
 
     closed = reconcile_paper_positions(adapter, store)
     if closed:

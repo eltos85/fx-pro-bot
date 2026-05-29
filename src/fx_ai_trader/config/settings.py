@@ -257,6 +257,34 @@ class AiFxTraderSettings(BaseSettings):
         default=300, validation_alias="AI_FX_TRADER_LIVE_PRICE_MAX_AGE_SEC"
     )
 
+    # ─── Event-driven review (2026-05-29 Phase 2) ───────────────────────
+    # Датчик locked-profit: между плановыми review запускает внеплановый,
+    # как только позиция входит в зону ≥ threshold_r (по живой цене из
+    # Phase 1 spot-стрима + локальной БД, БЕЗ API-запросов). НЕ меняет
+    # exit-правила — решение по-прежнему за LLM-guardian (Phase 0).
+    # См. src/fx_ai_trader/trading/price_sensor.py.
+    event_review_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_EVENT_REVIEW_ENABLED"
+    )
+    # threshold_r ДОЛЖЕН совпадать с locked-profit порогом в
+    # SYSTEM_PROMPT_REVIEW (1.5R) — датчик будит review ровно когда у
+    # guardian появляется право зафиксировать прибыль.
+    event_review_threshold_r: float = Field(
+        default=1.5, validation_alias="AI_FX_TRADER_EVENT_REVIEW_THRESHOLD_R"
+    )
+    event_review_hysteresis_r: float = Field(
+        default=0.3, validation_alias="AI_FX_TRADER_EVENT_REVIEW_HYSTERESIS_R"
+    )
+    event_review_cooldown_sec: int = Field(
+        default=120, validation_alias="AI_FX_TRADER_EVENT_REVIEW_COOLDOWN_SEC"
+    )
+    event_review_sensor_interval_sec: int = Field(
+        default=15, validation_alias="AI_FX_TRADER_EVENT_REVIEW_SENSOR_INTERVAL_SEC"
+    )
+    event_review_max_per_hour: int = Field(
+        default=6, validation_alias="AI_FX_TRADER_EVENT_REVIEW_MAX_PER_HOUR"
+    )
+
     # ─── Self-reflection regime change cutoff (2026-05-28) ───────────────
     # Фильтрует closed trades в SELF-REFLECTION блоках USER_PROMPT
     # (get_pnl_by_symbol / get_pnl_by_symbol_side / get_recent_closed_trades).

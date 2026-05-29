@@ -298,6 +298,27 @@ class CTraderFxAdapter:
                 "subscribe_live_prices failed (фолбэк на M1-close сохранён)"
             )
 
+    def get_live_spot_mid(self, internal_symbol: str) -> float | None:
+        """ТОЛЬКО живой spot mid из in-memory кэша; БЕЗ фолбэка на API.
+
+        Для event-датчика (Phase 2): он опрашивается часто (каждые ~15с),
+        поэтому НЕ должен дёргать ProtoOAGetTrendbarsReq (rate-limit). Если
+        живой цены нет (стрим не пришёл / устарела / live disabled) —
+        возвращает None, датчик просто пропускает позицию.
+        """
+        if self._client is None or not self._settings.live_price_enabled:
+            return None
+        info = self.get_symbol_info(internal_symbol)
+        if info is None:
+            return None
+        spot = self._client.get_spot_price(
+            info.symbol_id,
+            max_age_sec=float(self._settings.live_price_max_age_sec),
+        )
+        if spot is not None and spot.get("mid"):
+            return float(spot["mid"])
+        return None
+
     def get_current_price(self, internal_symbol: str) -> float | None:
         """Текущая рыночная цена.
 

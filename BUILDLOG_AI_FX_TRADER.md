@@ -2,6 +2,78 @@
 
 ## 2026-05-29
 
+### feat(event-review): Фаза 2 — событийный датчик locked-profit (внеплановый review)
+
+`коммит при deploy`
+
+#### Контекст
+
+Phase 1 дал живую цену. Phase 2 использует её для event-driven реакции:
+плановый review раз в 5 мин мог пропустить спайк позиции в зону
+locked-profit (≥1.5R), который откатывался внутри окна. Теперь датчик
+будит внеплановый review в момент входа в зону.
+
+#### Что это НЕ (strategy-guard.mdc)
+
+- НЕ открывает позиции, НЕ двигает SL/TP, НЕ закрывает сам.
+- НЕ меняет exit-правила: решение по-прежнему за LLM-guardian (Phase 0,
+  close ТОЛЬКО на locked-profit ≥1.5R).
+- Меняет лишь *когда* запускается review — это execution-timing
+  (изначальная цель dual-timer: «больше точек реакции»), не торговая
+  логика. Прайс берётся из живого стрима, exit-критерий неизменен.
+
+#### Research basis
+
+| Источник | Положение |
+|---|---|
+| Lopez de Prado «Advances in Financial ML» (2018) ch.2 | event-based sampling (threshold/CUSUM) — сэмплировать по значимым ценовым событиям, не по календарю |
+| Sutton & Barto «Reinforcement Learning» (2018) §3 | event-driven реакция эффективнее фиксированного опроса при разреженных значимых событиях |
+
+#### Что изменилось
+
+`src/fx_ai_trader/trading/price_sensor.py` (новый):
+- `compute_unrealised_r(side, entry, sl, price)` — R = signed
+  (price−entry)/|entry−SL|; None при отсутствии SL/цены/вырожд. риска.
+- `LockedProfitSensor` — rising-edge детектор входа в зону ≥ threshold_r
+  с гистерезисом (re-arm при падении ниже threshold−hysteresis),
+  cooldown, rate-cap (max/час), prune закрытых позиций.
+
+`client_adapter.py`: `get_live_spot_mid()` — ТОЛЬКО spot-кэш, БЕЗ
+фолбэка на trendbars (датчик опрашивается часто → не должен дёргать API).
+
+`app/main.py`: датчик в главном цикле (3-я ветка после full/review),
+опрос каждые `sensor_interval_sec` (15с) по локальной БД + spot-кэшу
+(0 API-вызовов); при fire — внеплановый `_run_review_cycle(trigger=
+"event")`, сбрасывает таймер планового review. Review-лог теперь
+различает `scheduled`/`event`.
+
+`config/settings.py` + `.env.example`: `event_review_enabled=True`,
+`threshold_r=1.5` (совпадает с порогом промпта), `hysteresis_r=0.3`,
+`cooldown_sec=120`, `sensor_interval_sec=15`, `max_per_hour=6`.
+
+#### Стоимость (контроль)
+
+Датчик сам по себе бесплатен (in-memory + локальная БД). Внеплановые
+review ограничены: cooldown 120с + max 6/час. Плановый review = 12/час;
+event-review добавляет ≤6/час и только при реальных спайках в прибыль.
+
+#### Тесты
+
+- Новый `tests/test_fx_ai_trader_event_review.py` (17 тестов): R-расчёт
+  BUY/SELL/None, rising-edge (один fire на вход), re-arm с гистерезисом,
+  cooldown, rate-cap со скользящим окном, prune закрытых.
+- Полный прогон: **1321 passed**.
+
+#### Откат
+
+`AI_FX_TRADER_EVENT_REVIEW_ENABLED=false` → остаётся только плановый
+review (поведение Phase 0/1). Полный откат — revert коммита.
+
+#### Дальше (Фаза 3, не реализовано)
+
+Adverse-move триггер для внепланового **full**-цикла (strategist с
+macro) при резком движении против позиции / новостном событии.
+
 ### feat(live-price): Фаза 1 — живой spot-стрим цены (ProtoOASubscribeSpots) вместо H1-close
 
 `коммит при deploy`
