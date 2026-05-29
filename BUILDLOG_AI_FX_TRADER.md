@@ -78,6 +78,13 @@ egress-slow с этого хоста). Graceful-degrade отработал (ци
 полчаса. Если GDELT стабильно бесполезен с VPS — `AI_FX_TRADER_GDELT_ENABLED=
 false` (остальные 4 фида не зависят).
 
+#### Observability (тот же деплой)
+
+Добавлена диагностическая строка в начале full-цикла: `Context feeds:
+macro_rates=Y (real-yield) | VIX=Y | COT=Y | GDELT=N | calendar=Y | news=N`
+— подтверждает, какие блоки реально попали в промпт (и real-yield vs
+TIP-proxy для FRED). Не торговая логика, чисто наблюдаемость.
+
 #### Compliance
 
 - `api-docs.mdc`: CFTC `72hh-3qpy`, FRED series_observations, GDELT DOC 2.0,

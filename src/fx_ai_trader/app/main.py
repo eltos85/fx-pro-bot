@@ -499,6 +499,22 @@ def _run_full_cycle(
         econ_calendar_provider=econ_calendar_provider,
     )
 
+    # Диагностика фидов (2026-05-29): какие data-блоки реально попали в
+    # контекст этого цикла. Подтверждает, что FRED/VIX/COT/GDELT/calendar
+    # дошли до промпта (а не молча отвалились). Не торговая логика.
+    mr = ctx.macro_rates_block or ""
+    log.info(
+        "Context feeds: macro_rates=%s%s | VIX=%s | COT=%s | GDELT=%s | "
+        "calendar=%s | news=%d",
+        "Y" if mr else "N",
+        " (real-yield)" if "REAL YIELD" in mr else (" (TIP-proxy)" if mr else ""),
+        "Y" if ctx.risk_regime_block else "N",
+        "Y" if ctx.cot_block else "N",
+        "Y" if ctx.gdelt_block else "N",
+        "Y" if ctx.econ_calendar_block else "N",
+        sum(len(v) for v in ctx.news_per_symbol.values()),
+    )
+
     # Phase 3: обновить Donchian-референс датчика входа из уже добытых
     # 1H-баров (бесплатно — full-цикл их и так тянет). Датчик далее
     # сравнивает живую цену с этими уровнями БЕЗ API-вызовов.
