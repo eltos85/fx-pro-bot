@@ -2,6 +2,86 @@
 
 ## 2026-05-29
 
+### feat(data-feeds): 5 бесплатных усилений контекста — FRED real-yields / VIX / CFTC COT / GDELT / econ-calendar
+
+`коммит при deploy`
+
+#### Контекст (запрос пользователя)
+
+«Нужно посмотреть откуда аналитик берёт данные, может есть более сильные
+источники, но бесплатные» → «делаем все усиления». Аудит источников
+(cTrader / yfinance / EIA / NOAA / RSS) выявил пробелы между тем, что
+SYSTEM_PROMPT **требует** в иерархии драйверов, и тем, что реально
+подавалось: real yields инферились (не было живого ряда), «ETF/COT»
+упоминался но не подавался, не было risk-regime (VIX), агрегированного
+sentiment и event-proximity (хотя промпт требует «scale size near FOMC»).
+
+#### Что добавлено (5 провайдеров, каждый graceful-degrade + feature-flag)
+
+- **B. FRED real-yields** (`data/macro_rates.py`): с `AI_FX_TRADER_FRED_API_KEY`
+  тянем DFII10 (точный 10Y real yield — gold-driver #1) + T10YIE (breakeven).
+  Без ключа → остаётся TIP-прокси (yfinance). Real-yield выводится ПЕРВЫМ
+  в US MACRO RATES. Endpoint: api.stlouisfed.org/fred/series/observations
+  (офиц. дока FRED API).
+- **C. VIX risk-regime** (`data/risk_regime.py`, новый): yfinance `^VIX`,
+  без ключа. Сырое значение + 24h/5d Δ; интерпретацию (calm/stress) делает
+  LLM. Research: Whaley 2000 (fear gauge), Baur & Lucey 2010 (gold safe-haven).
+- **A. CFTC COT** (`data/cot.py`, новый): Disaggregated Futures-Only,
+  Socrata resource `72hh-3qpy` (public API, без ключа). Managed-Money net
+  по COMEX Gold / NYMEX Brent Last Day / NAT GAS NYME + недельная Δ.
+  Контракт-имена проверены против live API (report week 2026-05-19).
+  Research: Sanders/Boris/Manfredo 2004, Briese 2008 (extremes → развороты).
+- **D. GDELT news tone** (`news/gdelt.py`, новый): DOC 2.0 `timelinetone`,
+  без ключа. Global media sentiment (avg/latest/trend) поверх точечных RSS.
+  Polite inter-request spacing 1.5s (429-защита), cache 3ч. Research:
+  Leetaru/Schrodt 2013, Tetlock 2007.
+- **E. Economic calendar** (`data/econ_calendar.py`, новый): pure-compute,
+  без сети/ключа. Recurring (EIA Wed/Thu, NFP первая пятница) — по правилам
+  + zoneinfo (DST-корректно); FOMC/CPI — статический sourced-список 2026
+  (federalreserve.gov + bls.gov). Окно 7 дней. Закрывает требование промпта
+  «scale to half size through FOMC».
+
+#### Интеграция
+
+- `MarketContext` +5 полей; `collect_market_context` принимает 5 новых
+  провайдеров; `format_context_for_prompt` рендерит блоки (calendar высоко —
+  sizing-critical; VIX/COT/GDELT — кросс-символьные оверлеи).
+- `main.py`: провайдеры строятся по флагам, прокидываются в full-cycle
+  (scheduled + event). Лог `Data feeds: ...` на старте.
+- `SYSTEM_PROMPT`: driver #1 (real yields) и #5 (ETF/COT) переписаны на
+  «читай ЖИВОЙ блок» вместо stale-хардкода (~+94k); добавлены оверлеи
+  RISK-REGIME (VIX), EVENT-PROXIMITY (calendar), NEWS-TONE (GDELT) —
+  все как confluence, НЕ standalone-триггеры (анти-FOMO рамка).
+- `.env.example`: задокументированы все флаги + FRED-ключ.
+
+#### Тесты / smoke
+
+- `tests/test_fx_ai_trader_data_feeds.py` (новый, 23 теста): форматтеры,
+  dataclass-проперти, symbol-maps, parsing (mock requests), trend-классификация,
+  NFP/FOMC/CPI-вычисление, horizon-фильтр, context-блоки. Полный fx_ai_trader
+  suite: 307 passed.
+- Live smoke: COT (gold MM +93540 / NG −96303 / Brent +12930), VIX 15.84,
+  calendar (EIA Wed/Thu в окне). GDELT 429 при ручном бёрсте → graceful None
+  (в проде 3 запроса/3ч).
+
+#### Compliance
+
+- `api-docs.mdc`: CFTC `72hh-3qpy`, FRED series_observations, GDELT DOC 2.0,
+  FOMC/CPI даты — все из официальных источников (ссылки в docstring'ах).
+- `no-data-fitting.mdc`: новые data-feeds, не подгонка стратегии; пороги
+  «экстремум/calm/stress» НЕ зашиты — решает LLM.
+- `strategy-guard.mdc`: правки промпта согласованы («делаем все усиления»);
+  driver-иерархия не менялась — обновлены только data-availability заметки.
+
+**Файлы:** `src/fx_ai_trader/data/macro_rates.py`,
+`src/fx_ai_trader/data/risk_regime.py` (new),
+`src/fx_ai_trader/data/cot.py` (new),
+`src/fx_ai_trader/data/econ_calendar.py` (new),
+`src/fx_ai_trader/news/gdelt.py` (new),
+`src/fx_ai_trader/trading/context.py`, `src/fx_ai_trader/app/main.py`,
+`src/fx_ai_trader/config/settings.py`, `src/fx_ai_trader/llm/prompts.py`,
+`.env.example`, `tests/test_fx_ai_trader_data_feeds.py` (new)
+
 ### feat(event-trigger): Phase 3.1 — передавать сигнал датчика аналитику (EVENT TRIGGER блок)
 
 `коммит при deploy`

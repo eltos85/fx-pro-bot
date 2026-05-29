@@ -162,8 +162,11 @@ these five drivers in priority order:
 1. REAL YIELDS (10Y TIPS) — strongest single driver. Correlation -0.7
    to -0.9 across rolling 12-month windows. Real yields ↓ = gold ↑.
    A 25bps shift on 10Y TIPS typically translates to 3-5% move on gold
-   over 4-week window. We do not have a live TIPS feed; INFER direction
-   from DXY + Fed-tone news (dovish surprise → likely lower real yields).
+   over 4-week window. The US MACRO RATES block now carries the LIVE 10Y
+   real yield (FRED DFII10) with 24h/5d bps change when available — use
+   it directly. If it is absent (no feed this cycle), fall back to the
+   TIP ETF direction + DXY + Fed-tone news (dovish surprise → lower real
+   yields).
 
 2. DXY (US Dollar Index) — second strongest. Correlation -0.6 to -0.8.
    Cleanest gold long: DXY weakening AND real yields easing
@@ -177,11 +180,32 @@ these five drivers in priority order:
    premium that decays 50–70% within a week if no actual disruption
    follows. Treat geopol as overlay, NOT anchor.
 
-5. ETF / COT POSITIONING — momentum amplifier. As of early-May 2026
-   managed money net long is ~+94k contracts, rally built on
-   short-covering not fresh longs (down from +302k in Feb despite
-   higher price) — exhaustion warning. Spec-net-long at the 95th
-   percentile flags exhaustion.
+5. ETF / COT POSITIONING — momentum amplifier. The CFTC COT block now
+   carries LIVE Managed-Money net positioning + week-over-week Δ for each
+   symbol (gold/Brent/NG) — read it directly instead of recalling stale
+   figures. Interpretation: a crowded one-sided net (e.g. spec-net-long
+   near multi-year highs) flags exhaustion/contrarian risk; a rally on
+   shrinking net-long (short-covering, not fresh longs) is a weak rally.
+   Weigh the Δ (flow direction) alongside the absolute level.
+
+RISK-REGIME OVERLAY (VIX) — cross-asset, applies to all three symbols.
+The RISK REGIME block carries the live CBOE VIX + 24h/5d change. Rising
+VIX / stress = safe-haven bid for gold (supportive) but risk-off pressure
+on oil (a risk asset). Falling VIX / calm = risk-on, supports cyclicals
+(oil) and removes a gold tailwind. Treat it as confluence context, not a
+standalone trigger; do not infer a regime band from a single print.
+
+EVENT-PROXIMITY OVERLAY (ECONOMIC CALENDAR) — cross-asset. The ECONOMIC
+CALENDAR block lists upcoming HIGH/MED-impact releases (FOMC, CPI, NFP,
+EIA) with hours-to-event. Into a HIGH-impact event: do NOT open fresh
+full-size positions; scale to half size (or stand aside) and widen stops
+for noise. EIA prints are MED and symbol-specific (petroleum→Brent,
+storage→NG). Absence of the block = nothing within the horizon.
+
+NEWS-TONE OVERLAY (GDELT) — structural sentiment over the whole media
+stream, complements the point-in-time RSS headlines. Use the avg/latest
+tone and trend as confluence (a sharp tone reversal can lead price), NOT
+as a standalone trigger. Weigh it against the concrete headlines.
 
 GOLD MISTAKES TO AVOID (KenMacro top-5, retail failure-mode audit):
 - Trading the chart without checking the real-yield / DXY direction.

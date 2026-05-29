@@ -87,8 +87,17 @@ class MacroRatesSnapshot:
     tip_last: float | None
     tip_change_24h_pct: float | None
     tip_change_5d_pct: float | None
+    # ── Enhancement B (2026-05-29): ТОЧНЫЕ ряды из FRED (если есть ключ).
+    # DFII10 = 10Y TIPS real yield в % (gold-driver №1, точное число вместо
+    # направленческого TIP-прокси). T10YIE = 10Y breakeven inflation в %
+    # (инфляционные ожидания). None если нет FRED ключа / fetch failed.
+    real_yield_10y_pct: float | None = None
+    real_yield_10y_change_24h_bps: float | None = None
+    real_yield_10y_change_5d_bps: float | None = None
+    breakeven_10y_pct: float | None = None
+    breakeven_10y_change_24h_bps: float | None = None
     # ISO timestamp когда сняли snapshot.
-    fetched_at_utc: str
+    fetched_at_utc: str = ""
 
 
 class MacroRatesProvider:
@@ -98,8 +107,9 @@ class MacroRatesProvider:
     без API-ключа; графический degrade если symbol недоступен.
     """
 
-    def __init__(self, cache_ttl_sec: int = 1800) -> None:
+    def __init__(self, cache_ttl_sec: int = 1800, fred_api_key: str = "") -> None:
         self._cache_ttl = cache_ttl_sec
+        self._fred_api_key = fred_api_key
         self._cache: MacroRatesSnapshot | None = None
         self._cache_ts: float = 0.0
 
@@ -156,16 +166,27 @@ class MacroRatesProvider:
             else None
         )
 
-        # Если все три источника пустые — нет смысла возвращать snapshot,
+        # Enhancement B (2026-05-29): точные FRED-ряды, если есть ключ.
+        # DFII10 (10Y real yield) и T10YIE (10Y breakeven) в %. Каждый
+        # как (last, prev_24h, prev_5d) для bps-расчёта. Без ключа / при
+        # ошибке → None (остаётся TIP-прокси).
+        real = {"last": None, "bps_24h": None, "bps_5d": None}
+        be = {"last": None, "bps_24h": None}
+        if self._fred_api_key:
+            real = _fetch_fred_bps("DFII10", self._fred_api_key)
+            be = _fetch_fred_bps("T10YIE", self._fred_api_key)
+
+        # Если все источники пустые — нет смысла возвращать snapshot,
         # пусть formatter увидит None и пропустит блок.
         if (
             dxy["last"] is None
             and ust10y_last is None
             and tip["last"] is None
+            and real["last"] is None
         ):
             log.warning(
                 "MacroRates: ни один из тикеров не вернул данных "
-                "(DXY/UST10Y/TIP) — пропускаю snapshot"
+                "(DXY/UST10Y/TIP/FRED) — пропускаю snapshot"
             )
             return None
 
@@ -179,6 +200,11 @@ class MacroRatesProvider:
             tip_last=tip["last"],
             tip_change_24h_pct=tip["pct_24h"],
             tip_change_5d_pct=tip["pct_5d"],
+            real_yield_10y_pct=real["last"],
+            real_yield_10y_change_24h_bps=real["bps_24h"],
+            real_yield_10y_change_5d_bps=real["bps_5d"],
+            breakeven_10y_pct=be["last"],
+            breakeven_10y_change_24h_bps=be["bps_24h"],
             fetched_at_utc=datetime.now(UTC).isoformat(timespec="seconds"),
         )
 
@@ -232,6 +258,55 @@ def _fetch_pct_series(ticker: str) -> dict[str, float | None]:
     return out
 
 
+_FRED_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
+
+
+def _fetch_fred_bps(series_id: str, api_key: str) -> dict[str, float | None]:
+    """Тянет последние daily-точки FRED-серии в % и считает 24h/5d Δ в bps.
+
+    FRED API v1 (документация: https://fred.stlouisfed.org/docs/api/fred/
+    series_observations.html). Значения уже в percent (DFII10=2.09 → 2.09%,
+    1 bp = 0.01%). Пропущенные дни приходят как "." — фильтруем.
+
+    Возвращает {last, bps_24h, bps_5d}. Любое поле None при недостатке
+    точек / network failure (caller остаётся на TIP-прокси).
+    """
+    import requests
+
+    out: dict[str, float | None] = {"last": None, "bps_24h": None, "bps_5d": None}
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "desc",
+        "limit": 8,
+    }
+    try:
+        resp = requests.get(_FRED_OBS_URL, params=params, timeout=10)
+        resp.raise_for_status()
+    except Exception:
+        log.exception("FRED fetch failed для %s", series_id)
+        return out
+    obs = resp.json().get("observations") or []
+    vals: list[float] = []
+    for row in obs:  # desc order: новейшее → старое
+        raw = row.get("value")
+        if raw in (None, ".", ""):
+            continue
+        try:
+            vals.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return out
+    out["last"] = vals[0]
+    if len(vals) >= 2:
+        out["bps_24h"] = (vals[0] - vals[1]) * 100.0
+    if len(vals) >= 6:
+        out["bps_5d"] = (vals[0] - vals[5]) * 100.0
+    return out
+
+
 def format_macro_rates_snapshot(snap: MacroRatesSnapshot | None) -> str | None:
     """Превратить snapshot в text-блок для LLM context.
 
@@ -247,6 +322,35 @@ def format_macro_rates_snapshot(snap: MacroRatesSnapshot | None) -> str | None:
         return None
 
     lines: list[str] = []
+    # Enhancement B: точный 10Y real yield (FRED DFII10) — gold-driver №1,
+    # выводим ПЕРВЫМ (выше DXY/TIP). Если есть — TIP становится вторичным
+    # подтверждением, не основным прокси.
+    if snap.real_yield_10y_pct is not None:
+        d24 = (
+            f"24h={snap.real_yield_10y_change_24h_bps:+.1f}bps"
+            if snap.real_yield_10y_change_24h_bps is not None
+            else "24h=n/a"
+        )
+        d5 = (
+            f"5d={snap.real_yield_10y_change_5d_bps:+.1f}bps"
+            if snap.real_yield_10y_change_5d_bps is not None
+            else "5d=n/a"
+        )
+        lines.append(
+            f"10Y REAL YIELD (FRED DFII10, TIPS — gold-driver #1; "
+            f"real yields↓ → gold-bullish): {snap.real_yield_10y_pct:.2f}% "
+            f"({d24}, {d5})"
+        )
+    if snap.breakeven_10y_pct is not None:
+        d24 = (
+            f"24h={snap.breakeven_10y_change_24h_bps:+.1f}bps"
+            if snap.breakeven_10y_change_24h_bps is not None
+            else "24h=n/a"
+        )
+        lines.append(
+            f"10Y BREAKEVEN INFLATION (FRED T10YIE, inflation expectations): "
+            f"{snap.breakeven_10y_pct:.2f}% ({d24})"
+        )
     if snap.dxy_last is not None:
         d24 = (
             f"24h={snap.dxy_change_24h_pct:+.2f}%"

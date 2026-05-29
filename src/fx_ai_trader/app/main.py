@@ -17,7 +17,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fx_ai_trader.config.settings import AiFxTraderSettings
+from fx_ai_trader.data.cot import CotProvider
+from fx_ai_trader.data.econ_calendar import EconCalendarProvider
 from fx_ai_trader.data.macro_rates import MacroRatesProvider
+from fx_ai_trader.data.risk_regime import RiskRegimeProvider
 from fx_ai_trader.llm.client import DeepSeekClient
 from fx_ai_trader.llm.prompts import (
     SYSTEM_PROMPT,
@@ -30,6 +33,7 @@ from fx_ai_trader.llm.prompts import (
     format_recent_trades,
 )
 from fx_ai_trader.news.eia import EiaProvider
+from fx_ai_trader.news.gdelt import GdeltProvider
 from fx_ai_trader.news.rss import CommodityRssNewsProvider
 from fx_ai_trader.news.weather import NoaaOutlookProvider
 from fx_ai_trader.safety.killswitch import KillSwitch, KillSwitchConfig
@@ -201,7 +205,39 @@ def run() -> None:
     if settings.macro_rates_enabled:
         macro_rates_provider = MacroRatesProvider(
             cache_ttl_sec=settings.macro_rates_cache_ttl_sec,
+            fred_api_key=settings.fred_api_key,
         )
+    # Risk regime (VIX) — Enhancement C (2026-05-29). yfinance ^VIX, no key.
+    risk_regime_provider: RiskRegimeProvider | None = None
+    if settings.risk_regime_enabled:
+        risk_regime_provider = RiskRegimeProvider(
+            cache_ttl_sec=settings.risk_regime_cache_ttl_sec,
+        )
+    # CFTC COT — Enhancement A (2026-05-29). Public API, no key, weekly.
+    cot_provider: CotProvider | None = None
+    if settings.cot_enabled:
+        cot_provider = CotProvider(cache_ttl_sec=settings.cot_cache_ttl_sec)
+    # GDELT news tone — Enhancement D (2026-05-29). Public API, no key.
+    gdelt_provider: GdeltProvider | None = None
+    if settings.gdelt_enabled:
+        gdelt_provider = GdeltProvider(cache_ttl_sec=settings.gdelt_cache_ttl_sec)
+    # Economic calendar — Enhancement E (2026-05-29). Pure-compute, no net.
+    econ_calendar_provider: EconCalendarProvider | None = None
+    if settings.econ_calendar_enabled:
+        econ_calendar_provider = EconCalendarProvider(
+            horizon_hours=settings.econ_calendar_horizon_hours,
+        )
+
+    log.info(
+        "Data feeds: macro_rates=%s (FRED=%s) | VIX=%s | COT=%s | "
+        "GDELT=%s | econ-cal=%s",
+        "on" if macro_rates_provider else "off",
+        "on" if settings.fred_api_key else "off(TIP-proxy)",
+        "on" if risk_regime_provider else "off",
+        "on" if cot_provider else "off",
+        "on" if gdelt_provider else "off",
+        "on" if econ_calendar_provider else "off",
+    )
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -284,7 +320,12 @@ def run() -> None:
                 _run_full_cycle(
                     cycle, settings, store, adapter, llm, killswitch,
                     news_provider, eia_provider, noaa_provider,
-                    macro_rates_provider, entry_sensor=entry_sensor,
+                    macro_rates_provider,
+                    risk_regime_provider=risk_regime_provider,
+                    cot_provider=cot_provider,
+                    gdelt_provider=gdelt_provider,
+                    econ_calendar_provider=econ_calendar_provider,
+                    entry_sensor=entry_sensor,
                 )
             except Exception:
                 log.exception("Full cycle %d crashed (продолжаю)", cycle)
@@ -318,7 +359,12 @@ def run() -> None:
                     _run_full_cycle(
                         cycle, settings, store, adapter, llm, killswitch,
                         news_provider, eia_provider, noaa_provider,
-                        macro_rates_provider, entry_sensor=entry_sensor,
+                        macro_rates_provider,
+                        risk_regime_provider=risk_regime_provider,
+                        cot_provider=cot_provider,
+                        gdelt_provider=gdelt_provider,
+                        econ_calendar_provider=econ_calendar_provider,
+                        entry_sensor=entry_sensor,
                         trigger="event", event_triggers=full_dec.triggers,
                     )
                 except Exception:
@@ -410,6 +456,10 @@ def _run_full_cycle(
     noaa_provider: NoaaOutlookProvider | None,
     macro_rates_provider: MacroRatesProvider | None,
     *,
+    risk_regime_provider: RiskRegimeProvider | None = None,
+    cot_provider: CotProvider | None = None,
+    gdelt_provider: GdeltProvider | None = None,
+    econ_calendar_provider: EconCalendarProvider | None = None,
     entry_sensor: EntryBreakoutSensor | None = None,
     trigger: str = "scheduled",
     event_triggers: list[str] | None = None,
@@ -443,6 +493,10 @@ def _run_full_cycle(
         news_provider=news_provider, eia_provider=eia_provider,
         noaa_provider=noaa_provider,
         macro_rates_provider=macro_rates_provider,
+        risk_regime_provider=risk_regime_provider,
+        cot_provider=cot_provider,
+        gdelt_provider=gdelt_provider,
+        econ_calendar_provider=econ_calendar_provider,
     )
 
     # Phase 3: обновить Donchian-референс датчика входа из уже добытых

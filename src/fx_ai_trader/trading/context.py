@@ -21,11 +21,18 @@ from fx_ai_trader.analysis.indicators import (
     compute_snapshot,
     format_snapshot,
 )
+from fx_ai_trader.data.cot import CotProvider, format_cot_snapshots
+from fx_ai_trader.data.econ_calendar import EconCalendarProvider
 from fx_ai_trader.data.macro_rates import (
     MacroRatesProvider,
     format_macro_rates_snapshot,
 )
+from fx_ai_trader.data.risk_regime import (
+    RiskRegimeProvider,
+    format_risk_regime_snapshot,
+)
 from fx_ai_trader.news.eia import EiaProvider, format_eia_by_symbol
+from fx_ai_trader.news.gdelt import GdeltProvider, format_gdelt_snapshots
 from fx_ai_trader.news.rss import CommodityRssNewsProvider, NewsItem
 from fx_ai_trader.news.weather import NoaaOutlookProvider, format_noaa_snapshot
 from fx_ai_trader.state.db import AiFxPosition, AiFxTraderStore
@@ -57,10 +64,17 @@ class MarketContext:
     # ключ (нет EIA-релевантного macro для gold).
     macro_per_symbol: dict[str, str] = field(default_factory=dict)
     # Cross-symbol macro rates block (BUILDLOG 2026-05-27 D1 — DXY +
-    # UST10Y + TIP). Применим ко всем инструментам (gold primary driver,
-    # oil secondary). None если провайдер недоступен / yfinance failed.
-    # См. src/fx_ai_trader/data/macro_rates.py.
+    # UST10Y + TIP; 2026-05-29 Enh.B — FRED real-yield/breakeven). Применим
+    # ко всем инструментам. None если провайдер недоступен.
     macro_rates_block: str | None = None
+    # Risk regime (VIX) — Enhancement C (2026-05-29). Cross-symbol.
+    risk_regime_block: str | None = None
+    # CFTC COT managed-money positioning — Enhancement A (2026-05-29).
+    cot_block: str | None = None
+    # GDELT global media tone — Enhancement D (2026-05-29). Per-symbol.
+    gdelt_block: str | None = None
+    # Economic calendar / event-proximity — Enhancement E (2026-05-29).
+    econ_calendar_block: str | None = None
 
 
 def _price_change_pct_24h(bars_1h: list[Bar]) -> float | None:
@@ -84,6 +98,10 @@ def collect_market_context(
     eia_provider: EiaProvider | None = None,
     noaa_provider: NoaaOutlookProvider | None = None,
     macro_rates_provider: MacroRatesProvider | None = None,
+    risk_regime_provider: RiskRegimeProvider | None = None,
+    cot_provider: CotProvider | None = None,
+    gdelt_provider: GdeltProvider | None = None,
+    econ_calendar_provider: EconCalendarProvider | None = None,
 ) -> MarketContext:
     snapshots: list[SymbolSnapshot] = []
     for sym in symbols:
@@ -166,6 +184,44 @@ def collect_market_context(
                 "macro_rates_provider failed (продолжаю без US rates)"
             )
 
+    # Risk regime (VIX) — Enhancement C. Cross-symbol, graceful degrade.
+    risk_regime_block: str | None = None
+    if risk_regime_provider is not None and risk_regime_provider.enabled:
+        try:
+            risk_regime_block = format_risk_regime_snapshot(
+                risk_regime_provider.get_snapshot()
+            )
+        except Exception:
+            log.exception("risk_regime_provider failed (продолжаю без VIX)")
+
+    # CFTC COT — Enhancement A. Managed-money positioning, graceful degrade.
+    cot_block: str | None = None
+    if cot_provider is not None and cot_provider.enabled:
+        try:
+            cot_block = format_cot_snapshots(
+                cot_provider.get_snapshots(symbols)
+            )
+        except Exception:
+            log.exception("cot_provider failed (продолжаю без COT)")
+
+    # GDELT — Enhancement D. Global media tone, graceful degrade.
+    gdelt_block: str | None = None
+    if gdelt_provider is not None and gdelt_provider.enabled:
+        try:
+            gdelt_block = format_gdelt_snapshots(
+                gdelt_provider.get_snapshots(symbols)
+            )
+        except Exception:
+            log.exception("gdelt_provider failed (продолжаю без GDELT)")
+
+    # Economic calendar — Enhancement E. Pure-compute, event-proximity.
+    econ_calendar_block: str | None = None
+    if econ_calendar_provider is not None and econ_calendar_provider.enabled:
+        try:
+            econ_calendar_block = econ_calendar_provider.get_block(symbols)
+        except Exception:
+            log.exception("econ_calendar failed (продолжаю без календаря)")
+
     return MarketContext(
         snapshots=snapshots,
         open_positions=store.get_open_positions(),
@@ -173,6 +229,10 @@ def collect_market_context(
         news_per_symbol=news,
         macro_per_symbol=macro_per_symbol,
         macro_rates_block=macro_rates_block,
+        risk_regime_block=risk_regime_block,
+        cot_block=cot_block,
+        gdelt_block=gdelt_block,
+        econ_calendar_block=econ_calendar_block,
     )
 
 
@@ -231,6 +291,27 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
     # блоком (canonical gold hierarchy "real yields → DXY → …").
     if ctx.macro_rates_block:
         parts.append(ctx.macro_rates_block)
+        parts.append("")
+
+    # Economic calendar — Enhancement E. Event-proximity (sizing-critical),
+    # выводим высоко чтобы LLM учёл близость FOMC/CPI до сайзинга.
+    if ctx.econ_calendar_block:
+        parts.append(ctx.econ_calendar_block)
+        parts.append("")
+
+    # Risk regime (VIX) — Enhancement C. Cross-symbol risk-on/off.
+    if ctx.risk_regime_block:
+        parts.append(ctx.risk_regime_block)
+        parts.append("")
+
+    # CFTC COT positioning — Enhancement A. Managed-money net per symbol.
+    if ctx.cot_block:
+        parts.append(ctx.cot_block)
+        parts.append("")
+
+    # GDELT global media tone — Enhancement D. Structural sentiment.
+    if ctx.gdelt_block:
+        parts.append(ctx.gdelt_block)
         parts.append("")
 
     # Per-symbol macro (с 2026-05-22): EIA + NOAA маршрутизированы по

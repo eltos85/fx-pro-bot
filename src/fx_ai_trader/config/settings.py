@@ -238,6 +238,58 @@ class AiFxTraderSettings(BaseSettings):
         default=1800,
         validation_alias="AI_FX_TRADER_MACRO_RATES_CACHE_TTL_SEC",
     )  # 30 минут — достаточно freshness, без HTTP-перегруза
+    # FRED API key (бесплатная регистрация на fred.stlouisfed.org).
+    # Пустой ключ → real-yield (DFII10) / breakeven (T10YIE) НЕ тянутся,
+    # остаётся TIP-прокси через yfinance (graceful degrade). С ключом
+    # macro_rates добавляет ТОЧНЫЙ 10Y real yield (gold-driver №1) и
+    # инфляционные ожидания. См. data/macro_rates.py (Enhancement B).
+    fred_api_key: str = Field(
+        default="", validation_alias="AI_FX_TRADER_FRED_API_KEY"
+    )
+
+    # ─── Risk regime (VIX) — Enhancement C (2026-05-29) ─────────────────
+    # CBOE VIX через yfinance (^VIX, без ключа). Risk-on/off контекст:
+    # gold = safe haven (VIX↑ → bid), oil = risk asset (VIX↑ → offer).
+    # Подаётся как сырое значение + 24h Δ; интерпретацию делает LLM.
+    risk_regime_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_RISK_REGIME_ENABLED"
+    )
+    risk_regime_cache_ttl_sec: int = Field(
+        default=1800, validation_alias="AI_FX_TRADER_RISK_REGIME_CACHE_TTL_SEC"
+    )
+
+    # ─── CFTC COT positioning — Enhancement A (2026-05-29) ──────────────
+    # Commitments of Traders (CFTC public API, без ключа, weekly Tue snapshot).
+    # SYSTEM_PROMPT в иерархии драйверов называет «ETF/COT», но COT не
+    # подавался. Net speculative positioning + экстремумы = контрарный
+    # сигнал. См. data/cot.py.
+    cot_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_COT_ENABLED"
+    )
+    cot_cache_ttl_sec: int = Field(
+        default=21600, validation_alias="AI_FX_TRADER_COT_CACHE_TTL_SEC"
+    )  # 6 часов — COT обновляется раз в неделю (пятница 15:30 ET)
+
+    # ─── GDELT news tone — Enhancement D (2026-05-29) ───────────────────
+    # Global media sentiment (GDELT DOC 2.0 timelinetone, без ключа).
+    # Структурный sentiment поверх точечных RSS-заголовков. GDELT бывает
+    # медленным → длинный TTL + graceful degrade.
+    gdelt_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_GDELT_ENABLED"
+    )
+    gdelt_cache_ttl_sec: int = Field(
+        default=10800, validation_alias="AI_FX_TRADER_GDELT_CACHE_TTL_SEC"
+    )  # 3 часа
+
+    # ─── Economic calendar — Enhancement E (2026-05-29) ─────────────────
+    # Event-proximity (FOMC/CPI/NFP/EIA). Pure-compute, без сети/ключа.
+    # SYSTEM_PROMPT требует scale size near FOMC — теперь LLM видит близость.
+    econ_calendar_enabled: bool = Field(
+        default=True, validation_alias="AI_FX_TRADER_ECON_CALENDAR_ENABLED"
+    )
+    econ_calendar_horizon_hours: float = Field(
+        default=168.0, validation_alias="AI_FX_TRADER_ECON_CALENDAR_HORIZON_HOURS"
+    )  # 7 дней — чтобы LLM всегда видел ближайший FOMC/CPI/NFP/EIA
 
     # ─── Live price stream (2026-05-29 Phase 1) ─────────────────────────
     # Подписка на ProtoOASubscribeSpotsReq → реальная текущая цена из
