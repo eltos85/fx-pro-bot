@@ -276,3 +276,19 @@ def test_can_open_blocks_on_rate_limit():
 
 def test_can_open_ok():
     assert killswitch.can_open(_FakeDB(), _ks_cfg(), now=1000.0).allowed is True
+
+
+# ─── telegram notifier ─────────────────────────────────────────────────────
+
+def test_notifier_inactive_without_token():
+    from scalp_bot.telegram.notifier import TelegramNotifier
+    n = TelegramNotifier("", "", enabled=True)
+    assert n.active is False
+    n.send("hi")  # no-op, не должно бросать/ходить в сеть
+
+
+def test_notifier_inactive_when_disabled():
+    from scalp_bot.telegram.notifier import TelegramNotifier
+    n = TelegramNotifier("tok", "chat", enabled=False)
+    assert n.active is False
+    n.send("hi")

@@ -87,8 +87,10 @@ class ScalpSettings(BaseSettings):
     take_profit_r: float = Field(default=1.5)
     sl_buffer_bps: float = Field(default=8.0)  # буфер за свип-уровнем, б.п.
 
-    # ─── Telegram (опционально) ──────────────────────────────────────────
+    # ─── Telegram (опционально, нотификации без поллинга команд) ─────────
     telegram_enabled: bool = Field(default=False)
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
 
     @property
     def symbol_list(self) -> list[str]:

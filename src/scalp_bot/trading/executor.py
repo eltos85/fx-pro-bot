@@ -50,13 +50,19 @@ def paper_pnl(side: str, entry: float, exit_price: float, qty: float) -> tuple[f
 
 
 class Executor:
-    def __init__(self, db, settings, client=None, *, now=time.time) -> None:
+    def __init__(self, db, settings, client=None, *, notifier=None,
+                 now=time.time) -> None:
         self._db = db
         self._cfg = settings
         self._client = client
+        self._notifier = notifier
         self._now = now
         # in-memory трекинг live-входов: trade_id -> {link, filled, ts}
         self._pending: dict[int, dict] = {}
+
+    def _notify(self, text: str) -> None:
+        if self._notifier is not None:
+            self._notifier.send(text)
 
     # ─── открытие ────────────────────────────────────────────────────────
 
@@ -85,6 +91,9 @@ class Executor:
                      "entry=%.4f sl=%.4f tp=%.4f [%s] score=%d",
                      tid, sig.symbol, sig.side, qty, qty * sig.entry_ref, risk_usd,
                      sig.entry_ref, sig.sl_level, sig.tp_level, reasons, sig.score)
+            self._notify(f"📝 PAPER open #{tid} {sig.symbol} {sig.side.upper()} "
+                         f"${qty * sig.entry_ref:.0f} @{sig.entry_ref:.4f} "
+                         f"SL {sig.sl_level:.4f} TP {sig.tp_level:.4f} [{reasons}]")
             return tid
 
         # LIVE (demo)
@@ -111,6 +120,9 @@ class Executor:
                  "sl=%.4f tp=%.4f [%s]", tid, sig.symbol, side, qty,
                  qty * limit_price, risk_usd, limit_price, sig.sl_level,
                  sig.tp_level, reasons)
+        self._notify(f"🟢 open #{tid} {sig.symbol} {sig.side.upper()} "
+                     f"${qty * limit_price:.0f} @{limit_price:.4f} "
+                     f"SL {sig.sl_level:.4f} TP {sig.tp_level:.4f} [{reasons}]")
         return tid
 
     # ─── сопровождение ───────────────────────────────────────────────────
@@ -145,6 +157,9 @@ class Executor:
                              close_reason=reason, ts_close=self._now())
         log.info("PAPER close #%d %s %s @%.4f pnl=%.4f fees=%.4f (%s)",
                  tr.id, tr.symbol, tr.side, exit_px, pnl, fees, reason)
+        emoji = "✅" if pnl >= 0 else "🔴"
+        self._notify(f"{emoji} PAPER close #{tr.id} {tr.symbol} pnl=${pnl:.2f} "
+                     f"fees=${fees:.2f} ({reason})")
 
     def _manage_live(self, tr, price: float | None) -> None:
         cl = self._client
@@ -183,6 +198,8 @@ class Executor:
             self._pending.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (биржа TP/SL)", tr.id, tr.symbol,
                      pnl or 0.0)
+            emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
+            self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} (TP/SL)")
             return
         if self._now() - tr.ts_open >= self._cfg.time_stop_sec:
             side = "Buy" if tr.side == "long" else "Sell"
@@ -194,3 +211,5 @@ class Executor:
             self._pending.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (time_stop)", tr.id, tr.symbol,
                      pnl or 0.0)
+            emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
+            self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} (time_stop)")

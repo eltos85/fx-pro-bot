@@ -22,6 +22,7 @@ from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.market_stream import BybitMarketStream
 from scalp_bot.safety import killswitch
 from scalp_bot.state.db import ScalpDB
+from scalp_bot.telegram.notifier import TelegramNotifier
 from scalp_bot.trading.client import ScalpBybitClient
 from scalp_bot.trading.executor import Executor
 
@@ -72,9 +73,16 @@ def run() -> None:
                                testnet=cfg.bybit_testnet)
     stream.start()
 
-    executor = Executor(db, cfg, client)
+    notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id,
+                                enabled=cfg.telegram_enabled)
+    if notifier.active:
+        notifier.send(f"🚀 scalp_bot старт | {mode} | {','.join(symbols)} | "
+                      f"лот ${cfg.position_usd:.0f} | kill ${cfg.max_daily_loss_usd:.0f}/день")
+
+    executor = Executor(db, cfg, client, notifier=notifier)
     cooldown: dict[str, float] = {}
     last_heartbeat = 0.0
+    kill_notified = False
 
     try:
         while not _shutdown:
@@ -90,11 +98,15 @@ def run() -> None:
             # 2) killswitch
             killed = killswitch.is_killed(db, cfg, now)
             if not killed.allowed:
+                if not kill_notified:
+                    notifier.send(f"⛔ KILLSWITCH: {killed.reason} — торговля остановлена")
+                    kill_notified = True
                 if now - last_heartbeat >= 60:
                     log.warning("KILLSWITCH: %s — новые входы заблокированы", killed.reason)
                     last_heartbeat = now
                 time.sleep(cfg.eval_interval_sec)
                 continue
+            kill_notified = False
 
             open_symbols = {tr.symbol for tr in db.open_trades()}
 

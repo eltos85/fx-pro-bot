@@ -301,6 +301,10 @@ services:
       SCALP_OB_IMBALANCE_MIN: ${SCALP_OB_IMBALANCE_MIN:-0.58}
       SCALP_TIME_STOP_SEC: ${SCALP_TIME_STOP_SEC:-90}
       SCALP_TAKE_PROFIT_R: ${SCALP_TAKE_PROFIT_R:-1.5}
+      # Telegram-нотификации (переиспользуем отдельного бота от ai_arena).
+      SCALP_TELEGRAM_ENABLED: ${SCALP_TELEGRAM_ENABLED:-false}
+      SCALP_TELEGRAM_BOT_TOKEN: ${SCALP_TELEGRAM_BOT_TOKEN:-}
+      SCALP_TELEGRAM_CHAT_ID: ${SCALP_TELEGRAM_CHAT_ID:-}
     volumes:
       - scalp_bot_data:/data
 

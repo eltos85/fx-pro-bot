@@ -6,6 +6,27 @@
 
 ## 2026-05-30
 
+### v0.2.1 — Telegram-нотификатор + переиспользование аккаунта ai_arena
+`<hash>`
+
+От удалённого ai_arena на VPS остались в `.env` отдельный demo-аккаунт
+Bybit (`AI_ARENA_BYBIT_*`) и отдельный Telegram-бот (`AI_ARENA_TELEGRAM_*`).
+Переиспользуем для scalp-bot:
+- отдельный Bybit-аккаунт → чистый аудит PnL, не мешается с ai-trader
+  (stats-collection.mdc);
+- свой Telegram-бот для алертов.
+
+Добавлен лёгкий `telegram/notifier.py` (только sendMessage, без поллинга
+команд — не конфликтует с другими ботами на токене). Алерты: старт,
+открытие/закрытие (PAPER и LIVE), killswitch. No-op если выключен/нет
+token. На VPS `SCALP_BYBIT_*` и `SCALP_TELEGRAM_*` маппятся на
+`AI_ARENA_*` через `.env` (compose их прокидывает).
+
+**Файлы:** `telegram/notifier.py` (new), `config/settings.py`
+(telegram_bot_token/chat_id), `trading/executor.py` (notify open/close),
+`app/main.py` (notify старт/killswitch), `docker-compose.yml`,
+`.env.example`, `tests/test_scalp_bot.py`.
+
 ### v0.2.0 — LIVE на demo по умолчанию, депо $1000, лот $10+, funding-guard
 `<hash>`
 
