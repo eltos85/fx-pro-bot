@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from scalp_bot.analysis.signals import (
+    SweepReclaimDetector,
     cvd_divergence,
     detect_sweep,
     diagnose,
@@ -34,7 +35,7 @@ def _cfg(**over):
         ob_imbalance_min=0.58, take_profit_r=2.0, sl_buffer_bps=8.0,
         require_reclaim=True, reclaim_frac=0.5, momentum_window_sec=3.0,
         round_trip_fee_frac=0.00075, min_target_fee_mult=3.0,
-        div_min_late_trades=2,
+        div_min_late_trades=2, arm_timeout_sec=60.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -243,6 +244,60 @@ def test_diagnose_reports_rule_states():
 
 def test_diagnose_none_when_stale():
     assert diagnose(_snap(_long_samples(), stale=True), _cfg()) is None
+
+
+# ─── двухфазный детектор (взвод → выстрел) ─────────────────────────────────
+
+def _arm_samples():
+    """Свип+дивергенция, но цена осталась на лоях (reclaim ещё нет)."""
+    early = [CvdSample(1, 100, -1), CvdSample(2, 99, -3), CvdSample(3, 98, -5)]
+    late = [CvdSample(4, 97, -4), CvdSample(5, 96.5, -2), CvdSample(6, 96.5, -1)]
+    return early + late
+
+
+def _fire_samples():
+    """Цена вернулась наверх, CVD растёт, нового свипа нет."""
+    return [CvdSample(10, 97.4, -3), CvdSample(11, 97.45, -2),
+            CvdSample(12, 97.5, -1), CvdSample(13, 97.5, 0),
+            CvdSample(14, 97.55, 1), CvdSample(15, 97.6, 2)]
+
+
+def test_detector_arms_then_fires_two_phase():
+    det = SweepReclaimDetector("SOLUSDT", _cfg())
+    # фаза 1: взвод без выстрела (нет reclaim)
+    assert det.update(_snap(_arm_samples(), last_price=96.5), now=100.0) is None
+    assert det.armed is True
+    # фаза 2: reclaim + разворот CVD → вход
+    sig = det.update(_snap(_fire_samples(), last_price=97.6), now=130.0)
+    assert sig is not None and sig.side == "long"
+    assert "reclaim" in sig.reasons and "mom" in sig.reasons
+    assert det.armed is False  # разоружился после входа
+
+
+def test_detector_no_fire_without_reclaim():
+    det = SweepReclaimDetector("SOLUSDT", _cfg())
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    assert det.armed is True
+    # цена так и осталась внизу → выстрела нет, но взвод держится
+    assert det.update(_snap(_arm_samples(), last_price=96.5), now=110.0) is None
+    assert det.armed is True
+
+
+def test_detector_arm_expires_after_timeout():
+    det = SweepReclaimDetector("SOLUSDT", _cfg(arm_timeout_sec=10.0))
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    assert det.armed is True
+    flat = [CvdSample(t, 96.5, 0) for t in range(120, 126)]
+    assert det.update(_snap(flat, last_price=96.5), now=125.0) is None
+    assert det.armed is False  # взвод истёк по таймауту
+
+
+def test_detector_reset_clears_state():
+    det = SweepReclaimDetector("SOLUSDT", _cfg())
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    assert det.armed is True
+    det.reset()
+    assert det.armed is False
 
 
 # ─── aggregates (SymbolState) ──────────────────────────────────────────────

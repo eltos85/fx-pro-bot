@@ -16,7 +16,7 @@ import logging
 import signal
 import time
 
-from scalp_bot.analysis.signals import diagnose, evaluate
+from scalp_bot.analysis.signals import SweepReclaimDetector, diagnose
 from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.market_stream import BybitMarketStream
@@ -82,6 +82,7 @@ def run() -> None:
                       f"лот ${cfg.position_usd:.0f} | kill ${cfg.max_daily_loss_usd:.0f}/день")
 
     executor = Executor(db, cfg, client, notifier=notifier)
+    detectors = {s: SweepReclaimDetector(s, cfg) for s in symbols}
     cooldown: dict[str, float] = {}
     last_heartbeat = 0.0
     kill_notified = False
@@ -131,7 +132,7 @@ def run() -> None:
                 time.sleep(cfg.eval_interval_sec)
                 continue
 
-            # 3) сигналы
+            # 3) сигналы (двухфазный детектор: взвод по свипу → выстрел по reclaim)
             for sym in symbols:
                 snap = states[sym].snapshot()
                 # funnel-диагностика по ВСЕМ символам (наблюдаемость воронки)
@@ -139,17 +140,22 @@ def run() -> None:
                     _accum_funnel(funnel, diagnose(snap, cfg))
                 except Exception:
                     log.exception("diagnose %s failed", sym)
+                det = detectors[sym]
                 if sym in open_symbols:
+                    det.reset()  # не взводимся пока есть позиция
                     continue
                 if now - cooldown.get(sym, 0.0) < cfg.signal_cooldown_sec:
                     continue
                 try:
-                    sig = evaluate(snap, cfg)
+                    sig = det.update(snap, now)
                 except Exception:
-                    log.exception("evaluate %s failed", sym)
+                    log.exception("detector %s failed", sym)
                     continue
+                if det.armed:
+                    funnel["armed"] += 1
                 if sig is None:
                     continue
+                funnel["fired"] += 1
                 gate = killswitch.can_open(db, cfg, now)
                 if not gate.allowed:
                     log.info("gate block: %s", gate.reason)
@@ -157,6 +163,7 @@ def run() -> None:
                 if executor.on_signal(sig) is not None:
                     cooldown[sym] = now
                     open_symbols.add(sym)
+                    det.reset()
 
             # 4) heartbeat
             if now - last_heartbeat >= 60:
@@ -194,8 +201,8 @@ _FUNNEL_RULES = ("sweep", "div", "reclaim", "momentum", "ob", "liq", "funding")
 def _new_funnel() -> dict:
     d = {k: 0 for k in _FUNNEL_RULES}
     d["evals"] = 0
-    d["score3"] = 0
-    d["signal"] = 0
+    d["armed"] = 0   # циклов во взводе (после свипа+дивергенции)
+    d["fired"] = 0   # фактических входов от детектора
     return d
 
 
@@ -206,23 +213,19 @@ def _accum_funnel(f: dict, diag: dict | None) -> None:
     for k in _FUNNEL_RULES:
         if diag.get(k):
             f[k] += 1
-    if diag.get("score", 0) >= 3:
-        f["score3"] += 1
-    if diag.get("signal"):
-        f["signal"] += 1
 
 
 def _log_funnel(f: dict) -> None:
-    """Воронка: из скольких оценок каждое правило/гейт проходило за минуту.
-    Видно, что блокирует входы (если signal=0, но score3>0 → режет fee-guard/
-    reclaim/momentum; если sweep низкий → нет свипов; и т.д.)."""
+    """Воронка за минуту: частота срабатывания каждого правила + взвод/выстрел
+    двухфазного детектора. armed=0 → свип+дивергенция не совпадают (нет взвода);
+    armed>0 но fired=0 → reclaim/momentum/fee-guard не доходят."""
     n = f.get("evals", 0)
     if n == 0:
         log.info("FUNNEL: нет валидных оценок (данные тонкие/STALE)")
         return
     parts = " ".join(f"{k}={f[k]}" for k in _FUNNEL_RULES)
-    log.info("FUNNEL evals=%d | %s | score>=3=%d | SIGNALS=%d",
-             n, parts, f["score3"], f["signal"])
+    log.info("FUNNEL evals=%d | %s | armed=%d FIRED=%d",
+             n, parts, f["armed"], f["fired"])
 
 
 def _flatten_on_start(client, db, symbols: list[str]) -> None:

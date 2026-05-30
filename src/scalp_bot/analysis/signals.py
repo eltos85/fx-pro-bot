@@ -246,37 +246,115 @@ def evaluate(snap: SymbolSnapshot, cfg) -> Signal | None:
     else:
         return None
 
+    # SL за экстремумом ИМЕННО свежего свипа (поздняя половина окна).
+    _, late = _split_halves(snap.cvd_samples)
+    recent = late or snap.cvd_samples
+    swept = (min(s.price for s in recent) if side == "long"
+             else max(s.price for s in recent))
+    return build_signal(snap, side, swept, cfg, score, reasons)
+
+
+def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
+                 score: int, reasons: list[str]) -> Signal | None:
+    """Строит Signal: entry по книге, SL за свипнутым уровнем + буфер,
+    TP = take_profit_r × R, с fee-guard (цель ≥ min_target_fee_mult × издержки)."""
     entry = snap.best_ask if (side == "long" and snap.best_ask) else (
         snap.best_bid if (side == "short" and snap.best_bid) else snap.last_price
     )
+    if entry is None or entry <= 0:
+        return None
     buf = cfg.sl_buffer_bps / 1e4
-    # SL за экстремумом ИМЕННО свежего свипа (поздняя половина окна), а не за
-    # глобальным минимумом всех 180с — иначе старый дальний низ раздувает R и
-    # TP, и сделка висит до тайм-стопа. Канон: стоп сразу за фитилём свипа.
-    _, late = _split_halves(snap.cvd_samples)
-    recent = late or snap.cvd_samples
     if side == "long":
-        swept = min(s.price for s in recent)
         sl = swept * (1.0 - buf)
         risk = entry - sl
         tp = entry + cfg.take_profit_r * risk
     else:
-        swept = max(s.price for s in recent)
         sl = swept * (1.0 + buf)
         risk = sl - entry
         tp = entry - cfg.take_profit_r * risk
-
     if risk <= 0:
         return None
-
-    # Fee-guard: цель должна быть ≥ min_target_fee_mult × round-trip издержек,
-    # иначе комиссии съедают edge (анти fee-trap для мелких целей скальпа).
-    tp_move_frac = (cfg.take_profit_r * risk) / entry if entry > 0 else 0.0
-    min_move = cfg.min_target_fee_mult * cfg.round_trip_fee_frac
-    if tp_move_frac < min_move:
+    # Fee-guard: ход до TP ≥ min_target_fee_mult × round-trip издержек.
+    tp_move_frac = (cfg.take_profit_r * risk) / entry
+    if tp_move_frac < cfg.min_target_fee_mult * cfg.round_trip_fee_frac:
         return None
-
     return Signal(
         symbol=snap.symbol, side=side, entry_ref=entry,
         sl_level=sl, tp_level=tp, score=score, reasons=reasons,
     )
+
+
+class SweepReclaimDetector:
+    """Двухфазный детектор свип-разворота (канон CAP, разнесённый во времени).
+
+    Проблема одношагового evaluate: sweep/дивергенция («свежий минимум») и
+    reclaim («цена вернулась») истинны в РАЗНЫЕ моменты — в один снимок почти
+    никогда не совпадают. Поэтому ловим как состояние:
+
+    Фаза ВЗВОД (arm): sweep + CVD-дивергенция у экстремума → запоминаем
+      сторону, свипнутый уровень и амплитуду прокола.
+    Фаза ВЫСТРЕЛ (fire): в течение arm_timeout_sec, если цена сделала reclaim
+      (вернулась ≥ reclaim_frac пути за уровень) И CVD развернулся (momentum) →
+      вход. ob/liq/funding — бонус-подтверждения (в reasons, не блокируют).
+    """
+
+    def __init__(self, symbol: str, cfg) -> None:
+        self.symbol = symbol
+        self.cfg = cfg
+        self._armed: dict | None = None
+
+    @property
+    def armed(self) -> bool:
+        return self._armed is not None
+
+    def reset(self) -> None:
+        self._armed = None
+
+    def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
+        cfg = self.cfg
+        if snap.stale or snap.last_price is None or len(snap.cvd_samples) < 6:
+            return None
+        if self._armed and now - self._armed["ts"] > cfg.arm_timeout_sec:
+            self._armed = None
+        s = snap.cvd_samples
+        # ── фаза ВЗВОД (или переарм на более свежий/глубокий свип) ──
+        for side in ("long", "short"):
+            if not (detect_sweep(s, side)
+                    and cvd_divergence(s, side, getattr(cfg, "div_min_late_trades", 0))):
+                continue
+            early, late = _split_halves(s)
+            if side == "long":
+                swept = min(x.price for x in late)
+                prior = min(x.price for x in early)
+                exc = prior - swept
+            else:
+                swept = max(x.price for x in late)
+                prior = max(x.price for x in early)
+                exc = swept - prior
+            if exc > 0:
+                self._armed = {"side": side, "swept": swept, "exc": exc, "ts": now}
+            break
+        if not self._armed:
+            return None
+        # ── фаза ВЫСТРЕЛ ──
+        a = self._armed
+        side = a["side"]
+        last = snap.last_price
+        if side == "long":
+            reclaimed_now = last >= a["swept"] + cfg.reclaim_frac * a["exc"]
+        else:
+            reclaimed_now = last <= a["swept"] - cfg.reclaim_frac * a["exc"]
+        if not (reclaimed_now and reversal_momentum(s, side, cfg.momentum_window_sec)):
+            return None
+        reasons = ["sweep", "cvd_div", "reclaim", "mom"]
+        if ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min):
+            reasons.append("ob_imb")
+        if liq_flush(snap.liq_events, side, cfg.liq_flush_usd):
+            reasons.append("liq")
+        if funding_supportive(snap.funding_rate, side,
+                              cfg.funding_extreme_pos, cfg.funding_extreme_neg):
+            reasons.append("funding")
+        sig = build_signal(snap, side, a["swept"], cfg, len(reasons), reasons)
+        if sig is not None:
+            self._armed = None
+        return sig

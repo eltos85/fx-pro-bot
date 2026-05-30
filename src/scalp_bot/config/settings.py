@@ -92,6 +92,9 @@ class ScalpSettings(BaseSettings):
     require_reclaim: bool = Field(default=True)
     # Доля возврата цены от свип-экстремума к свипнутому уровню (0..1).
     reclaim_frac: float = Field(default=0.5)
+    # Двухфазный детектор: сколько секунд держим «взвод» после свипа, ожидая
+    # reclaim+разворот. Канон: разворот печатается в 1-3 свечах после свипа.
+    arm_timeout_sec: float = Field(default=60.0)
     # Окно (сек) для оценки разворота CVD (лента качнулась в сторону сделки).
     momentum_window_sec: float = Field(default=30.0)
     # Минимум сделок в поздней половине окна для валидной CVD-дивергенции
