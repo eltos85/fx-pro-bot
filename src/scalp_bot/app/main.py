@@ -63,6 +63,8 @@ def run() -> None:
         client = ScalpBybitClient(cfg.bybit_api_key, cfg.bybit_api_secret,
                                   demo=cfg.bybit_demo, category=cfg.bybit_category)
         log.info("Bybit REST: demo=%s category=%s", cfg.bybit_demo, cfg.bybit_category)
+        if cfg.flatten_on_start:
+            _flatten_on_start(client, db, cfg.symbol_list)
 
     states: dict[str, SymbolState] = {
         s: SymbolState(s, cvd_window_sec=cfg.cvd_window_sec,
@@ -119,6 +121,15 @@ def run() -> None:
                 time.sleep(cfg.eval_interval_sec)
                 continue
 
+            # 2c) сессионный фильтр (опц.): только активные часы (London/NY)
+            if cfg.session_filter_enabled and not in_active_session(now, cfg):
+                if now - last_heartbeat >= 60:
+                    log.info("вне активной сессии (UTC h=%d) — входы на паузе",
+                             int((now % 86400) // 3600))
+                    last_heartbeat = now
+                time.sleep(cfg.eval_interval_sec)
+                continue
+
             # 3) сигналы
             for sym in symbols:
                 if sym in open_symbols:
@@ -167,6 +178,37 @@ def _heartbeat(states: dict[str, SymbolState], db: ScalpDB,
     day_pnl = db.realized_pnl_since(now_utc_day())
     log.info("HB ws=%s open=%d dayPnL=%.2f | %s",
              stream.is_connected(), db.open_count(), day_pnl, " | ".join(parts))
+
+
+def _flatten_on_start(client, db, symbols: list[str]) -> None:
+    """Старт «с чистого листа»: закрыть открытые позиции по символам и
+    реконсилить зависшие open-сделки в БД под новую логику входа/выхода."""
+    now = time.time()
+    for sym in symbols:
+        try:
+            pos = client.get_position(sym)
+        except Exception:
+            log.exception("flatten: get_position %s failed", sym)
+            continue
+        if pos and pos.size > 0:
+            client.close_market(sym, pos.side, pos.size, f"scalp_flat_{int(now)}")
+            log.info("flatten: закрыта позиция %s %s size=%.6f", sym, pos.side, pos.size)
+    for tr in db.open_trades():
+        pnl = None
+        try:
+            pnl = client.last_closed_pnl(tr.symbol, "scalp_")
+        except Exception:
+            log.exception("flatten: last_closed_pnl %s failed", tr.symbol)
+        db.mark_closed(tr.id, exit_price=tr.entry, pnl_usd=pnl or 0.0,
+                       fees_usd=0.0, close_reason="restart_flat", ts_close=now)
+        log.info("flatten: реконсил open-сделки #%d %s pnl=%.4f", tr.id,
+                 tr.symbol, pnl or 0.0)
+
+
+def in_active_session(now: float, cfg) -> bool:
+    """Текущий UTC-час входит в активные торговые часы (cfg.active_hours)."""
+    hour = int((now % 86400.0) // 3600.0)
+    return hour in cfg.active_hours
 
 
 def now_utc_day() -> float:

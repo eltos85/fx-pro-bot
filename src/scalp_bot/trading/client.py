@@ -20,6 +20,14 @@ from pybit.unified_trading import HTTP
 log = logging.getLogger("scalp_bot.client")
 
 
+def _qty_decimals(step: float) -> int:
+    """Число знаков после запятой в шаге лота."""
+    if step <= 0:
+        return 8
+    d = f"{step:.10f}".rstrip("0")
+    return len(d.split(".")[1]) if "." in d else 0
+
+
 @dataclass
 class InstrumentInfo:
     symbol: str
@@ -80,7 +88,17 @@ class ScalpBybitClient:
         step = info.qty_step if info else 0.001
         if step <= 0:
             return qty
-        return math.floor(qty / step) * step
+        return round(math.floor(qty / step) * step, _qty_decimals(step))
+
+    def fmt_qty(self, symbol: str, qty: float) -> str:
+        """qty → строка ровно по точности шага лота (без float-мусора,
+        иначе Bybit ErrCode 10001 «Qty invalid»)."""
+        info = self.instrument(symbol)
+        step = info.qty_step if info else 0.0
+        if step and step > 0:
+            qty = math.floor(qty / step) * step
+            return f"{qty:.{_qty_decimals(step)}f}"
+        return repr(qty)
 
     def round_price(self, symbol: str, price: float) -> float:
         info = self.instrument(symbol)
@@ -160,7 +178,7 @@ class ScalpBybitClient:
             "category": self._category,
             "symbol": symbol,
             "side": side,
-            "qty": str(qty),
+            "qty": self.fmt_qty(symbol, qty),
             "orderLinkId": order_link_id,
         }
         if order_type == "post_only_limit":
@@ -213,7 +231,7 @@ class ScalpBybitClient:
             "symbol": symbol,
             "side": opposite,
             "orderType": "Market",
-            "qty": str(qty),
+            "qty": self.fmt_qty(symbol, qty),
             "orderLinkId": order_link_id,
             "reduceOnly": True,
         }

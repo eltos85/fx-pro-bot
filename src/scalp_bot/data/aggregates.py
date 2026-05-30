@@ -32,7 +32,10 @@ class CvdSample:
 @dataclass
 class LiqEvent:
     ts: float
-    side: str  # "Buy" = шорт ликвидирован (forced buy); "Sell" = лонг ликвидирован
+    # Bybit allLiquidation S = POSITION side (офиц. дока):
+    # "Buy"  = ликвидирован ЛОНГ  (forced SELL, капитуляция вниз)
+    # "Sell" = ликвидирован ШОРТ (forced BUY, сквиз вверх)
+    side: str
     size_usd: float
     price: float
 

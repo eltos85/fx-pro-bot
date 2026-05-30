@@ -12,9 +12,12 @@ from scalp_bot.analysis.signals import (
     cvd_divergence,
     detect_sweep,
     evaluate,
+    flow_invalidated,
     funding_supportive,
     liq_flush,
     ob_supportive,
+    reclaimed,
+    reversal_momentum,
 )
 from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot, SymbolState
 from scalp_bot.safety import killswitch
@@ -25,8 +28,11 @@ from scalp_bot.trading.executor import paper_pnl, position_size
 
 def _cfg(**over):
     base = dict(
-        min_confluence=3, liq_flush_usd=50000.0, funding_extreme=0.0003,
-        ob_imbalance_min=0.58, take_profit_r=1.5, sl_buffer_bps=8.0,
+        min_confluence=3, liq_flush_usd=50000.0,
+        funding_extreme_pos=0.0005, funding_extreme_neg=0.0003,
+        ob_imbalance_min=0.58, take_profit_r=2.0, sl_buffer_bps=8.0,
+        require_reclaim=True, reclaim_frac=0.5, momentum_window_sec=3.0,
+        round_trip_fee_frac=0.00075, min_target_fee_mult=3.0,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -78,26 +84,29 @@ def test_split_too_few_samples():
 
 # ─── liquidations ────────────────────────────────────────────────────────
 
-def test_liq_flush_long_counts_sell_side():
-    liqs = [LiqEvent(1, "Sell", 30000, 100), LiqEvent(2, "Sell", 30000, 100),
-            LiqEvent(3, "Buy", 99999, 100)]
-    assert liq_flush(liqs, "long", 50000) is True
-    # для short считаем Buy-ликвидации — тут одна на 99999
-    assert liq_flush(liqs, "short", 50000) is True
-    assert liq_flush(liqs, "short", 200000) is False
+def test_liq_flush_long_counts_buy_side():
+    # Bybit S="Buy" = ликвидирован ЛОНГ (forced sell) → fade лонгом
+    liqs = [LiqEvent(1, "Buy", 30000, 100), LiqEvent(2, "Buy", 30000, 100),
+            LiqEvent(3, "Sell", 99999, 100)]
+    assert liq_flush(liqs, "long", 50000) is True   # Buy sum=60000
+    # short считает Sell-ликвидации (ликвидирован шорт, forced buy)
+    assert liq_flush(liqs, "short", 50000) is True  # Sell sum=99999
+    assert liq_flush(liqs, "long", 200000) is False
 
 
 def test_liq_flush_below_threshold():
-    assert liq_flush([LiqEvent(1, "Sell", 10000, 100)], "long", 50000) is False
+    assert liq_flush([LiqEvent(1, "Buy", 10000, 100)], "long", 50000) is False
 
 
 # ─── funding / orderbook ───────────────────────────────────────────────────
 
-def test_funding_supportive_long_needs_negative():
-    assert funding_supportive(-0.0004, "long", 0.0003) is True
-    assert funding_supportive(0.0004, "long", 0.0003) is False
-    assert funding_supportive(0.0004, "short", 0.0003) is True
-    assert funding_supportive(None, "long", 0.0003) is False
+def test_funding_supportive_asymmetric():
+    # long требует funding ≤ −neg(0.0003); short требует funding ≥ +pos(0.0005)
+    assert funding_supportive(-0.0004, "long", 0.0005, 0.0003) is True
+    assert funding_supportive(-0.0002, "long", 0.0005, 0.0003) is False
+    assert funding_supportive(0.0006, "short", 0.0005, 0.0003) is True
+    assert funding_supportive(0.0004, "short", 0.0005, 0.0003) is False  # < pos-порог
+    assert funding_supportive(None, "long", 0.0005, 0.0003) is False
 
 
 def test_ob_supportive():
@@ -107,6 +116,37 @@ def test_ob_supportive():
     assert ob_supportive(None, "long", 0.58) is False
 
 
+# ─── reclaim / momentum / flow invalidation ────────────────────────────────
+
+def test_reclaimed_long_true_when_price_returns():
+    # свип вниз до 96.5, цена вернулась к 97.5 (>50% пути к 98) → reclaim
+    assert reclaimed(_long_samples(), "long", 0.5) is True
+
+
+def test_reclaimed_long_false_when_price_stays_low():
+    early = [CvdSample(1, 100, -1), CvdSample(2, 99, -3), CvdSample(3, 98, -5)]
+    late = [CvdSample(4, 97, -4), CvdSample(5, 96.5, -2), CvdSample(6, 96.4, -1)]
+    assert reclaimed(early + late, "long", 0.5) is False  # last 96.4, нужно ≥97.2
+
+
+def test_reversal_momentum_long_true_when_cvd_rising():
+    # окно 3с: cvd последних сэмплов растёт (−5→−1)
+    assert reversal_momentum(_long_samples(), "long", 3.0) is True
+
+
+def test_reversal_momentum_long_false_when_cvd_falling():
+    s = [CvdSample(4, 97, -1), CvdSample(5, 96.5, -3), CvdSample(6, 96.4, -5)]
+    assert reversal_momentum(s, "long", 3.0) is False
+
+
+def test_flow_invalidated_long_when_cvd_turns_down():
+    # лента качнулась в short (CVD падает) → лонг инвалидирован
+    s = [CvdSample(4, 97, -1), CvdSample(5, 96.5, -3), CvdSample(6, 96.4, -6)]
+    snap = _snap(s)
+    assert flow_invalidated(snap, "long", 3.0) is True
+    assert flow_invalidated(snap, "short", 3.0) is False
+
+
 # ─── evaluate (интеграция правил) ──────────────────────────────────────────
 
 def _snap(samples, **over):
@@ -114,7 +154,7 @@ def _snap(samples, **over):
         symbol="SOLUSDT", ts=10.0, last_price=97.0, best_bid=96.9, best_ask=97.1,
         ob_imbalance=0.62, funding_rate=-0.0005,
         open_interest=1.0, cvd_samples=samples,
-        liq_events=[LiqEvent(1, "Sell", 60000, 97)], stale=False,
+        liq_events=[LiqEvent(1, "Buy", 60000, 97)], stale=False,
     )
     base.update(over)
     return SymbolSnapshot(**base)
@@ -147,6 +187,25 @@ def test_evaluate_below_confluence_returns_none():
     snap = _snap(_long_samples(), funding_rate=0.0, ob_imbalance=0.50,
                  liq_events=[])
     assert evaluate(snap, _cfg(min_confluence=3)) is None
+
+
+def test_evaluate_none_when_no_reclaim():
+    # require_reclaim=True, но цена осталась на свип-лоях → нет reclaim → None
+    early = [CvdSample(1, 100, -1), CvdSample(2, 99, -3), CvdSample(3, 98, -5)]
+    late = [CvdSample(4, 97, -4), CvdSample(5, 96.5, -2), CvdSample(6, 96.4, -1)]
+    snap = _snap(early + late, last_price=96.4)
+    assert evaluate(snap, _cfg()) is None
+
+
+def test_evaluate_fee_guard_blocks_tiny_target():
+    # завышаем требуемый множитель → ход до TP < min → сигнал отброшен
+    assert evaluate(_snap(_long_samples()), _cfg(min_target_fee_mult=1000.0)) is None
+
+
+def test_evaluate_passes_with_require_reclaim_off():
+    # отключив подтверждение разворота, сигнал проходит на голом конфлюенсе
+    sig = evaluate(_snap(_long_samples()), _cfg(require_reclaim=False))
+    assert sig is not None and sig.side == "long"
 
 
 # ─── aggregates (SymbolState) ──────────────────────────────────────────────
@@ -203,6 +262,13 @@ def test_position_size_floors_to_min_notional():
 def test_position_size_rounds_down_to_step():
     qty = position_size(100.0, 100.0, qty_step=0.3)
     assert qty == pytest.approx(0.9)  # floor(1.0/0.3)=3 → 0.9
+
+
+def test_position_size_no_float_artifact():
+    # регресс: $100 @82.42, step 0.1 → 1.2 (а НЕ 1.2000000000000002 → ErrCode 10001)
+    qty = position_size(100.0, 82.42, qty_step=0.1, min_qty=0.1)
+    assert qty == 1.2
+    assert str(qty) == "1.2"
 
 
 def test_position_size_below_exchange_min_uses_min_qty():

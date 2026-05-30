@@ -74,23 +74,69 @@ def cvd_divergence(samples: list[CvdSample], side: str) -> bool:
 def liq_flush(liqs: list[LiqEvent], side: str, threshold_usd: float) -> bool:
     """Каскад ликвидаций в сторону капитуляции.
 
-    LONG-fade: ликвидируются ЛОНГИ (side="Sell", forced sell) — капитуляция вниз.
-    SHORT-fade: ликвидируются ШОРТЫ (side="Buy", forced buy) — выброс вверх.
+    Семантика Bybit allLiquidation (офиц. дока): поле S = POSITION side.
+    S="Buy" → ликвидирован ЛОНГ (forced SELL, капитуляция ВНИЗ) → fade ЛОНГОМ.
+    S="Sell" → ликвидирован ШОРТ (forced BUY, сквиз ВВЕРХ) → fade ШОРТОМ.
+    https://bybit-exchange.github.io/docs/v5/websocket/public/all-liquidation
     """
-    want = "Sell" if side == "long" else "Buy"
+    want = "Buy" if side == "long" else "Sell"
     total = sum(e.size_usd for e in liqs if e.side == want)
     return total >= threshold_usd
 
 
-def funding_supportive(funding: float | None, side: str, extreme: float) -> bool:
-    """Перекос толпы против сделки = топливо для разворота.
+def funding_supportive(funding: float | None, side: str,
+                       pos_extreme: float, neg_extreme: float) -> bool:
+    """Перекос толпы против сделки = топливо для разворота (АСИММЕТРИЧНО).
 
-    LONG:  funding ≤ −extreme (толпа в шорте → сквиз вверх).
-    SHORT: funding ≥ +extreme (толпа в лонге → каскад вниз).
+    LONG:  funding ≤ −neg_extreme (толпа в шорте → сквиз вверх).
+    SHORT: funding ≥ +pos_extreme (толпа в лонге → каскад вниз).
+    Research: crowded long обычно глубже (+0.05%), crowded short мельче (−0.03%).
     """
     if funding is None:
         return False
-    return funding <= -extreme if side == "long" else funding >= extreme
+    return funding <= -neg_extreme if side == "long" else funding >= pos_extreme
+
+
+def reclaimed(samples: list[CvdSample], side: str, frac: float) -> bool:
+    """Reclaim (CAP Rule 2): цена ушла за уровень фитилём, но вернулась внутрь.
+
+    LONG: свипнутый low в поздней половине; цена восстановилась ≥ frac пути
+    от свип-экстремума обратно к свипнутому уровню (min ранней половины).
+    SHORT — зеркально.
+    """
+    early, late = _split_halves(samples)
+    if not early or not late:
+        return False
+    last_price = samples[-1].price
+    if side == "long":
+        prior = min(s.price for s in early)      # свипнутый уровень (поддержка)
+        swept = min(s.price for s in late)       # свип-экстремум (ниже)
+        excursion = prior - swept
+        if excursion <= 0:
+            return False
+        return last_price >= swept + frac * excursion
+    prior = max(s.price for s in early)
+    swept = max(s.price for s in late)
+    excursion = swept - prior
+    if excursion <= 0:
+        return False
+    return last_price <= swept - frac * excursion
+
+
+def reversal_momentum(samples: list[CvdSample], side: str, window_sec: float) -> bool:
+    """Разворот ленты (CAP Rule 5 / tape-shift): CVD качнулся в сторону сделки.
+
+    LONG: за последние window_sec CVD растёт (агрессия перетекает в buy).
+    SHORT: CVD падает. Подтверждает, что разворот НАЧАЛСЯ (не входим в нож).
+    """
+    if len(samples) < 2:
+        return False
+    cutoff = samples[-1].ts - window_sec
+    recent = [s for s in samples if s.ts >= cutoff]
+    if len(recent) < 2:
+        return False
+    delta_cvd = recent[-1].cvd - recent[0].cvd
+    return delta_cvd > 0 if side == "long" else delta_cvd < 0
 
 
 def ob_supportive(imbalance: float | None, side: str, min_imb: float) -> bool:
@@ -98,6 +144,16 @@ def ob_supportive(imbalance: float | None, side: str, min_imb: float) -> bool:
     if imbalance is None:
         return False
     return imbalance >= min_imb if side == "long" else imbalance <= (1.0 - min_imb)
+
+
+def flow_invalidated(snap: SymbolSnapshot, side: str, window_sec: float) -> bool:
+    """Hard invalidation: ордер-флоу (CVD) развернулся ПРОТИВ позиции.
+
+    LONG-позиция инвалидируется, если лента качнулась в short (CVD падает).
+    Все скальп-источники: «exit immediately when order flow flips».
+    """
+    opp = "short" if side == "long" else "long"
+    return reversal_momentum(snap.cvd_samples, opp, window_sec)
 
 
 def _evaluate_side(snap: SymbolSnapshot, side: str, cfg) -> tuple[int, list[str]]:
@@ -113,15 +169,23 @@ def _evaluate_side(snap: SymbolSnapshot, side: str, cfg) -> tuple[int, list[str]
     if liq_flush(snap.liq_events, side, cfg.liq_flush_usd):
         score += 1
         reasons.append("liq_flush")
-    if funding_supportive(snap.funding_rate, side, cfg.funding_extreme):
+    if funding_supportive(snap.funding_rate, side,
+                          cfg.funding_extreme_pos, cfg.funding_extreme_neg):
         score += 1
         reasons.append("funding")
     if ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min):
         score += 1
         reasons.append("ob_imb")
-    # CVD-дивергенция обязательна.
+    # CVD-дивергенция обязательна (ключевой признак поглощения).
     if not div:
         return (0, [])
+    # Подтверждение разворота: reclaim + разворот ленты (анти «ловля ножа»).
+    if getattr(cfg, "require_reclaim", False):
+        if not reclaimed(snap.cvd_samples, side, cfg.reclaim_frac):
+            return (0, [])
+        if not reversal_momentum(snap.cvd_samples, side, cfg.momentum_window_sec):
+            return (0, [])
+        reasons.append("rcl+mom")
     return (score, reasons)
 
 
@@ -160,6 +224,13 @@ def evaluate(snap: SymbolSnapshot, cfg) -> Signal | None:
         tp = entry - cfg.take_profit_r * risk
 
     if risk <= 0:
+        return None
+
+    # Fee-guard: цель должна быть ≥ min_target_fee_mult × round-trip издержек,
+    # иначе комиссии съедают edge (анти fee-trap для мелких целей скальпа).
+    tp_move_frac = (cfg.take_profit_r * risk) / entry if entry > 0 else 0.0
+    min_move = cfg.min_target_fee_mult * cfg.round_trip_fee_frac
+    if tp_move_frac < min_move:
         return None
 
     return Signal(

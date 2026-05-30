@@ -6,6 +6,59 @@
 
 ## 2026-05-30
 
+### v0.3.0 — аудит по учебникам скальпинга + фиксы (sweep-and-reclaim, liq-side, qty)
+`<hash>`
+
+Прочитаны проф-источники (реальный fetch): Bob Volman «Forex Price Action
+Scalping» (2011), Bookmap/Kalena/TradingView (order-flow & CVD), ChartWhisperer
+CAP 5-rule sweep-and-reclaim protocol, CrossTrade, Quantum-Algo (liquidity
+sweeps), TraderSpy/Altrady/MetaMask/Yellow.com (funding/ликвидации),
+LiberatedStockTrader/1minscalper/VT Markets (комиссии/риск). Сверена логика
+бота, выписаны расхождения, внедрены изменения (одобрено пользователем).
+
+**🔴 Bug-fix (инверсия семантики ликвидаций).** Офиц. дока Bybit
+`all-liquidation`: поле `S` = POSITION side, `S="Buy"` = ликвидирован ЛОНГ
+(forced sell, капитуляция вниз). Правило `liq_flush` для long-fade считало
+`"Sell"` — инвертировано. Срабатывало на неверную сторону. Исправлено
+(`signals.liq_flush`, `aggregates.LiqEvent` docstring).
+https://bybit-exchange.github.io/docs/v5/websocket/public/all-liquidation
+
+**🔴 Bug-fix (Qty invalid, ErrCode 10001).** `position_size` после
+`floor(qty/step)*step` давал float-артефакт `1.2000000000000002`, `str()`
+улетал на биржу → reject. Добавлена квантизация `round(..., qty_decimals(step))`
++ `client.fmt_qty()` форматирует qty ровно по точности шага (защитно в
+`place_entry`/`close_market`).
+
+**Изменения стратегии (research-based, одобрены):**
+- **Reclaim + разворот CVD** (CAP Rule 2 + Rule 5 / tape-shift): вход только
+  после возврата цены за свипнутый уровень (≥`reclaim_frac`=0.5 пути) И когда
+  CVD качнулся в сторону сделки за `momentum_window_sec`=30с. Чинит главный
+  изъян — «ловлю ножа» (бот мог входить в реальный пробой). Источники: все
+  sweep-гайды единогласно «не входи во время свипа, жди подтверждения».
+- **TP 1.5R → 2.0R**: канон свип-разворота (CrossTrade 2:1–4:1, ChartWhisperer
+  T1≈2-3R). 1.5R после комиссий давал тонкий edge.
+- **Fee-guard**: сигнал отбрасывается, если ход до TP < `min_target_fee_mult`
+  (3.0) × `round_trip_fee_frac` (0.00075 = maker+taker). Анти fee-trap для
+  мелких целей (liberatedstocktrader/1minscalper/VT Markets: цель ≥3× издержек).
+- **Активный выход (hard invalidation)**: `flow_invalidated` закрывает позицию
+  раньше тайм-стопа, если CVD развернулся против (после `active_exit_min_age`
+  10с). Источники: Kalena/tradezella/tradealgo «exit immediately when flow flips».
+- **Funding-порог АСИММЕТРИЧНЫЙ**: short-fade при funding ≥ +0.05%, long-fade
+  при ≤ −0.03% (TraderSpy/Altrady — crowded long глубже crowded short).
+- **Сессионный фильтр** (опц., default OFF): только London/NY+overlap; ВЫКЛ
+  чтобы не уморить частоту при строгом конфлюенсе.
+- **Flatten-on-start**: при старте закрываем открытые позиции по символам +
+  реконсилим зависшие open-сделки (новая логика входа/выхода, чистый лист).
+
+Совпало с каноном и оставлено: CVD-дивергенция обязательна, направление
+funding-фейда, SL за свипнутым экстремумом, maker-вход/killswitch/rate-limit.
+
+**Файлы:** `analysis/signals.py` (reclaim/reversal_momentum/flow_invalidated/
+fee-guard/liq-side/funding asym), `trading/executor.py` (active-exit, qty
+квантизация), `trading/client.py` (fmt_qty), `app/main.py` (flatten-on-start,
+session filter), `config/settings.py` (новые параметры), `tests/test_scalp_bot.py`
+(41 тест).
+
 ### v0.2.1 — Telegram-нотификатор + переиспользование аккаунта ai_arena
 `<hash>`
 

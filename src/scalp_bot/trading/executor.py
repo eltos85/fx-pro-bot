@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 
-from scalp_bot.analysis.signals import Signal
+from scalp_bot.analysis.signals import Signal, flow_invalidated
 
 log = logging.getLogger("scalp_bot.exec")
 
@@ -25,20 +25,32 @@ MAKER_FEE = 0.0002
 TAKER_FEE = 0.00055
 
 
+def qty_decimals(step: float) -> int:
+    """Число знаков после запятой в шаге лота (для квантизации без float-мусора)."""
+    if step <= 0:
+        return 8
+    d = f"{step:.10f}".rstrip("0")
+    return len(d.split(".")[1]) if "." in d else 0
+
+
 def position_size(position_usd: float, entry: float, *, min_notional: float = 0.0,
                   qty_step: float = 0.0, min_qty: float = 0.0) -> float:
     """qty из целевого notional ($). Пол min_notional (мелкий лот = комиссия
-    съедает прибыль). Округление вниз под qty_step, отсев < min_qty биржи."""
+    съедает прибыль). Округление вниз под qty_step, отсев < min_qty биржи.
+
+    Квантизация round(..., decimals) убирает float-артефакты вида
+    1.2000000000000002 (Bybit ErrCode 10001 «Qty invalid»).
+    """
     if entry <= 0 or position_usd <= 0:
         return 0.0
     notional = max(position_usd, min_notional)
     qty = notional / entry
     if qty_step > 0:
         import math
-        qty = math.floor(qty / qty_step) * qty_step
+        qty = round(math.floor(qty / qty_step) * qty_step, qty_decimals(qty_step))
     if min_qty > 0 and qty < min_qty:
         # биржевой минимум выше нашего лота — берём биржевой минимум
-        qty = min_qty
+        qty = round(min_qty, qty_decimals(qty_step)) if qty_step > 0 else min_qty
     return qty
 
 
@@ -133,11 +145,20 @@ class Executor:
             snap = st.snapshot() if st else None
             price = snap.last_price if snap else None
             if tr.mode == "paper":
-                self._manage_paper(tr, price)
+                self._manage_paper(tr, price, snap)
             else:
-                self._manage_live(tr, price)
+                self._manage_live(tr, price, snap)
 
-    def _manage_paper(self, tr, price: float | None) -> None:
+    def _flow_exit(self, tr, snap) -> bool:
+        """True если активный выход разрешён и ордер-флоу развернулся против."""
+        cfg = self._cfg
+        if not getattr(cfg, "active_exit_enabled", False) or snap is None:
+            return False
+        if self._now() - tr.ts_open < cfg.active_exit_min_age_sec:
+            return False
+        return flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
+
+    def _manage_paper(self, tr, price: float | None, snap=None) -> None:
         if price is None:
             return
         age = self._now() - tr.ts_open
@@ -148,6 +169,8 @@ class Executor:
             reason, exit_px = "sl", tr.sl
         elif hit_tp:
             reason, exit_px = "tp", tr.tp
+        elif self._flow_exit(tr, snap):
+            reason, exit_px = "flow_exit", price
         elif age >= self._cfg.time_stop_sec:
             reason, exit_px = "time_stop", price
         if reason is None:
@@ -161,7 +184,7 @@ class Executor:
         self._notify(f"{emoji} PAPER close #{tr.id} {tr.symbol} pnl=${pnl:.2f} "
                      f"fees=${fees:.2f} ({reason})")
 
-    def _manage_live(self, tr, price: float | None) -> None:
+    def _manage_live(self, tr, price: float | None, snap=None) -> None:
         cl = self._client
         pend = self._pending.get(tr.id)
         # 1) ожидание заполнения post-only входа
@@ -201,15 +224,18 @@ class Executor:
             emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
             self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} (TP/SL)")
             return
-        if self._now() - tr.ts_open >= self._cfg.time_stop_sec:
+        flow_out = self._flow_exit(tr, snap)
+        if flow_out or self._now() - tr.ts_open >= self._cfg.time_stop_sec:
+            close_reason = "flow_exit" if flow_out else "time_stop"
             side = "Buy" if tr.side == "long" else "Sell"
-            cl.close_market(tr.symbol, side, pos.size, f"scalp_ts_{tr.id}")
+            cl.close_market(tr.symbol, side, pos.size, f"scalp_{close_reason}_{tr.id}")
             pnl = cl.last_closed_pnl(tr.symbol, "scalp_")
             self._db.mark_closed(tr.id, exit_price=pos.mark_price or tr.entry,
                                  pnl_usd=pnl or 0.0, fees_usd=0.0,
-                                 close_reason="time_stop", ts_close=self._now())
+                                 close_reason=close_reason, ts_close=self._now())
             self._pending.pop(tr.id, None)
-            log.info("LIVE close #%d %s pnl=%.4f (time_stop)", tr.id, tr.symbol,
-                     pnl or 0.0)
+            log.info("LIVE close #%d %s pnl=%.4f (%s)", tr.id, tr.symbol,
+                     pnl or 0.0, close_reason)
             emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
-            self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} (time_stop)")
+            self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} "
+                         f"({close_reason})")

@@ -69,9 +69,12 @@ class ScalpSettings(BaseSettings):
     ob_levels: int = Field(default=25)
     # Imbalance, выше которого книга считается перекошенной (bid/(bid+ask)).
     ob_imbalance_min: float = Field(default=0.58)
-    # Funding |rate| порог «толпа перекошена» (Lambda Finance 2026: 0.05%
-    # = лёгкий перекос; coinxsight 2026: 0.03% = over-leverage).
-    funding_extreme: float = Field(default=0.0003)
+    # Funding-перекос толпы (АСИММЕТРИЧНО, research 2026):
+    # crowded LONG = funding ≥ +0.05% (TraderSpy/Altrady) → фейдим ШОРТОМ;
+    # crowded SHORT = funding ≤ −0.03% → фейдим ЛОНГОМ.
+    # https://blog.traderspy.app/en/blog/crypto-funding-rates-secret-weapon/
+    funding_extreme_pos: float = Field(default=0.0005)  # порог для short-fade
+    funding_extreme_neg: float = Field(default=0.0003)  # порог для long-fade
     # Ликвидационный flush: суммарный размер ликвидаций (в USD) за окно.
     liq_flush_usd: float = Field(default=50000.0)
     liq_window_sec: float = Field(default=60.0)
@@ -80,12 +83,52 @@ class ScalpSettings(BaseSettings):
     # Анти-шум между входами по одному символу.
     signal_cooldown_sec: float = Field(default=60.0)
 
+    # ─── Подтверждение разворота (sweep-and-reclaim, CAP-протокол) ────────
+    # «Не входи во время свипа — жди возврата за уровень + разворота ленты».
+    # Источники: chartwhisperer CAP 5-rule protocol (Rule 2 reclaim, Rule 5
+    # CHoCH), CrossTrade, Kalena (tape-shift), Quantum-Algo. Главный фикс
+    # «ловли ножа»: detect_sweep ловит экстремум, но без reclaim бот мог
+    # входить в реальный пробой.
+    require_reclaim: bool = Field(default=True)
+    # Доля возврата цены от свип-экстремума к свипнутому уровню (0..1).
+    reclaim_frac: float = Field(default=0.5)
+    # Окно (сек) для оценки разворота CVD (лента качнулась в сторону сделки).
+    momentum_window_sec: float = Field(default=30.0)
+
+    # ─── Анти fee-trap (комиссии съедают мелкую цель) ────────────────────
+    # Round-trip издержки ≈ maker-вход (0.02%) + taker-выход (0.055%).
+    # Источники: liberatedstocktrader, 1minscalper, VT Markets (цель ≥3×
+    # издержек). Сигнал отбрасывается, если ход до TP < min_target_fee_mult ×
+    # round_trip_fee_frac.
+    round_trip_fee_frac: float = Field(default=0.00075)
+    min_target_fee_mult: float = Field(default=3.0)
+
+    # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────
+    # Канон: свипы доходят в London/NY open + overlap, «мёртвые» часы дают
+    # ложные. Crypto 24/7 + строгий конфлюенс → по умолчанию ВЫКЛ, чтобы не
+    # уморить частоту. Включать при достаточной статистике.
+    session_filter_enabled: bool = Field(default=False)
+    # Активные UTC-часы (London 07-10, NY 13-16 + overlap 12-16).
+    active_hours_utc: str = Field(default="7,8,9,12,13,14,15,16")
+
     # ─── Управление позицией ─────────────────────────────────────────────
     # Тайм-стоп: скальп не должен «висеть» (tick-scalping 60-90с, b2broker).
     time_stop_sec: float = Field(default=90.0)
     # TP/SL в единицах R; SL ставится за свипнутый уровень + буфер.
-    take_profit_r: float = Field(default=1.5)
+    # 2.0R — канон для свип-разворота (CrossTrade 2:1–4:1, chartwhisperer
+    # T1≈2-3R). Ранее 1.5R — после комиссий edge слишком тонкий.
+    take_profit_r: float = Field(default=2.0)
     sl_buffer_bps: float = Field(default=8.0)  # буфер за свип-уровнем, б.п.
+    # Активный выход (hard invalidation): закрыть раньше тайм-стопа, если
+    # ордер-флоу (CVD) развернулся ПРОТИВ позиции. Все скальп-источники:
+    # «exit immediately when order flow flips» (Kalena, tradezella, tradealgo).
+    active_exit_enabled: bool = Field(default=True)
+    active_exit_min_age_sec: float = Field(default=10.0)  # не дёргаться на шуме
+
+    # ─── Старт «с чистого листа» ──────────────────────────────────────────
+    # При старте закрыть любые открытые позиции по нашим символам и
+    # реконсилить «зависшие» open-сделки в БД (новая логика входа/выхода).
+    flatten_on_start: bool = Field(default=True)
 
     # ─── Telegram (опционально, нотификации без поллинга команд) ─────────
     telegram_enabled: bool = Field(default=False)
@@ -95,6 +138,10 @@ class ScalpSettings(BaseSettings):
     @property
     def symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+
+    @property
+    def active_hours(self) -> set[int]:
+        return {int(h) for h in self.active_hours_utc.split(",") if h.strip()}
 
 
 def load_settings() -> ScalpSettings:
