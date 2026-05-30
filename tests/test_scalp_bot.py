@@ -677,6 +677,7 @@ from scalp_bot.analysis.strategies import (  # noqa: E402
     near_round,
     resolve,
 )
+from scalp_bot.data.universe import rank_universe  # noqa: E402
 from scalp_bot.state.db import ScalpDB  # noqa: E402
 
 
@@ -926,3 +927,65 @@ def test_build_strategies_two():
     cfg = SimpleNamespace(strategy_list=["sweep_fade", "density_bounce"])
     strats = build_strategies(cfg, ["SOLUSDT"])
     assert [s.name for s in strats] == ["sweep_fade", "density_bounce"]
+
+
+def test_ensure_symbols_additive_and_idempotent():
+    cfg = SimpleNamespace(strategy_list=["sweep_fade", "density_bounce"],
+                          **_density_cfg().__dict__)
+    strats = build_strategies(cfg, ["AAAUSDT"])
+    for s in strats:
+        s.ensure_symbols(["BBBUSDT", "AAAUSDT"])  # новый + уже известный
+        s.ensure_symbols(["BBBUSDT"])             # повторно — без дублей/ошибок
+        assert s.armed("BBBUSDT") is False        # символ известен, не взведён
+        assert s.armed("AAAUSDT") is False
+
+
+# ─── авто-селектор вселенной (data/universe.py) ─────────────────────────────
+
+def _ticker(sym, last, hi, lo, turnover, bid=None, ask=None, pre=""):
+    return {"symbol": sym, "lastPrice": str(last), "highPrice24h": str(hi),
+            "lowPrice24h": str(lo), "turnover24h": str(turnover),
+            "bid1Price": "" if bid is None else str(bid),
+            "ask1Price": "" if ask is None else str(ask),
+            "curPreListingPhase": pre}
+
+
+def test_rank_universe_filters_and_sorts_by_range():
+    tickers = [
+        _ticker("HYPEUSDT", 66.0, 72.0, 60.0, 800e6),     # range 18.2%
+        _ticker("NEARUSDT", 2.4, 2.8, 2.4, 250e6),         # range 16.7%
+        _ticker("BTCUSDT", 100000, 102500, 100000, 5e9),   # range 2.5% < floor
+        _ticker("PUMPUSDT", 1.0, 1.45, 1.0, 200e6),        # range 45% > cap
+        _ticker("THINUSDT", 5.0, 6.0, 5.0, 50e6),          # turnover < floor
+        _ticker("ETHUSDC", 3000, 3600, 3000, 1e9),         # не USDT
+    ]
+    picked = rank_universe(tickers, top_n=5, min_turnover=150e6,
+                           min_range_pct=6.0, max_range_pct=30.0,
+                           max_spread_bps=5.0)
+    assert picked == ["HYPEUSDT", "NEARUSDT"]  # по range% убыв.
+
+
+def test_rank_universe_top_n_cap():
+    tickers = [_ticker(f"C{i}USDT", 10, 12, 10, 200e6) for i in range(8)]
+    picked = rank_universe(tickers, top_n=3, min_turnover=150e6,
+                           min_range_pct=6.0, max_range_pct=30.0,
+                           max_spread_bps=0.0)
+    assert len(picked) == 3
+
+
+def test_rank_universe_spread_cap():
+    wide = _ticker("WIDEUSDT", 100, 110, 100, 200e6, bid=99.0, ask=100.0)
+    assert rank_universe([wide], top_n=5, min_turnover=150e6, min_range_pct=6.0,
+                         max_range_pct=30.0, max_spread_bps=5.0) == []
+    tight = _ticker("OKUSDT", 100, 110, 100, 200e6, bid=99.99, ask=100.0)
+    assert rank_universe([tight], top_n=5, min_turnover=150e6, min_range_pct=6.0,
+                         max_range_pct=30.0, max_spread_bps=5.0) == ["OKUSDT"]
+
+
+def test_rank_universe_skips_pre_listing_and_bad_rows():
+    pre = _ticker("NEWUSDT", 10, 12, 10, 200e6, pre="Phase1")
+    bad = {"symbol": "BADUSDT", "lastPrice": "0", "highPrice24h": "1",
+           "lowPrice24h": "0", "turnover24h": "200000000"}
+    assert rank_universe([pre, bad], top_n=5, min_turnover=150e6,
+                         min_range_pct=6.0, max_range_pct=30.0,
+                         max_spread_bps=5.0) == []

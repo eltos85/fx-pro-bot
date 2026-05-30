@@ -22,6 +22,7 @@ from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.exec_stream import BybitExecStream
 from scalp_bot.data.market_stream import BybitMarketStream
+from scalp_bot.data.universe import rank_universe
 from scalp_bot.safety import killswitch
 from scalp_bot.state.db import ScalpDB
 from scalp_bot.telegram.notifier import TelegramNotifier
@@ -51,10 +52,6 @@ def run() -> None:
 
     symbols = cfg.symbol_list
     mode = "LIVE(demo)" if cfg.trading_enabled else "PAPER"
-    log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
-             "kill day/total=$%.0f/$%.0f | min_conf=%d", mode, ",".join(symbols),
-             cfg.position_usd, cfg.min_position_usd, cfg.max_daily_loss_usd,
-             cfg.max_total_loss_usd, cfg.min_confluence)
 
     db = ScalpDB(cfg.data_dir)
 
@@ -66,8 +63,25 @@ def run() -> None:
         client = ScalpBybitClient(cfg.bybit_api_key, cfg.bybit_api_secret,
                                   demo=cfg.bybit_demo, category=cfg.bybit_category)
         log.info("Bybit REST: demo=%s category=%s", cfg.bybit_demo, cfg.bybit_category)
+        # авто-селектор вселенной: бот сам выбирает монеты под стратегию
+        if cfg.auto_universe_enabled:
+            picked = _select_universe(client, cfg)
+            if picked:
+                symbols = picked
+                log.info("авто-вселенная (топ-%d): %s", cfg.universe_top_n,
+                         ",".join(symbols))
+            else:
+                log.warning("авто-вселенная пуста — fallback на SCALP_SYMBOLS=%s",
+                            ",".join(symbols))
         if cfg.flatten_on_start:
-            _flatten_on_start(client, db, cfg.symbol_list)
+            # закрыть позиции по выбранным символам И по символам открытых сделок
+            flat_syms = set(symbols) | {tr.symbol for tr in db.open_trades()}
+            _flatten_on_start(client, db, sorted(flat_syms))
+
+    log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
+             "kill day/total=$%.0f/$%.0f | min_conf=%d", mode, ",".join(symbols),
+             cfg.position_usd, cfg.min_position_usd, cfg.max_daily_loss_usd,
+             cfg.max_total_loss_usd, cfg.min_confluence)
 
     states: dict[str, SymbolState] = {
         s: SymbolState(s, cvd_window_sec=cfg.cvd_window_sec,
@@ -96,6 +110,7 @@ def run() -> None:
     executor = Executor(db, cfg, client, notifier=notifier, strategies=strategies)
     cooldown: dict[str, float] = {}
     last_heartbeat = 0.0
+    last_universe = time.time()  # уже выбрали на старте — ждём refresh до ротации
     kill_notified = False
     funnel = _new_funnel()
 
@@ -104,7 +119,18 @@ def run() -> None:
             loop_start = time.monotonic()
             now = time.time()
 
-            # 0) забрать исполнения из приватного WS → атрибуция к сделкам
+            # 0a) часовая ротация вселенной (бот сам выбирает монеты)
+            if (client is not None and cfg.auto_universe_enabled
+                    and now - last_universe >= cfg.universe_refresh_sec):
+                last_universe = now
+                try:
+                    stream, states, symbols = _rotate_universe(
+                        client, cfg, db, stream, states, strategies, symbols,
+                        notifier)
+                except Exception:
+                    log.exception("rotate_universe failed")
+
+            # 0b) забрать исполнения из приватного WS → атрибуция к сделкам
             if exec_stream is not None:
                 try:
                     executor.ingest_executions(exec_stream.drain())
@@ -310,6 +336,53 @@ def _flatten_on_start(client, db, symbols: list[str]) -> None:
                        fees_usd=0.0, close_reason="restart_flat", ts_close=now)
         log.info("flatten: реконсил open-сделки #%d %s pnl=%.4f", tr.id,
                  tr.symbol, pnl or 0.0)
+
+
+def _select_universe(client, cfg) -> list[str]:
+    """Топ-N монет под стратегию из get_tickers (см. data/universe.py)."""
+    return rank_universe(
+        client.get_tickers(), top_n=cfg.universe_top_n,
+        min_turnover=cfg.universe_min_turnover_usd,
+        min_range_pct=cfg.universe_min_range_pct,
+        max_range_pct=cfg.universe_max_range_pct,
+        max_spread_bps=cfg.universe_max_spread_bps)
+
+
+def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
+                     notifier):
+    """Часовой пересмотр вселенной. Возвращает (stream, states, symbols).
+
+    Безопасно для открытых: символ с открытой позицией НЕ выкидываем, пока она
+    не закроется (даже если выпал из топа). Существующие SymbolState
+    переиспользуем (CVD/агрегаты переживают рестарт WS — теряется лишь ~1с
+    реконнекта, не всё окно). Стратегии не пересоздаём — лениво добавляем новые
+    символы (ensure_symbols), чтобы executor продолжал ссылаться на те же
+    объекты для дискреционного выхода."""
+    picked = _select_universe(client, cfg)
+    if not picked:
+        log.warning("ротация: авто-вселенная пуста — оставляю текущие символы")
+        return stream, states, symbols
+    open_syms = {tr.symbol for tr in db.open_trades()}
+    # топ-N плюс символы с открытыми позициями (доводим до закрытия)
+    target = list(dict.fromkeys(list(picked) + [s for s in open_syms]))
+    if set(target) == set(symbols):
+        return stream, states, symbols
+    log.info("ротация вселенной: %s → %s", ",".join(symbols), ",".join(target))
+    new_states = {
+        s: states.get(s) or SymbolState(
+            s, cvd_window_sec=cfg.cvd_window_sec,
+            liq_window_sec=cfg.liq_window_sec, ob_levels=cfg.ob_levels)
+        for s in target
+    }
+    stream.stop()
+    new_stream = BybitMarketStream(target, new_states, category=cfg.bybit_category,
+                                   testnet=cfg.bybit_testnet)
+    new_stream.start()
+    for st in strategies:
+        st.ensure_symbols(target)
+    if notifier is not None and notifier.active:
+        notifier.send("🔄 вселенная обновлена: " + ",".join(target))
+    return new_stream, new_states, target
 
 
 def in_active_session(now: float, cfg) -> bool:

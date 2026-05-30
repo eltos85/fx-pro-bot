@@ -51,6 +51,11 @@ class Strategy(Protocol):
         """Сбросить состояние по символу (вызывается при открытой позиции)."""
         ...
 
+    def ensure_symbols(self, symbols: list[str]) -> None:
+        """Лениво завести пер-символьное состояние для новых символов (ротация
+        вселенной), не теряя состояние уже известных."""
+        ...
+
     def should_exit(self, tr, snap: SymbolSnapshot, now: float
                     ) -> tuple[str, float] | None:
         """Дискреционный выход стратегии (помимо общих TP/SL/тайм-стопа).
@@ -96,6 +101,10 @@ class SweepFadeStrategy:
         det = self._det.get(symbol)
         if det is not None:
             det.reset()
+
+    def ensure_symbols(self, symbols: list[str]) -> None:
+        for s in symbols:
+            self._det.setdefault(s, SweepReclaimDetector(s, self.cfg))
 
     def should_exit(self, tr, snap: SymbolSnapshot, now: float
                     ) -> tuple[str, float] | None:
@@ -220,6 +229,10 @@ class DensityBounceStrategy:
     def reset(self, symbol: str) -> None:
         if symbol in self._track:
             self._track[symbol] = {"bid": None, "ask": None}
+
+    def ensure_symbols(self, symbols: list[str]) -> None:
+        for s in symbols:
+            self._track.setdefault(s, {"bid": None, "ask": None})
 
     def _update_track(self, sym: str, book_side: str,
                       levels: list[tuple[float, float]], now: float) -> None:

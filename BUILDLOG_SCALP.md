@@ -6,6 +6,39 @@
 
 ## 2026-05-30
 
+### v0.5.0 — авто-селектор торговой вселенной (без хардкода монет)
+`<hash>`
+
+**Зачем.** Хардкод `SCALP_SYMBOLS` устаревает: волатильность монет дрейфует по
+режимам. Теперь бот сам выбирает монеты под стратегию и пересматривает раз в час.
+
+**Как.** `data/universe.py::rank_universe` тянет `get_tickers` (24h snapshot,
+офдок <https://bybit-exchange.github.io/docs/v5/market/tickers>) и фильтрует:
+- `range% = (high24h−low24h)/last ∈ [6%, 30%]` — амплитуда. Floor 6% из
+  математики fee-guard (нужен стоп `R≥0.22%` → round-trip taker 0.11% ×
+  min_target_fee_mult / take_profit_r) + live-границы (2.5–5.4% режутся,
+  9–16% проходят). Cap 30% — отсечь pump-and-dump (XLM 37%/ALLO 43%).
+- `turnover24h ≥ $150M` — ликвидный тир (рабочие монеты были 248–799M$).
+- спред ≤ 5 bps. Только `*USDT`-перпы, пре-маркет-листинги пропускаем.
+Сортировка по range% убыв. (tie-break turnover) → топ-N (default 5).
+
+**Ротация (часовая, безопасная).** `_rotate_universe`: символ с открытой
+позицией НЕ выкидываем пока не закроется; `SymbolState` переиспользуем (CVD
+переживает рестарт WS — теряется ~1с реконнекта, не всё окно); стратегии не
+пересоздаём — лениво добавляем символы (`ensure_symbols`), чтобы executor
+ссылался на те же объекты для дискреционного выхода. exec-стрим (account-wide)
+ротации не требует.
+
+**Пороги — конфиг (env), не подгонка** (no-data-fitting.mdc): привязаны к
+fee-guard и live-границе, а НЕ оптимизированы под прошлый P&L. Параметры:
+`SCALP_AUTO_UNIVERSE_ENABLED/_TOP_N/_REFRESH_SEC/_MIN_TURNOVER_USD/
+_MIN_RANGE_PCT/_MAX_RANGE_PCT/_MAX_SPREAD_BPS`. `SCALP_SYMBOLS` — только
+fallback при сбое API.
+
+**Файлы:** `data/universe.py` (новый), `trading/client.py` (get_tickers),
+`config/settings.py`, `app/main.py`, `analysis/strategies.py` (ensure_symbols),
+`docker-compose.yml`, `tests/test_scalp_bot.py` (+6).
+
 ### v0.4.2 — точный net P&L из приватного WS execution (вместо REST)
 `<hash>`
 

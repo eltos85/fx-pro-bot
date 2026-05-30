@@ -33,6 +33,19 @@ class ScalpSettings(BaseSettings):
     # конфликт направлений по символу → тик пропускается (см. strategies.py).
     enabled_strategies: str = Field(default="sweep_fade")
 
+    # ─── Авто-селектор вселенной (data/universe.py) ──────────────────────────
+    # Если включён — бот сам выбирает монеты под стратегию из get_tickers, а
+    # ``symbols`` используется лишь как fallback при сбое API. Пороги привязаны
+    # к математике fee-guard и live-границе (BUILDLOG_SCALP 2026-05-30), а НЕ
+    # подгоняются под прошлый P&L (no-data-fitting.mdc).
+    auto_universe_enabled: bool = Field(default=True)
+    universe_top_n: int = Field(default=5)
+    universe_refresh_sec: float = Field(default=3600.0)  # пересмотр раз в час
+    universe_min_turnover_usd: float = Field(default=150_000_000.0)
+    universe_min_range_pct: float = Field(default=6.0)
+    universe_max_range_pct: float = Field(default=30.0)
+    universe_max_spread_bps: float = Field(default=5.0)
+
     # ─── Капитал / риск ──────────────────────────────────────────────────
     virtual_capital: float = Field(default=1000.0)
     # Размер сделки в USD (notional). Пользователь мыслит «лотами в $».

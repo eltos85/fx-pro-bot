@@ -273,7 +273,19 @@ services:
     environment:
       SCALP_DATA_DIR: /data
       SCALP_LOG_LEVEL: ${SCALP_LOG_LEVEL:-INFO}
+      # Хардкод-список используется только как fallback при сбое get_tickers,
+      # если включён авто-селектор вселенной (ниже).
       SCALP_SYMBOLS: ${SCALP_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
+      # Авто-селектор: бот сам выбирает топ-N монет под стратегию из get_tickers
+      # (range%/turnover/spread) и пересматривает раз в час. Пороги привязаны к
+      # математике fee-guard и live-границе (BUILDLOG_SCALP) — не подгонка.
+      SCALP_AUTO_UNIVERSE_ENABLED: ${SCALP_AUTO_UNIVERSE_ENABLED:-true}
+      SCALP_UNIVERSE_TOP_N: ${SCALP_UNIVERSE_TOP_N:-5}
+      SCALP_UNIVERSE_REFRESH_SEC: ${SCALP_UNIVERSE_REFRESH_SEC:-3600}
+      SCALP_UNIVERSE_MIN_TURNOVER_USD: ${SCALP_UNIVERSE_MIN_TURNOVER_USD:-150000000}
+      SCALP_UNIVERSE_MIN_RANGE_PCT: ${SCALP_UNIVERSE_MIN_RANGE_PCT:-6}
+      SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-30}
+      SCALP_UNIVERSE_MAX_SPREAD_BPS: ${SCALP_UNIVERSE_MAX_SPREAD_BPS:-5}
       # Bybit — ОТДЕЛЬНЫЕ ключи (или те же что ai-trader/bybit-bot, но
       # рекомендуется отдельный subaccount для аудита PnL).
       SCALP_BYBIT_API_KEY: ${SCALP_BYBIT_API_KEY:-}

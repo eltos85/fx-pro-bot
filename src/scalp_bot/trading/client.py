@@ -90,6 +90,17 @@ class ScalpBybitClient:
         self._instr[symbol] = info
         return info
 
+    def get_tickers(self) -> list[dict]:
+        """24h-снапшот по всем инструментам категории (для авто-селектора
+        вселенной). Офдок: https://bybit-exchange.github.io/docs/v5/market/tickers
+        Поля: lastPrice, highPrice24h, lowPrice24h, turnover24h, bid1/ask1Price."""
+        try:
+            resp = self._session.get_tickers(category=self._category)
+        except Exception:
+            log.exception("get_tickers failed")
+            return []
+        return resp.get("result", {}).get("list", []) or []
+
     def round_qty(self, symbol: str, qty: float) -> float:
         info = self.instrument(symbol)
         step = info.qty_step if info else 0.001
