@@ -34,6 +34,7 @@ fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
 fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
 ai-trader = "ai_trader.app.main:run"
 fx-ai-trader = "fx_ai_trader.app.main:run"
+scalp-bot = "scalp_bot.app.main:run"
 ctrader-token-service = "ctrader_token_service.__main__:main"
 
 [tool.hatch.build.targets.wheel]
@@ -41,6 +42,7 @@ packages = [
   "src/fx_pro_bot",
   "src/ai_trader",
   "src/fx_ai_trader",
+  "src/scalp_bot",
   "src/shared_oauth",
   "src/ctrader_token_service",
 ]

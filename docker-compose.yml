@@ -254,5 +254,54 @@ services:
       # бот его не пишет (см. fx_ai_trader/trading/token_lock.py).
       - ./data:/data
 
+  # ─── scalp-bot: orderflow-скальпер Bybit (rule-based, без LLM) ──────────
+  # Полностью изолирован от ai-trader/bybit-bot. Решения по микроструктуре
+  # (CVD/дельта, стакан, funding, ликвидации) из Bybit public WS в реалтайме.
+  scalp-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.scalp-bot
+    image: scalp-bot:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      SCALP_DATA_DIR: /data
+      SCALP_LOG_LEVEL: ${SCALP_LOG_LEVEL:-INFO}
+      SCALP_SYMBOLS: ${SCALP_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
+      # Bybit — ОТДЕЛЬНЫЕ ключи (или те же что ai-trader/bybit-bot, но
+      # рекомендуется отдельный subaccount для аудита PnL).
+      SCALP_BYBIT_API_KEY: ${SCALP_BYBIT_API_KEY:-}
+      SCALP_BYBIT_API_SECRET: ${SCALP_BYBIT_API_SECRET:-}
+      SCALP_BYBIT_DEMO: ${SCALP_BYBIT_DEMO:-true}
+      SCALP_BYBIT_CATEGORY: ${SCALP_BYBIT_CATEGORY:-linear}
+      # PAPER по умолчанию: ордера не ставятся, только логируются и
+      # симулируются. Включать LIVE (на demo!) одним флагом после наблюдения.
+      SCALP_TRADING_ENABLED: ${SCALP_TRADING_ENABLED:-false}
+      SCALP_ENTRY_ORDER_TYPE: ${SCALP_ENTRY_ORDER_TYPE:-post_only_limit}
+      # Капитал/риск
+      SCALP_VIRTUAL_CAPITAL: ${SCALP_VIRTUAL_CAPITAL:-500}
+      SCALP_RISK_PER_TRADE_USD: ${SCALP_RISK_PER_TRADE_USD:-5}
+      SCALP_MAX_LEVERAGE: ${SCALP_MAX_LEVERAGE:-5}
+      SCALP_MAX_DAILY_LOSS_USD: ${SCALP_MAX_DAILY_LOSS_USD:-50}
+      SCALP_MAX_TOTAL_LOSS_USD: ${SCALP_MAX_TOTAL_LOSS_USD:-150}
+      SCALP_MAX_OPEN_POSITIONS: ${SCALP_MAX_OPEN_POSITIONS:-2}
+      SCALP_MAX_TRADES_PER_HOUR: ${SCALP_MAX_TRADES_PER_HOUR:-20}
+      # Сигналы (research-based дефолты — см. settings.py / BUILDLOG_SCALP.md)
+      SCALP_MIN_CONFLUENCE: ${SCALP_MIN_CONFLUENCE:-3}
+      SCALP_FUNDING_EXTREME: ${SCALP_FUNDING_EXTREME:-0.0003}
+      SCALP_LIQ_FLUSH_USD: ${SCALP_LIQ_FLUSH_USD:-50000}
+      SCALP_OB_IMBALANCE_MIN: ${SCALP_OB_IMBALANCE_MIN:-0.58}
+      SCALP_TIME_STOP_SEC: ${SCALP_TIME_STOP_SEC:-90}
+      SCALP_TAKE_PROFIT_R: ${SCALP_TAKE_PROFIT_R:-1.5}
+    volumes:
+      - scalp_bot_data:/data
+
 volumes:
   ai_trader_data:
+  scalp_bot_data:
