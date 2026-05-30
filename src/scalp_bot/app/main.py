@@ -27,6 +27,7 @@ from scalp_bot.trading.client import ScalpBybitClient
 from scalp_bot.trading.executor import Executor
 
 log = logging.getLogger("scalp_bot")
+play = logging.getLogger("scalp_bot.play")  # пошаговый нарратив торговли
 
 _shutdown = False
 
@@ -226,6 +227,21 @@ def _log_funnel(f: dict) -> None:
     parts = " ".join(f"{k}={f[k]}" for k in _FUNNEL_RULES)
     log.info("FUNNEL evals=%d | %s | armed=%d FIRED=%d",
              n, parts, f["armed"], f["fired"])
+    # плейбук-вердикт простым языком: где сейчас «затык» воронки
+    if f["fired"] > 0:
+        play.info("📊 за минуту: %d вход(ов) — стратегия дошла до сделки", f["fired"])
+    elif f["armed"] > 0:
+        play.info("📊 за минуту: взводились, но до выстрела не дошло — "
+                  "reclaim/разворот CVD не совпали (нормально на спокойном рынке)")
+    elif f["sweep"] == 0:
+        play.info("📊 за минуту: свипов нет — рынок без проколов уровней, "
+                  "спокойно жду экстремумы")
+    elif f["div"] == 0:
+        play.info("📊 за минуту: свипы есть, но без дивергенции CVD — это импульс, "
+                  "а не поглощение, во взвод не беру (так и задумано)")
+    else:
+        play.info("📊 за минуту: есть свипы и дивергенции, но взвод не удержался — "
+                  "проверь div_min_late_trades/окно, если так каждую минуту")
 
 
 def _flatten_on_start(client, db, symbols: list[str]) -> None:

@@ -23,9 +23,18 @@ import time
 from scalp_bot.analysis.signals import Signal, flow_invalidated
 
 log = logging.getLogger("scalp_bot.exec")
+play = logging.getLogger("scalp_bot.play")  # пошаговый нарратив торговли
 
 MAKER_FEE = 0.0002
 TAKER_FEE = 0.00055
+
+# Закрытие → человеческая причина для плейбук-логов
+_CLOSE_RU = {
+    "tp": "цель достигнута (TP)", "sl": "выбило по стопу (SL)",
+    "tp_sl": "биржа закрыла по TP/SL", "time_stop": "тайм-стоп (не пошло за время)",
+    "flow_exit": "поток развернулся против — выхожу раньше",
+    "entry_Cancelled": "ордер входа отменён биржей", "entry_timeout": "вход не исполнился вовремя",
+}
 
 
 def qty_decimals(step: float) -> int:
@@ -83,6 +92,7 @@ class Executor:
         self._now = now
         # in-memory трекинг live-входов: trade_id -> {link, filled, ts}
         self._pending: dict[int, dict] = {}
+        self._hold_log: dict[int, float] = {}  # троттлинг «держу позицию»-логов
 
     def _notify(self, text: str) -> None:
         if self._notifier is not None:
@@ -152,8 +162,15 @@ class Executor:
                  qty * limit_price, risk_usd, limit_price, sig.sl_level,
                  sig.tp_level, reasons)
         if is_market:
+            play.info("📥 [%s] МАРКЕТ-вход %s: беру рынок @%.4f (qty=%s, $%.0f) — "
+                      "позиция открыта, сопровождаю", sig.symbol,
+                      sig.side.upper(), limit_price, qty, qty * limit_price)
             self._notify(open_text)
         else:
+            play.info("📤 [%s] ставлю maker-лимитку %s @%.4f (qty=%s, $%.0f) на "
+                      "своей стороне книги — жду филл до %.0fс", sig.symbol,
+                      sig.side.upper(), limit_price, qty, qty * limit_price,
+                      cfg.entry_fill_timeout_sec)
             self._notify(f"⏳ #{tid} {sig.symbol} {sig.side.upper()} maker-лимитка "
                          f"@{limit_price:.4f} выставлена, жду филл")
         return tid
@@ -225,6 +242,10 @@ class Executor:
                 pend["filled"] = True
                 pend["ts"] = self._now()
                 log.info("LIVE #%d %s — позиция открыта", tr.id, status)
+                play.info("✅ [%s] филл #%d %s @%.4f — позиция открыта, "
+                          "слежу за TP %.4f / SL %.4f / тайм-стопом %.0fс",
+                          tr.symbol, tr.id, tr.side.upper(), tr.entry, tr.tp,
+                          tr.sl, self._cfg.time_stop_sec)
                 self._notify(pend.get("open_text", f"🟢 open #{tr.id} {tr.symbol}"))
                 return
             if status in ("Cancelled", "Rejected", "Deactivated"):
@@ -233,6 +254,8 @@ class Executor:
                                      ts_close=self._now())
                 self._pending.pop(tr.id, None)
                 log.info("LIVE #%d entry %s — не открылись", tr.id, status)
+                play.info("🚫 [%s] вход #%d не состоялся (%s) — позиции нет, "
+                          "возвращаюсь к поиску", tr.symbol, tr.id, status)
                 return
             if self._now() - pend["ts"] > self._cfg.entry_fill_timeout_sec:
                 cl.cancel_order(tr.symbol, pend["link"])
@@ -241,6 +264,9 @@ class Executor:
                                      ts_close=self._now())
                 self._pending.pop(tr.id, None)
                 log.info("LIVE #%d entry timeout — отменён", tr.id)
+                play.info("⌛ [%s] maker-лимитка #%d не исполнилась за %.0fс — "
+                          "снимаю ордер (цена ушла от мейкера)", tr.symbol, tr.id,
+                          self._cfg.entry_fill_timeout_sec)
             return
         # 2) активная позиция
         pos = cl.get_position(tr.symbol)
@@ -252,8 +278,13 @@ class Executor:
                                  pnl_usd=pnl, fees_usd=0.0,
                                  close_reason="tp_sl", ts_close=self._now())
             self._pending.pop(tr.id, None)
+            self._hold_log.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (биржа TP/SL)", tr.id, tr.symbol,
                      pnl or 0.0)
+            res = "профит" if (pnl or 0.0) >= 0 else "убыток"
+            play.info("🏁 [%s] закрыл #%d %s: %s — %s, pnl=$%.2f",
+                      tr.symbol, tr.id, tr.side.upper(), _CLOSE_RU["tp_sl"],
+                      res, pnl or 0.0)
             emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
             self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} (TP/SL)")
             return
@@ -267,8 +298,24 @@ class Executor:
                                  pnl_usd=pnl, fees_usd=0.0,
                                  close_reason=close_reason, ts_close=self._now())
             self._pending.pop(tr.id, None)
+            self._hold_log.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (%s)", tr.id, tr.symbol,
                      pnl or 0.0, close_reason)
+            res = "профит" if (pnl or 0.0) >= 0 else "убыток"
+            play.info("🏁 [%s] закрыл #%d %s: %s — %s, pnl=$%.2f", tr.symbol,
+                      tr.id, tr.side.upper(), _CLOSE_RU.get(close_reason, close_reason),
+                      res, pnl or 0.0)
             emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
             self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} "
                          f"({close_reason})")
+            return
+        # держим позицию — троттлим лог дистанций до TP/SL и возраста
+        iv = getattr(self._cfg, "narrate_interval_sec", 15.0)
+        if price is not None and self._now() - self._hold_log.get(tr.id, 0.0) >= iv:
+            self._hold_log[tr.id] = self._now()
+            age = self._now() - tr.ts_open
+            to_tp = (tr.tp - price) if tr.side == "long" else (price - tr.tp)
+            to_sl = (price - tr.sl) if tr.side == "long" else (tr.sl - price)
+            play.info("⏱ [%s] держу #%d %s %.0fс | цена %.4f | до TP %+.4f, "
+                      "до SL %+.4f", tr.symbol, tr.id, tr.side.upper(), age,
+                      price, to_tp, to_sl)

@@ -19,9 +19,16 @@ bookmap liquidity-vacuum, Kalena CVD):
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot
+
+# Отдельный логгер-«плейбук»: пошаговый нарратив торговли простым языком,
+# чтобы на пальцах видеть, где бот идёт по стратегии верно, а где буксует.
+play = logging.getLogger("scalp_bot.play")
+
+_SIDE_RU = {"long": "LONG↑", "short": "SHORT↓"}
 
 
 @dataclass
@@ -313,6 +320,7 @@ class SweepReclaimDetector:
         self.symbol = symbol
         self.cfg = cfg
         self._armed: dict | None = None
+        self._last_wait_log = 0.0
 
     @property
     def armed(self) -> bool:
@@ -321,11 +329,23 @@ class SweepReclaimDetector:
     def reset(self) -> None:
         self._armed = None
 
+    def _target(self, a: dict) -> float:
+        """Цена reclaim — куда должна вернуться цена, чтобы дать выстрел."""
+        if a["side"] == "long":
+            return a["swept"] + self.cfg.reclaim_frac * a["exc"]
+        return a["swept"] - self.cfg.reclaim_frac * a["exc"]
+
     def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
         cfg = self.cfg
         if snap.stale or snap.last_price is None or len(snap.cvd_samples) < 6:
             return None
+        # истечение взвода: reclaim/разворот так и не пришли за таймаут
         if self._armed and now - self._armed["ts"] > cfg.arm_timeout_sec:
+            a = self._armed
+            play.info("💤 [%s] взвод %s истёк (%.0fс): reclaim %.4f и разворот CVD "
+                      "не пришли — снимаю наблюдение",
+                      self.symbol, _SIDE_RU.get(a["side"], a["side"]),
+                      cfg.arm_timeout_sec, self._target(a))
             self._armed = None
         s = snap.cvd_samples
         # ── фаза ВЗВОД (или переарм на более свежий/глубокий свип) ──
@@ -343,7 +363,18 @@ class SweepReclaimDetector:
                 prior = max(x.price for x in early)
                 exc = swept - prior
             if exc > 0:
+                was = self._armed
                 self._armed = {"side": side, "swept": swept, "exc": exc, "ts": now}
+                # лог только на НОВЫЙ взвод или смену уровня (не каждый тик)
+                if was is None or was["side"] != side or abs(was["swept"] - swept) > 1e-9:
+                    absorb = "продавцов выдыхают" if side == "long" else "покупателей выдыхают"
+                    play.info("🎯 [%s] ВЗВОД %s: свип уровня %.4f + дивергенция CVD "
+                              "(%s). Жду reclaim %.4f (%.0f%% отката) и разворот CVD, "
+                              "таймаут %.0fс",
+                              self.symbol, _SIDE_RU.get(side, side), swept, absorb,
+                              self._target(self._armed), cfg.reclaim_frac * 100,
+                              cfg.arm_timeout_sec)
+                    self._last_wait_log = now
             break
         if not self._armed:
             return None
@@ -351,12 +382,26 @@ class SweepReclaimDetector:
         a = self._armed
         side = a["side"]
         last = snap.last_price
-        if side == "long":
-            reclaimed_now = last >= a["swept"] + cfg.reclaim_frac * a["exc"]
-        else:
-            reclaimed_now = last <= a["swept"] - cfg.reclaim_frac * a["exc"]
-        if not (reclaimed_now and reversal_momentum(s, side, cfg.momentum_window_sec)):
+        target = self._target(a)
+        reclaimed_now = last >= target if side == "long" else last <= target
+        mom = reversal_momentum(s, side, cfg.momentum_window_sec)
+        if not (reclaimed_now and mom):
+            # ожидание — троттлим, чтобы не флудить (раз в narrate_interval_sec)
+            iv = getattr(cfg, "narrate_interval_sec", 15.0)
+            if now - self._last_wait_log >= iv:
+                self._last_wait_log = now
+                if not reclaimed_now:
+                    gap = target - last if side == "long" else last - target
+                    play.info("⏳ [%s] жду %s: цена %.4f, до reclaim %.4f не хватает "
+                              "%.4f; разворот CVD: %s", self.symbol,
+                              _SIDE_RU.get(side, side), last, target, gap,
+                              "есть" if mom else "нет")
+                else:
+                    play.info("⏳ [%s] жду %s: reclaim ✓ (%.4f), но CVD ещё не "
+                              "развернулся — вход держу", self.symbol,
+                              _SIDE_RU.get(side, side), last)
             return None
+        # reclaim + разворот совпали → собираем бонус-подтверждения
         reasons = ["sweep", "cvd_div", "reclaim", "mom"]
         if ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min):
             reasons.append("ob_imb")
@@ -365,7 +410,19 @@ class SweepReclaimDetector:
         if funding_supportive(snap.funding_rate, side,
                               cfg.funding_extreme_pos, cfg.funding_extreme_neg):
             reasons.append("funding")
+        bonus = [r for r in reasons if r in ("ob_imb", "liq", "funding")]
         sig = build_signal(snap, side, a["swept"], cfg, len(reasons), reasons)
-        if sig is not None:
+        if sig is None:
+            # reclaim+разворот были, но риск/комиссии не прошли fee-guard
+            play.info("⛔ [%s] %s: reclaim+разворот ✓, но fee-guard — цель не "
+                      "покрывает комиссии (стоп близко). Снимаю взвод",
+                      self.symbol, _SIDE_RU.get(side, side))
             self._armed = None
+            return None
+        play.info("🔫 [%s] ВЫСТРЕЛ %s: reclaim ✓ (%.4f≥%.4f) + CVD развернулся ✓ | "
+                  "бонусы: %s | score=%d → сигнал на вход @%.4f SL %.4f TP %.4f",
+                  self.symbol, _SIDE_RU.get(side, side), last, target,
+                  ",".join(bonus) if bonus else "нет", sig.score,
+                  sig.entry_ref, sig.sl_level, sig.tp_level)
+        self._armed = None
         return sig
