@@ -7,7 +7,10 @@
 - LIVE   (True, на Bybit DEMO): post-only LIMIT вход с биржевыми SL/TP,
   reduce-only MARKET выход по тайм-стопу.
 
-Размер позиции — фикс-риск $/сделку (Van Tharp): qty = risk_usd / |entry−SL|.
+Размер позиции — фиксированный NOTIONAL ($position_usd), qty = notional/entry.
+ВНИМАНИЕ: $-риск НЕ фиксирован, он = notional × (дистанция SL в % от цены).
+При SL ~0.2–0.5% риск ≈ $0.2–0.5 на $100 лота. Killswitch ограничивает
+суммарный дневной/совокупный убыток, а не риск отдельной сделки.
 
 Комиссии Bybit linear (https://www.bybit.com/en/help-center/article/Trading-Fee-Structure):
 maker 0.02%, taker 0.055%. PAPER моделирует вход maker + выход taker.
@@ -59,6 +62,15 @@ def paper_pnl(side: str, entry: float, exit_price: float, qty: float) -> tuple[f
     gross = (exit_price - entry) * qty if side == "long" else (entry - exit_price) * qty
     fees = qty * (entry * MAKER_FEE + exit_price * TAKER_FEE)
     return (gross - fees, fees)
+
+
+def taker_pnl(side: str, entry: float, exit_price: float, qty: float) -> float:
+    """Консервативная оценка net PnL (обе ноги taker) — fallback для killswitch,
+    когда биржевой closedPnl недоступен. Чуть завышает издержки (вход обычно
+    maker), т.е. оценка осторожная в сторону убытка."""
+    gross = (exit_price - entry) * qty if side == "long" else (entry - exit_price) * qty
+    fees = qty * (entry + exit_price) * TAKER_FEE
+    return gross - fees
 
 
 class Executor:
@@ -149,6 +161,16 @@ class Executor:
             else:
                 self._manage_live(tr, price, snap)
 
+    def _realized_or_estimate(self, tr, exit_price: float) -> float:
+        """net PnL: биржевой closedPnl, иначе оценка по цене (killswitch не
+        должен «ослепнуть» при сбое closedPnl — иначе убытки уйдут как 0)."""
+        pnl = self._client.last_closed_pnl(tr.symbol, "scalp_")
+        if pnl is None:
+            pnl = taker_pnl(tr.side, tr.entry, exit_price, tr.qty)
+            log.warning("LIVE #%d closedPnl недоступен — оценка по цене=%.4f",
+                        tr.id, pnl)
+        return pnl
+
     def _flow_exit(self, tr, snap) -> bool:
         """True если активный выход разрешён и ордер-флоу развернулся против."""
         cfg = self._cfg
@@ -214,9 +236,9 @@ class Executor:
         if pos is None:
             return  # transient — не трогаем
         if pos.size <= 0:
-            pnl = cl.last_closed_pnl(tr.symbol, "scalp_")
+            pnl = self._realized_or_estimate(tr, pos.mark_price or tr.entry)
             self._db.mark_closed(tr.id, exit_price=pos.mark_price or tr.entry,
-                                 pnl_usd=pnl or 0.0, fees_usd=0.0,
+                                 pnl_usd=pnl, fees_usd=0.0,
                                  close_reason="tp_sl", ts_close=self._now())
             self._pending.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (биржа TP/SL)", tr.id, tr.symbol,
@@ -229,9 +251,9 @@ class Executor:
             close_reason = "flow_exit" if flow_out else "time_stop"
             side = "Buy" if tr.side == "long" else "Sell"
             cl.close_market(tr.symbol, side, pos.size, f"scalp_{close_reason}_{tr.id}")
-            pnl = cl.last_closed_pnl(tr.symbol, "scalp_")
+            pnl = self._realized_or_estimate(tr, pos.mark_price or tr.entry)
             self._db.mark_closed(tr.id, exit_price=pos.mark_price or tr.entry,
-                                 pnl_usd=pnl or 0.0, fees_usd=0.0,
+                                 pnl_usd=pnl, fees_usd=0.0,
                                  close_reason=close_reason, ts_close=self._now())
             self._pending.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (%s)", tr.id, tr.symbol,

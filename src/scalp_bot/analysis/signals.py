@@ -53,21 +53,27 @@ def detect_sweep(samples: list[CvdSample], side: str) -> bool:
     return max(s.price for s in late) > max(s.price for s in early)
 
 
-def cvd_divergence(samples: list[CvdSample], side: str) -> bool:
+def cvd_divergence(samples: list[CvdSample], side: str, min_late: int = 0) -> bool:
     """Дивергенция цена↔CVD (поглощение).
 
-    LONG  (bull): late price-min < early price-min, но late cvd-min ≥ early cvd-min.
-    SHORT (bear): late price-max > early price-max, но late cvd-max ≤ early cvd-max.
+    LONG  (bull): late price-min < early price-min, но late cvd-min > early cvd-min.
+    SHORT (bear): late price-max > early price-max, но late cvd-max < early cvd-max.
+
+    Строгое неравенство по CVD (>/<, не ≥/≤): на «тонком» окне почти плоский CVD
+    давал ложную дивергенцию при равенстве. ``min_late`` — минимум сделок в
+    поздней половине (анти «пустота»: дивергенция на 2-3 тиках = шум).
     """
     early, late = _split_halves(samples)
     if not early or not late:
         return False
+    if min_late and len(late) < min_late:
+        return False
     if side == "long":
         price_lower_low = min(s.price for s in late) < min(s.price for s in early)
-        cvd_higher_low = min(s.cvd for s in late) >= min(s.cvd for s in early)
+        cvd_higher_low = min(s.cvd for s in late) > min(s.cvd for s in early)
         return price_lower_low and cvd_higher_low
     price_higher_high = max(s.price for s in late) > max(s.price for s in early)
-    cvd_lower_high = max(s.cvd for s in late) <= max(s.cvd for s in early)
+    cvd_lower_high = max(s.cvd for s in late) < max(s.cvd for s in early)
     return price_higher_high and cvd_lower_high
 
 
@@ -146,6 +152,38 @@ def ob_supportive(imbalance: float | None, side: str, min_imb: float) -> bool:
     return imbalance >= min_imb if side == "long" else imbalance <= (1.0 - min_imb)
 
 
+def diagnose(snap: SymbolSnapshot, cfg) -> dict | None:
+    """Состояние всех правил/гейтов для лучшей стороны — для funnel-диагностики.
+
+    Возвращает dict с булевыми флагами (наблюдаемость, НЕ влияет на торговлю):
+    sweep/div/reclaim/momentum/ob/liq/funding/score/fee_ok/signal.
+    """
+    if snap.stale or snap.last_price is None or len(snap.cvd_samples) < 6:
+        return None
+    s = snap.cvd_samples
+    best = None
+    for side in ("long", "short"):
+        div = cvd_divergence(s, side, getattr(cfg, "div_min_late_trades", 0))
+        d = {
+            "side": side,
+            "sweep": detect_sweep(s, side),
+            "div": div,
+            "liq": liq_flush(snap.liq_events, side, cfg.liq_flush_usd),
+            "funding": funding_supportive(snap.funding_rate, side,
+                                          cfg.funding_extreme_pos, cfg.funding_extreme_neg),
+            "ob": ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min),
+            "reclaim": reclaimed(s, side, cfg.reclaim_frac),
+            "momentum": reversal_momentum(s, side, cfg.momentum_window_sec),
+        }
+        d["score"] = sum(1 for k in ("sweep", "div", "liq", "funding", "ob") if d[k])
+        if best is None or d["score"] > best["score"]:
+            best = d
+    sig = evaluate(snap, cfg)
+    best["fee_ok"] = sig is not None or not best["div"]  # грубо: дошли до fee-guard
+    best["signal"] = sig is not None
+    return best
+
+
 def flow_invalidated(snap: SymbolSnapshot, side: str, window_sec: float) -> bool:
     """Hard invalidation: ордер-флоу (CVD) развернулся ПРОТИВ позиции.
 
@@ -162,7 +200,7 @@ def _evaluate_side(snap: SymbolSnapshot, side: str, cfg) -> tuple[int, list[str]
     if detect_sweep(snap.cvd_samples, side):
         score += 1
         reasons.append("sweep")
-    div = cvd_divergence(snap.cvd_samples, side)
+    div = cvd_divergence(snap.cvd_samples, side, getattr(cfg, "div_min_late_trades", 0))
     if div:
         score += 1
         reasons.append("cvd_div")
@@ -212,13 +250,18 @@ def evaluate(snap: SymbolSnapshot, cfg) -> Signal | None:
         snap.best_bid if (side == "short" and snap.best_bid) else snap.last_price
     )
     buf = cfg.sl_buffer_bps / 1e4
+    # SL за экстремумом ИМЕННО свежего свипа (поздняя половина окна), а не за
+    # глобальным минимумом всех 180с — иначе старый дальний низ раздувает R и
+    # TP, и сделка висит до тайм-стопа. Канон: стоп сразу за фитилём свипа.
+    _, late = _split_halves(snap.cvd_samples)
+    recent = late or snap.cvd_samples
     if side == "long":
-        swept = min(s.price for s in snap.cvd_samples)
+        swept = min(s.price for s in recent)
         sl = swept * (1.0 - buf)
         risk = entry - sl
         tp = entry + cfg.take_profit_r * risk
     else:
-        swept = max(s.price for s in snap.cvd_samples)
+        swept = max(s.price for s in recent)
         sl = swept * (1.0 + buf)
         risk = sl - entry
         tp = entry - cfg.take_profit_r * risk

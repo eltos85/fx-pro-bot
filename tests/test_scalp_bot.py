@@ -11,6 +11,7 @@ import pytest
 from scalp_bot.analysis.signals import (
     cvd_divergence,
     detect_sweep,
+    diagnose,
     evaluate,
     flow_invalidated,
     funding_supportive,
@@ -21,7 +22,7 @@ from scalp_bot.analysis.signals import (
 )
 from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot, SymbolState
 from scalp_bot.safety import killswitch
-from scalp_bot.trading.executor import paper_pnl, position_size
+from scalp_bot.trading.executor import Executor, paper_pnl, position_size, taker_pnl
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────
@@ -33,6 +34,7 @@ def _cfg(**over):
         ob_imbalance_min=0.58, take_profit_r=2.0, sl_buffer_bps=8.0,
         require_reclaim=True, reclaim_frac=0.5, momentum_window_sec=3.0,
         round_trip_fee_frac=0.00075, min_target_fee_mult=3.0,
+        div_min_late_trades=2,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -75,6 +77,20 @@ def test_cvd_divergence_false_when_cvd_follows_price():
     s = [CvdSample(1, 100, 0), CvdSample(2, 99, -1), CvdSample(3, 98, -2),
          CvdSample(4, 97, -5), CvdSample(5, 96, -7), CvdSample(6, 95, -9)]
     assert cvd_divergence(s, "long") is False
+
+
+def test_cvd_divergence_strict_rejects_flat_cvd():
+    # цена ниже, но CVD РОВНО равен (плоско) → строгое > → не дивергенция
+    early = [CvdSample(1, 100, -5), CvdSample(2, 99, -3), CvdSample(3, 98, -5)]
+    late = [CvdSample(4, 97, -5), CvdSample(5, 96.5, -4), CvdSample(6, 97.5, -5)]
+    # min(late.cvd)=-5 == min(early.cvd)=-5 → не строго больше → False
+    assert cvd_divergence(early + late, "long") is False
+
+
+def test_cvd_divergence_min_late_activity_filter():
+    # поздняя половина из 3 сделок, но требуем ≥5 → отсев «пустоты»
+    assert cvd_divergence(_long_samples(), "long", min_late=5) is False
+    assert cvd_divergence(_long_samples(), "long", min_late=2) is True
 
 
 def test_split_too_few_samples():
@@ -208,6 +224,27 @@ def test_evaluate_passes_with_require_reclaim_off():
     assert sig is not None and sig.side == "long"
 
 
+def test_evaluate_sl_from_recent_sweep_half():
+    # SL берётся по экстремуму поздней половины (свежий свип), не глоб. минимуму
+    sig = evaluate(_snap(_long_samples()), _cfg())
+    late_min = min(96.5, 97.0, 97.5)  # поздняя половина _long_samples
+    assert sig is not None
+    assert sig.sl_level == pytest.approx(late_min * (1 - 8 / 1e4))
+
+
+def test_diagnose_reports_rule_states():
+    d = diagnose(_snap(_long_samples()), _cfg())
+    assert d is not None
+    assert d["side"] == "long"
+    assert d["div"] is True and d["sweep"] is True
+    assert d["signal"] is True
+    assert d["score"] >= 3
+
+
+def test_diagnose_none_when_stale():
+    assert diagnose(_snap(_long_samples(), stale=True), _cfg()) is None
+
+
 # ─── aggregates (SymbolState) ──────────────────────────────────────────────
 
 def test_symbolstate_cvd_accumulates_signed():
@@ -289,6 +326,29 @@ def test_paper_pnl_long_includes_fees():
 def test_paper_pnl_short():
     net, _ = paper_pnl("short", 100.0, 99.0, 5.0)
     assert net > 0
+
+
+def test_taker_pnl_estimate():
+    # обе ноги taker: gross − qty*(entry+exit)*TAKER
+    assert taker_pnl("long", 100.0, 101.0, 5.0) == pytest.approx(5.0 - 5 * 201 * 0.00055)
+    assert taker_pnl("short", 100.0, 99.0, 5.0) == pytest.approx(5.0 - 5 * 199 * 0.00055)
+
+
+def test_realized_or_estimate_falls_back_when_closedpnl_none():
+    # killswitch не должен «ослепнуть»: при closedPnl=None берём оценку по цене
+    fake_client = SimpleNamespace(last_closed_pnl=lambda sym, pref: None)
+    ex = Executor(db=None, settings=SimpleNamespace(), client=fake_client)
+    tr = SimpleNamespace(id=1, symbol="ETHUSDT", side="long", entry=2000.0, qty=0.04)
+    pnl = ex._realized_or_estimate(tr, 1990.0)  # убыток ~ −0.4 минус комиссии
+    assert pnl == pytest.approx(taker_pnl("long", 2000.0, 1990.0, 0.04))
+    assert pnl < 0  # убыток реально записывается, а не 0
+
+
+def test_realized_or_estimate_uses_exchange_pnl_when_available():
+    fake_client = SimpleNamespace(last_closed_pnl=lambda sym, pref: -3.21)
+    ex = Executor(db=None, settings=SimpleNamespace(), client=fake_client)
+    tr = SimpleNamespace(id=2, symbol="BTCUSDT", side="short", entry=70000.0, qty=0.001)
+    assert ex._realized_or_estimate(tr, 70100.0) == pytest.approx(-3.21)
 
 
 # ─── killswitch ────────────────────────────────────────────────────────────

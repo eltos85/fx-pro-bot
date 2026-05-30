@@ -238,7 +238,15 @@ class ScalpBybitClient:
         return self._submit(params)
 
     def last_closed_pnl(self, symbol: str, order_link_id_prefix: str) -> float | None:
-        """net closedPnl последней закрытой части (для записи в БД)."""
+        """net closedPnl последней закрытой части (для записи в БД).
+
+        ВАЖНО: при выходе по биржевым TP/SL закрывающий ордер генерирует САМА
+        биржа — у него НЕТ нашего orderLinkId с префиксом ``scalp_``. Поэтому
+        матч по префиксу даст промах, и killswitch «ослепнет». Логика: сперва
+        ищем по префиксу (наши reduce-only закрытия), иначе берём самую свежую
+        закрытую запись по символу (get_closed_pnl сортирован по времени desc;
+        на изолированном scalp-аккаунте это и есть наша сделка).
+        """
         try:
             resp = self._session.get_closed_pnl(
                 category=self._category, symbol=symbol, limit=20)
@@ -252,6 +260,12 @@ class ScalpBybitClient:
                     return float(it.get("closedPnl", 0) or 0)
                 except (ValueError, TypeError):
                     return None
+        # fallback: самая свежая закрытая запись (биржевой TP/SL без нашего link)
+        if items:
+            try:
+                return float(items[0].get("closedPnl", 0) or 0)
+            except (ValueError, TypeError):
+                return None
         return None
 
     def _submit(self, params: dict) -> dict:

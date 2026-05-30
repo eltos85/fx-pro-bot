@@ -16,7 +16,7 @@ import logging
 import signal
 import time
 
-from scalp_bot.analysis.signals import evaluate
+from scalp_bot.analysis.signals import diagnose, evaluate
 from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.market_stream import BybitMarketStream
@@ -85,6 +85,7 @@ def run() -> None:
     cooldown: dict[str, float] = {}
     last_heartbeat = 0.0
     kill_notified = False
+    funnel = _new_funnel()
 
     try:
         while not _shutdown:
@@ -132,11 +133,16 @@ def run() -> None:
 
             # 3) сигналы
             for sym in symbols:
+                snap = states[sym].snapshot()
+                # funnel-диагностика по ВСЕМ символам (наблюдаемость воронки)
+                try:
+                    _accum_funnel(funnel, diagnose(snap, cfg))
+                except Exception:
+                    log.exception("diagnose %s failed", sym)
                 if sym in open_symbols:
                     continue
                 if now - cooldown.get(sym, 0.0) < cfg.signal_cooldown_sec:
                     continue
-                snap = states[sym].snapshot()
                 try:
                     sig = evaluate(snap, cfg)
                 except Exception:
@@ -155,6 +161,8 @@ def run() -> None:
             # 4) heartbeat
             if now - last_heartbeat >= 60:
                 _heartbeat(states, db, stream)
+                _log_funnel(funnel)
+                funnel = _new_funnel()
                 last_heartbeat = now
 
             elapsed = time.monotonic() - loop_start
@@ -178,6 +186,43 @@ def _heartbeat(states: dict[str, SymbolState], db: ScalpDB,
     day_pnl = db.realized_pnl_since(now_utc_day())
     log.info("HB ws=%s open=%d dayPnL=%.2f | %s",
              stream.is_connected(), db.open_count(), day_pnl, " | ".join(parts))
+
+
+_FUNNEL_RULES = ("sweep", "div", "reclaim", "momentum", "ob", "liq", "funding")
+
+
+def _new_funnel() -> dict:
+    d = {k: 0 for k in _FUNNEL_RULES}
+    d["evals"] = 0
+    d["score3"] = 0
+    d["signal"] = 0
+    return d
+
+
+def _accum_funnel(f: dict, diag: dict | None) -> None:
+    if diag is None:
+        return
+    f["evals"] += 1
+    for k in _FUNNEL_RULES:
+        if diag.get(k):
+            f[k] += 1
+    if diag.get("score", 0) >= 3:
+        f["score3"] += 1
+    if diag.get("signal"):
+        f["signal"] += 1
+
+
+def _log_funnel(f: dict) -> None:
+    """Воронка: из скольких оценок каждое правило/гейт проходило за минуту.
+    Видно, что блокирует входы (если signal=0, но score3>0 → режет fee-guard/
+    reclaim/momentum; если sweep низкий → нет свипов; и т.д.)."""
+    n = f.get("evals", 0)
+    if n == 0:
+        log.info("FUNNEL: нет валидных оценок (данные тонкие/STALE)")
+        return
+    parts = " ".join(f"{k}={f[k]}" for k in _FUNNEL_RULES)
+    log.info("FUNNEL evals=%d | %s | score>=3=%d | SIGNALS=%d",
+             n, parts, f["score3"], f["signal"])
 
 
 def _flatten_on_start(client, db, symbols: list[str]) -> None:
