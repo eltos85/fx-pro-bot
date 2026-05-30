@@ -277,11 +277,11 @@ services:
       # если включён авто-селектор вселенной (ниже).
       SCALP_SYMBOLS: ${SCALP_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
       # Авто-селектор: бот сам выбирает топ-N монет под стратегию из get_tickers
-      # (range%/turnover/spread) и пересматривает раз в час. Пороги привязаны к
-      # математике fee-guard и live-границе (BUILDLOG_SCALP) — не подгонка.
+      # (range%/turnover/spread) и пересматривает раз в 30 мин. Пороги привязаны
+      # к математике fee-guard и live-границе (BUILDLOG_SCALP) — не подгонка.
       SCALP_AUTO_UNIVERSE_ENABLED: ${SCALP_AUTO_UNIVERSE_ENABLED:-true}
       SCALP_UNIVERSE_TOP_N: ${SCALP_UNIVERSE_TOP_N:-5}
-      SCALP_UNIVERSE_REFRESH_SEC: ${SCALP_UNIVERSE_REFRESH_SEC:-3600}
+      SCALP_UNIVERSE_REFRESH_SEC: ${SCALP_UNIVERSE_REFRESH_SEC:-1800}
       SCALP_UNIVERSE_MIN_TURNOVER_USD: ${SCALP_UNIVERSE_MIN_TURNOVER_USD:-150000000}
       SCALP_UNIVERSE_MIN_RANGE_PCT: ${SCALP_UNIVERSE_MIN_RANGE_PCT:-6}
       SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-30}

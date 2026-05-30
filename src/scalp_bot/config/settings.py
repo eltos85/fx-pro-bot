@@ -40,7 +40,7 @@ class ScalpSettings(BaseSettings):
     # подгоняются под прошлый P&L (no-data-fitting.mdc).
     auto_universe_enabled: bool = Field(default=True)
     universe_top_n: int = Field(default=5)
-    universe_refresh_sec: float = Field(default=3600.0)  # пересмотр раз в час
+    universe_refresh_sec: float = Field(default=1800.0)  # пересмотр раз в 30 мин
     universe_min_turnover_usd: float = Field(default=150_000_000.0)
     universe_min_range_pct: float = Field(default=6.0)
     universe_max_range_pct: float = Field(default=30.0)
