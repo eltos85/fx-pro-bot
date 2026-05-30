@@ -244,17 +244,18 @@ class ScalpBybitClient:
         }
         return self._submit(params)
 
-    def closed_pnl(self, symbol: str, *, order_id: str | None = None,
-                   qty: float | None = None, since_ms: int | None = None,
-                   ) -> float | None:
-        """net closedPnl ИМЕННО нашей сделки (для записи в БД / killswitch).
+    def closed_pnl_detail(self, symbol: str, *, order_id: str | None = None,
+                          qty: float | None = None, since_ms: int | None = None,
+                          near_ms: int | None = None) -> dict | None:
+        """Запись о закрытии ИМЕННО нашей сделки: {pnl, exit, order_id, created}.
 
         Bybit ``closedPnl`` уже net (= cumExitValue − cumEntryValue − openFee
-        − closeFee, проверено по примеру офдока). Ответ get_closed_pnl НЕ
-        содержит orderLinkId — матчим по ``orderId`` закрывающего ордера, а для
-        биржевых TP/SL (наш orderId неизвестен) — по ``closedSize`` ≈ qty в окне
-        времени сделки. items[0]-фолбэк УБРАН: при частых сделках по символу он
-        брал чужой цикл (рассинхрон БД↔выписка, BUILDLOG 2026-05-30).
+        − closeFee, проверено по офдоку). Ответ get_closed_pnl НЕ содержит
+        orderLinkId — матчим по ``orderId`` закрывающего ордера; для биржевых
+        TP/SL (наш orderId неизвестен) — по ``closedSize`` ≈ qty, выбирая запись
+        с ``createdTime`` ближайшим к near_ms (моменту нашего закрытия) — так
+        несколько сделок одного размера по символу не путаются.
+        items[0]-фолбэк УБРАН (рассинхрон БД↔выписка, BUILDLOG 2026-05-30).
         Источник: https://bybit-exchange.github.io/docs/v5/position/close-pnl
         """
         params: dict = {"category": self._category, "symbol": symbol, "limit": 50}
@@ -269,23 +270,41 @@ class ScalpBybitClient:
         items = resp.get("result", {}).get("list", []) or []
         if not items:
             return None
+        chosen = None
         # 1) точный матч по orderId нашего reduce-only закрытия
         if order_id:
-            for it in items:
-                if str(it.get("orderId", "")) == order_id:
-                    return _as_float(it.get("closedPnl"))
-        # 2) матч по размеру закрытия (биржевой TP/SL): closedSize ≈ qty,
-        #    самая свежая подходящая запись (list отсортирован по времени desc)
-        if qty and qty > 0:
+            chosen = next((it for it in items
+                           if str(it.get("orderId", "")) == order_id), None)
+        # 2) матч по размеру закрытия (closedSize ≈ qty), ближайший к near_ms
+        if chosen is None and qty and qty > 0:
             tol = max(qty * 0.02, 1e-9)
-            for it in items:
-                cs = _as_float(it.get("closedSize"))
-                if cs is not None and abs(cs - qty) <= tol:
-                    return _as_float(it.get("closedPnl"))
-        # ни orderId, ни размер не совпали → не угадываем (лучше None, чем чужой PnL)
-        log.warning("closed_pnl %s: нет совпадения (order_id=%s qty=%s) — "
-                    "не атрибутирую", symbol, order_id, qty)
-        return None
+            cands = [it for it in items
+                     if (cs := _as_float(it.get("closedSize"))) is not None
+                     and abs(cs - qty) <= tol]
+            if cands:
+                if near_ms is not None:
+                    chosen = min(cands, key=lambda it: abs(
+                        (_as_float(it.get("createdTime")) or 0) - near_ms))
+                else:
+                    chosen = cands[0]  # самая свежая (list desc по времени)
+        if chosen is None:
+            log.warning("closed_pnl %s: нет совпадения (order_id=%s qty=%s) — "
+                        "не атрибутирую", symbol, order_id, qty)
+            return None
+        return {
+            "pnl": _as_float(chosen.get("closedPnl")),
+            "exit": _as_float(chosen.get("avgExitPrice")),
+            "order_id": str(chosen.get("orderId", "")),
+            "created": _as_float(chosen.get("createdTime")),
+        }
+
+    def closed_pnl(self, symbol: str, *, order_id: str | None = None,
+                   qty: float | None = None, since_ms: int | None = None,
+                   near_ms: int | None = None) -> float | None:
+        """net closedPnl нашей сделки (тонкая обёртка над closed_pnl_detail)."""
+        d = self.closed_pnl_detail(symbol, order_id=order_id, qty=qty,
+                                   since_ms=since_ms, near_ms=near_ms)
+        return d["pnl"] if d else None
 
     def _submit(self, params: dict) -> dict:
         try:

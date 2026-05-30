@@ -6,6 +6,40 @@
 
 ## 2026-05-30
 
+### v0.4.2 — точный net P&L из приватного WS execution (вместо REST)
+`<hash>`
+
+**Симптом.** БД/Telegram расходились с выпиской Bybit (#47 ZEC: бот $0.0721,
+выписка closedPnl $0.0398). Причина: при закрытии бот СРАЗУ дёргал REST
+`get_closed_pnl`, биржа ещё не успевала опубликовать запись → fallback на
+оценку `taker_pnl` по `mark_price` (519.09 вместо реального филла 518.92).
+Гонка по времени → недетерминированный результат (старый #39 совпал, свежие нет).
+
+**Решение (api-docs.mdc — офдок Bybit v5).** Источник истины по P&L —
+приватный WebSocket `execution`, а НЕ REST-опрос:
+<https://bybit-exchange.github.io/docs/v5/websocket/private/execution>
+Каждый филл несёт точные `execPnl` (realized = cashFlow), `execFee` (реальная
+комиссия), `execPrice` (реальная цена), `orderLinkId` (наш тег). Матч к сделке
+по `orderLinkId` (вход/выход тегаются), для биржевых TP/SL (пустой linkId) — по
+символу к открытой сделке. **net = Σ execPnl − Σ execFee = Bybit closedPnl**
+(закрытая формула close-pnl). Без гонок и без оценок.
+
+**Поток.** `BybitExecStream` (приватный WS, demo-домен по флагу) кладёт филлы в
+потокобезопасную очередь; главный цикл `drain()` → `executor.ingest_executions()`
+(в своём треде) накапливает на сделку `{fee, pnl, close_val, close_qty}`.
+`_realized_or_estimate` берёт net из леджера когда `close_qty≈qty`; если филлы
+ещё в пути (WS обычно быстрее REST) — предв. оценка + флаг `pnl_provisional`,
+`reconcile()` дотягивает реальный net из того же леджера на следующих циклах.
+
+**БД.** Колонка `pnl_provisional` (+миграция), `finalize_pnl()`,
+`provisional_closed_since()` — БД сходится с выпиской 1:1 (stats-collection.mdc).
+
+**REST.** `get_closed_pnl` оставлен ТОЛЬКО в `_flatten_on_start` (разовый
+стартовый реконсил, где WS-леджер ещё пуст). В hot-path REST убран.
+
+**Файлы:** `data/exec_stream.py` (новый), `trading/executor.py`,
+`app/main.py`, `state/db.py`, `trading/client.py`, `tests/test_scalp_bot.py`.
+
 ### v0.4.1 — density_bounce (Фаза 2): стратегия №2 «отскок от плотности»
 `<hash>`
 

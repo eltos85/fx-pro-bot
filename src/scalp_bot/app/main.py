@@ -20,6 +20,7 @@ from scalp_bot.analysis.signals import diagnose
 from scalp_bot.analysis.strategies import build_strategies, resolve
 from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
+from scalp_bot.data.exec_stream import BybitExecStream
 from scalp_bot.data.market_stream import BybitMarketStream
 from scalp_bot.safety import killswitch
 from scalp_bot.state.db import ScalpDB
@@ -77,6 +78,13 @@ def run() -> None:
                                testnet=cfg.bybit_testnet)
     stream.start()
 
+    # приватный поток исполнений — источник истины по net P&L/комиссиям (без REST)
+    exec_stream = None
+    if client is not None:
+        exec_stream = BybitExecStream(cfg.bybit_api_key, cfg.bybit_api_secret,
+                                      demo=cfg.bybit_demo, testnet=cfg.bybit_testnet)
+        exec_stream.start()
+
     notifier = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id,
                                 enabled=cfg.telegram_enabled)
     if notifier.active:
@@ -95,6 +103,13 @@ def run() -> None:
         while not _shutdown:
             loop_start = time.monotonic()
             now = time.time()
+
+            # 0) забрать исполнения из приватного WS → атрибуция к сделкам
+            if exec_stream is not None:
+                try:
+                    executor.ingest_executions(exec_stream.drain())
+                except Exception:
+                    log.exception("ingest_executions failed")
 
             # 1) сопровождение открытых
             try:
@@ -176,7 +191,7 @@ def run() -> None:
 
             # 4) heartbeat
             if now - last_heartbeat >= 60:
-                _heartbeat(states, db, stream)
+                _heartbeat(states, db, stream, exec_stream)
                 _log_funnel(funnel)
                 funnel = _new_funnel()
                 last_heartbeat = now
@@ -185,12 +200,14 @@ def run() -> None:
             time.sleep(max(0.0, cfg.eval_interval_sec - elapsed))
     finally:
         stream.stop()
+        if exec_stream is not None:
+            exec_stream.stop()
         db.close()
         log.info("scalp_bot остановлен")
 
 
 def _heartbeat(states: dict[str, SymbolState], db: ScalpDB,
-               stream: BybitMarketStream) -> None:
+               stream: BybitMarketStream, exec_stream=None) -> None:
     parts = []
     for sym, st in states.items():
         s = st.snapshot()
@@ -200,8 +217,10 @@ def _heartbeat(states: dict[str, SymbolState], db: ScalpDB,
         parts.append(f"{sym}:{flag} px={s.last_price} cvdN={len(s.cvd_samples)} "
                      f"imb={imb} fund={fund} liq={len(s.liq_events)}")
     day_pnl = db.realized_pnl_since(now_utc_day())
-    log.info("HB ws=%s open=%d dayPnL=%.2f | %s",
-             stream.is_connected(), db.open_count(), day_pnl, " | ".join(parts))
+    exec_ws = exec_stream.is_connected() if exec_stream is not None else "—"
+    log.info("HB ws=%s execWs=%s open=%d dayPnL=%.2f | %s",
+             stream.is_connected(), exec_ws, db.open_count(), day_pnl,
+             " | ".join(parts))
     _log_strategy_stats(db)
 
 

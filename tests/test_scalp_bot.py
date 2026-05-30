@@ -404,41 +404,101 @@ def test_taker_pnl_estimate():
     assert taker_pnl("short", 100.0, 99.0, 5.0) == pytest.approx(5.0 - 5 * 199 * 0.00055)
 
 
-def test_realized_or_estimate_falls_back_when_closedpnl_none():
-    # killswitch не должен «ослепнуть»: при closedPnl=None берём оценку по цене
-    fake_client = SimpleNamespace(closed_pnl=lambda sym, **kw: None)
-    ex = Executor(db=None, settings=SimpleNamespace(), client=fake_client)
+def _exec(symbol, link, *, fee, pnl=0.0, price, qty, closed=0.0):
+    """Нормализованная строка приватного WS execution (как из exec_stream)."""
+    return {"symbol": symbol, "orderLinkId": link, "orderId": "", "side": "",
+            "execFee": fee, "execPnl": pnl, "execPrice": price, "execQty": qty,
+            "closedSize": closed, "leavesQty": 0.0, "stopOrderType": "",
+            "execTime": 0.0}
+
+
+def test_realized_from_fills_none_until_close_arrives():
+    # филлы выхода ещё не пришли по WS → оценка по цене, provisional
+    ex = Executor(db=None, settings=SimpleNamespace(), client=SimpleNamespace())
     tr = SimpleNamespace(id=1, symbol="ETHUSDT", side="long", entry=2000.0,
                          qty=0.04, ts_open=0.0)
-    pnl = ex._realized_or_estimate(tr, 1990.0)  # убыток ~ −0.4 минус комиссии
+    ex._link2trade["scalp_ETHUSDT_1"] = 1
+    # пришёл только входной филл (closedSize=0, pnl=0) — выход ещё нет
+    ex.ingest_executions([_exec("ETHUSDT", "scalp_ETHUSDT_1",
+                                fee=0.016, price=2000.0, qty=0.04)])
+    pnl, exitp, is_real = ex._realized_or_estimate(tr, 1990.0)
+    assert is_real is False  # close_qty==0 → неполно
     assert pnl == pytest.approx(taker_pnl("long", 2000.0, 1990.0, 0.04))
-    assert pnl < 0  # убыток реально записывается, а не 0
+    assert exitp == 1990.0
 
 
-def test_realized_or_estimate_uses_exchange_pnl_when_available():
-    fake_client = SimpleNamespace(closed_pnl=lambda sym, **kw: -3.21)
-    ex = Executor(db=None, settings=SimpleNamespace(), client=fake_client)
-    tr = SimpleNamespace(id=2, symbol="BTCUSDT", side="short", entry=70000.0,
-                         qty=0.001, ts_open=0.0)
-    assert ex._realized_or_estimate(tr, 70100.0) == pytest.approx(-3.21)
+def test_realized_from_fills_net_is_sum_pnl_minus_fees():
+    # net = ΣexecPnl − ΣexecFee (вход+выход), exit = VWAP закрывающих филлов
+    ex = Executor(db=None, settings=SimpleNamespace(), client=SimpleNamespace())
+    tr = SimpleNamespace(id=2, symbol="ZECUSDT", side="long", entry=518.14,
+                         qty=0.19, ts_open=0.0)
+    ex._link2trade["entry"] = 2
+    ex._fills[2] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0}
+    # вход: комиссия 0.0541, без pnl
+    ex.ingest_executions([_exec("ZECUSDT", "entry", fee=0.0541,
+                                price=518.14, qty=0.19)])
+    # выход: realized execPnl +0.1482, комиссия 0.0542, цена 518.92
+    ex._link2trade["close"] = 2
+    ex.ingest_executions([_exec("ZECUSDT", "close", fee=0.0542, pnl=0.1482,
+                                price=518.92, qty=0.19, closed=0.19)])
+    pnl, exitp, is_real = ex._realized_or_estimate(tr, 0.0)
+    assert is_real is True
+    assert pnl == pytest.approx(0.1482 - 0.0541 - 0.0542)  # = Bybit closedPnl
+    assert exitp == pytest.approx(518.92)
 
 
-def test_realized_or_estimate_passes_order_id_for_matching():
-    # фикс рассинхрона: closed_pnl должен получить order_id/qty для точного матча
-    captured = {}
+def test_ingest_matches_exchange_tp_sl_by_symbol(tmp_path):
+    # биржевой TP/SL: orderLinkId пустой → матч по символу к открытой сделке
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ZECUSDT", side="long", qty=0.19, entry=518.0,
+                         sl=517.0, tp=520.0, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=0.0)
+    ex = Executor(db=db, settings=SimpleNamespace(), client=SimpleNamespace())
+    ex._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0}
+    ex.ingest_executions([_exec("ZECUSDT", "", fee=0.05, pnl=-0.40,
+                                price=517.0, qty=0.19, closed=0.19)])
+    tr = SimpleNamespace(id=tid, symbol="ZECUSDT", side="long", entry=518.0,
+                         qty=0.19, ts_open=0.0)
+    net, exitp, complete = ex._realized_from_fills(tr)
+    assert complete is True
+    assert net == pytest.approx(-0.45) and exitp == pytest.approx(517.0)
+    db.close()
 
-    def _closed(sym, **kw):
-        captured.update(kw)
-        return -1.0
 
-    ex = Executor(db=None, settings=SimpleNamespace(),
-                  client=SimpleNamespace(closed_pnl=_closed))
-    tr = SimpleNamespace(id=9, symbol="SOLUSDT", side="long", entry=100.0,
-                         qty=1.5, ts_open=1700000.0)
-    ex._realized_or_estimate(tr, 101.0, order_id="abc-123")
-    assert captured["order_id"] == "abc-123"
-    assert captured["qty"] == 1.5
-    assert captured["since_ms"] == int(1700000.0 * 1000)
+def test_reconcile_finalizes_from_ws_ledger(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ZECUSDT", side="long", qty=0.19, entry=518.14,
+                         sl=517.0, tp=519.0, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1000.0)
+    # закрыто с ОЦЕНКОЙ (provisional): 0.0721
+    db.mark_closed(tid, exit_price=519.09, pnl_usd=0.0721, fees_usd=0.0,
+                   close_reason="time_stop", ts_close=1090.0, provisional=True)
+    assert len(db.provisional_closed_since(0.0)) == 1
+    ex = Executor(db=db, settings=SimpleNamespace(), client=SimpleNamespace(),
+                  now=lambda: 1100.0)
+    # филлы выхода доехали по WS: реальный net 0.0398 / exit 518.92
+    ex._fills[tid] = {"fee": 0.0542, "pnl": 0.0940, "close_val": 518.92 * 0.19,
+                      "close_qty": 0.19}
+    ex.reconcile()
+    assert db.provisional_closed_since(0.0) == []  # флаг снят
+    st = {s.strategy: s for s in db.stats_by_strategy(0.0)}["sweep_fade"]
+    assert st.pnl_usd == pytest.approx(0.0398)  # БД = выписка
+    assert tid not in ex._fills  # трекинг очищен после финализации
+    db.close()
+
+
+def test_reconcile_keeps_provisional_when_fills_absent(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ZECUSDT", side="long", qty=0.19, entry=518.14,
+                         sl=517.0, tp=519.0, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1000.0)
+    db.mark_closed(tid, exit_price=519.09, pnl_usd=0.0721, fees_usd=0.0,
+                   close_reason="time_stop", ts_close=1090.0, provisional=True)
+    ex = Executor(db=db, settings=SimpleNamespace(), client=SimpleNamespace(),
+                  now=lambda: 1100.0)
+    ex.reconcile()  # филлов в леджере нет → ничего не финализируем
+    assert len(db.provisional_closed_since(0.0)) == 1
+    db.close()
 
 
 # ─── fee-aware дискреционный выход sweep_fade (через should_exit) ───────────

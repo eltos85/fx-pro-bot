@@ -98,6 +98,12 @@ class Executor:
         # in-memory трекинг live-входов: trade_id -> {link, filled, ts}
         self._pending: dict[int, dict] = {}
         self._hold_log: dict[int, float] = {}  # троттлинг «держу позицию»-логов
+        # атрибуция филлов из приватного WS execution (источник истины по P&L):
+        #   _link2trade: orderLinkId -> trade_id (вход и выход тегаются нами);
+        #   _fills: trade_id -> аккумулятор {fee, pnl, close_val, close_qty}.
+        # net сделки = Σ execPnl − Σ execFee (= Bybit closedPnl), без REST.
+        self._link2trade: dict[str, int] = {}
+        self._fills: dict[int, dict] = {}
 
     def _notify(self, text: str) -> None:
         if self._notifier is not None:
@@ -155,6 +161,10 @@ class Executor:
             sl=sig.sl_level, tp=sig.tp_level, score=sig.score, reasons=reasons,
             mode="live", strategy=sig.strategy, entry_order_id=link,
             ts_open=self._now())
+        # регистрируем тег входа → атрибуция филлов из приватного WS execution
+        self._link2trade[link] = tid
+        self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
+                            "close_qty": 0.0}
         is_market = cfg.entry_order_type == "market"
         # Уведомление об открытии шлём ТОЛЬКО после реального филла (для maker
         # post-only ордер может быть отменён/не исполнен — тогда позиции нет).
@@ -193,21 +203,86 @@ class Executor:
                 self._manage_paper(tr, price, snap)
             else:
                 self._manage_live(tr, price, snap)
+        # досверка оценочных PnL с биржей (closedPnl публикуется с задержкой)
+        try:
+            self.reconcile()
+        except Exception:
+            log.exception("reconcile failed")
 
-    def _realized_or_estimate(self, tr, exit_price: float, *,
-                              order_id: str | None = None) -> float:
-        """net PnL ИМЕННО нашей сделки: closedPnl с матчем по orderId/closedSize
-        (см. client.closed_pnl), иначе оценка по цене (killswitch не должен
-        «ослепнуть» при сбое closedPnl — иначе убытки уйдут как 0).
-        since_ms = ts_open сделки сужает выборку до её жизни (антирассинхрон)."""
-        pnl = self._client.closed_pnl(
-            tr.symbol, order_id=order_id, qty=tr.qty,
-            since_ms=int(tr.ts_open * 1000))
-        if pnl is None:
-            pnl = taker_pnl(tr.side, tr.entry, exit_price, tr.qty)
-            log.warning("LIVE #%d closedPnl не атрибутирован — оценка по цене=%.4f",
-                        tr.id, pnl)
-        return pnl
+    def ingest_executions(self, rows: list[dict]) -> None:
+        """Атрибуция филлов из приватного WS execution к сделкам (вызывается из
+        главного треда). Матч по нашему orderLinkId (вход/выход тегаются), для
+        биржевых TP/SL (пустой/чужой linkId) — по символу к открытой сделке.
+        Накапливаем точные execFee/execPnl/execPrice → net = ΣexecPnl − ΣexecFee."""
+        for r in rows or []:
+            tid = self._link2trade.get(r.get("orderLinkId", ""))
+            if tid is None:
+                tid = self._open_trade_for_symbol(r.get("symbol", ""))
+            if tid is None:
+                continue  # филл не наш / сделка уже финализирована
+            acc = self._fills.setdefault(
+                tid, {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0})
+            acc["fee"] += r.get("execFee", 0.0)
+            acc["pnl"] += r.get("execPnl", 0.0)
+            # закрывающий филл: closedSize>0 или есть realized P&L
+            if r.get("closedSize", 0.0) > 0 or r.get("execPnl", 0.0) != 0.0:
+                acc["close_val"] += r.get("execPrice", 0.0) * r.get("execQty", 0.0)
+                acc["close_qty"] += r.get("execQty", 0.0)
+
+    def _open_trade_for_symbol(self, symbol: str) -> int | None:
+        if not symbol:
+            return None
+        for tr in self._db.open_trades():
+            if tr.symbol == symbol and tr.mode == "live":
+                return tr.id
+        return None
+
+    def _realized_from_fills(self, tr) -> tuple[float, float | None, bool]:
+        """net по WS-филлам → (net, exit_px, complete). complete=True когда
+        закрывающий объём ≈ qty сделки (все филлы выхода пришли по WS).
+        net = ΣexecPnl − ΣexecFee (включая комиссию входа) = Bybit closedPnl."""
+        acc = self._fills.get(tr.id)
+        if not acc or acc["close_qty"] <= 0:
+            return (0.0, None, False)
+        net = acc["pnl"] - acc["fee"]
+        exit_px = acc["close_val"] / acc["close_qty"]
+        complete = acc["close_qty"] >= tr.qty * 0.98
+        return (net, exit_px, complete)
+
+    def _realized_or_estimate(self, tr, exit_price: float
+                              ) -> tuple[float, float, bool]:
+        """net PnL → (pnl, exit_price, is_real) из приватного WS execution.
+        Если филлы выхода уже пришли (обычно WS быстрее REST) — точный net и
+        реальная цена выхода. Иначе предв. оценка по цене (killswitch не должен
+        «ослепнуть»); сделка помечается provisional и досверяется в reconcile()
+        из того же WS-леджера на следующих циклах."""
+        net, exit_px, complete = self._realized_from_fills(tr)
+        if complete:
+            return (net, exit_px if exit_px is not None else exit_price, True)
+        pnl = taker_pnl(tr.side, tr.entry, exit_price, tr.qty)
+        log.warning("LIVE #%d филлы выхода ещё не пришли по WS — предв. оценка="
+                    "%.4f (досверю)", tr.id, pnl)
+        return (pnl, exit_price, False)
+
+    def _forget_trade(self, tid: int) -> None:
+        """Снять трекинг закрытой сделки (после финализации реальным net)."""
+        self._fills.pop(tid, None)
+        for link in [k for k, v in self._link2trade.items() if v == tid]:
+            self._link2trade.pop(link, None)
+
+    def reconcile(self) -> None:
+        """Досверка предварительных (оценочных) PnL по WS-леджеру: когда филлы
+        выхода доедут (обычно ≤1с), переписываем БД реальным net, чтобы она
+        сходилась с выпиской 1:1 (stats-collection.mdc — БД = ground truth)."""
+        horizon = self._now() - 600.0  # сверяем закрытия за последние 10 мин
+        for tr in self._db.provisional_closed_since(horizon):
+            net, exit_px, complete = self._realized_from_fills(tr)
+            if not complete:
+                continue  # филлы ещё не пришли — попробуем на след. цикле
+            self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px)
+            log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)",
+                     tr.id, tr.symbol, tr.pnl_usd or 0.0, net)
+            self._forget_trade(tr.id)
 
     def _strategy_exit(self, tr, snap) -> tuple[str, float] | None:
         """Дискреционный выход СТРАТЕГИИ-владельца сделки (та же, что открыла).
@@ -272,6 +347,7 @@ class Executor:
                                      fees_usd=0.0, close_reason=f"entry_{status}",
                                      ts_close=self._now())
                 self._pending.pop(tr.id, None)
+                self._forget_trade(tr.id)
                 log.info("LIVE #%d entry %s — не открылись", tr.id, status)
                 play.info("🚫 [%s] вход #%d не состоялся (%s) — позиции нет, "
                           "возвращаюсь к поиску", tr.symbol, tr.id, status)
@@ -282,6 +358,7 @@ class Executor:
                                      fees_usd=0.0, close_reason="entry_timeout",
                                      ts_close=self._now())
                 self._pending.pop(tr.id, None)
+                self._forget_trade(tr.id)
                 log.info("LIVE #%d entry timeout — отменён", tr.id)
                 play.info("⌛ [%s] maker-лимитка #%d не исполнилась за %.0fс — "
                           "снимаю ордер (цена ушла от мейкера)", tr.symbol, tr.id,
@@ -292,11 +369,15 @@ class Executor:
         if pos is None:
             return  # transient — не трогаем
         if pos.size <= 0:
-            # биржевой TP/SL: нашего close-orderId нет → матч по closedSize+время
-            pnl = self._realized_or_estimate(tr, pos.mark_price or tr.entry)
-            self._db.mark_closed(tr.id, exit_price=pos.mark_price or tr.entry,
-                                 pnl_usd=pnl, fees_usd=0.0,
-                                 close_reason="tp_sl", ts_close=self._now())
+            # биржевой TP/SL: наши филлы выхода приходят по WS execution (матч
+            # по символу к открытой сделке внутри ingest_executions)
+            pnl, exitp, is_real = self._realized_or_estimate(
+                tr, pos.mark_price or tr.entry)
+            self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,
+                                 fees_usd=0.0, close_reason="tp_sl",
+                                 ts_close=self._now(), provisional=not is_real)
+            if is_real:
+                self._forget_trade(tr.id)
             self._pending.pop(tr.id, None)
             self._hold_log.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (биржа TP/SL)", tr.id, tr.symbol,
@@ -312,14 +393,16 @@ class Executor:
         if strat_exit is not None or self._now() - tr.ts_open >= self._cfg.time_stop_sec:
             close_reason = strat_exit[0] if strat_exit is not None else "time_stop"
             side = "Buy" if tr.side == "long" else "Sell"
-            close_res = cl.close_market(tr.symbol, side, pos.size,
-                                        f"scalp_{close_reason}_{tr.id}")
-            close_oid = (close_res or {}).get("result", {}).get("orderId")
-            pnl = self._realized_or_estimate(tr, pos.mark_price or tr.entry,
-                                             order_id=close_oid)
-            self._db.mark_closed(tr.id, exit_price=pos.mark_price or tr.entry,
-                                 pnl_usd=pnl, fees_usd=0.0,
-                                 close_reason=close_reason, ts_close=self._now())
+            close_link = f"scalp_{close_reason}_{tr.id}"
+            self._link2trade[close_link] = tr.id  # филлы выхода → эта сделка
+            cl.close_market(tr.symbol, side, pos.size, close_link)
+            pnl, exitp, is_real = self._realized_or_estimate(
+                tr, pos.mark_price or tr.entry)
+            self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,
+                                 fees_usd=0.0, close_reason=close_reason,
+                                 ts_close=self._now(), provisional=not is_real)
+            if is_real:
+                self._forget_trade(tr.id)
             self._pending.pop(tr.id, None)
             self._hold_log.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (%s)", tr.id, tr.symbol,

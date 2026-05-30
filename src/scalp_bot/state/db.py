@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS trades (
     exit REAL,
     pnl_usd REAL,
     fees_usd REAL,
-    close_reason TEXT
+    close_reason TEXT,
+    pnl_provisional INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ts_close ON trades(ts_close);
@@ -60,6 +61,7 @@ class TradeRow:
     pnl_usd: float | None
     fees_usd: float | None
     close_reason: str | None
+    pnl_provisional: int = 0
 
 
 @dataclass
@@ -96,6 +98,11 @@ class ScalpDB:
             self._conn.execute(
                 "ALTER TABLE trades ADD COLUMN strategy TEXT NOT NULL "
                 "DEFAULT 'sweep_fade'")
+        if "pnl_provisional" not in cols:
+            # PnL предварительный (оценка), требует сверки с биржей
+            self._conn.execute(
+                "ALTER TABLE trades ADD COLUMN pnl_provisional INTEGER "
+                "NOT NULL DEFAULT 0")
         # индекс создаём после миграции (на старой БД колонки ещё не было)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy)")
@@ -125,14 +132,38 @@ class ScalpDB:
     def mark_closed(
         self, trade_id: int, *, exit_price: float, pnl_usd: float,
         fees_usd: float, close_reason: str, ts_close: float | None = None,
+        provisional: bool = False,
     ) -> None:
         ts = ts_close if ts_close is not None else time.time()
         self._conn.execute(
             "UPDATE trades SET status='closed', ts_close=?, exit=?, pnl_usd=?, "
-            "fees_usd=?, close_reason=? WHERE id=?",
-            (ts, exit_price, pnl_usd, fees_usd, close_reason, trade_id),
+            "fees_usd=?, close_reason=?, pnl_provisional=? WHERE id=?",
+            (ts, exit_price, pnl_usd, fees_usd, close_reason,
+             1 if provisional else 0, trade_id),
         )
         self._conn.commit()
+
+    def finalize_pnl(self, trade_id: int, *, pnl_usd: float,
+                     exit_price: float | None = None) -> None:
+        """Заменить предварительный (оценочный) PnL реальным closedPnl с биржи
+        и снять флаг pnl_provisional (после сверки в reconcile)."""
+        if exit_price is not None:
+            self._conn.execute(
+                "UPDATE trades SET pnl_usd=?, exit=?, pnl_provisional=0 WHERE id=?",
+                (pnl_usd, exit_price, trade_id))
+        else:
+            self._conn.execute(
+                "UPDATE trades SET pnl_usd=?, pnl_provisional=0 WHERE id=?",
+                (pnl_usd, trade_id))
+        self._conn.commit()
+
+    def provisional_closed_since(self, ts: float) -> list[TradeRow]:
+        """Закрытые сделки с оценочным PnL (нужна сверка с биржей), ts_close>=ts."""
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE status='closed' AND pnl_provisional=1 "
+            "AND ts_close>=? ORDER BY id", (ts,)
+        ).fetchall()
+        return [self._row(r) for r in rows]
 
     # ─── reads ───────────────────────────────────────────────────────────
 
@@ -205,4 +236,6 @@ class ScalpDB:
             status=r["status"], entry_order_id=r["entry_order_id"],
             ts_close=r["ts_close"], exit=r["exit"], pnl_usd=r["pnl_usd"],
             fees_usd=r["fees_usd"], close_reason=r["close_reason"],
+            pnl_provisional=r["pnl_provisional"] if "pnl_provisional"
+            in r.keys() else 0,
         )
