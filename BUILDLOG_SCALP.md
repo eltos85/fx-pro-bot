@@ -6,6 +6,36 @@
 
 ## 2026-05-30
 
+### v0.3.2 — 🔴 фикс: post-only вход с ЧУЖОЙ стороны стакана → entry_Cancelled
+`<hash>`
+
+**Симптом.** Telegram слал «🟢 open #14/#15», но на бирже позиций нет, equity
+не двигался. В БД у ВСЕХ live-сделок (#10–#15) `close_reason='entry_Cancelled'`,
+pnl=0, время жизни ~0.6с.
+
+**Причина.** `build_signal` брал цену входа с ПРОТИВОПОЛОЖНОЙ стороны книги:
+для LONG — `best_ask`, для SHORT — `best_bid`. Но ордер ставится как
+**PostOnly** (maker). PostOnly BUY по `best_ask` мгновенно пересекает спред →
+Bybit по правилу post-only его **отменяет** (не исполняет как taker,
+https://bybit-exchange.github.io/docs/v5/order/create-order). Итог: ни одна
+позиция реально не открывалась. Плюс уведомление «open» слалось на МОМЕНТ
+ОТПРАВКИ ордера, а не на филл — вводило в заблуждение.
+
+**Фикс.**
+1. `build_signal`: для `post_only_limit` цена входа берётся по СВОЕЙ стороне
+   (LONG→`best_bid`, SHORT→`best_ask`) — лимитка стоит мейкером, не пересекает
+   спред. Для `market` — тейкер-референс (LONG→`best_ask`, SHORT→`best_bid`).
+2. `executor`: уведомление «🟢 open» теперь шлётся ТОЛЬКО после реального филла
+   (`Filled`/`PartiallyFilled` в `_manage_live`). На отправке maker-ордера —
+   лёгкое «⏳ выставлена, жду филл». Market-вход уведомляет сразу (filled).
+
+Ключи ботов проверены — свап корректен (scalp и ai_trader на разных demo-
+аккаунтах). Открытых позиций на счёте scalp нет (закрывать нечего).
+
+**Файлы:** `src/scalp_bot/analysis/signals.py` (maker-сторона входа),
+`src/scalp_bot/trading/executor.py` (open-уведомление после филла),
+`tests/test_scalp_bot.py` (+1 тест стороны книги).
+
 ### v0.3.1 — двухфазный детектор свип-разворота (взвод → выстрел)
 `<hash>`
 

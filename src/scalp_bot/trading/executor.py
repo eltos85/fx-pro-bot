@@ -138,15 +138,24 @@ class Executor:
             symbol=sig.symbol, side=sig.side, qty=qty, entry=limit_price,
             sl=sig.sl_level, tp=sig.tp_level, score=sig.score, reasons=reasons,
             mode="live", entry_order_id=link, ts_open=self._now())
-        self._pending[tid] = {"link": link, "filled": cfg.entry_order_type == "market",
-                              "ts": self._now()}
-        log.info("LIVE open #%d %s %s qty=%.6f notional=$%.2f risk=$%.2f @%.4f "
-                 "sl=%.4f tp=%.4f [%s]", tid, sig.symbol, side, qty,
-                 qty * limit_price, risk_usd, limit_price, sig.sl_level,
-                 sig.tp_level, reasons)
-        self._notify(f"🟢 open #{tid} {sig.symbol} {sig.side.upper()} "
+        is_market = cfg.entry_order_type == "market"
+        # Уведомление об открытии шлём ТОЛЬКО после реального филла (для maker
+        # post-only ордер может быть отменён/не исполнен — тогда позиции нет).
+        open_text = (f"🟢 open #{tid} {sig.symbol} {sig.side.upper()} "
                      f"${qty * limit_price:.0f} @{limit_price:.4f} "
                      f"SL {sig.sl_level:.4f} TP {sig.tp_level:.4f} [{reasons}]")
+        self._pending[tid] = {"link": link, "filled": is_market,
+                              "ts": self._now(), "open_text": open_text}
+        log.info("LIVE %s #%d %s %s qty=%.6f notional=$%.2f risk=$%.2f @%.4f "
+                 "sl=%.4f tp=%.4f [%s]",
+                 "MARKET" if is_market else "PLACED", tid, sig.symbol, side, qty,
+                 qty * limit_price, risk_usd, limit_price, sig.sl_level,
+                 sig.tp_level, reasons)
+        if is_market:
+            self._notify(open_text)
+        else:
+            self._notify(f"⏳ #{tid} {sig.symbol} {sig.side.upper()} maker-лимитка "
+                         f"@{limit_price:.4f} выставлена, жду филл")
         return tid
 
     # ─── сопровождение ───────────────────────────────────────────────────
@@ -212,9 +221,11 @@ class Executor:
         # 1) ожидание заполнения post-only входа
         if pend and not pend["filled"]:
             status = cl.order_status(tr.symbol, pend["link"])
-            if status == "Filled":
+            if status in ("Filled", "PartiallyFilled"):
                 pend["filled"] = True
                 pend["ts"] = self._now()
+                log.info("LIVE #%d %s — позиция открыта", tr.id, status)
+                self._notify(pend.get("open_text", f"🟢 open #{tr.id} {tr.symbol}"))
                 return
             if status in ("Cancelled", "Rejected", "Deactivated"):
                 self._db.mark_closed(tr.id, exit_price=tr.entry, pnl_usd=0.0,

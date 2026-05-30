@@ -257,10 +257,21 @@ def evaluate(snap: SymbolSnapshot, cfg) -> Signal | None:
 def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
                  score: int, reasons: list[str]) -> Signal | None:
     """Строит Signal: entry по книге, SL за свипнутым уровнем + буфер,
-    TP = take_profit_r × R, с fee-guard (цель ≥ min_target_fee_mult × издержки)."""
-    entry = snap.best_ask if (side == "long" and snap.best_ask) else (
-        snap.best_bid if (side == "short" and snap.best_bid) else snap.last_price
-    )
+    TP = take_profit_r × R, с fee-guard (цель ≥ min_target_fee_mult × издержки).
+
+    Цена входа зависит от типа ордера:
+    - post_only_limit (maker): ставим по СВОЕЙ стороне книги (long→best_bid,
+      short→best_ask). Иначе лимитка пересекает спред и Bybit отменяет
+      post-only (баг до v0.3.2: вход брался с чужой стороны → entry_Cancelled).
+    - market (taker): референс = цена, по которой реально исполнимся
+      (long→best_ask, short→best_bid)."""
+    maker = getattr(cfg, "entry_order_type", "market") == "post_only_limit"
+    if maker:
+        entry = snap.best_bid if side == "long" else snap.best_ask
+    else:
+        entry = snap.best_ask if side == "long" else snap.best_bid
+    if entry is None or entry <= 0:
+        entry = snap.last_price
     if entry is None or entry <= 0:
         return None
     buf = cfg.sl_buffer_bps / 1e4

@@ -10,6 +10,7 @@ import pytest
 
 from scalp_bot.analysis.signals import (
     SweepReclaimDetector,
+    build_signal,
     cvd_divergence,
     detect_sweep,
     diagnose,
@@ -244,6 +245,20 @@ def test_diagnose_reports_rule_states():
 
 def test_diagnose_none_when_stale():
     assert diagnose(_snap(_long_samples(), stale=True), _cfg()) is None
+
+
+def test_build_signal_maker_uses_own_book_side():
+    # snap: best_bid=96.9, best_ask=97.1
+    snap = _snap(_long_samples())
+    # post-only LONG → мейкер по best_bid (не пересекает спред → не отменится)
+    s = build_signal(snap, "long", 96.5, _cfg(entry_order_type="post_only_limit"), 3, ["x"])
+    assert s is not None and s.entry_ref == pytest.approx(96.9)
+    # post-only SHORT → мейкер по best_ask
+    s2 = build_signal(snap, "short", 98.0, _cfg(entry_order_type="post_only_limit"), 3, ["x"])
+    assert s2 is not None and s2.entry_ref == pytest.approx(97.1)
+    # market LONG → тейкер-референс best_ask
+    s3 = build_signal(snap, "long", 96.5, _cfg(entry_order_type="market"), 3, ["x"])
+    assert s3 is not None and s3.entry_ref == pytest.approx(97.1)
 
 
 # ─── двухфазный детектор (взвод → выстрел) ─────────────────────────────────
