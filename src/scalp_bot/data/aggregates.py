@@ -54,6 +54,10 @@ class SymbolSnapshot:
     cvd_samples: list[CvdSample]
     liq_events: list[LiqEvent]  # за последнее окно
     stale: bool  # True если данных давно не было
+    # Top-N уровни стакана (цена, объём) — для детекции плотностей/стен.
+    # bids убыв. по цене, asks возр. по цене (как отдаёт Bybit orderbook.50).
+    bids: list[tuple[float, float]] = field(default_factory=list)
+    asks: list[tuple[float, float]] = field(default_factory=list)
 
 
 class SymbolState:
@@ -84,6 +88,8 @@ class SymbolState:
         self._best_bid: float | None = None
         self._best_ask: float | None = None
         self._ob_imbalance: float | None = None
+        self._bids: list[tuple[float, float]] = []
+        self._asks: list[tuple[float, float]] = []
         self._funding: float | None = None
         self._oi: float | None = None
         self._last_update: float = -1e18
@@ -109,8 +115,10 @@ class SymbolState:
                 self._best_bid = bids[0][0]
             if asks:
                 self._best_ask = asks[0][0]
-            bid_vol = sum(sz for _, sz in bids[: self._ob_levels])
-            ask_vol = sum(sz for _, sz in asks[: self._ob_levels])
+            self._bids = list(bids[: self._ob_levels])
+            self._asks = list(asks[: self._ob_levels])
+            bid_vol = sum(sz for _, sz in self._bids)
+            ask_vol = sum(sz for _, sz in self._asks)
             total = bid_vol + ask_vol
             self._ob_imbalance = (bid_vol / total) if total > 0 else None
             self._last_update = now
@@ -153,6 +161,8 @@ class SymbolState:
                 cvd_samples=list(self._cvd),
                 liq_events=list(self._liqs),
                 stale=(now - self._last_update) > self._max_age,
+                bids=list(self._bids),
+                asks=list(self._asks),
             )
 
     def _evict_locked(self, now: float) -> None:

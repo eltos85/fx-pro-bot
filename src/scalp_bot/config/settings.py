@@ -119,6 +119,26 @@ class ScalpSettings(BaseSettings):
     round_trip_fee_frac: float = Field(default=0.0011)
     min_target_fee_mult: float = Field(default=3.0)
 
+    # ─── density_bounce (стратегия №2: отскок от плотности в стакане) ─────
+    # Стена = крупная лимитка ≥ wall_mult × средний размер уровня на своей
+    # стороне (top-N). Kalena 2026: «relative sizing», порог 5–8× среднего за
+    # 10–15 мин; берём консервативный край 8×. arXiv 2604.20949: depth-сигналы
+    # причинно раньше flow. https://blog.kalena.ai/crypto-wall-detection-...
+    density_wall_mult: float = Field(default=8.0)
+    # Близость стены к круглому числу (доля цены). Данилов: плотности на
+    # круглых уровнях надёжнее как S/R.
+    density_round_frac: float = Field(default=0.001)  # 0.1%
+    # Анти-спуфинг: стена должна продержаться ≥ persist_sec до входа.
+    density_persist_sec: float = Field(default=10.0)
+    # Анти-абсорбция: если ≥ absorb_frac стены «съели» за absorb_window —
+    # остаток скоро снимут (Kalena: 30% за <10с → выход/не вход).
+    density_absorb_frac: float = Field(default=0.30)
+    density_absorb_window_sec: float = Field(default=10.0)
+    # Вход, когда цена подошла к стене ближе near_bps (б.п. от цены стены).
+    density_near_bps: float = Field(default=8.0)
+    # Опциональный абсолютный пол стены в USD (0 = выкл, только относительный).
+    density_min_wall_usd: float = Field(default=0.0)
+
     # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────
     # Канон: свипы доходят в London/NY open + overlap, «мёртвые» часы дают
     # ложные. Crypto 24/7 + строгий конфлюенс → по умолчанию ВЫКЛ, чтобы не

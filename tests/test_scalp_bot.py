@@ -554,8 +554,11 @@ def test_notifier_inactive_when_disabled():
 
 from scalp_bot.analysis.signals import Signal  # noqa: E402
 from scalp_bot.analysis.strategies import (  # noqa: E402
+    DensityBounceStrategy,
     SweepFadeStrategy,
     build_strategies,
+    detect_wall,
+    near_round,
     resolve,
 )
 from scalp_bot.state.db import ScalpDB  # noqa: E402
@@ -689,3 +692,121 @@ def test_executor_exit_dispatch_unknown_strategy_returns_none():
                   strategies=[], now=lambda: 1.0)
     tr = SimpleNamespace(id=8, strategy="ghost", side="long", entry=100.0)
     assert ex._strategy_exit(tr, _snap(_long_samples())) is None
+
+
+# ─── density_bounce (Фаза 2): стена в стакане → отскок ──────────────────────
+
+def _density_cfg(**over):
+    base = dict(
+        density_wall_mult=8.0, density_round_frac=0.001, density_persist_sec=10.0,
+        density_absorb_frac=0.30, density_absorb_window_sec=10.0,
+        density_near_bps=8.0, density_min_wall_usd=0.0,
+        # для build_signal:
+        entry_order_type="market", sl_buffer_bps=8.0, take_profit_r=2.0,
+        round_trip_fee_frac=0.0011, min_target_fee_mult=3.0,
+        active_exit_min_age_sec=10.0,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _book_with_bid_wall(wall_size=50.0):
+    bids = [(100.0, wall_size), (99.99, 1), (99.98, 1), (99.97, 1), (99.96, 1)]
+    asks = [(100.10, 1), (100.11, 1), (100.12, 1), (100.13, 1), (100.14, 1)]
+    return bids, asks
+
+
+def test_near_round_scales_with_price():
+    assert near_round(100.0, 0.001) is True       # шаг 10 → 100 круглое
+    assert near_round(2.4, 0.001) is True          # шаг 0.1 → 2.4 круглое
+    assert near_round(518.0, 0.001) is False       # шаг 10 → ближайшее 520
+    assert near_round(66.43, 0.001) is False       # шаг 1 → 66, далеко
+
+
+def test_detect_wall_excludes_self_from_baseline():
+    bids, _ = _book_with_bid_wall(50.0)
+    w = detect_wall(bids, wall_mult=8.0)
+    assert w == (100.0, 50.0)
+    # если стена не дотягивает до 8× обычного уровня — не стена
+    assert detect_wall([(100.0, 5), (99.9, 1), (99.8, 1), (99.7, 1), (99.6, 1)],
+                       wall_mult=8.0) is None
+
+
+def test_detect_wall_needs_min_levels():
+    assert detect_wall([(100.0, 99), (99.9, 1)], wall_mult=8.0) is None
+
+
+def test_density_arms_then_fires_after_persist():
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    # t=0: стена замечена, но не выстояла persist_sec → входа нет
+    assert st.update(snap, now=0.0) is None
+    assert st.armed("SOLUSDT") is True
+    # t=11: выстояла ≥10с и цена у стены → отскок LONG
+    sig = st.update(snap, now=11.0)
+    assert sig is not None
+    assert sig.side == "long" and sig.strategy == "density_bounce"
+    assert "density" in sig.reasons
+    assert sig.sl_level < sig.entry_ref < sig.tp_level
+
+
+def test_density_no_fire_when_price_far_from_wall():
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    # цена в 0.5% от стены (>> near_bps 0.08%) → не входим
+    snap = _snap([], last_price=100.6, best_bid=100.5, best_ask=100.6,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    assert st.update(snap, now=11.0) is None
+
+
+def test_density_absorption_drops_wall():
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    big_bids, asks = _book_with_bid_wall(50.0)
+    snap0 = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                  bids=big_bids, asks=asks)
+    st.update(snap0, now=0.0)
+    assert st.armed("SOLUSDT") is True
+    # 40% стены съели за 2с (≥30% за <10с) → снять наблюдение (спуфинг)
+    small_bids, _ = _book_with_bid_wall(30.0)
+    snap1 = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                  bids=small_bids, asks=asks)
+    st.update(snap1, now=2.0)
+    assert st.armed("SOLUSDT") is False
+
+
+def test_density_should_exit_when_wall_gone():
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    tr = SimpleNamespace(id=1, side="long", entry=100.10, sl=99.92, ts_open=0.0)
+    bids_present, asks = _book_with_bid_wall(50.0)
+    snap_ok = _snap([], last_price=100.05, bids=bids_present, asks=asks)
+    # стена ещё на месте (в (sl, entry]) → держим
+    assert st.should_exit(tr, snap_ok, now=20.0) is None
+    # стена исчезла → density_gone
+    flat_bids = [(100.0, 1), (99.99, 1), (99.98, 1), (99.97, 1), (99.96, 1)]
+    snap_gone = _snap([], last_price=100.05, bids=flat_bids, asks=asks)
+    decision = st.should_exit(tr, snap_gone, now=20.0)
+    assert decision is not None and decision[0] == "density_gone"
+
+
+def test_density_should_exit_respects_min_age():
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    tr = SimpleNamespace(id=1, side="long", entry=100.10, sl=99.92, ts_open=0.0)
+    flat_bids = [(100.0, 1), (99.99, 1), (99.98, 1), (99.97, 1), (99.96, 1)]
+    snap_gone = _snap([], last_price=100.05, bids=flat_bids,
+                      asks=_book_with_bid_wall()[1])
+    # возраст 5с < 10с → не дёргаемся даже если стены нет
+    assert st.should_exit(tr, snap_gone, now=5.0) is None
+
+
+def test_build_strategies_two():
+    cfg = SimpleNamespace(strategy_list=["sweep_fade", "density_bounce"])
+    strats = build_strategies(cfg, ["SOLUSDT"])
+    assert [s.name for s in strats] == ["sweep_fade", "density_bounce"]

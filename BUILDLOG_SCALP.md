@@ -6,6 +6,47 @@
 
 ## 2026-05-30
 
+### v0.4.1 — density_bounce (Фаза 2): стратегия №2 «отскок от плотности»
+`<hash>`
+
+**Что.** Вторая независимая стратегия поверх каркаса v0.4.0: отскок от
+плотности (крупной лимитки) в стакане. Reversion-философия, родственна
+sweep_fade, но другой триггер (структура книги, а не CVD-свип).
+
+**Логика (на символ).**
+1. Стена = уровень с size ≥ `density_wall_mult`×baseline (baseline = средний
+   размер уровня БЕЗ самой стены, иначе аномалия раздувает свой порог).
+2. Стена должна быть близко к круглому числу (`density_round_frac`), шаг
+   круглости масштабируется к величине цены (66→шаг1, 518→шаг10, 2.4→шаг0.1).
+3. Анти-спуфинг: стена должна выстоять ≥ `density_persist_sec` (10с) до входа.
+4. Анти-абсорбция: если ≥ `density_absorb_frac` (30%) стены съели за
+   `density_absorb_window_sec` (10с) — снять наблюдение (остаток снимут).
+5. Вход, когда цена подошла к стене ≤ `density_near_bps`. bid-стена → LONG,
+   ask-стена → SHORT. SL сразу за стеной (`build_signal` swept=цена_стены),
+   TP по R с общим fee-guard.
+6. Выход (`should_exit`): стена возле SL исчезла → тезис снят → `density_gone`.
+
+**Research basis** (strategy-guard.mdc): Kalena «Crypto Wall Detection» 2026
+(стена = 5–8× среднего, относительный порог; >30% за <10с = спуфинг); arXiv
+2604.20949 (depth-сигналы причинно раньше flow); Данилов YouTube 2025 (отскок
+от плотности на круглом числе, короткий стоп за стеной). Параметры — в
+docstring `DensityBounceStrategy` и в `settings.py`.
+
+**Data-слой.** `SymbolSnapshot` теперь несёт top-N уровни стакана
+(`bids`/`asks`, цена→объём) — раньше хранился только агрегат `ob_imbalance`.
+
+**Конфликт со sweep_fade.** Если в один тик sweep_fade и density дают РАЗНЫЕ
+направления по символу — `resolve` пропускает тик (гард из Фазы 1).
+
+**Тесты.** +9 (near_round, detect_wall baseline-exclusion, arm→fire после
+persist, no-fire при удалённой цене, absorption-drop, should_exit wall-gone +
+min-age, фабрика двух стратегий). Итого 78 passed.
+
+**Файлы:** `analysis/strategies.py` (DensityBounceStrategy + helpers),
+`data/aggregates.py` (bids/asks в snapshot), `config/settings.py` (density_*),
+`trading/executor.py` (close-reason density_gone), `tests/test_scalp_bot.py`,
+`.env.example`.
+
 ### v0.4.0 — мультистратегийный каркас (Фаза 1) + фикс атрибуции PnL
 `<hash>`
 
