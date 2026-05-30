@@ -421,6 +421,43 @@ def test_realized_or_estimate_uses_exchange_pnl_when_available():
     assert ex._realized_or_estimate(tr, 70100.0) == pytest.approx(-3.21)
 
 
+# ─── fee-aware активный выход (не скретчить флэт в комиссионный минус) ──────
+
+def _exec_flow(now_t):
+    cfg = SimpleNamespace(active_exit_enabled=True, active_exit_min_age_sec=10.0,
+                          momentum_window_sec=3.0)
+    return Executor(db=None, settings=cfg, client=None, now=lambda: now_t)
+
+
+def _flow_flip_samples():
+    # лента качнулась в short → flow_invalidated(long)=True
+    return [CvdSample(4, 97, -1), CvdSample(5, 96.5, -3), CvdSample(6, 96.4, -6)]
+
+
+def test_flow_exit_skips_when_profit_below_fees():
+    # +0.05 хода < round-trip taker (97×0.0011≈0.107) → НЕ скретчим (иначе −fee)
+    ex = _exec_flow(100.0)
+    snap = _snap(_flow_flip_samples(), last_price=97.05)
+    tr = SimpleNamespace(id=1, side="long", entry=97.0, ts_open=80.0)
+    assert ex._flow_exit(tr, snap) is False
+
+
+def test_flow_exit_fires_when_profit_covers_fees():
+    # +0.20 хода ≥ комиссии и лента развернулась → фиксируем профит
+    ex = _exec_flow(100.0)
+    snap = _snap(_flow_flip_samples(), last_price=97.20)
+    tr = SimpleNamespace(id=2, side="long", entry=97.0, ts_open=80.0)
+    assert ex._flow_exit(tr, snap) is True
+
+
+def test_flow_exit_respects_min_age():
+    # возраст 5с < 10с → активный выход не вмешивается, даже если профит большой
+    ex = _exec_flow(85.0)
+    snap = _snap(_flow_flip_samples(), last_price=97.50)
+    tr = SimpleNamespace(id=3, side="long", entry=97.0, ts_open=80.0)
+    assert ex._flow_exit(tr, snap) is False
+
+
 # ─── killswitch ────────────────────────────────────────────────────────────
 
 class _FakeDB:

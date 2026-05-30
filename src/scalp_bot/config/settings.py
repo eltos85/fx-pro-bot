@@ -106,11 +106,13 @@ class ScalpSettings(BaseSettings):
     div_min_late_trades: int = Field(default=4)
 
     # ─── Анти fee-trap (комиссии съедают мелкую цель) ────────────────────
-    # Round-trip издержки ≈ maker-вход (0.02%) + taker-выход (0.055%).
-    # Источники: liberatedstocktrader, 1minscalper, VT Markets (цель ≥3×
-    # издержек). Сигнал отбрасывается, если ход до TP < min_target_fee_mult ×
-    # round_trip_fee_frac.
-    round_trip_fee_frac: float = Field(default=0.00075)
+    # Round-trip издержки. С маркет-входом (SCALP_ENTRY_ORDER_TYPE=market) обе
+    # ноги — TAKER: 0.055% × 2 = 0.11%. Подтверждено реальными сделками бота
+    # 2026-05-30 (openFee+closeFee ≈ 0.109$ на $100). Раньше стоял 0.075%
+    # (maker-вход + taker-выход) — недооценивал издержки на маркете.
+    # Источники: liberatedstocktrader, 1minscalper, VT Markets (цель ≥3×).
+    # Сигнал отбрасывается, если ход до TP < min_target_fee_mult × round_trip.
+    round_trip_fee_frac: float = Field(default=0.0011)
     min_target_fee_mult: float = Field(default=3.0)
 
     # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────

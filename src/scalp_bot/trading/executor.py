@@ -198,11 +198,24 @@ class Executor:
         return pnl
 
     def _flow_exit(self, tr, snap) -> bool:
-        """True если активный выход разрешён и ордер-флоу развернулся против."""
+        """Fee-aware активный выход: срабатывает ТОЛЬКО чтобы зафиксировать
+        прибыль, уже покрывшую round-trip комиссию (профит-лок по развороту
+        ленты). Если цена около входа / в мелком плюсе < комиссии — НЕ скретчим
+        (иначе гарантированный комиссионный минус: бот «угадал», но +0.07% хода
+        не бьёт ~0.11% taker round-trip). Убыточные сделки ведёт SL, не active-
+        exit. Это лечит «торговлю без учёта комиссии» (см. BUILDLOG 2026-05-30)."""
         cfg = self._cfg
         if not getattr(cfg, "active_exit_enabled", False) or snap is None:
             return False
         if self._now() - tr.ts_open < cfg.active_exit_min_age_sec:
+            return False
+        price = snap.last_price
+        if price is None:
+            return False
+        # ход в нашу пользу должен покрыть round-trip taker, иначе не выходим
+        favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
+        fee_px = tr.entry * 2 * TAKER_FEE  # round-trip taker в цене
+        if favorable < fee_px:
             return False
         return flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
 
