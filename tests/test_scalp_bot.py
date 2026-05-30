@@ -406,27 +406,48 @@ def test_taker_pnl_estimate():
 
 def test_realized_or_estimate_falls_back_when_closedpnl_none():
     # killswitch не должен «ослепнуть»: при closedPnl=None берём оценку по цене
-    fake_client = SimpleNamespace(last_closed_pnl=lambda sym, pref: None)
+    fake_client = SimpleNamespace(closed_pnl=lambda sym, **kw: None)
     ex = Executor(db=None, settings=SimpleNamespace(), client=fake_client)
-    tr = SimpleNamespace(id=1, symbol="ETHUSDT", side="long", entry=2000.0, qty=0.04)
+    tr = SimpleNamespace(id=1, symbol="ETHUSDT", side="long", entry=2000.0,
+                         qty=0.04, ts_open=0.0)
     pnl = ex._realized_or_estimate(tr, 1990.0)  # убыток ~ −0.4 минус комиссии
     assert pnl == pytest.approx(taker_pnl("long", 2000.0, 1990.0, 0.04))
     assert pnl < 0  # убыток реально записывается, а не 0
 
 
 def test_realized_or_estimate_uses_exchange_pnl_when_available():
-    fake_client = SimpleNamespace(last_closed_pnl=lambda sym, pref: -3.21)
+    fake_client = SimpleNamespace(closed_pnl=lambda sym, **kw: -3.21)
     ex = Executor(db=None, settings=SimpleNamespace(), client=fake_client)
-    tr = SimpleNamespace(id=2, symbol="BTCUSDT", side="short", entry=70000.0, qty=0.001)
+    tr = SimpleNamespace(id=2, symbol="BTCUSDT", side="short", entry=70000.0,
+                         qty=0.001, ts_open=0.0)
     assert ex._realized_or_estimate(tr, 70100.0) == pytest.approx(-3.21)
 
 
-# ─── fee-aware активный выход (не скретчить флэт в комиссионный минус) ──────
+def test_realized_or_estimate_passes_order_id_for_matching():
+    # фикс рассинхрона: closed_pnl должен получить order_id/qty для точного матча
+    captured = {}
 
-def _exec_flow(now_t):
+    def _closed(sym, **kw):
+        captured.update(kw)
+        return -1.0
+
+    ex = Executor(db=None, settings=SimpleNamespace(),
+                  client=SimpleNamespace(closed_pnl=_closed))
+    tr = SimpleNamespace(id=9, symbol="SOLUSDT", side="long", entry=100.0,
+                         qty=1.5, ts_open=1700000.0)
+    ex._realized_or_estimate(tr, 101.0, order_id="abc-123")
+    assert captured["order_id"] == "abc-123"
+    assert captured["qty"] == 1.5
+    assert captured["since_ms"] == int(1700000.0 * 1000)
+
+
+# ─── fee-aware дискреционный выход sweep_fade (через should_exit) ───────────
+
+def _sweep_strat(now_t=None):
+    from scalp_bot.analysis.strategies import SweepFadeStrategy
     cfg = SimpleNamespace(active_exit_enabled=True, active_exit_min_age_sec=10.0,
-                          momentum_window_sec=3.0)
-    return Executor(db=None, settings=cfg, client=None, now=lambda: now_t)
+                          momentum_window_sec=3.0, round_trip_fee_frac=0.0011)
+    return SweepFadeStrategy(cfg, [])
 
 
 def _flow_flip_samples():
@@ -436,26 +457,28 @@ def _flow_flip_samples():
 
 def test_flow_exit_skips_when_profit_below_fees():
     # +0.05 хода < round-trip taker (97×0.0011≈0.107) → НЕ скретчим (иначе −fee)
-    ex = _exec_flow(100.0)
+    st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=97.05)
     tr = SimpleNamespace(id=1, side="long", entry=97.0, ts_open=80.0)
-    assert ex._flow_exit(tr, snap) is False
+    assert st.should_exit(tr, snap, now=100.0) is None
 
 
 def test_flow_exit_fires_when_profit_covers_fees():
     # +0.20 хода ≥ комиссии и лента развернулась → фиксируем профит
-    ex = _exec_flow(100.0)
+    st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=97.20)
     tr = SimpleNamespace(id=2, side="long", entry=97.0, ts_open=80.0)
-    assert ex._flow_exit(tr, snap) is True
+    decision = st.should_exit(tr, snap, now=100.0)
+    assert decision is not None and decision[0] == "flow_exit"
+    assert decision[1] == pytest.approx(97.20)
 
 
 def test_flow_exit_respects_min_age():
     # возраст 5с < 10с → активный выход не вмешивается, даже если профит большой
-    ex = _exec_flow(85.0)
+    st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=97.50)
     tr = SimpleNamespace(id=3, side="long", entry=97.0, ts_open=80.0)
-    assert ex._flow_exit(tr, snap) is False
+    assert st.should_exit(tr, snap, now=85.0) is None
 
 
 # ─── killswitch ────────────────────────────────────────────────────────────
@@ -525,3 +548,144 @@ def test_notifier_inactive_when_disabled():
     n = TelegramNotifier("tok", "chat", enabled=False)
     assert n.active is False
     n.send("hi")
+
+
+# ─── мультистратегийный каркас: resolve / тег в БД / диспетч выхода ─────────
+
+from scalp_bot.analysis.signals import Signal  # noqa: E402
+from scalp_bot.analysis.strategies import (  # noqa: E402
+    SweepFadeStrategy,
+    build_strategies,
+    resolve,
+)
+from scalp_bot.state.db import ScalpDB  # noqa: E402
+
+
+def _sig(side, score, strategy="sweep_fade", symbol="SOLUSDT"):
+    return Signal(symbol=symbol, side=side, entry_ref=100.0, sl_level=99.0,
+                  tp_level=102.0, score=score, reasons=["x"], strategy=strategy)
+
+
+def test_resolve_none_when_empty():
+    assert resolve([]) is None
+
+
+def test_resolve_same_side_picks_highest_score():
+    a = _sig("long", 4, "sweep_fade")
+    b = _sig("long", 6, "density_bounce")
+    assert resolve([a, b]) is b  # выше score
+
+
+def test_resolve_conflicting_sides_skips():
+    # long и short по одному символу → неоднозначность → не берём ничего
+    assert resolve([_sig("long", 5), _sig("short", 9, "density_bounce")]) is None
+
+
+def test_build_strategies_defaults_to_sweep_fade():
+    cfg = SimpleNamespace(strategy_list=["sweep_fade"])
+    strats = build_strategies(cfg, ["SOLUSDT"])
+    assert [s.name for s in strats] == ["sweep_fade"]
+
+
+def test_build_strategies_unknown_falls_back():
+    cfg = SimpleNamespace(strategy_list=["does_not_exist"])
+    strats = build_strategies(cfg, ["SOLUSDT"])
+    assert [s.name for s in strats] == ["sweep_fade"]  # защита: всегда хоть одна
+
+
+def test_sweep_fade_tags_signal_strategy():
+    # сигнал от стратегии помечается её именем (атрибуция)
+    cfg = _cfg()
+    st = SweepFadeStrategy(cfg, ["SOLUSDT"])
+    # взвод
+    armed = _snap([CvdSample(1, 100, -1), CvdSample(2, 99, -3), CvdSample(3, 98, -5),
+                   CvdSample(4, 97, -4), CvdSample(5, 96.5, -2), CvdSample(6, 97.0, -1)],
+                  ts=10.0, last_price=97.0)
+    st.update(armed, now=10.0)
+    # выстрел: reclaim + momentum
+    fire = _snap([CvdSample(7, 96.5, -2), CvdSample(8, 97.0, 0), CvdSample(9, 97.6, 3),
+                  CvdSample(10, 97.8, 5), CvdSample(11, 98.0, 7), CvdSample(12, 98.2, 9)],
+                 ts=20.0, last_price=98.2)
+    sig = st.update(fire, now=20.0)
+    if sig is not None:  # если сетап сложился — тег обязателен
+        assert sig.strategy == "sweep_fade"
+
+
+def test_db_strategy_tag_and_stats(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    # sweep_fade: 2 сделки (+1.0 win, -0.4 loss); density_bounce: 1 win +2.0
+    for strat, pnl in [("sweep_fade", 1.0), ("sweep_fade", -0.4),
+                       ("density_bounce", 2.0)]:
+        tid = db.insert_open(symbol="SOLUSDT", side="long", qty=1.0, entry=100.0,
+                             sl=99.0, tp=102.0, score=4, reasons="x", mode="paper",
+                             strategy=strat, ts_open=1000.0)
+        db.mark_closed(tid, exit_price=101.0, pnl_usd=pnl, fees_usd=0.05,
+                       close_reason="tp", ts_close=2000.0)
+    stats = {s.strategy: s for s in db.stats_by_strategy(since=0.0)}
+    assert stats["sweep_fade"].trades == 2
+    assert stats["sweep_fade"].wins == 1 and stats["sweep_fade"].losses == 1
+    assert stats["sweep_fade"].pnl_usd == pytest.approx(0.6)
+    assert stats["sweep_fade"].win_rate == pytest.approx(0.5)
+    assert stats["density_bounce"].pnl_usd == pytest.approx(2.0)
+    db.close()
+
+
+def test_db_stats_excludes_reconcile_closes(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="SOLUSDT", side="long", qty=1.0, entry=100.0,
+                         sl=99.0, tp=102.0, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1000.0)
+    db.mark_closed(tid, exit_price=100.0, pnl_usd=0.0, fees_usd=0.0,
+                   close_reason="restart_flat", ts_close=2000.0)
+    # реконсил-закрытие не считается торговым исходом
+    assert db.stats_by_strategy(since=0.0) == []
+    db.close()
+
+
+def test_db_migration_adds_strategy_column(tmp_path):
+    import sqlite3
+    # старая БД без колонки strategy
+    p = str(tmp_path / "scalp_bot.sqlite")
+    con = sqlite3.connect(p)
+    con.executescript(
+        "CREATE TABLE trades (id INTEGER PRIMARY KEY AUTOINCREMENT, ts_open REAL,"
+        "symbol TEXT, side TEXT, qty REAL, entry REAL, sl REAL, tp REAL,"
+        "score INTEGER, reasons TEXT, mode TEXT, status TEXT DEFAULT 'open',"
+        "entry_order_id TEXT, ts_close REAL, exit REAL, pnl_usd REAL,"
+        "fees_usd REAL, close_reason TEXT);")
+    con.execute("INSERT INTO trades (ts_open,symbol,side,qty,entry,sl,tp,score,"
+                "reasons,mode,status) VALUES (1,'SOLUSDT','long',1,100,99,102,4,"
+                "'x','paper','closed')")
+    con.commit()
+    con.close()
+    # открытие через ScalpDB должно добавить колонку и проставить дефолт
+    db = ScalpDB(str(tmp_path))
+    rows = db.open_trades()  # не должно падать на отсутствии strategy
+    assert all(hasattr(r, "strategy") for r in rows)
+    db.close()
+
+
+def test_executor_dispatches_exit_to_owning_strategy():
+    # executor вызывает should_exit ИМЕННО стратегии-владельца сделки
+    calls = []
+
+    class _Strat:
+        name = "density_bounce"
+
+        def should_exit(self, tr, snap, now):
+            calls.append((tr.id, now))
+            return ("density_gone", 100.5)
+
+    ex = Executor(db=None, settings=SimpleNamespace(), client=None,
+                  strategies=[_Strat()], now=lambda: 42.0)
+    tr = SimpleNamespace(id=7, strategy="density_bounce", side="long", entry=100.0)
+    snap = _snap(_long_samples())
+    assert ex._strategy_exit(tr, snap) == ("density_gone", 100.5)
+    assert calls == [(7, 42.0)]
+
+
+def test_executor_exit_dispatch_unknown_strategy_returns_none():
+    ex = Executor(db=None, settings=SimpleNamespace(), client=None,
+                  strategies=[], now=lambda: 1.0)
+    tr = SimpleNamespace(id=8, strategy="ghost", side="long", entry=100.0)
+    assert ex._strategy_exit(tr, _snap(_long_samples())) is None

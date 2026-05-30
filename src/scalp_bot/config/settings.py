@@ -29,6 +29,10 @@ class ScalpSettings(BaseSettings):
     # stoic.ai 2026 — BTC/ETH/SOL industry-standard для скальпа).
     symbols: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT")
 
+    # Активные стратегии (CSV). Каждая ищет/сопровождает входы независимо;
+    # конфликт направлений по символу → тик пропускается (см. strategies.py).
+    enabled_strategies: str = Field(default="sweep_fade")
+
     # ─── Капитал / риск ──────────────────────────────────────────────────
     virtual_capital: float = Field(default=1000.0)
     # Размер сделки в USD (notional). Пользователь мыслит «лотами в $».
@@ -150,6 +154,10 @@ class ScalpSettings(BaseSettings):
     @property
     def symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+
+    @property
+    def strategy_list(self) -> list[str]:
+        return [s.strip() for s in self.enabled_strategies.split(",") if s.strip()]
 
     @property
     def active_hours(self) -> set[int]:

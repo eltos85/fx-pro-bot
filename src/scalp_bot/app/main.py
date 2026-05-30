@@ -16,7 +16,8 @@ import logging
 import signal
 import time
 
-from scalp_bot.analysis.signals import SweepReclaimDetector, diagnose
+from scalp_bot.analysis.signals import diagnose
+from scalp_bot.analysis.strategies import build_strategies, resolve
 from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.market_stream import BybitMarketStream
@@ -82,8 +83,9 @@ def run() -> None:
         notifier.send(f"🚀 scalp_bot старт | {mode} | {','.join(symbols)} | "
                       f"лот ${cfg.position_usd:.0f} | kill ${cfg.max_daily_loss_usd:.0f}/день")
 
-    executor = Executor(db, cfg, client, notifier=notifier)
-    detectors = {s: SweepReclaimDetector(s, cfg) for s in symbols}
+    strategies = build_strategies(cfg, symbols)
+    log.info("стратегии: %s", ",".join(s.name for s in strategies))
+    executor = Executor(db, cfg, client, notifier=notifier, strategies=strategies)
     cooldown: dict[str, float] = {}
     last_heartbeat = 0.0
     kill_notified = False
@@ -133,7 +135,7 @@ def run() -> None:
                 time.sleep(cfg.eval_interval_sec)
                 continue
 
-            # 3) сигналы (двухфазный детектор: взвод по свипу → выстрел по reclaim)
+            # 3) сигналы: прогон ВСЕХ стратегий по символу → разрешение конфликта
             for sym in symbols:
                 snap = states[sym].snapshot()
                 # funnel-диагностика по ВСЕМ символам (наблюдаемость воронки)
@@ -141,19 +143,24 @@ def run() -> None:
                     _accum_funnel(funnel, diagnose(snap, cfg))
                 except Exception:
                     log.exception("diagnose %s failed", sym)
-                det = detectors[sym]
                 if sym in open_symbols:
-                    det.reset()  # не взводимся пока есть позиция
+                    for st in strategies:  # не взводимся пока есть позиция
+                        st.reset(sym)
                     continue
                 if now - cooldown.get(sym, 0.0) < cfg.signal_cooldown_sec:
                     continue
-                try:
-                    sig = det.update(snap, now)
-                except Exception:
-                    log.exception("detector %s failed", sym)
-                    continue
-                if det.armed:
-                    funnel["armed"] += 1
+                candidates = []
+                for st in strategies:
+                    try:
+                        s = st.update(snap, now)
+                    except Exception:
+                        log.exception("strategy %s %s failed", st.name, sym)
+                        continue
+                    if st.armed(sym):
+                        funnel["armed"] += 1
+                    if s is not None:
+                        candidates.append(s)
+                sig = resolve(candidates)
                 if sig is None:
                     continue
                 funnel["fired"] += 1
@@ -164,7 +171,8 @@ def run() -> None:
                 if executor.on_signal(sig) is not None:
                     cooldown[sym] = now
                     open_symbols.add(sym)
-                    det.reset()
+                    for st in strategies:
+                        st.reset(sym)
 
             # 4) heartbeat
             if now - last_heartbeat >= 60:
@@ -194,6 +202,21 @@ def _heartbeat(states: dict[str, SymbolState], db: ScalpDB,
     day_pnl = db.realized_pnl_since(now_utc_day())
     log.info("HB ws=%s open=%d dayPnL=%.2f | %s",
              stream.is_connected(), db.open_count(), day_pnl, " | ".join(parts))
+    _log_strategy_stats(db)
+
+
+def _log_strategy_stats(db: ScalpDB) -> None:
+    """Постратегийная сводка за сегодня (UTC): сделки/WR/net PnL.
+
+    WR/PnL информативны для мониторинга, но решения об отключении стратегии —
+    только при выборке ≥100 сделок (sample-size.mdc). Здесь — наблюдаемость."""
+    stats = db.stats_by_strategy(now_utc_day())
+    if not stats:
+        return
+    for st in stats:
+        play.info("📈 [%s] сегодня: сделок=%d, WR=%.0f%% (%d/%d), net=$%.2f",
+                  st.strategy, st.trades, st.win_rate * 100, st.wins,
+                  st.wins + st.losses, st.pnl_usd)
 
 
 _FUNNEL_RULES = ("sweep", "div", "reclaim", "momentum", "ob", "liq", "funding")
@@ -260,9 +283,10 @@ def _flatten_on_start(client, db, symbols: list[str]) -> None:
     for tr in db.open_trades():
         pnl = None
         try:
-            pnl = client.last_closed_pnl(tr.symbol, "scalp_")
+            pnl = client.closed_pnl(tr.symbol, qty=tr.qty,
+                                    since_ms=int(tr.ts_open * 1000))
         except Exception:
-            log.exception("flatten: last_closed_pnl %s failed", tr.symbol)
+            log.exception("flatten: closed_pnl %s failed", tr.symbol)
         db.mark_closed(tr.id, exit_price=tr.entry, pnl_usd=pnl or 0.0,
                        fees_usd=0.0, close_reason="restart_flat", ts_close=now)
         log.info("flatten: реконсил open-сделки #%d %s pnl=%.4f", tr.id,

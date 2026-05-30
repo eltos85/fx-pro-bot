@@ -40,6 +40,7 @@ class Signal:
     tp_level: float
     score: int
     reasons: list[str]
+    strategy: str = "sweep_fade"  # какая стратегия породила сигнал (атрибуция)
 
 
 def _split_halves(samples: list[CvdSample]) -> tuple[list[CvdSample], list[CvdSample]]:

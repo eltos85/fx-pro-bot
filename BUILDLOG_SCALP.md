@@ -6,6 +6,55 @@
 
 ## 2026-05-30
 
+### v0.4.0 — мультистратегийный каркас (Фаза 1) + фикс атрибуции PnL
+`<hash>`
+
+**Зачем.** Готовим бота к нескольким независимым стратегиям (обсуждение
+архитектуры с пользователем): бот гоняет N стратегий поверх одного потока
+данных, каждая сама ищет вход, СВОЯ стратегия сопровождает и закрывает свою
+позицию; параллельно ищем другие входы по всем стратегиям. Текущий sweep-fade
+становится стратегией №1 без изменения поведения. Density-bounce — Фаза 2.
+
+**Каркас (поведение sweep_fade не меняется).**
+- `analysis/strategies.py`: протокол `Strategy` (update/armed/reset/should_exit),
+  `SweepFadeStrategy` (обёртка над `SweepReclaimDetector` + fee-aware выход
+  перенесён сюда из executor), `build_strategies` (фабрика по
+  `SCALP_ENABLED_STRATEGIES`), `resolve` (гард конфликта: разные направления по
+  символу в один тик → пропуск тика; одна сторона → max score).
+- `Signal.strategy` + колонка `trades.strategy` (миграция ALTER для БД на VPS,
+  старые сделки → `sweep_fade`). Атрибуция: сделка помечается стратегией.
+- Executor: дискреционный выход диспетчеризуется владельцу
+  (`strategy.should_exit`); универсальные TP/SL/тайм-стоп/killswitch — общие.
+- main: вместо одного детектора — прогон всех стратегий + `resolve`; 1 позиция
+  на символ (как и было, через open_symbols).
+
+**Постратегийная стата (мониторинг).** `db.stats_by_strategy(since)` →
+сделки/wins/losses/net PnL по стратегиям (реконсил-закрытия исключены).
+В heartbeat — строка `📈 [strategy] сегодня: сделок/WR/net`. ВАЖНО: решения об
+отключении стратегии — только при ≥100 сделок по связке (sample-size.mdc),
+здесь стата = наблюдаемость, не триггер.
+
+**🔴 Фикс рассинхрона PnL (БД ↔ выписка Bybit).** Симптом (повторный репорт):
+числа в Telegram (`#36 +0.12`) не сходятся с выпиской. Причина по офдоку
+(https://bybit-exchange.github.io/docs/v5/position/close-pnl): ответ
+`get_closed_pnl` **НЕ содержит `orderLinkId`**, поэтому прежний матч
+`startswith("scalp_")` всегда промахивался и код падал в фолбэк `items[0]`
+(самая свежая закрытая по символу) — при частых сделках по ZEC/HYPE это ЧУЖОЙ
+цикл. Проверено по примеру доки: `closedPnl = cumExit − cumEntry − openFee −
+closeFee` → уже net, т.е. при ПРАВИЛЬНОЙ записи БД корректна; чиним атрибуцию.
+Решение `client.closed_pnl(symbol, order_id, qty, since_ms)`: матч по `orderId`
+закрывающего ордера (наши reduce-only), для биржевых TP/SL — по `closedSize`≈qty
+в окне `startTime`=ts_open. items[0]-фолбэк УБРАН (лучше None+оценка по цене,
+чем чужой PnL).
+
+**Тесты.** +11 (resolve-конфликт, фабрика, тег+стата+миграция БД, диспетч
+выхода, order_id в closed_pnl). Итого 69 passed. Поведение sweep_fade прежнее.
+
+**Файлы:** `analysis/strategies.py` (new), `analysis/signals.py` (Signal.strategy),
+`state/db.py` (колонка+миграция+stats_by_strategy), `trading/client.py`
+(closed_pnl), `trading/executor.py` (диспетч выхода+PnL), `app/main.py` (router+
+HB-стата), `config/settings.py` (enabled_strategies), `tests/test_scalp_bot.py`.
+
 ### v0.3.4 — 🔴 fee-aware выходы: не скретчить флэт в комиссионный минус
 `<hash>`
 

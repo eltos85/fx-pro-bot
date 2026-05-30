@@ -20,6 +20,13 @@ from pybit.unified_trading import HTTP
 log = logging.getLogger("scalp_bot.client")
 
 
+def _as_float(v: object) -> float | None:
+    try:
+        return float(v)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+
+
 def _qty_decimals(step: float) -> int:
     """Число знаков после запятой в шаге лота."""
     if step <= 0:
@@ -237,35 +244,47 @@ class ScalpBybitClient:
         }
         return self._submit(params)
 
-    def last_closed_pnl(self, symbol: str, order_link_id_prefix: str) -> float | None:
-        """net closedPnl последней закрытой части (для записи в БД).
+    def closed_pnl(self, symbol: str, *, order_id: str | None = None,
+                   qty: float | None = None, since_ms: int | None = None,
+                   ) -> float | None:
+        """net closedPnl ИМЕННО нашей сделки (для записи в БД / killswitch).
 
-        ВАЖНО: при выходе по биржевым TP/SL закрывающий ордер генерирует САМА
-        биржа — у него НЕТ нашего orderLinkId с префиксом ``scalp_``. Поэтому
-        матч по префиксу даст промах, и killswitch «ослепнет». Логика: сперва
-        ищем по префиксу (наши reduce-only закрытия), иначе берём самую свежую
-        закрытую запись по символу (get_closed_pnl сортирован по времени desc;
-        на изолированном scalp-аккаунте это и есть наша сделка).
+        Bybit ``closedPnl`` уже net (= cumExitValue − cumEntryValue − openFee
+        − closeFee, проверено по примеру офдока). Ответ get_closed_pnl НЕ
+        содержит orderLinkId — матчим по ``orderId`` закрывающего ордера, а для
+        биржевых TP/SL (наш orderId неизвестен) — по ``closedSize`` ≈ qty в окне
+        времени сделки. items[0]-фолбэк УБРАН: при частых сделках по символу он
+        брал чужой цикл (рассинхрон БД↔выписка, BUILDLOG 2026-05-30).
+        Источник: https://bybit-exchange.github.io/docs/v5/position/close-pnl
         """
+        params: dict = {"category": self._category, "symbol": symbol, "limit": 50}
+        if since_ms is not None:
+            # небольшой запас назад: createdTime закрытия может чуть отставать
+            params["startTime"] = int(since_ms - 5000)
         try:
-            resp = self._session.get_closed_pnl(
-                category=self._category, symbol=symbol, limit=20)
+            resp = self._session.get_closed_pnl(**params)
         except Exception:
             log.exception("get_closed_pnl %s failed", symbol)
             return None
         items = resp.get("result", {}).get("list", []) or []
-        for it in items:
-            if str(it.get("orderLinkId", "")).startswith(order_link_id_prefix):
-                try:
-                    return float(it.get("closedPnl", 0) or 0)
-                except (ValueError, TypeError):
-                    return None
-        # fallback: самая свежая закрытая запись (биржевой TP/SL без нашего link)
-        if items:
-            try:
-                return float(items[0].get("closedPnl", 0) or 0)
-            except (ValueError, TypeError):
-                return None
+        if not items:
+            return None
+        # 1) точный матч по orderId нашего reduce-only закрытия
+        if order_id:
+            for it in items:
+                if str(it.get("orderId", "")) == order_id:
+                    return _as_float(it.get("closedPnl"))
+        # 2) матч по размеру закрытия (биржевой TP/SL): closedSize ≈ qty,
+        #    самая свежая подходящая запись (list отсортирован по времени desc)
+        if qty and qty > 0:
+            tol = max(qty * 0.02, 1e-9)
+            for it in items:
+                cs = _as_float(it.get("closedSize"))
+                if cs is not None and abs(cs - qty) <= tol:
+                    return _as_float(it.get("closedPnl"))
+        # ни orderId, ни размер не совпали → не угадываем (лучше None, чем чужой PnL)
+        log.warning("closed_pnl %s: нет совпадения (order_id=%s qty=%s) — "
+                    "не атрибутирую", symbol, order_id, qty)
         return None
 
     def _submit(self, params: dict) -> dict:

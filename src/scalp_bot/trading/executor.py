@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import time
 
-from scalp_bot.analysis.signals import Signal, flow_invalidated
+from scalp_bot.analysis.signals import Signal
 
 log = logging.getLogger("scalp_bot.exec")
 play = logging.getLogger("scalp_bot.play")  # пошаговый нарратив торговли
@@ -84,12 +84,16 @@ def taker_pnl(side: str, entry: float, exit_price: float, qty: float) -> float:
 
 class Executor:
     def __init__(self, db, settings, client=None, *, notifier=None,
-                 now=time.time) -> None:
+                 strategies=None, now=time.time) -> None:
         self._db = db
         self._cfg = settings
         self._client = client
         self._notifier = notifier
         self._now = now
+        # реестр стратегий по имени — для диспетча дискреционного выхода
+        # (позицию сопровождает та же стратегия, что открыла).
+        self._strategies: dict = {getattr(s, "name", ""): s
+                                  for s in (strategies or [])}
         # in-memory трекинг live-входов: trade_id -> {link, filled, ts}
         self._pending: dict[int, dict] = {}
         self._hold_log: dict[int, float] = {}  # троттлинг «держу позицию»-логов
@@ -120,7 +124,8 @@ class Executor:
             tid = self._db.insert_open(
                 symbol=sig.symbol, side=sig.side, qty=qty, entry=sig.entry_ref,
                 sl=sig.sl_level, tp=sig.tp_level, score=sig.score,
-                reasons=reasons, mode="paper", ts_open=self._now())
+                reasons=reasons, mode="paper", strategy=sig.strategy,
+                ts_open=self._now())
             log.info("PAPER open #%d %s %s qty=%.6f notional=$%.2f risk=$%.2f "
                      "entry=%.4f sl=%.4f tp=%.4f [%s] score=%d",
                      tid, sig.symbol, sig.side, qty, qty * sig.entry_ref, risk_usd,
@@ -147,7 +152,8 @@ class Executor:
         tid = self._db.insert_open(
             symbol=sig.symbol, side=sig.side, qty=qty, entry=limit_price,
             sl=sig.sl_level, tp=sig.tp_level, score=sig.score, reasons=reasons,
-            mode="live", entry_order_id=link, ts_open=self._now())
+            mode="live", strategy=sig.strategy, entry_order_id=link,
+            ts_open=self._now())
         is_market = cfg.entry_order_type == "market"
         # Уведомление об открытии шлём ТОЛЬКО после реального филла (для maker
         # post-only ордер может быть отменён/не исполнен — тогда позиции нет).
@@ -187,37 +193,35 @@ class Executor:
             else:
                 self._manage_live(tr, price, snap)
 
-    def _realized_or_estimate(self, tr, exit_price: float) -> float:
-        """net PnL: биржевой closedPnl, иначе оценка по цене (killswitch не
-        должен «ослепнуть» при сбое closedPnl — иначе убытки уйдут как 0)."""
-        pnl = self._client.last_closed_pnl(tr.symbol, "scalp_")
+    def _realized_or_estimate(self, tr, exit_price: float, *,
+                              order_id: str | None = None) -> float:
+        """net PnL ИМЕННО нашей сделки: closedPnl с матчем по orderId/closedSize
+        (см. client.closed_pnl), иначе оценка по цене (killswitch не должен
+        «ослепнуть» при сбое closedPnl — иначе убытки уйдут как 0).
+        since_ms = ts_open сделки сужает выборку до её жизни (антирассинхрон)."""
+        pnl = self._client.closed_pnl(
+            tr.symbol, order_id=order_id, qty=tr.qty,
+            since_ms=int(tr.ts_open * 1000))
         if pnl is None:
             pnl = taker_pnl(tr.side, tr.entry, exit_price, tr.qty)
-            log.warning("LIVE #%d closedPnl недоступен — оценка по цене=%.4f",
+            log.warning("LIVE #%d closedPnl не атрибутирован — оценка по цене=%.4f",
                         tr.id, pnl)
         return pnl
 
-    def _flow_exit(self, tr, snap) -> bool:
-        """Fee-aware активный выход: срабатывает ТОЛЬКО чтобы зафиксировать
-        прибыль, уже покрывшую round-trip комиссию (профит-лок по развороту
-        ленты). Если цена около входа / в мелком плюсе < комиссии — НЕ скретчим
-        (иначе гарантированный комиссионный минус: бот «угадал», но +0.07% хода
-        не бьёт ~0.11% taker round-trip). Убыточные сделки ведёт SL, не active-
-        exit. Это лечит «торговлю без учёта комиссии» (см. BUILDLOG 2026-05-30)."""
-        cfg = self._cfg
-        if not getattr(cfg, "active_exit_enabled", False) or snap is None:
-            return False
-        if self._now() - tr.ts_open < cfg.active_exit_min_age_sec:
-            return False
-        price = snap.last_price
-        if price is None:
-            return False
-        # ход в нашу пользу должен покрыть round-trip taker, иначе не выходим
-        favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
-        fee_px = tr.entry * 2 * TAKER_FEE  # round-trip taker в цене
-        if favorable < fee_px:
-            return False
-        return flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
+    def _strategy_exit(self, tr, snap) -> tuple[str, float] | None:
+        """Дискреционный выход СТРАТЕГИИ-владельца сделки (та же, что открыла).
+
+        Универсальные выходы (TP/SL/тайм-стоп) живут в _manage_*. Здесь —
+        только стратегийная логика (для sweep_fade: fee-aware профит-лок по
+        развороту ленты). Возвращает (close_reason, exit_price) или None."""
+        strat = self._strategies.get(getattr(tr, "strategy", ""))
+        if strat is None or snap is None:
+            return None
+        try:
+            return strat.should_exit(tr, snap, self._now())
+        except Exception:
+            log.exception("should_exit %s #%d failed", tr.strategy, tr.id)
+            return None
 
     def _manage_paper(self, tr, price: float | None, snap=None) -> None:
         if price is None:
@@ -226,12 +230,13 @@ class Executor:
         hit_tp = price >= tr.tp if tr.side == "long" else price <= tr.tp
         hit_sl = price <= tr.sl if tr.side == "long" else price >= tr.sl
         reason = exit_px = None
+        strat_exit = self._strategy_exit(tr, snap)
         if hit_sl:
             reason, exit_px = "sl", tr.sl
         elif hit_tp:
             reason, exit_px = "tp", tr.tp
-        elif self._flow_exit(tr, snap):
-            reason, exit_px = "flow_exit", price
+        elif strat_exit is not None:
+            reason, exit_px = strat_exit
         elif age >= self._cfg.time_stop_sec:
             reason, exit_px = "time_stop", price
         if reason is None:
@@ -286,6 +291,7 @@ class Executor:
         if pos is None:
             return  # transient — не трогаем
         if pos.size <= 0:
+            # биржевой TP/SL: нашего close-orderId нет → матч по closedSize+время
             pnl = self._realized_or_estimate(tr, pos.mark_price or tr.entry)
             self._db.mark_closed(tr.id, exit_price=pos.mark_price or tr.entry,
                                  pnl_usd=pnl, fees_usd=0.0,
@@ -301,12 +307,15 @@ class Executor:
             emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
             self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} (TP/SL)")
             return
-        flow_out = self._flow_exit(tr, snap)
-        if flow_out or self._now() - tr.ts_open >= self._cfg.time_stop_sec:
-            close_reason = "flow_exit" if flow_out else "time_stop"
+        strat_exit = self._strategy_exit(tr, snap)
+        if strat_exit is not None or self._now() - tr.ts_open >= self._cfg.time_stop_sec:
+            close_reason = strat_exit[0] if strat_exit is not None else "time_stop"
             side = "Buy" if tr.side == "long" else "Sell"
-            cl.close_market(tr.symbol, side, pos.size, f"scalp_{close_reason}_{tr.id}")
-            pnl = self._realized_or_estimate(tr, pos.mark_price or tr.entry)
+            close_res = cl.close_market(tr.symbol, side, pos.size,
+                                        f"scalp_{close_reason}_{tr.id}")
+            close_oid = (close_res or {}).get("result", {}).get("orderId")
+            pnl = self._realized_or_estimate(tr, pos.mark_price or tr.entry,
+                                             order_id=close_oid)
             self._db.mark_closed(tr.id, exit_price=pos.mark_price or tr.entry,
                                  pnl_usd=pnl, fees_usd=0.0,
                                  close_reason=close_reason, ts_close=self._now())
