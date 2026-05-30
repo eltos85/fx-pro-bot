@@ -47,8 +47,10 @@ def run() -> None:
 
     symbols = cfg.symbol_list
     mode = "LIVE(demo)" if cfg.trading_enabled else "PAPER"
-    log.info("scalp_bot старт | mode=%s | symbols=%s | risk=$%.2f | min_conf=%d",
-             mode, ",".join(symbols), cfg.risk_per_trade_usd, cfg.min_confluence)
+    log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
+             "kill day/total=$%.0f/$%.0f | min_conf=%d", mode, ",".join(symbols),
+             cfg.position_usd, cfg.min_position_usd, cfg.max_daily_loss_usd,
+             cfg.max_total_loss_usd, cfg.min_confluence)
 
     db = ScalpDB(cfg.data_dir)
 
@@ -95,6 +97,15 @@ def run() -> None:
                 continue
 
             open_symbols = {tr.symbol for tr in db.open_trades()}
+
+            # 2b) funding-окно: не открываемся перед списанием (00/08/16 UTC)
+            to_funding = sec_to_next_funding(now)
+            if to_funding < cfg.avoid_funding_window_sec:
+                if now - last_heartbeat >= 60:
+                    log.info("funding через %.0fс — входы на паузе (окно %.0fс)",
+                             to_funding, cfg.avoid_funding_window_sec)
+                time.sleep(cfg.eval_interval_sec)
+                continue
 
             # 3) сигналы
             for sym in symbols:
@@ -149,6 +160,15 @@ def _heartbeat(states: dict[str, SymbolState], db: ScalpDB,
 def now_utc_day() -> float:
     now = time.time()
     return now - (now % 86400.0)
+
+
+def sec_to_next_funding(now: float) -> float:
+    """Секунд до ближайшего funding settlement Bybit (00:00/08:00/16:00 UTC)."""
+    sec_of_day = now % 86400.0
+    for boundary in (0.0, 28800.0, 57600.0, 86400.0):
+        if boundary > sec_of_day:
+            return boundary - sec_of_day
+    return 86400.0 - sec_of_day
 
 
 if __name__ == "__main__":

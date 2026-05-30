@@ -191,21 +191,27 @@ def test_symbolstate_stale_flag():
 
 # ─── position sizing / pnl ─────────────────────────────────────────────────
 
-def test_position_size_basic():
-    assert position_size(5.0, 100.0, 99.0) == pytest.approx(5.0)
+def test_position_size_from_notional():
+    assert position_size(100.0, 100.0) == pytest.approx(1.0)
+
+
+def test_position_size_floors_to_min_notional():
+    # целевой $5 < min $10 → берём $10 notional
+    assert position_size(5.0, 100.0, min_notional=10.0) == pytest.approx(0.1)
 
 
 def test_position_size_rounds_down_to_step():
-    qty = position_size(5.0, 100.0, 99.7, qty_step=0.01)
-    assert qty == pytest.approx(16.66)
+    qty = position_size(100.0, 100.0, qty_step=0.3)
+    assert qty == pytest.approx(0.9)  # floor(1.0/0.3)=3 → 0.9
 
 
-def test_position_size_below_min_returns_zero():
-    assert position_size(5.0, 100.0, 99.0, min_qty=10.0) == 0.0
+def test_position_size_below_exchange_min_uses_min_qty():
+    # наш лот мельче биржевого минимума → берём биржевой минимум
+    assert position_size(1.0, 100.0, min_qty=0.5) == pytest.approx(0.5)
 
 
-def test_position_size_zero_distance():
-    assert position_size(5.0, 100.0, 100.0) == 0.0
+def test_position_size_zero_entry():
+    assert position_size(100.0, 0.0) == 0.0
 
 
 def test_paper_pnl_long_includes_fees():

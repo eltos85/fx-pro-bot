@@ -6,7 +6,32 @@
 
 ## 2026-05-30
 
-### v0.1.0 — каркас orderflow-скальпера (PAPER-ready)
+### v0.2.0 — LIVE на demo по умолчанию, депо $1000, лот $10+, funding-guard
+`<hash>`
+
+По требованию пользователя: запускаем сразу на биржу (демо-счёт, риска нет),
+PAPER больше НЕ дефолт.
+
+- `trading_enabled=true` по умолчанию (LIVE на Bybit demo). PAPER остаётся
+  опциональным режимом (false), но не навязывается.
+- Капитал $1000; killswitch дневной $500 / совокупный $800 (буфер до
+  обнуления депо); max 2 позиции; 20 сделок/час.
+- Сайзинг переведён с фикс-риска на **фикс-notional**: лот $100, **минимум
+  $10** (мельче — комиссия/спред съедают прибыль скальпа; пользователь
+  мыслит «лотами в $»). Биржевой `minOrderQty` уважается.
+- **Учёт комиссий**: LIVE-PnL = Bybit `closedPnl` (net, уже после maker/taker
+  fee). Вход post-only maker (0.02%) дешевле taker (0.055%).
+- **Funding-guard**: Bybit списывает/начисляет funding раз в 8ч
+  (00:00/08:00/16:00 UTC) по открытой позиции. Для 90-сек скальпа почти не
+  задевает, но бот НЕ открывает позиции в окне `avoid_funding_window_sec`
+  (120с) перед списанием — funding-cost исключён полностью.
+
+**Файлы:** `config/settings.py` (position_usd/min_position_usd, trading_enabled
+default true, kill $500/$800, avoid_funding_window_sec), `trading/executor.py`
+(position_size по notional + min-floor), `app/main.py` (funding-окно,
+sec_to_next_funding), `docker-compose.yml`, `.env.example`, `tests/test_scalp_bot.py`.
+
+### v0.1.0 — каркас orderflow-скальпера
 `<hash>`
 
 Новый отдельный бот по скальпингу в собственном Docker-контейнере
@@ -34,10 +59,10 @@
   модельных комиссий) / LIVE на demo (флаг `SCALP_TRADING_ENABLED`).
 
 **Валидация:** orderflow почти не бэктестится (нет дешёвой истории L2),
-поэтому edge проверяется forward-тестом — сначала PAPER, набор ≥100 сделок,
-анализ WR/expectancy с учётом комиссий (sample-size.mdc), только потом
-demo-live. Никаких реальных денег до подтверждения положительного
-expectancy после комиссий.
+поэтому edge проверяется forward-тестом на **demo-счёте** (риска нет).
+Набор ≥100 сделок, анализ WR/expectancy с учётом комиссий (sample-size.mdc)
+до любых выводов об отключении/тюнинге. На реальные деньги — отдельное
+решение пользователя после подтверждённого положительного expectancy.
 
 **Smoke:** живой WS-коннект к Bybit подтверждён — приходят сделки (CVD),
 стакан (imbalance), funding по BTC/ETH/SOL. 29 юнит-тестов зелёные

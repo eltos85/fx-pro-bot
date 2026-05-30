@@ -25,18 +25,20 @@ MAKER_FEE = 0.0002
 TAKER_FEE = 0.00055
 
 
-def position_size(risk_usd: float, entry: float, sl: float,
-                  *, qty_step: float = 0.0, min_qty: float = 0.0) -> float:
-    """qty из фикс-риска. Округление вниз под qty_step, отсев < min_qty."""
-    dist = abs(entry - sl)
-    if dist <= 0 or risk_usd <= 0:
+def position_size(position_usd: float, entry: float, *, min_notional: float = 0.0,
+                  qty_step: float = 0.0, min_qty: float = 0.0) -> float:
+    """qty из целевого notional ($). Пол min_notional (мелкий лот = комиссия
+    съедает прибыль). Округление вниз под qty_step, отсев < min_qty биржи."""
+    if entry <= 0 or position_usd <= 0:
         return 0.0
-    qty = risk_usd / dist
+    notional = max(position_usd, min_notional)
+    qty = notional / entry
     if qty_step > 0:
         import math
         qty = math.floor(qty / qty_step) * qty_step
     if min_qty > 0 and qty < min_qty:
-        return 0.0
+        # биржевой минимум выше нашего лота — берём биржевой минимум
+        qty = min_qty
     return qty
 
 
@@ -65,21 +67,24 @@ class Executor:
             info = self._client.instrument(sig.symbol)
             if info:
                 qty_step, min_qty = info.qty_step, info.min_order_qty
-        qty = position_size(cfg.risk_per_trade_usd, sig.entry_ref, sig.sl_level,
+        qty = position_size(cfg.position_usd, sig.entry_ref,
+                            min_notional=cfg.min_position_usd,
                             qty_step=qty_step, min_qty=min_qty)
         if qty <= 0:
-            log.info("skip %s %s: qty=0 (risk/dist/min)", sig.symbol, sig.side)
+            log.info("skip %s %s: qty=0 (notional/min)", sig.symbol, sig.side)
             return None
         reasons = "+".join(sig.reasons)
+        risk_usd = qty * abs(sig.entry_ref - sig.sl_level)
 
         if not cfg.trading_enabled:
             tid = self._db.insert_open(
                 symbol=sig.symbol, side=sig.side, qty=qty, entry=sig.entry_ref,
                 sl=sig.sl_level, tp=sig.tp_level, score=sig.score,
                 reasons=reasons, mode="paper", ts_open=self._now())
-            log.info("PAPER open #%d %s %s qty=%.6f entry=%.4f sl=%.4f tp=%.4f [%s] score=%d",
-                     tid, sig.symbol, sig.side, qty, sig.entry_ref, sig.sl_level,
-                     sig.tp_level, reasons, sig.score)
+            log.info("PAPER open #%d %s %s qty=%.6f notional=$%.2f risk=$%.2f "
+                     "entry=%.4f sl=%.4f tp=%.4f [%s] score=%d",
+                     tid, sig.symbol, sig.side, qty, qty * sig.entry_ref, risk_usd,
+                     sig.entry_ref, sig.sl_level, sig.tp_level, reasons, sig.score)
             return tid
 
         # LIVE (demo)
@@ -102,8 +107,10 @@ class Executor:
             mode="live", entry_order_id=link, ts_open=self._now())
         self._pending[tid] = {"link": link, "filled": cfg.entry_order_type == "market",
                               "ts": self._now()}
-        log.info("LIVE open #%d %s %s qty=%.6f @%.4f sl=%.4f tp=%.4f [%s]",
-                 tid, sig.symbol, side, qty, limit_price, sig.sl_level, sig.tp_level, reasons)
+        log.info("LIVE open #%d %s %s qty=%.6f notional=$%.2f risk=$%.2f @%.4f "
+                 "sl=%.4f tp=%.4f [%s]", tid, sig.symbol, side, qty,
+                 qty * limit_price, risk_usd, limit_price, sig.sl_level,
+                 sig.tp_level, reasons)
         return tid
 
     # ─── сопровождение ───────────────────────────────────────────────────

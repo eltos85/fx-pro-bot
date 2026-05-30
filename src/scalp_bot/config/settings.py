@@ -30,24 +30,33 @@ class ScalpSettings(BaseSettings):
     symbols: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT")
 
     # ─── Капитал / риск ──────────────────────────────────────────────────
-    virtual_capital: float = Field(default=500.0)
-    risk_per_trade_usd: float = Field(default=5.0)  # 1% от 500
+    virtual_capital: float = Field(default=1000.0)
+    # Размер сделки в USD (notional). Пользователь мыслит «лотами в $».
+    # Минимум 10$ — мельче комиссия/спред съедают прибыль скальпа.
+    position_usd: float = Field(default=100.0)
+    min_position_usd: float = Field(default=10.0)
     max_leverage: int = Field(default=5)
-    # Killswitch
-    max_daily_loss_usd: float = Field(default=50.0)
-    max_total_loss_usd: float = Field(default=150.0)
+    # Killswitch (demo): дневной убыток $500, совокупный $800 (буфер до
+    # обнуления $1000 депо), max 2 позиции, 20 сделок/час (анти-overtrade).
+    max_daily_loss_usd: float = Field(default=500.0)
+    max_total_loss_usd: float = Field(default=800.0)
     max_open_positions: int = Field(default=2)
     max_trades_per_hour: int = Field(default=20)
 
     # ─── Исполнение ──────────────────────────────────────────────────────
-    # PAPER по умолчанию: ордера НЕ ставятся на биржу, только логируются
-    # и симулируются. Включать LIVE (на demo!) одним флагом после наблюдения.
-    trading_enabled: bool = Field(default=False)
+    # LIVE на demo по умолчанию (демо-счёт, риска нет). False = PAPER-режим
+    # (симуляция без ордеров) — опциональный, не дефолт.
+    trading_enabled: bool = Field(default=True)
     # post_only_limit (maker, дёшево) | market (taker, дорого но надёжно).
     # Bybit linear: maker 0.02% / taker 0.055% — round-trip taker ≈0.11%
     # съедает 10-20% цели скальпа (rononcrypto 2026). По умолчанию maker.
     entry_order_type: str = Field(default="post_only_limit")
     entry_fill_timeout_sec: float = Field(default=8.0)
+    # Funding settlements Bybit — раз в 8ч (00:00/08:00/16:00 UTC) списание/
+    # начисление по открытой позиции. Для 90-сек скальпа почти не задевает,
+    # но НЕ открываемся в окне перед списанием, чтобы исключить funding-cost
+    # совсем (https://www.bybit.com/en/help-center/article/Funding-fee-Calculation).
+    avoid_funding_window_sec: float = Field(default=120.0)
 
     # ─── Параметры микроструктуры (research-based) ───────────────────────
     # Цикл оценки сигналов: orderflow читается из WS-кэша, без REST.
