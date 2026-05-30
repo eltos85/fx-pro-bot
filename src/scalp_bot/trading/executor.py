@@ -104,6 +104,11 @@ class Executor:
         # net сделки = Σ execPnl − Σ execFee (= Bybit closedPnl), без REST.
         self._link2trade: dict[str, int] = {}
         self._fills: dict[int, dict] = {}
+        # отложенные close-уведомления: tid -> {ts, label, symbol}. Шлём из
+        # reconcile() с РЕАЛЬНЫМ net (Telegram не должен показывать оценку,
+        # которая через ~1с правится по WS). Fallback по таймауту — чтобы
+        # сообщение не потерялось, если филл по WS не дойдёт.
+        self._close_pending: dict[int, dict] = {}
 
     def _notify(self, text: str) -> None:
         if self._notifier is not None:
@@ -267,22 +272,59 @@ class Executor:
     def _forget_trade(self, tid: int) -> None:
         """Снять трекинг закрытой сделки (после финализации реальным net)."""
         self._fills.pop(tid, None)
+        self._close_pending.pop(tid, None)
         for link in [k for k, v in self._link2trade.items() if v == tid]:
             self._link2trade.pop(link, None)
+
+    def _on_close(self, tr, pnl: float, reason: str, label: str,
+                  is_real: bool) -> None:
+        """Плейбук-нарратив + Telegram при закрытии. Если net реальный (филлы
+        по WS уже пришли) — шлём сразу. Иначе откладываем уведомление до
+        reconcile() (придёт с реальным net, без устаревшей оценки в Telegram)."""
+        res = "профит" if (pnl or 0.0) >= 0 else "убыток"
+        play.info("🏁 [%s] закрыл #%d %s: %s — %s, pnl=$%.2f", tr.symbol, tr.id,
+                  tr.side.upper(), _CLOSE_RU.get(reason, reason), res, pnl or 0.0)
+        if is_real:
+            self._send_close_msg(tr.id, tr.symbol, pnl or 0.0, label)
+        else:
+            self._close_pending[tr.id] = {"ts": self._now(), "label": label,
+                                          "symbol": tr.symbol}
+
+    def _send_close_msg(self, tid: int, symbol: str, pnl: float, label: str,
+                        approx: bool = False) -> None:
+        emoji = "✅" if pnl >= 0 else "🔴"
+        mark = "≈" if approx else ""
+        self._notify(f"{emoji} close #{tid} {symbol} pnl={mark}${pnl:.2f} ({label})")
 
     def reconcile(self) -> None:
         """Досверка предварительных (оценочных) PnL по WS-леджеру: когда филлы
         выхода доедут (обычно ≤1с), переписываем БД реальным net, чтобы она
-        сходилась с выпиской 1:1 (stats-collection.mdc — БД = ground truth)."""
-        horizon = self._now() - 600.0  # сверяем закрытия за последние 10 мин
+        сходилась с выпиской 1:1 (stats-collection.mdc — БД = ground truth), и
+        дошлём отложенное close-уведомление с реальным net."""
+        now = self._now()
+        horizon = now - 600.0  # сверяем закрытия за последние 10 мин
+        fallback = getattr(self._cfg, "close_notify_fallback_sec", 10.0)
         for tr in self._db.provisional_closed_since(horizon):
             net, exit_px, complete = self._realized_from_fills(tr)
-            if not complete:
-                continue  # филлы ещё не пришли — попробуем на след. цикле
-            self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px)
-            log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)",
-                     tr.id, tr.symbol, tr.pnl_usd or 0.0, net)
-            self._forget_trade(tr.id)
+            if complete:
+                self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px)
+                log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)",
+                         tr.id, tr.symbol, tr.pnl_usd or 0.0, net)
+                pend = self._close_pending.pop(tr.id, None)
+                if pend is not None:  # отложенное уведомление → шлём реальный net
+                    self._send_close_msg(tr.id, pend["symbol"], net, pend["label"])
+                self._forget_trade(tr.id)
+                continue
+            # фолбэк: филлы по WS не дошли слишком долго → шлём оценку с пометкой,
+            # чтобы пользователь не остался без уведомления о закрытии
+            pend = self._close_pending.get(tr.id)
+            if pend is not None and now - pend["ts"] > fallback:
+                self._send_close_msg(tr.id, pend["symbol"], tr.pnl_usd or 0.0,
+                                     pend["label"], approx=True)
+                self._close_pending.pop(tr.id, None)
+                log.warning("reconcile #%d %s: филлы по WS не дошли за %.0fс — "
+                            "уведомление с оценкой ≈$%.2f", tr.id, tr.symbol,
+                            fallback, tr.pnl_usd or 0.0)
 
     def _strategy_exit(self, tr, snap) -> tuple[str, float] | None:
         """Дискреционный выход СТРАТЕГИИ-владельца сделки (та же, что открыла).
@@ -382,12 +424,7 @@ class Executor:
             self._hold_log.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (биржа TP/SL)", tr.id, tr.symbol,
                      pnl or 0.0)
-            res = "профит" if (pnl or 0.0) >= 0 else "убыток"
-            play.info("🏁 [%s] закрыл #%d %s: %s — %s, pnl=$%.2f",
-                      tr.symbol, tr.id, tr.side.upper(), _CLOSE_RU["tp_sl"],
-                      res, pnl or 0.0)
-            emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
-            self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} (TP/SL)")
+            self._on_close(tr, pnl, "tp_sl", "TP/SL", is_real)
             return
         strat_exit = self._strategy_exit(tr, snap)
         if strat_exit is not None or self._now() - tr.ts_open >= self._cfg.time_stop_sec:
@@ -407,13 +444,7 @@ class Executor:
             self._hold_log.pop(tr.id, None)
             log.info("LIVE close #%d %s pnl=%.4f (%s)", tr.id, tr.symbol,
                      pnl or 0.0, close_reason)
-            res = "профит" if (pnl or 0.0) >= 0 else "убыток"
-            play.info("🏁 [%s] закрыл #%d %s: %s — %s, pnl=$%.2f", tr.symbol,
-                      tr.id, tr.side.upper(), _CLOSE_RU.get(close_reason, close_reason),
-                      res, pnl or 0.0)
-            emoji = "✅" if (pnl or 0.0) >= 0 else "🔴"
-            self._notify(f"{emoji} close #{tr.id} {tr.symbol} pnl=${pnl or 0.0:.2f} "
-                         f"({close_reason})")
+            self._on_close(tr, pnl, close_reason, close_reason, is_real)
             return
         # держим позицию — троттлим лог дистанций до TP/SL и возраста
         iv = getattr(self._cfg, "narrate_interval_sec", 15.0)

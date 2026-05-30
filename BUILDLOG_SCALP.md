@@ -37,6 +37,16 @@
 **REST.** `get_closed_pnl` оставлен ТОЛЬКО в `_flatten_on_start` (разовый
 стартовый реконсил, где WS-леджер ещё пуст). В hot-path REST убран.
 
+**Telegram-уведомление о закрытии** теперь шлётся с РЕАЛЬНЫМ net (из
+`reconcile`), а не с оценкой в момент закрытия. Раньше: TG показывал
+`+$0.06`, а реальный net (по выписке = дельта Wallet Balance) был `−0.0026`
+(NEAR #58 2026-05-30). При provisional-закрытии уведомление откладывается
+(`_close_pending`), уходит когда филлы доедут по WS. Fallback
+`close_notify_fallback_sec` (10с): если филлы не дошли — шлём оценку с
+пометкой `≈`, чтобы уведомление не потерялось. Проверка по выписке: net
+сделки = сумма двух `Change` (Open+Close) = дельта Wallet Balance, Bybit
+не показывает это одной ячейкой → расхождение было только визуальным в TG.
+
 **Файлы:** `data/exec_stream.py` (новый), `trading/executor.py`,
 `app/main.py`, `state/db.py`, `trading/client.py`, `tests/test_scalp_bot.py`.
 

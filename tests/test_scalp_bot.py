@@ -501,6 +501,62 @@ def test_reconcile_keeps_provisional_when_fills_absent(tmp_path):
     db.close()
 
 
+def test_real_close_notifies_immediately():
+    msgs: list[str] = []
+    notifier = SimpleNamespace(send=msgs.append)
+    ex = Executor(db=None, settings=SimpleNamespace(), client=SimpleNamespace(),
+                  notifier=notifier, now=lambda: 1.0)
+    tr = SimpleNamespace(id=5, symbol="ZECUSDT", side="long")
+    ex._on_close(tr, -0.45, "tp_sl", "TP/SL", is_real=True)
+    assert len(msgs) == 1 and "TP/SL" in msgs[0] and "-0.45" in msgs[0]
+
+
+def test_provisional_close_defers_notify_until_reconcile(tmp_path):
+    # Telegram не должен показывать оценку: уведомление откладывается до
+    # reconcile, который шлёт РЕАЛЬНЫЙ net по WS-филлам (NEAR #58 из выписки).
+    msgs: list[str] = []
+    notifier = SimpleNamespace(send=msgs.append)
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="NEARUSDT", side="short", qty=41.2, entry=2.4216,
+                         sl=2.4279, tp=2.4123, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1000.0)
+    ex = Executor(db=db, settings=SimpleNamespace(close_notify_fallback_sec=10.0),
+                  client=SimpleNamespace(), notifier=notifier, now=lambda: 1100.0)
+    tr = db.open_trades()[0]
+    db.mark_closed(tid, exit_price=2.419, pnl_usd=0.0634, fees_usd=0.0,
+                   close_reason="flow_exit", ts_close=1100.0, provisional=True)
+    ex._on_close(tr, 0.0634, "flow_exit", "flow_exit", is_real=False)
+    assert msgs == []  # оценка НЕ ушла в Telegram
+    # филлы выхода доехали по WS: cashFlow +0.1071, комиссии 0.0549+0.0548
+    ex._fills[tid] = {"fee": 0.1097, "pnl": 0.1071,
+                      "close_val": 2.419 * 41.2, "close_qty": 41.2}
+    ex.reconcile()
+    assert len(msgs) == 1
+    assert f"close #{tid}" in msgs[0] and "-0.00" in msgs[0]  # реальный net −0.0026
+    db.close()
+
+
+def test_close_notify_fallback_sends_estimate_after_timeout(tmp_path):
+    msgs: list[str] = []
+    notifier = SimpleNamespace(send=msgs.append)
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="NEARUSDT", side="short", qty=41.2, entry=2.42,
+                         sl=2.43, tp=2.41, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1000.0)
+    db.mark_closed(tid, exit_price=2.42, pnl_usd=-0.07, fees_usd=0.0,
+                   close_reason="time_stop", ts_close=1000.0, provisional=True)
+    ex = Executor(db=db, settings=SimpleNamespace(close_notify_fallback_sec=10.0),
+                  client=SimpleNamespace(), notifier=notifier, now=lambda: 1005.0)
+    ex._close_pending[tid] = {"ts": 1000.0, "label": "time_stop",
+                              "symbol": "NEARUSDT"}
+    ex.reconcile()  # 5с < 10с и филлов нет → молчим
+    assert msgs == []
+    ex._now = lambda: 1012.0  # 12с > 10с → фолбэк с пометкой ≈
+    ex.reconcile()
+    assert len(msgs) == 1 and "≈" in msgs[0] and "-0.07" in msgs[0]
+    db.close()
+
+
 # ─── fee-aware дискреционный выход sweep_fade (через should_exit) ───────────
 
 def _sweep_strat(now_t=None):
