@@ -151,6 +151,25 @@ class ScalpSettings(BaseSettings):
     # Сигнал отбрасывается, если ход до TP < min_target_fee_mult × round_trip.
     round_trip_fee_frac: float = Field(default=0.0011)
     min_target_fee_mult: float = Field(default=3.0)
+    # Мин-R пол: дистанция стопа должна быть достаточно широкой, чтобы комиссия
+    # была МАЛОЙ долей риска. R ≥ min_risk_fee_mult × round_trip_fee →
+    # fee ≤ 1/mult доля R. mult=4 → fee ≤ 0.25R (R≈0.44%, TP 3.5R≈1.55% — центр
+    # проф-коридора цели скальпа 0.5–2%). Обоснование (research, не подгонка под
+    # выборку): издержки съедают 50–80% профита скальпера при тугом стопе
+    # (Echo Zero 2026); стоп = «структура + ATR-буфер», 0.8–1.5× ATR за свингом
+    # (cryptotrading-guide 2026, VT Markets, Wilder «2 ATR»); цель 0.5–2%
+    # (stoic.ai 2026). Анализ 31 flow_scratch (2026-05-31): при R≈0.13% комиссия
+    # ≈0.4–0.8R и съедала асимметрию. SL отодвигаем ЗА структуру, если структурный
+    # R меньше пола (canon «beyond swing + buffer»).
+    min_risk_fee_mult: float = Field(default=4.0)
+    # Сайзинг: риск-базированный (канон профи: «стоп с графика, размер —
+    # следствие»: qty = risk_per_trade_usd ÷ |entry−SL|). Широкий стоп тогда НЕ
+    # растит $-риск, а лишь уменьшает лот. Источники: TradeOlogy/DYOR/StockCharts
+    # 2026 («size is the output, never the input»). False = старый фикс-notional.
+    risk_based_sizing: bool = Field(default=True)
+    # Фиксированный $-риск на сделку (1% депо $1000 — Tharp/Van Tharp; при R≈0.44%
+    # notional≈$227, в пределах killswitch $500/день и 2 одновременных позиций).
+    risk_per_trade_usd: float = Field(default=1.0)
 
     # ─── density_bounce (стратегия №2: отскок от плотности в стакане) ─────
     # Стена = крупная лимитка ≥ wall_mult × средний размер уровня на своей

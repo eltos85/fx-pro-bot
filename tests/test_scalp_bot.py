@@ -24,7 +24,9 @@ from scalp_bot.analysis.signals import (
 )
 from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot, SymbolState
 from scalp_bot.safety import killswitch
-from scalp_bot.trading.executor import Executor, paper_pnl, position_size, taker_pnl
+from scalp_bot.trading.executor import (
+    Executor, paper_pnl, position_size, position_size_by_risk, taker_pnl,
+)
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────
@@ -38,6 +40,7 @@ def _cfg(**over):
         round_trip_fee_frac=0.00075, min_target_fee_mult=3.0,
         div_min_late_trades=2, arm_timeout_sec=60.0,
         require_ob_imbalance=False,  # v0.7.0: ob_imb — бонус (дефолт прода)
+        min_risk_fee_mult=4.0,  # v0.8.1: мин-R пол (fee ≤ 0.25R)
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -406,6 +409,52 @@ def test_position_size_below_exchange_min_uses_min_qty():
 
 def test_position_size_zero_entry():
     assert position_size(100.0, 0.0) == 0.0
+
+
+# ─── v0.8.1: мин-R пол (fee ≤ 0.25R) + риск-сайзинг ────────────────────────
+
+def test_build_signal_min_risk_floor_widens_sl():
+    # структурный R мал (свип близко к входу) → R расширяется до пола 4×fee.
+    # entry=best_ask=100.0; swept 99.95 → struct sl=99.95×(1-8e-4)=99.870,
+    # R=0.13 (0.13% < пол 0.3%) → пол: min_risk=4×0.00075×100=0.30 → sl=99.70.
+    snap = _snap(_long_samples(), best_ask=100.0, best_bid=99.9, last_price=100.0)
+    s = build_signal(snap, "long", 99.95, _cfg(entry_order_type="market"), 3, ["x"])
+    assert s is not None
+    assert s.sl_level == pytest.approx(99.70, abs=1e-6)
+    # TP пересчитан от итогового R: 100 + take_profit_r(2.0)×0.30 = 100.60
+    assert s.tp_level == pytest.approx(100.60, abs=1e-6)
+
+
+def test_build_signal_min_risk_floor_short():
+    # short: entry=best_bid=100.0; swept 100.05 → struct R мал → пол отодвигает SL вверх
+    snap = _snap(_short_samples(), best_ask=100.1, best_bid=100.0, last_price=100.0)
+    s = build_signal(snap, "short", 100.05, _cfg(entry_order_type="market"), 3, ["x"])
+    assert s is not None
+    assert s.sl_level == pytest.approx(100.30, abs=1e-6)  # 100 + 0.30
+    assert s.tp_level == pytest.approx(99.40, abs=1e-6)   # 100 - 2.0×0.30
+
+
+def test_build_signal_keeps_structure_sl_when_r_above_floor():
+    # широкий свип (R > пол) → SL остаётся за структурой, пол не вмешивается
+    snap = _snap(_long_samples(), best_ask=100.0, best_bid=99.9, last_price=100.0)
+    s = build_signal(snap, "long", 99.0, _cfg(entry_order_type="market"), 3, ["x"])
+    assert s is not None
+    assert s.sl_level == pytest.approx(99.0 * (1 - 8 / 1e4), abs=1e-6)
+
+
+def test_position_size_by_risk_basic():
+    # риск $1, entry 100, sl 99.55 → dist 0.45 → qty = 1/0.45
+    assert position_size_by_risk(1.0, 100.0, 99.55) == pytest.approx(1.0 / 0.45)
+
+
+def test_position_size_by_risk_floors_to_min_notional():
+    # широкий стоп → крошечный лот; пол min_notional $10 поднимает qty.
+    # dist 50 → qty=0.02 → notional $2 < $10 → qty = 10/100 = 0.1
+    assert position_size_by_risk(1.0, 100.0, 50.0, min_notional=10.0) == pytest.approx(0.1)
+
+
+def test_position_size_by_risk_zero_distance():
+    assert position_size_by_risk(1.0, 100.0, 100.0) == 0.0
 
 
 def test_paper_pnl_long_includes_fees():

@@ -7,10 +7,13 @@
 - LIVE   (True, на Bybit DEMO): post-only LIMIT вход с биржевыми SL/TP,
   reduce-only MARKET выход по тайм-стопу.
 
-Размер позиции — фиксированный NOTIONAL ($position_usd), qty = notional/entry.
-ВНИМАНИЕ: $-риск НЕ фиксирован, он = notional × (дистанция SL в % от цены).
-При SL ~0.2–0.5% риск ≈ $0.2–0.5 на $100 лота. Killswitch ограничивает
-суммарный дневной/совокупный убыток, а не риск отдельной сделки.
+Размер позиции (settings.risk_based_sizing, дефолт True) — РИСК-базированный:
+qty = risk_per_trade_usd / |entry−SL| (канон профи «стоп с графика, размер —
+следствие», TradeOlogy/DYOR/StockCharts 2026). $-риск на сделку фиксирован,
+широкий стоп лишь уменьшает лот. При R≈0.44% и риске $1 notional≈$227.
+Legacy-режим (risk_based_sizing=False) — фикс-notional ($position_usd), где
+$-риск НЕ фиксирован (= notional × дистанция SL в %). Killswitch в обоих
+режимах ограничивает суммарный дневной/совокупный убыток.
 
 Комиссии Bybit linear (https://www.bybit.com/en/help-center/article/Trading-Fee-Structure):
 maker 0.02%, taker 0.055%. PAPER моделирует вход maker + выход taker.
@@ -64,6 +67,29 @@ def position_size(position_usd: float, entry: float, *, min_notional: float = 0.
         qty = round(math.floor(qty / qty_step) * qty_step, qty_decimals(qty_step))
     if min_qty > 0 and qty < min_qty:
         # биржевой минимум выше нашего лота — берём биржевой минимум
+        qty = round(min_qty, qty_decimals(qty_step)) if qty_step > 0 else min_qty
+    return qty
+
+
+def position_size_by_risk(risk_usd: float, entry: float, sl: float, *,
+                          min_notional: float = 0.0, qty_step: float = 0.0,
+                          min_qty: float = 0.0) -> float:
+    """qty из фиксированного $-риска: qty = risk_usd / |entry−sl| (канон профи
+    «стоп с графика, размер — следствие»). Широкий стоп → меньше лот, $-риск
+    постоянен. Пол min_notional (мелкий лот = комиссия съедает), округление под
+    qty_step, отсев < min_qty. Источники: TradeOlogy/DYOR/StockCharts 2026."""
+    if entry <= 0 or risk_usd <= 0:
+        return 0.0
+    dist = abs(entry - sl)
+    if dist <= 0:
+        return 0.0
+    qty = risk_usd / dist
+    if qty * entry < min_notional:  # пол по notional (мелкий лот)
+        qty = min_notional / entry
+    if qty_step > 0:
+        import math
+        qty = round(math.floor(qty / qty_step) * qty_step, qty_decimals(qty_step))
+    if min_qty > 0 and qty < min_qty:
         qty = round(min_qty, qty_decimals(qty_step)) if qty_step > 0 else min_qty
     return qty
 
@@ -124,9 +150,15 @@ class Executor:
             info = self._client.instrument(sig.symbol)
             if info:
                 qty_step, min_qty = info.qty_step, info.min_order_qty
-        qty = position_size(cfg.position_usd, sig.entry_ref,
-                            min_notional=cfg.min_position_usd,
-                            qty_step=qty_step, min_qty=min_qty)
+        if getattr(cfg, "risk_based_sizing", False):
+            qty = position_size_by_risk(
+                cfg.risk_per_trade_usd, sig.entry_ref, sig.sl_level,
+                min_notional=cfg.min_position_usd,
+                qty_step=qty_step, min_qty=min_qty)
+        else:
+            qty = position_size(cfg.position_usd, sig.entry_ref,
+                                min_notional=cfg.min_position_usd,
+                                qty_step=qty_step, min_qty=min_qty)
         if qty <= 0:
             log.info("skip %s %s: qty=0 (notional/min)", sig.symbol, sig.side)
             return None

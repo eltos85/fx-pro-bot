@@ -286,13 +286,20 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
     if side == "long":
         sl = swept * (1.0 - buf)
         risk = entry - sl
-        tp = entry + cfg.take_profit_r * risk
     else:
         sl = swept * (1.0 + buf)
         risk = sl - entry
-        tp = entry - cfg.take_profit_r * risk
     if risk <= 0:
         return None
+    # Мин-R пол: R ≥ min_risk_fee_mult × round-trip fee, чтобы комиссия была
+    # малой долей риска (research: издержки 50-80% профита при тугом стопе; стоп
+    # = структура + буфер). Если структурный R меньше пола — отодвигаем SL ЗА
+    # уровень (canon «beyond swing + ATR buffer»), TP пересчитываем от итог. R.
+    min_risk = getattr(cfg, "min_risk_fee_mult", 0.0) * cfg.round_trip_fee_frac * entry
+    if min_risk > 0 and risk < min_risk:
+        risk = min_risk
+        sl = entry - risk if side == "long" else entry + risk
+    tp = entry + cfg.take_profit_r * risk if side == "long" else entry - cfg.take_profit_r * risk
     # Fee-guard: ход до TP ≥ min_target_fee_mult × round-trip издержек.
     tp_move_frac = (cfg.take_profit_r * risk) / entry
     if tp_move_frac < cfg.min_target_fee_mult * cfg.round_trip_fee_frac:

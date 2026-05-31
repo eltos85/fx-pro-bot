@@ -6,6 +6,51 @@
 
 ## 2026-05-31
 
+### v0.8.1 — мин-R пол (fee ≤ 0.25R) + риск-базированный сайзинг
+`<hash>`
+
+**Проблема (анализ, не интуиция).** Разбор 31 `flow_scratch` (БД, PnL по WS):
+скретч режет РАНО (медиана 0.41R, только 3% у самого SL) и дешевле полного SL
+(−0.27 vs −0.45), т.е. работает верно. НО R-нормированный лосс = **−0.74R при
+adverse-ходе всего 0.41R** → разницу (~0.33R) съедает **комиссия**. Причина: SL
+тугой (R≈0.13% цены), а round-trip fee ≈0.11% ≈ **0.4–0.8R**. Это убивало
+асимметрию TP=3.5R (v0.7.0): чтобы 3.5R окупил серию, надо ещё перекрыть
+fee-драг на каждой сделке.
+
+**Проф-подтверждение (запрошено пользователем перед правкой):**
+- Стоп скальпинга = «структура + ATR-буфер», 0.8–1.5× ATR за свингом; общий
+  канон Уайлдера «2 ATR, чтобы не выбило шумом»
+  ([cryptotrading-guide 2026](https://cryptotrading-guide.com/best-atr-stop-loss-for-crypto-2026-the-complete-guide-to-atr-multipliers-placement-risk/),
+  [VT Markets](https://www.vtmarkets.com/discover/atr-for-traders-how-to-set-smarter-stops-targets-position-size/)).
+- Цель скальпа 0.5–2% ([stoic.ai 2026](https://stoic.ai/blog/best-cryptocurrencies-for-day-trading-complete-guide-to-top-trading-opportunities/));
+  наш TP 3.5R≈0.47% был НИЖЕ коридора.
+- Издержки съедают 50–80% профита скальпера; при тугом стопе fee 3–5%/round-trip
+  ([Echo Zero 2026](https://blog.echozero.app/article/scalping-strategy-performance-in-high-frequency-crypto-markets)).
+- Канон: «стоп с графика, РАЗМЕР — следствие: size = risk$ ÷ stop distance»
+  ([TradeOlogy](https://academy.tradeology.app/risk-psychology/position-sizing-deep-dive),
+  DYOR, StockCharts 2026).
+
+**Правка (одобрено 2026-05-31: k=4, риск-сайзинг, $1/сделку).**
+1. **Мин-R пол** (`min_risk_fee_mult=4.0`): `R ≥ 4 × round_trip_fee` →
+   fee ≤ 0.25R (R≈**0.44%**, TP 3.5R≈**1.55%** — центр коридора 0.5–2%). Если
+   структурный R меньше пола — SL отодвигается ЗА свип-уровень (`build_signal`),
+   TP пересчитывается от итогового R.
+2. **Риск-сайзинг** (`risk_based_sizing=True`, `risk_per_trade_usd=1.0`):
+   `qty = risk$ ÷ |entry−SL|` (`position_size_by_risk`). Широкий стоп НЕ растит
+   $-риск, лишь уменьшает лот. При R≈0.44% и риске $1 notional≈$227 (в пределах
+   killswitch $500/день и 2 одновременных позиций). Legacy фикс-notional —
+   `risk_based_sizing=False`.
+
+**Почему не подгонка под выборку (`no-data-fitting`/`sample-size`).** n=31/4ч мало
+для P&L-вывода, и правка обоснована СТРУКТУРНО (fee-математика + проф-канон), а
+не оптимизацией под прошлый P&L. P&L-эффект проверить forward-тестом на ≥100
+сделок (ждём накопления).
+
+**Файлы:** `config/settings.py` (`min_risk_fee_mult`, `risk_based_sizing`,
+`risk_per_trade_usd`), `analysis/signals.py` (мин-R пол в `build_signal`),
+`trading/executor.py` (`position_size_by_risk` + ветка в `on_signal` + docstring),
+`docker-compose.yml` (3 env), `tests/test_scalp_bot.py` (+6 тестов, 107 passed).
+
 ### v0.7.1 — анти-клиппинг flow_exit: профит-лок только после ≥1R
 `<hash>`
 

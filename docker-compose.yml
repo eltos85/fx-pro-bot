@@ -326,6 +326,11 @@ services:
       # Анти-клиппинг (v0.7.1): flow_exit фиксирует по развороту ленты только
       # после ≥1R прибыли (был копеечный порог ≥комиссии → клипал вины, обнулял TP).
       SCALP_FLOW_EXIT_ACTIVATE_R: ${SCALP_FLOW_EXIT_ACTIVATE_R:-1.0}
+      # Мин-R пол + риск-сайзинг (v0.8.1): R ≥ 4×fee → fee ≤ 0.25R (R≈0.44%),
+      # размер = риск$/дистанция_SL (канон профи), фикс $-риск/сделку.
+      SCALP_MIN_RISK_FEE_MULT: ${SCALP_MIN_RISK_FEE_MULT:-4.0}
+      SCALP_RISK_BASED_SIZING: ${SCALP_RISK_BASED_SIZING:-true}
+      SCALP_RISK_PER_TRADE_USD: ${SCALP_RISK_PER_TRADE_USD:-1.0}
       # Telegram-нотификации (переиспользуем отдельного бота от ai_arena).
       SCALP_TELEGRAM_ENABLED: ${SCALP_TELEGRAM_ENABLED:-false}
       SCALP_TELEGRAM_BOT_TOKEN: ${SCALP_TELEGRAM_BOT_TOKEN:-}
