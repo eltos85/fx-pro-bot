@@ -37,6 +37,7 @@ def _cfg(**over):
         require_reclaim=True, reclaim_frac=0.5, momentum_window_sec=3.0,
         round_trip_fee_frac=0.00075, min_target_fee_mult=3.0,
         div_min_late_trades=2, arm_timeout_sec=60.0,
+        require_ob_imbalance=True,
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -315,6 +316,26 @@ def test_detector_reset_clears_state():
     assert det.armed is False
 
 
+def test_detector_no_fire_without_ob_imbalance():
+    # require_ob_imbalance=True: reclaim+разворот есть, но стакан НЕ подтверждает
+    # (imb 0.50 < 0.58) → вход придерживаем, взвод держится
+    det = SweepReclaimDetector("SOLUSDT", _cfg(require_ob_imbalance=True))
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    assert det.armed is True
+    weak_book = _snap(_fire_samples(), last_price=97.6, ob_imbalance=0.50)
+    assert det.update(weak_book, now=130.0) is None
+    assert det.armed is True  # не разоружился — ждёт подтверждения стакана
+
+
+def test_detector_fires_with_ob_imbalance_required():
+    # тот же сетап, но стакан подтверждает (imb 0.62 ≥ 0.58) → выстрел
+    det = SweepReclaimDetector("SOLUSDT", _cfg(require_ob_imbalance=True))
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    strong_book = _snap(_fire_samples(), last_price=97.6, ob_imbalance=0.62)
+    sig = det.update(strong_book, now=130.0)
+    assert sig is not None and "ob_imb" in sig.reasons
+
+
 # ─── aggregates (SymbolState) ──────────────────────────────────────────────
 
 def test_symbolstate_cvd_accumulates_signed():
@@ -562,7 +583,8 @@ def test_close_notify_fallback_sends_estimate_after_timeout(tmp_path):
 def _sweep_strat(now_t=None):
     from scalp_bot.analysis.strategies import SweepFadeStrategy
     cfg = SimpleNamespace(active_exit_enabled=True, active_exit_min_age_sec=10.0,
-                          momentum_window_sec=3.0, round_trip_fee_frac=0.0011)
+                          momentum_window_sec=3.0, round_trip_fee_frac=0.0011,
+                          scratch_on_flow_flip=True, scratch_min_age_sec=20.0)
     return SweepFadeStrategy(cfg, [])
 
 
@@ -595,6 +617,34 @@ def test_flow_exit_respects_min_age():
     snap = _snap(_flow_flip_samples(), last_price=97.50)
     tr = SimpleNamespace(id=3, side="long", entry=97.0, ts_open=80.0)
     assert st.should_exit(tr, snap, now=85.0) is None
+
+
+def test_flow_scratch_fires_when_underwater_and_flow_flips():
+    # ход −0.20 (≥ round-trip 97×0.0011≈0.107) + поток против + созрела (25с) →
+    # режем убыток рано (flow_scratch), не ждём SL/тайм-стоп
+    st = _sweep_strat()
+    snap = _snap(_flow_flip_samples(), last_price=96.80)
+    tr = SimpleNamespace(id=4, side="long", entry=97.0, ts_open=80.0)
+    decision = st.should_exit(tr, snap, now=105.0)
+    assert decision is not None and decision[0] == "flow_scratch"
+    assert decision[1] == pytest.approx(96.80)
+
+
+def test_flow_scratch_skips_small_underwater():
+    # мелкий минус −0.05 < комиссии → НЕ скретчим (иначе −fee на шуме)
+    st = _sweep_strat()
+    snap = _snap(_flow_flip_samples(), last_price=96.95)
+    tr = SimpleNamespace(id=5, side="long", entry=97.0, ts_open=80.0)
+    assert st.should_exit(tr, snap, now=105.0) is None
+
+
+def test_flow_scratch_respects_scratch_min_age():
+    # явно в минусе и поток против, но возраст 15с < scratch_min_age 20с →
+    # ещё не режем (сетапу даём «созреть»)
+    st = _sweep_strat()
+    snap = _snap(_flow_flip_samples(), last_price=96.80)
+    tr = SimpleNamespace(id=6, side="long", entry=97.0, ts_open=80.0)
+    assert st.should_exit(tr, snap, now=95.0) is None
 
 
 # ─── killswitch ────────────────────────────────────────────────────────────

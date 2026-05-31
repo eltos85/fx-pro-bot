@@ -69,11 +69,15 @@ class SweepFadeStrategy:
     """Стратегия №1: свип ликвидности + поглощение (mean-reversion fade).
 
     Обёртка над двухфазным ``SweepReclaimDetector`` (по детектору на символ).
-    Дискреционный выход — fee-aware «профит-лок по развороту ленты»
-    (перенесён из executor: см. BUILDLOG 2026-05-30 v0.3.4): закрываем
-    раньше TP только если ход уже покрыл round-trip комиссию И поток (CVD)
-    развернулся против позиции. Флэт/мелкий плюс не скретчим (иначе −fee),
-    убыточные ведёт общий SL.
+    Дискреционный выход (should_exit) — два симметричных триггера по развороту
+    ленты (CVD flip против позиции), оба только после active_exit_min_age_sec:
+      1. ПРОФИТ-ЛОК (flow_exit): ход в плюс ≥ round-trip комиссии И поток
+         развернулся → фиксируем (BUILDLOG 2026-05-30 v0.3.4).
+      2. SCRATCH-ПРИ-ОШИБКЕ (flow_scratch): ход в МИНУС ≥ round-trip И поток
+         развернулся И сделка «созрела» (≥ scratch_min_age_sec) → режем убыток
+         рано, не ждём SL/тайм-стоп (research «exit if wrong» + анализ 304
+         сделок 2026-05-31: убыточные тянулись к 91с/SL).
+    Флэт/мелкий +/− (|ход| < комиссии) НЕ трогаем — иначе −fee на шуме.
     """
 
     name = "sweep_fade"
@@ -116,13 +120,20 @@ class SweepFadeStrategy:
         price = snap.last_price
         if price is None:
             return None
-        # ход в нашу пользу должен покрыть round-trip taker, иначе не выходим
         favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
         fee_px = tr.entry * cfg.round_trip_fee_frac
-        if favorable < fee_px:
-            return None
-        if flow_invalidated(snap, tr.side, cfg.momentum_window_sec):
+        flipped = flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
+        if not flipped:
+            return None  # лента ещё за нас — держим
+        # 1) профит-лок: в плюсе ≥ round-trip и поток развернулся → фиксируем
+        if favorable >= fee_px:
             return ("flow_exit", price)
+        # 2) scratch-при-ошибке: явно в минусе ≥ round-trip, поток против и
+        #    сделка созрела → режем убыток рано (не ждём SL/тайм-стоп)
+        if (getattr(cfg, "scratch_on_flow_flip", False)
+                and favorable <= -fee_px
+                and now - tr.ts_open >= getattr(cfg, "scratch_min_age_sec", 20.0)):
+            return ("flow_scratch", price)
         return None
 
 

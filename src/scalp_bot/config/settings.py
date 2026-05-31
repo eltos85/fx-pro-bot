@@ -107,6 +107,12 @@ class ScalpSettings(BaseSettings):
     # «ловли ножа»: detect_sweep ловит экстремум, но без reclaim бот мог
     # входить в реальный пробой.
     require_reclaim: bool = Field(default=True)
+    # Стакан как ОБЯЗАТЕЛЬНОЕ подтверждение входа sweep_fade (был «бонус»).
+    # Анализ 304 сделок (2026-05-31, BUILDLOG_SCALP): входы с ob_imb — WR 40%
+    # (net −$4.48 / n=67), без него — WR 29% (net −$29 / n=240). Order-book
+    # imbalance — ядро order-flow школы (Kalena 2026: bid/ask ratio ≥ порога).
+    # Поднимает качество входа (меньше сделок, выше WR) — quality > quantity.
+    require_ob_imbalance: bool = Field(default=True)
     # Доля возврата цены от свип-экстремума к свипнутому уровню (0..1).
     reclaim_frac: float = Field(default=0.5)
     # Двухфазный детектор: сколько секунд держим «взвод» после свипа, ожидая
@@ -165,8 +171,13 @@ class ScalpSettings(BaseSettings):
     active_hours_utc: str = Field(default="7,8,9,12,13,14,15,16")
 
     # ─── Управление позицией ─────────────────────────────────────────────
-    # Тайм-стоп: скальп не должен «висеть» (tick-scalping 60-90с, b2broker).
-    time_stop_sec: float = Field(default=90.0)
+    # Тайм-стоп: скальп не должен «висеть». 90→60с по анализу 304 сделок
+    # (2026-05-31, BUILDLOG_SCALP): time_stop давал 86% всего убытка — мёртвые
+    # сделки текли до 91с. Профи-консенсус (Kalena DOM 2026, TradeZella): хват
+    # 10-90с, «не давай скальпу стать свингом». 45с было бы агрессивно (убило бы
+    # flow_exit-победителей: медиана их выхода 56с), 60с — баланс: ранний срез
+    # делает scratch-логика (ниже), 60с — лишь бэкстоп для «плоских» сделок.
+    time_stop_sec: float = Field(default=60.0)
     # TP/SL в единицах R; SL ставится за свипнутый уровень + буфер.
     # 2.0R — канон для свип-разворота (CrossTrade 2:1–4:1, chartwhisperer
     # T1≈2-3R). Ранее 1.5R — после комиссий edge слишком тонкий.
@@ -177,6 +188,15 @@ class ScalpSettings(BaseSettings):
     # «exit immediately when order flow flips» (Kalena, tradezella, tradealgo).
     active_exit_enabled: bool = Field(default=True)
     active_exit_min_age_sec: float = Field(default=10.0)  # не дёргаться на шуме
+    # Scratch-при-ошибке (research «exit if wrong» + анализ 304 сделок
+    # 2026-05-31): если сделка явно в МИНУСЕ (ход против ≥ round-trip комиссии)
+    # И поток (CVD) развернулся против — режем убыток рано, не ждём SL/тайм-стоп.
+    # Данные: убыточные тянулись до 91с (ср. −$0.167), а с разворотом ленты идут
+    # к SL (−$0.467). Брать flat/мелкий минус НЕ скретчим (иначе −fee на шуме).
+    scratch_on_flow_flip: bool = Field(default=True)
+    # Даём сетапу «созреть» перед скретчем (research: ~30с shot-clock; берём 20с,
+    # т.к. flow_invalidated сам требует разворота ленты — это уже сильный сигнал).
+    scratch_min_age_sec: float = Field(default=20.0)
 
     # ─── Старт «с чистого листа» ──────────────────────────────────────────
     # При старте закрыть любые открытые позиции по нашим символам и

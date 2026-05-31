@@ -402,9 +402,21 @@ class SweepReclaimDetector:
                               "развернулся — вход держу", self.symbol,
                               _SIDE_RU.get(side, side), last)
             return None
+        # фильтр качества входа: стакан должен подтверждать сторону сделки
+        # (обязателен по умолчанию — см. require_ob_imbalance в settings).
+        ob_ok = ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min)
+        if getattr(cfg, "require_ob_imbalance", False) and not ob_ok:
+            iv = getattr(cfg, "narrate_interval_sec", 15.0)
+            if now - self._last_wait_log >= iv:
+                self._last_wait_log = now
+                play.info("⏳ [%s] жду %s: reclaim+разворот ✓, но стакан не "
+                          "подтверждает (imb<%.2f) — придерживаю вход",
+                          self.symbol, _SIDE_RU.get(side, side),
+                          cfg.ob_imbalance_min)
+            return None
         # reclaim + разворот совпали → собираем бонус-подтверждения
         reasons = ["sweep", "cvd_div", "reclaim", "mom"]
-        if ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min):
+        if ob_ok:
             reasons.append("ob_imb")
         if liq_flush(snap.liq_events, side, cfg.liq_flush_usd):
             reasons.append("liq")
