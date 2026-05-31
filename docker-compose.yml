@@ -294,6 +294,10 @@ services:
       # Пины (v0.8.2): force-include в обход фильтра (запрос пользователя — вернуть
       # ALLO, отсечённый как памп). Осознанный риск на конкретной монете.
       SCALP_UNIVERSE_PIN_SYMBOLS: ${SCALP_UNIVERSE_PIN_SYMBOLS:-ALLOUSDT}
+      # density (v0.8.3): wall 8×→5× (8× недостижим на top-25 Bybit, density не
+      # срабатывала — 0 сделок) + round-band 0.1%→0.3% (был слишком жёсткий гейт).
+      SCALP_DENSITY_WALL_MULT: ${SCALP_DENSITY_WALL_MULT:-5.0}
+      SCALP_DENSITY_ROUND_FRAC: ${SCALP_DENSITY_ROUND_FRAC:-0.003}
       SCALP_UNIVERSE_MIN_RANGE_PCT: ${SCALP_UNIVERSE_MIN_RANGE_PCT:-6}
       SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-30}
       SCALP_UNIVERSE_MAX_SPREAD_BPS: ${SCALP_UNIVERSE_MAX_SPREAD_BPS:-5}

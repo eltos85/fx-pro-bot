@@ -185,12 +185,17 @@ class ScalpSettings(BaseSettings):
     # ─── density_bounce (стратегия №2: отскок от плотности в стакане) ─────
     # Стена = крупная лимитка ≥ wall_mult × средний размер уровня на своей
     # стороне (top-N). Kalena 2026: «relative sizing», порог 5–8× среднего за
-    # 10–15 мин; берём консервативный край 8×. arXiv 2604.20949: depth-сигналы
-    # причинно раньше flow. https://blog.kalena.ai/crypto-wall-detection-...
-    density_wall_mult: float = Field(default=8.0)
-    # Близость стены к круглому числу (доля цены). Данилов: плотности на
-    # круглых уровнях надёжнее как S/R.
-    density_round_frac: float = Field(default=0.001)  # 0.1%
+    # 10–15 мин. 8→5 (2026-05-31): на живых книгах Bybit (top-25, мгновенный
+    # baseline) самый крупный уровень всего 2–4× среднего — 8× (консерв. край)
+    # НЕДОСТИЖИМ, density_bounce/break не «взводились» (0 сделок за всю историю).
+    # 5× — НИЖНИЙ край research-диапазона Kalena, не подгонка (остаёмся в каноне).
+    # Известное ограничение: research меряет vs среднее за 10–15мин, мы — vs
+    # мгновенный top-25 → ratio структурно занижен; rolling-baseline = future.
+    density_wall_mult: float = Field(default=5.0)
+    # Близость стены к круглому числу (доля цены). Данилов: плотности на круглых
+    # уровнях надёжнее как S/R. 0.1→0.3% (2026-05-31): 0.1% было слишком жёстко
+    # (near_round=False на всех живых книгах) — гейт глушил все стены.
+    density_round_frac: float = Field(default=0.003)  # 0.3%
     # Анти-спуфинг: стена должна продержаться ≥ persist_sec до входа.
     density_persist_sec: float = Field(default=10.0)
     # Анти-абсорбция: если ≥ absorb_frac стены «съели» за absorb_window —
