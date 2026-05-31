@@ -584,7 +584,8 @@ def _sweep_strat(now_t=None):
     from scalp_bot.analysis.strategies import SweepFadeStrategy
     cfg = SimpleNamespace(active_exit_enabled=True, active_exit_min_age_sec=10.0,
                           momentum_window_sec=3.0, round_trip_fee_frac=0.0011,
-                          scratch_on_flow_flip=True, scratch_min_age_sec=20.0)
+                          scratch_on_flow_flip=True, scratch_min_age_sec=20.0,
+                          flow_exit_activate_r=1.0)  # v0.7.1: профит-лок ≥1R
     return SweepFadeStrategy(cfg, [])
 
 
@@ -593,19 +594,29 @@ def _flow_flip_samples():
     return [CvdSample(4, 97, -1), CvdSample(5, 96.5, -3), CvdSample(6, 96.4, -6)]
 
 
-def test_flow_exit_skips_when_profit_below_fees():
-    # +0.05 хода < round-trip taker (97×0.0011≈0.107) → НЕ скретчим (иначе −fee)
+# во всех сделках ниже: entry 97.0, sl 96.80 → R = 0.20 (1R-порог flow_exit)
+
+def test_flow_exit_holds_when_profit_below_1r():
+    # +0.05 хода < 1R(0.20) → НЕ клипаем, ДЕРЖИМ (даём добежать к TP) — v0.7.1
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=97.05)
-    tr = SimpleNamespace(id=1, side="long", entry=97.0, ts_open=80.0)
+    tr = SimpleNamespace(id=1, side="long", entry=97.0, sl=96.80, ts_open=80.0)
     assert st.should_exit(tr, snap, now=100.0) is None
 
 
-def test_flow_exit_fires_when_profit_covers_fees():
-    # +0.20 хода ≥ комиссии и лента развернулась → фиксируем профит
+def test_flow_exit_holds_small_profit_anticlip():
+    # +0.10 (полпути до 1R) + лента развернулась → раньше клипали, теперь ДЕРЖИМ
+    st = _sweep_strat()
+    snap = _snap(_flow_flip_samples(), last_price=97.10)
+    tr = SimpleNamespace(id=2, side="long", entry=97.0, sl=96.80, ts_open=80.0)
+    assert st.should_exit(tr, snap, now=100.0) is None
+
+
+def test_flow_exit_fires_when_profit_reaches_1r():
+    # +0.20 = 1R и лента развернулась → фиксируем осмысленный профит
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=97.20)
-    tr = SimpleNamespace(id=2, side="long", entry=97.0, ts_open=80.0)
+    tr = SimpleNamespace(id=3, side="long", entry=97.0, sl=96.80, ts_open=80.0)
     decision = st.should_exit(tr, snap, now=100.0)
     assert decision is not None and decision[0] == "flow_exit"
     assert decision[1] == pytest.approx(97.20)
@@ -615,7 +626,7 @@ def test_flow_exit_respects_min_age():
     # возраст 5с < 10с → активный выход не вмешивается, даже если профит большой
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=97.50)
-    tr = SimpleNamespace(id=3, side="long", entry=97.0, ts_open=80.0)
+    tr = SimpleNamespace(id=4, side="long", entry=97.0, sl=96.80, ts_open=80.0)
     assert st.should_exit(tr, snap, now=85.0) is None
 
 
@@ -624,7 +635,7 @@ def test_flow_scratch_fires_when_underwater_and_flow_flips():
     # режем убыток рано (flow_scratch), не ждём SL/тайм-стоп
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=96.80)
-    tr = SimpleNamespace(id=4, side="long", entry=97.0, ts_open=80.0)
+    tr = SimpleNamespace(id=5, side="long", entry=97.0, sl=96.80, ts_open=80.0)
     decision = st.should_exit(tr, snap, now=105.0)
     assert decision is not None and decision[0] == "flow_scratch"
     assert decision[1] == pytest.approx(96.80)
@@ -634,7 +645,7 @@ def test_flow_scratch_skips_small_underwater():
     # мелкий минус −0.05 < комиссии → НЕ скретчим (иначе −fee на шуме)
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=96.95)
-    tr = SimpleNamespace(id=5, side="long", entry=97.0, ts_open=80.0)
+    tr = SimpleNamespace(id=6, side="long", entry=97.0, sl=96.80, ts_open=80.0)
     assert st.should_exit(tr, snap, now=105.0) is None
 
 
@@ -643,7 +654,7 @@ def test_flow_scratch_respects_scratch_min_age():
     # ещё не режем (сетапу даём «созреть»)
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=96.80)
-    tr = SimpleNamespace(id=6, side="long", entry=97.0, ts_open=80.0)
+    tr = SimpleNamespace(id=7, side="long", entry=97.0, sl=96.80, ts_open=80.0)
     assert st.should_exit(tr, snap, now=95.0) is None
 
 

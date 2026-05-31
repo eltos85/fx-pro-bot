@@ -323,6 +323,9 @@ services:
       # режет убытки рано, тугой бэкстоп не нужен), TP 3.5R (асимметричный payoff).
       SCALP_TIME_STOP_SEC: ${SCALP_TIME_STOP_SEC:-120}
       SCALP_TAKE_PROFIT_R: ${SCALP_TAKE_PROFIT_R:-3.5}
+      # Анти-клиппинг (v0.7.1): flow_exit фиксирует по развороту ленты только
+      # после ≥1R прибыли (был копеечный порог ≥комиссии → клипал вины, обнулял TP).
+      SCALP_FLOW_EXIT_ACTIVATE_R: ${SCALP_FLOW_EXIT_ACTIVATE_R:-1.0}
       # Telegram-нотификации (переиспользуем отдельного бота от ai_arena).
       SCALP_TELEGRAM_ENABLED: ${SCALP_TELEGRAM_ENABLED:-false}
       SCALP_TELEGRAM_BOT_TOKEN: ${SCALP_TELEGRAM_BOT_TOKEN:-}

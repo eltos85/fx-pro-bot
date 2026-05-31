@@ -72,15 +72,18 @@ class SweepFadeStrategy:
     """Стратегия №1: свип ликвидности + поглощение (mean-reversion fade).
 
     Обёртка над двухфазным ``SweepReclaimDetector`` (по детектору на символ).
-    Дискреционный выход (should_exit) — два симметричных триггера по развороту
-    ленты (CVD flip против позиции), оба только после active_exit_min_age_sec:
-      1. ПРОФИТ-ЛОК (flow_exit): ход в плюс ≥ round-trip комиссии И поток
-         развернулся → фиксируем (BUILDLOG 2026-05-30 v0.3.4).
+    Дискреционный выход (should_exit) — два триггера по развороту ленты (CVD flip
+    против позиции), оба только после active_exit_min_age_sec:
+      1. ПРОФИТ-ЛОК (flow_exit): ход в плюс ≥ flow_exit_activate_r × R И поток
+         развернулся → фиксируем. v0.7.1: порог поднят с «≥ round-trip комиссии»
+         до ≥1R (анти-клиппинг, анализ 427 сделок 2026-05-31: копеечный порог
+         клипал 79 вин медианой ~$0.04 и обнулял смысл TP=3.5R). Ниже 1R на
+         развороте — ДЕРЖИМ (даём добежать к TP), не клипаем.
       2. SCRATCH-ПРИ-ОШИБКЕ (flow_scratch): ход в МИНУС ≥ round-trip И поток
          развернулся И сделка «созрела» (≥ scratch_min_age_sec) → режем убыток
          рано, не ждём SL/тайм-стоп (research «exit if wrong» + анализ 304
          сделок 2026-05-31: убыточные тянулись к 91с/SL).
-    Флэт/мелкий +/− (|ход| < комиссии) НЕ трогаем — иначе −fee на шуме.
+    Зона между −комиссией и +1R на развороте — НЕ трогаем (даём развиться).
     """
 
     name = "sweep_fade"
@@ -124,12 +127,16 @@ class SweepFadeStrategy:
         if price is None:
             return None
         favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
+        risk = abs(tr.entry - getattr(tr, "sl", tr.entry))
         fee_px = tr.entry * cfg.round_trip_fee_frac
         flipped = flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
         if not flipped:
             return None  # лента ещё за нас — держим
-        # 1) профит-лок: в плюсе ≥ round-trip и поток развернулся → фиксируем
-        if favorable >= fee_px:
+        # 1) профит-лок: фиксируем по развороту ленты ТОЛЬКО когда набрана
+        #    осмысленная прибыль ≥ activate_r × R (анти-клиппинг v0.7.1). Ниже
+        #    порога — ДЕРЖИМ (даём добежать к TP=3.5R), не клипаем центы.
+        activate = getattr(cfg, "flow_exit_activate_r", 1.0) * risk
+        if risk > 0 and favorable >= activate:
             return ("flow_exit", price)
         # 2) scratch-при-ошибке: явно в минусе ≥ round-trip, поток против и
         #    сделка созрела → режем убыток рано (не ждём SL/тайм-стоп)

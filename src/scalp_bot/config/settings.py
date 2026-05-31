@@ -202,6 +202,14 @@ class ScalpSettings(BaseSettings):
     # «exit immediately when order flow flips» (Kalena, tradezella, tradealgo).
     active_exit_enabled: bool = Field(default=True)
     active_exit_min_age_sec: float = Field(default=10.0)  # не дёргаться на шуме
+    # Профит-лок (flow_exit) фиксирует по развороту ленты ТОЛЬКО когда набрана
+    # осмысленная прибыль ≥ flow_exit_activate_r × R (R = |entry−sl|). Анти-клиппинг
+    # (анализ 427 сделок 2026-05-31): при пороге «≥ round-trip комиссии» flow_exit
+    # давал 79 вин с медианой ~$0.04 (клипал центы), тогда как добежавшие до TP
+    # (tp_sl) вины были в 4× крупнее (avg +$0.39). Копеечный порог обнулял смысл
+    # TP=3.5R (v0.7.0) — сделка не доживала до цели. 1R = «дай заработать ставку,
+    # потом фиксируй по развороту» (асимметричный payoff, Философия B).
+    flow_exit_activate_r: float = Field(default=1.0)
     # Scratch-при-ошибке (research «exit if wrong» + анализ 304 сделок
     # 2026-05-31): если сделка явно в МИНУСЕ (ход против ≥ round-trip комиссии)
     # И поток (CVD) развернулся против — режем убыток рано, не ждём SL/тайм-стоп.
