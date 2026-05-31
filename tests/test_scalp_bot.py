@@ -721,6 +721,7 @@ def test_notifier_inactive_when_disabled():
 from scalp_bot.analysis.signals import Signal  # noqa: E402
 from scalp_bot.analysis.strategies import (  # noqa: E402
     DensityBounceStrategy,
+    DensityBreakStrategy,
     SweepFadeStrategy,
     build_strategies,
     detect_wall,
@@ -973,10 +974,92 @@ def test_density_should_exit_respects_min_age():
     assert st.should_exit(tr, snap_gone, now=5.0) is None
 
 
+# ─── density_break (Фаза 3): выстоявшая стена пробита → прострел (momentum) ──
+
+def _ask_wall_book(wall_size=50.0):
+    """ask-стена (сопротивление) у 100.0; bids плоские (без стены)."""
+    asks = [(100.0, wall_size), (100.01, 1), (100.02, 1), (100.03, 1), (100.04, 1)]
+    bids = [(99.95, 1), (99.94, 1), (99.93, 1), (99.92, 1), (99.91, 1)]
+    return bids, asks
+
+
+def _flat_book_above():
+    """книга без стены, цена ушла выше 100.0 (стену съели)."""
+    asks = [(100.05, 1), (100.06, 1), (100.07, 1), (100.08, 1), (100.09, 1)]
+    bids = [(100.29, 1), (100.28, 1), (100.27, 1), (100.26, 1), (100.25, 1)]
+    return bids, asks
+
+
+def _persist_then(st, bids, asks, last):
+    """Прогон: взвести наблюдение (t=0), дать стене выстоять (t=15)."""
+    st.update(_snap([], last_price=last, bids=bids, asks=asks), now=0.0)
+    st.update(_snap([], last_price=last, bids=bids, asks=asks), now=15.0)
+
+
+def test_density_break_fires_long_on_ask_wall_break():
+    cfg = _density_cfg()
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)           # ask-стена 100.0 выстояла
+    flat_bids, flat_asks = _flat_book_above()           # стену съели, цена пробила
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "long"
+    assert "wall_break" in sig.reasons and sig.strategy == "density_break"
+    assert sig.sl_level < 100.0 < sig.entry_ref          # SL за пробитым уровнем
+
+
+def test_density_break_fires_short_on_bid_wall_break():
+    cfg = _density_cfg()
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall(50.0)               # bid-стена 100.0 (поддержка)
+    _persist_then(st, bids, asks, last=100.04)
+    flat_bids = [(99.69, 1), (99.68, 1), (99.67, 1), (99.66, 1), (99.65, 1)]
+    flat_asks = [(99.71, 1), (99.72, 1), (99.73, 1), (99.74, 1), (99.75, 1)]
+    snap = _snap([], last_price=99.7, best_bid=99.69, best_ask=99.71,
+                 bids=flat_bids, asks=flat_asks)
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "short"
+    assert sig.sl_level > 100.0 > sig.entry_ref          # SL за пробитым уровнем
+
+
+def test_density_break_no_fire_on_spoof_wall():
+    # стена мелькнула и исчезла ДО persist (t=3 < 10) → спуфинг, не торгуем
+    cfg = _density_cfg()
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    st.update(_snap([], last_price=99.96, bids=bids, asks=asks), now=0.0)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    assert st.update(snap, now=3.0) is None              # не выстояла → нет входа
+
+
+def test_density_break_no_fire_when_price_not_broken():
+    # стена выстояла и снята, но цена НЕ пробила уровень (спуфинг-пулл) → пропуск
+    cfg = _density_cfg()
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_asks = [(100.06, 1), (100.07, 1), (100.08, 1), (100.09, 1), (100.10, 1)]
+    snap = _snap([], last_price=99.96, best_bid=99.95, best_ask=99.97,
+                 bids=bids, asks=flat_asks)              # стены нет, но цена < 100.0
+    assert st.update(snap, now=16.0) is None
+
+
 def test_build_strategies_two():
     cfg = SimpleNamespace(strategy_list=["sweep_fade", "density_bounce"])
     strats = build_strategies(cfg, ["SOLUSDT"])
     assert [s.name for s in strats] == ["sweep_fade", "density_bounce"]
+
+
+def test_build_strategies_registers_density_break():
+    cfg = SimpleNamespace(
+        strategy_list=["sweep_fade", "density_bounce", "density_break"])
+    strats = build_strategies(cfg, ["SOLUSDT"])
+    assert [s.name for s in strats] == [
+        "sweep_fade", "density_bounce", "density_break"]
 
 
 def test_ensure_symbols_additive_and_idempotent():

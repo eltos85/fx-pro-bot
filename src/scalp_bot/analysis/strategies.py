@@ -12,8 +12,11 @@
   ПРОТИВОПОЛОЖНЫЕ направления по символу — не берём ни одну (``resolve``).
 
 Стратегии:
-- ``sweep_fade``      — текущий свип+поглощение mean-reversion (SweepReclaimDetector).
-- ``density_bounce``  — отскок от плотности в стакане (Фаза 2, добавляется позже).
+- ``sweep_fade``      — свип+поглощение mean-reversion (SweepReclaimDetector).
+- ``density_bounce``  — отскок ОТ плотности в стакане (стена держит → fade).
+- ``density_break``   — пробой НА СНОСЕ плотности («прострел», momentum) —
+                        зеркало density_bounce: выстоявшая стена пробита → вход
+                        по ходу пробоя (Данилов YouTube 2026).
 """
 from __future__ import annotations
 
@@ -324,12 +327,135 @@ class DensityBounceStrategy:
         return None
 
 
+class DensityBreakStrategy:
+    """Стратегия №3: пробой на сносе плотности («прострел»). Зеркало density_bounce.
+
+    ─── Research basis ───
+    Руслан Данилов (YouTube 2026, «Разгон депозита» / «Все рабочие стратегии»):
+    плотность, которая ДЕРЖАЛА цену, при снятии/пробое даёт «прострел» — *«если
+    его снимут, прострел будет хороший»*, *«стопы за плотностью выбивают + крупный
+    игрок → импульс»*. Order-flow канон (Bookmap «liquidity void»; Kalena 2026
+    wall-detection — removal/absorption; arXiv 2604.20949 — depth раньше flow):
+    когда крупная resting-liquidity ПОГЛОЩЕНА (price punched through), за ней
+    разрежение → цена ускоряется. Анти-спуфинг (ключ!): торгуем снос ТОЛЬКО у
+    стены, которая реально ВЫСТОЯЛА ≥ persist_sec; стена, мелькнувшая <persist —
+    спуфинг, НЕ сигнал (в density_bounce то же событие = инвалидация; здесь
+    выстоявшая+пробитая = вход ПО ХОДУ пробоя).
+
+    Логика (на символ, momentum/breakout — ПРОТИВОПОЛОЖНА fade):
+    1. Наблюдаем крупную стену у круглого числа (detect_wall + near_round).
+    2. Стена «выстояла» (persisted) если продержалась ≥ density_persist_sec.
+    3. Стена ИСЧЕЗЛА с своего уровня И цена ПРОБИЛА его по ходу:
+       ask-стена (сопротивление сверху) пробита ВВЕРХ → LONG;
+       bid-стена (поддержка снизу) пробита ВНИЗ → SHORT.
+       SL за пробитым уровнем (build_signal swept=цена_стены: ложный пробой =
+       возврат за уровень), TP по R с общим fee-guard.
+    Снос БЕЗ пробоя цены (спуфинг-пулл, цена не дошла) — v1 НЕ торгуем (цена не
+    пересекла уровень → нет подтверждения). Выход (should_exit): v1 — только
+    универсальные TP/SL/тайм-стоп (ложный пробой режет hard SL); flow-based
+    выход — отдельная итерация после валидации базового эджа (no-data-fitting).
+    """
+
+    name = "density_break"
+
+    def __init__(self, cfg, symbols: list[str]) -> None:
+        self.cfg = cfg
+        self._track: dict[str, dict[str, dict | None]] = {
+            s: {"bid": None, "ask": None} for s in symbols
+        }
+
+    def armed(self, symbol: str) -> bool:
+        t = self._track.get(symbol)
+        return bool(t and ((t["bid"] and t["bid"]["persisted"])
+                           or (t["ask"] and t["ask"]["persisted"])))
+
+    def reset(self, symbol: str) -> None:
+        if symbol in self._track:
+            self._track[symbol] = {"bid": None, "ask": None}
+
+    def ensure_symbols(self, symbols: list[str]) -> None:
+        for s in symbols:
+            self._track.setdefault(s, {"bid": None, "ask": None})
+
+    def _track_side(self, sym: str, book_side: str,
+                    levels: list[tuple[float, float]], now: float) -> float | None:
+        """Сопровождаем стену на стороне книги; помечаем «выстоявшую» (persisted).
+        Возвращает уровень стены, если она ТОЛЬКО ЧТО исчезла, выстояв ≥persist
+        (кандидат на пробой), иначе None. Спуфинг (<persist) → тихо снимаем."""
+        cfg = self.cfg
+        t = self._track[sym]
+        cur = t[book_side]
+        wall = detect_wall(levels, cfg.density_wall_mult, cfg.density_min_wall_usd)
+        if cur is None:
+            if wall is not None and near_round(wall[0], cfg.density_round_frac):
+                t[book_side] = {"price": wall[0], "size0": wall[1],
+                                "first_seen": now, "persisted": False}
+            return None
+        same = (wall is not None
+                and abs(wall[0] - cur["price"]) <= cfg.density_round_frac * cur["price"])
+        if same:
+            if (not cur["persisted"]
+                    and now - cur["first_seen"] >= cfg.density_persist_sec):
+                cur["persisted"] = True
+                play.info("🧱 [%s] плотность %s %.6f выстояла ≥%.0fс — слежу за "
+                          "пробоем (снос → прострел)", sym, book_side, cur["price"],
+                          cfg.density_persist_sec)
+            return None
+        # стены на cur.price больше нет → снятие/поглощение
+        level = cur["price"]
+        persisted = cur["persisted"]
+        t[book_side] = None
+        return level if persisted else None
+
+    def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
+        cfg = self.cfg
+        if snap.stale or snap.last_price is None:
+            return None
+        sym = snap.symbol
+        if sym not in self._track:
+            self._track[sym] = {"bid": None, "ask": None}
+        last = snap.last_price
+        # ask-стена пробита ВВЕРХ → LONG; bid-стена пробита ВНИЗ → SHORT
+        for book_side, levels, side in (("ask", snap.asks, "long"),
+                                        ("bid", snap.bids, "short")):
+            level = self._track_side(sym, book_side, levels, now)
+            if level is None:
+                continue
+            broke = last > level if side == "long" else last < level
+            if not broke:
+                play.info("🧱 [%s] плотность %s %.6f снята, но цена %.6f не пробила "
+                          "— пропускаю (возможно спуфинг-пулл)", sym, book_side,
+                          level, last)
+                continue
+            reasons = ["wall_break", "persist", "round"]
+            sig = build_signal(snap, side, level, cfg, len(reasons), reasons)
+            if sig is None:
+                play.info("⛔ [%s] пробой %s стены %.6f, но fee-guard — ход мал, "
+                          "комиссия не покрыта", sym, _SIDE_RU.get(side, side), level)
+                continue
+            sig.strategy = self.name
+            play.info("🚀 [%s] ПРОБОЙ %s: плотность %.6f выстояла и пробита (цена "
+                      "%.6f) → вход @%.4f SL %.4f TP %.4f", sym,
+                      _SIDE_RU.get(side, side), level, last, sig.entry_ref,
+                      sig.sl_level, sig.tp_level)
+            return sig
+        return None
+
+    def should_exit(self, tr, snap: SymbolSnapshot, now: float
+                    ) -> tuple[str, float] | None:
+        # v1: дискреционного выхода нет — пробой ведём общими TP/SL/тайм-стопом
+        # (ложный пробой = возврат за уровень режет hard SL). Flow-выход —
+        # отдельная итерация после валидации базового эджа (no-data-fitting.mdc).
+        return None
+
+
 def build_strategies(cfg, symbols: list[str]) -> list[Strategy]:
     """Фабрика стратегий по cfg.enabled_strategies (CSV). Неизвестные — скип."""
     enabled = getattr(cfg, "strategy_list", ["sweep_fade"])
     registry: dict[str, type] = {
         SweepFadeStrategy.name: SweepFadeStrategy,
         DensityBounceStrategy.name: DensityBounceStrategy,
+        DensityBreakStrategy.name: DensityBreakStrategy,
     }
     out: list[Strategy] = []
     for name in enabled:

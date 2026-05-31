@@ -6,6 +6,61 @@
 
 ## 2026-05-31
 
+### v0.8.0 — стратегия №3 `density_break`: пробой на сносе плотности («прострел»)
+`<hash>`
+
+**Запрос пользователя.** По ролику Руслана Данилова
+([YouTube «Разгон депозита» 2026](https://www.youtube.com/watch?v=YWLjzc0A3k4),
++ ранее [«Все рабочие стратегии»](https://www.youtube.com/watch?v=HOwqznGsX88)):
+сделать ещё одну стратегию. Ключевая идея, которой у нас НЕ было: плотность,
+которая ДЕРЖАЛА цену, при пробое даёт «прострел» — *«если его снимут, прострел
+будет хороший»*, *«стопы за плотностью выбивают + крупный игрок → импульс»*.
+
+**Что это.** Третья независимая стратегия поверх мультистратегийного каркаса —
+**зеркало `density_bounce`** (momentum/breakout, ПРОТИВОПОЛОЖНА fade):
+- `density_bounce` (есть): стена держит → fade В стену (отскок).
+- `density_break` (новая): выстоявшая стена ПРОБИТА → вход ПО ХОДУ пробоя.
+
+**Логика (на символ).**
+1. Наблюдаем крупную стену у круглого числа (`detect_wall` + `near_round`).
+2. Стена «выстояла» (`persisted`), если продержалась ≥ `density_persist_sec`
+   (10с) — **анти-спуфинг**: мелькнувшая <persist стена = спуфинг, НЕ сигнал.
+3. Стена исчезла с уровня И цена ПРОБИЛА его по ходу:
+   ask-стена (сопротивление) пробита вверх → **LONG**; bid-стена (поддержка)
+   пробита вниз → **SHORT**. SL за пробитым уровнем (`build_signal` swept=
+   цена_стены: ложный пробой = возврат за уровень), TP по R + общий fee-guard.
+4. Снос БЕЗ пробоя цены (спуфинг-пулл) — v1 НЕ торгуем (нет подтверждения
+   пересечением уровня).
+5. Выход (`should_exit`) v1 — только общие TP/SL/тайм-стоп (ложный пробой режет
+   hard SL). Flow-based выход — отдельная итерация после валидации базового эджа
+   (no-data-fitting.mdc: не наслаивать непроверенные эвристики выхода).
+
+**Research basis** (strategy-guard.mdc, в docstring `DensityBreakStrategy`):
+Данилов YouTube 2026 (снос плотности → прострел); Bookmap «liquidity void»;
+Kalena 2026 wall-detection (removal/absorption); arXiv 2604.20949 (depth раньше
+flow). Параметры ПЕРЕИСПОЛЬЗУЮТ `density_*` (wall_mult 8×, persist 10с, round
+0.1%) — новых порогов нет, не подгонка.
+
+**Конфликт со sweep_fade/density_bounce.** Стратегии независимы; разные
+направления по символу в один тик → `resolve` пропускает тик (гард из Фазы 1).
+density_break (пробой) и density_bounce (отскок) триггерятся РАЗНЫМИ событиями
+(стена держит vs стена снесена) — одновременно по одной стене не сработают.
+
+**Включение.** `enabled_strategies` (CSV). settings.py дефолт →
+`sweep_fade,density_bounce,density_break`; compose `SCALP_ENABLED_STRATEGIES`
+(дефолт те же три, реальное значение из VPS `.env`). На VPS `.env` дополнен
+`density_break`.
+
+**Файлы:** `analysis/strategies.py` (`DensityBreakStrategy` + регистрация в
+`build_strategies` + docstring модуля), `config/settings.py` (enabled default),
+`docker-compose.yml` (`SCALP_ENABLED_STRATEGIES`), `tests/test_scalp_bot.py`
+(+5: fire long/short, спуфинг, нет пробоя, регистрация; 100 passed).
+
+**Sample-size disclaimer.** Новая стратегия → выводы по WR/PnL ТОЛЬКО после ≥100
+сделок по связке `density_break × инструмент` (sample-size.mdc). Сейчас — запуск
+на demo для forward-валидации (orderflow не бэктестится). Постратегийная стата в
+heartbeat (`stats_by_strategy`) уже разводит метрики по стратегиям.
+
 ### v0.7.0 — Философия B: дай победителю бежать (ob_imb→бонус, TP 3.5R, time_stop 120с)
 `<hash>`
 

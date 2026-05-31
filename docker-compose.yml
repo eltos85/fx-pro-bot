@@ -276,6 +276,10 @@ services:
       # Хардкод-список используется только как fallback при сбое get_tickers,
       # если включён авто-селектор вселенной (ниже).
       SCALP_SYMBOLS: ${SCALP_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
+      # Активные стратегии (CSV): sweep_fade + density_bounce (fade) +
+      # density_break (momentum-пробой на сносе плотности, v0.8.0). Реальное
+      # значение — из .env (env_file); тут дефолт для свежего деплоя.
+      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break}
       # Авто-селектор: бот сам выбирает монеты под стратегию из get_tickers
       # (композит range%/turnover/spread), берёт ВСЕ прошедшие фильтр и
       # пересматривает раз в 5 мин (ротация — no-op если состав не сменился).

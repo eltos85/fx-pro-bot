@@ -31,7 +31,8 @@ class ScalpSettings(BaseSettings):
 
     # Активные стратегии (CSV). Каждая ищет/сопровождает входы независимо;
     # конфликт направлений по символу → тик пропускается (см. strategies.py).
-    enabled_strategies: str = Field(default="sweep_fade")
+    # sweep_fade + density_bounce (fade) + density_break (momentum-пробой, v0.8.0).
+    enabled_strategies: str = Field(default="sweep_fade,density_bounce,density_break")
 
     # ─── Авто-селектор вселенной (data/universe.py) ──────────────────────────
     # Если включён — бот сам выбирает монеты под стратегию из get_tickers, а
