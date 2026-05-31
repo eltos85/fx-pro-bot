@@ -288,7 +288,12 @@ services:
       # safety-кап на число WS-подписок; берём ВСЕ прошедшие фильтр (≤0=без лимита)
       SCALP_UNIVERSE_TOP_N: ${SCALP_UNIVERSE_TOP_N:-15}
       SCALP_UNIVERSE_REFRESH_SEC: ${SCALP_UNIVERSE_REFRESH_SEC:-300}
-      SCALP_UNIVERSE_MIN_TURNOVER_USD: ${SCALP_UNIVERSE_MIN_TURNOVER_USD:-150000000}
+      # 150M→100M (v0.8.2): рынок просел ~2×, floor $150M выкидывал рабочие
+      # NEAR/ZEC; страж ликвидности = spread cap. Range-cap 30% (анти-памп) оставлен.
+      SCALP_UNIVERSE_MIN_TURNOVER_USD: ${SCALP_UNIVERSE_MIN_TURNOVER_USD:-100000000}
+      # Пины (v0.8.2): force-include в обход фильтра (запрос пользователя — вернуть
+      # ALLO, отсечённый как памп). Осознанный риск на конкретной монете.
+      SCALP_UNIVERSE_PIN_SYMBOLS: ${SCALP_UNIVERSE_PIN_SYMBOLS:-ALLOUSDT}
       SCALP_UNIVERSE_MIN_RANGE_PCT: ${SCALP_UNIVERSE_MIN_RANGE_PCT:-6}
       SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-30}
       SCALP_UNIVERSE_MAX_SPREAD_BPS: ${SCALP_UNIVERSE_MAX_SPREAD_BPS:-5}

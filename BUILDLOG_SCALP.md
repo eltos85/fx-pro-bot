@@ -6,6 +6,38 @@
 
 ## 2026-05-31
 
+### v0.8.2 — recalibration вселенной: turnover 150→100M + пин-механизм (ALLO)
+`<hash>`
+
+**Симптом (диагностика на живых данных).** Селектор пропускал ВСЕГО 2 монеты
+(XLM, BNB) — бот застрял на них. Запрос `get_tickers` (678 тикеров) + прогон
+`rank_universe`: рабочие альты не проходили **turnover-floor $150M**:
+- NEAR: range 9.8%, turnover **$137M**, spread 0.4bps → FAIL (turn);
+- ZEC: range 8.3%, turnover **$125M**, spread 0.2bps → FAIL (turn);
+- ALLO: range **42.1%** (>30 cap), turnover $76M → FAIL (pump + turn).
+
+**Причина.** Floor $150M ставился (BUILDLOG 2026-05-30), чтобы держать рабочие
+монеты, у которых тогда был оборот $248–799M. Рынок просел ~2× → тот же floor
+стал выкидывать ровно эти монеты. Turnover — грубый прокси; реальный страж
+ликвидности скальпа = **spread cap (5bps)**, а у NEAR/ZEC спред 0.2–0.4bps
+(тоньше BNB 1.4).
+
+**Правка (одобрено 2026-05-31).**
+1. **`universe_min_turnover_usd` 150M→100M** — возвращает NEAR/ZEC-класс; ALLO
+   и прочие пампы по-прежнему отсекает range-cap 30%. Не подгонка под P&L:
+   возврат floor его исходного смысла на сдвинувшемся рынке (spread — главный
+   страж). Range-cap 30% оставлен (анти-памп, выбор пользователя).
+2. **Пин-механизм** (`universe_pin_symbols=ALLOUSDT`, `apply_pins`): force-include
+   в ОБХОД фильтра — пользователь передумал и захотел ALLO обратно. Это
+   осознанный риск памп-н-дампа на КОНКРЕТНОЙ монете, не общее ослабление
+   фильтра. Риск-сайзинг (v0.8.1) частично страхует: широкий range ALLO →
+   большой R → малый лот.
+
+**Файлы:** `config/settings.py` (`universe_min_turnover_usd`,
+`universe_pin_symbols` + `universe_pin_list`), `data/universe.py` (`apply_pins`
++ docstring), `app/main.py` (`_select_universe` применяет пины),
+`docker-compose.yml` (2 env), `tests/test_scalp_bot.py` (+3 теста, 110 passed).
+
 ### v0.8.1 — мин-R пол (fee ≤ 0.25R) + риск-базированный сайзинг
 `<hash>`
 

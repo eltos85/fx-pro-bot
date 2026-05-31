@@ -15,8 +15,10 @@ WS-подписок (≤0 = без лимита).
   / take_profit_r), а дневной range — прокси микро-волатильности свипов.
   Live-граница: range 2.5–5.4% (BTC/ETH/SOL/XRP) — сигналы режутся; 9–16%
   (HYPE/NEAR/ZEC) — проходят (BUILDLOG_SCALP 2026-05-30) → floor 6%.
-- ``turnover24h`` — ликвидность (тугой спред/филл). Floor $150M держит топ-тир
-  (рабочие монеты были 248–799M$); скальп торгуют только ликвидные перпы.
+- ``turnover24h`` — ликвидность (грубый прокси). Floor 150M→100M (2026-05-31):
+  рынок просел ~2× по обороту, и $150M стал выкидывать рабочие NEAR ($137M)/
+  ZEC ($125M) с отличным спредом 0.2–0.4bps. Реальный страж ликвидности для
+  скальпа — spread cap (ниже), turnover лишь отсекает совсем «пыль».
 - range cap 30% — отсечь pump-and-dump (event-пампы XLM 37%/ALLO 43%).
 - spread cap (bps) — не входить в дорогих по спреду.
 
@@ -117,3 +119,16 @@ def rank_universe(tickers: list[dict], *, top_n: int, min_turnover: float,
     rows.sort(key=lambda m: (m["score"], m["turnover"]), reverse=True)
     picked = rows if top_n <= 0 else rows[:top_n]
     return [m["symbol"] for m in picked]
+
+
+def apply_pins(ranked: list[str], pinned: list[str], top_n: int) -> list[str]:
+    """Force-include «пиннутых» монет В ОБХОД фильтра (запрос пользователя:
+    вернуть монету, которую отсекает range-cap/turnover как памп). Пины всегда в
+    итоге (в своём порядке, дедуп), ranked добивает остаток до top_n (≤0 = без
+    кап). Это осознанный риск памп-н-дампа на КОНКРЕТНОЙ монете, а не общее
+    ослабление фильтра для всего рынка."""
+    pins = [p for p in dict.fromkeys(pinned) if p]
+    rest = [r for r in ranked if r not in pins]
+    if top_n > 0:
+        rest = rest[: max(0, top_n - len(pins))]
+    return pins + rest

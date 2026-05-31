@@ -1207,3 +1207,24 @@ def test_rank_universe_no_cap_when_top_n_zero():
                            min_range_pct=6.0, max_range_pct=30.0,
                            max_spread_bps=0.0)
     assert len(picked) == 8
+
+
+def test_apply_pins_force_includes_and_dedups():
+    from scalp_bot.data.universe import apply_pins
+    # пин впереди, дедуп если уже в ranked, остальное добивает остаток
+    out = apply_pins(["XLMUSDT", "BNBUSDT"], ["ALLOUSDT"], top_n=15)
+    assert out == ["ALLOUSDT", "XLMUSDT", "BNBUSDT"]
+    out2 = apply_pins(["ALLOUSDT", "XLMUSDT"], ["ALLOUSDT"], top_n=15)
+    assert out2 == ["ALLOUSDT", "XLMUSDT"]  # без дубля
+
+
+def test_apply_pins_keeps_pin_under_top_n_cap():
+    from scalp_bot.data.universe import apply_pins
+    # пин всегда сохраняется, ranked обрезается до остатка
+    out = apply_pins(["A", "B", "C"], ["ALLOUSDT"], top_n=2)
+    assert out == ["ALLOUSDT", "A"]
+
+
+def test_apply_pins_empty_is_noop():
+    from scalp_bot.data.universe import apply_pins
+    assert apply_pins(["XLMUSDT"], [], top_n=15) == ["XLMUSDT"]

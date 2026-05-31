@@ -22,7 +22,7 @@ from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.exec_stream import BybitExecStream
 from scalp_bot.data.market_stream import BybitMarketStream
-from scalp_bot.data.universe import rank_universe
+from scalp_bot.data.universe import apply_pins, rank_universe
 from scalp_bot.safety import killswitch
 from scalp_bot.state.db import ScalpDB
 from scalp_bot.telegram.notifier import TelegramNotifier
@@ -339,13 +339,15 @@ def _flatten_on_start(client, db, symbols: list[str]) -> None:
 
 
 def _select_universe(client, cfg) -> list[str]:
-    """Топ-N монет под стратегию из get_tickers (см. data/universe.py)."""
-    return rank_universe(
+    """Топ-N монет под стратегию из get_tickers (см. data/universe.py) +
+    force-include «пиннутых» монет в обход фильтра (universe_pin_symbols)."""
+    ranked = rank_universe(
         client.get_tickers(), top_n=cfg.universe_top_n,
         min_turnover=cfg.universe_min_turnover_usd,
         min_range_pct=cfg.universe_min_range_pct,
         max_range_pct=cfg.universe_max_range_pct,
         max_spread_bps=cfg.universe_max_spread_bps)
+    return apply_pins(ranked, cfg.universe_pin_list, cfg.universe_top_n)
 
 
 def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,

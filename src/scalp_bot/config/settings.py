@@ -49,7 +49,18 @@ class ScalpSettings(BaseSettings):
     # refresh почти всегда дешёвый get_tickers без WS-рестарта. Ниже ~5 мин на
     # 24h-метриках новой информации не даёт (нужны intraday/RVOL — future).
     universe_refresh_sec: float = Field(default=300.0)
-    universe_min_turnover_usd: float = Field(default=150_000_000.0)
+    # 150M→100M (2026-05-31): рынок просел ~2× по обороту, и floor $150M стал
+    # выкидывать ровно те рабочие монеты, ради которых ставился (NEAR $137M,
+    # ZEC $125M) — а у них range 8–10% и спред 0.2–0.4bps (тоньше BNB). Turnover —
+    # грубый прокси; реальный страж ликвидности для скальпа = spread cap (5bps).
+    # Не подгонка под P&L: возврат floor его исходного смысла на сдвинувшемся рынке.
+    universe_min_turnover_usd: float = Field(default=100_000_000.0)
+    # Пины: force-include в ОБХОД фильтра (запрос пользователя 2026-05-31 —
+    # вернуть ALLO, который отсекает range-cap 30% как памп 42% + turnover $76M).
+    # Осознанный риск памп-н-дампа на КОНКРЕТНОЙ монете, не общее ослабление
+    # фильтра. Риск-сайзинг (v0.8.1) частично страхует: широкий range ALLO →
+    # большой R → малый лот (qty=$1/дистанция). Пусто = чистый авто-режим.
+    universe_pin_symbols: str = Field(default="ALLOUSDT")
     universe_min_range_pct: float = Field(default=6.0)
     universe_max_range_pct: float = Field(default=30.0)
     universe_max_spread_bps: float = Field(default=5.0)
@@ -252,6 +263,11 @@ class ScalpSettings(BaseSettings):
     @property
     def symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+
+    @property
+    def universe_pin_list(self) -> list[str]:
+        return [s.strip().upper() for s in self.universe_pin_symbols.split(",")
+                if s.strip()]
 
     @property
     def strategy_list(self) -> list[str]:
