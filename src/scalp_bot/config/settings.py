@@ -39,8 +39,15 @@ class ScalpSettings(BaseSettings):
     # к математике fee-guard и live-границе (BUILDLOG_SCALP 2026-05-30), а НЕ
     # подгоняются под прошлый P&L (no-data-fitting.mdc).
     auto_universe_enabled: bool = Field(default=True)
-    universe_top_n: int = Field(default=5)
-    universe_refresh_sec: float = Field(default=1800.0)  # пересмотр раз в 30 мин
+    # «Качество, не количество»: берём ВСЕ монеты, прошедшие hard-фильтр; это —
+    # лишь safety-кап на число WS-подписок (≤0 = без лимита). Подошло 5 — берём
+    # 5, подошло 2 — берём 2 (запрос пользователя 2026-05-31).
+    universe_top_n: int = Field(default=15)
+    # Пересмотр раз в 5 мин. Ротация — no-op если состав не изменился (см.
+    # _rotate_universe), а метрики 24-часовые (двигаются медленно) → частый
+    # refresh почти всегда дешёвый get_tickers без WS-рестарта. Ниже ~5 мин на
+    # 24h-метриках новой информации не даёт (нужны intraday/RVOL — future).
+    universe_refresh_sec: float = Field(default=300.0)
     universe_min_turnover_usd: float = Field(default=150_000_000.0)
     universe_min_range_pct: float = Field(default=6.0)
     universe_max_range_pct: float = Field(default=30.0)

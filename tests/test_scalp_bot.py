@@ -1039,3 +1039,28 @@ def test_rank_universe_skips_pre_listing_and_bad_rows():
     assert rank_universe([pre, bad], top_n=5, min_turnover=150e6,
                          min_range_pct=6.0, max_range_pct=30.0,
                          max_spread_bps=5.0) == []
+
+
+def test_rank_universe_composite_prefers_liquid_over_thin_volatile():
+    # A: range 11% но turnover 1000M (ликвидная); B: range 12% но turnover 160M
+    # (тоньше). Старая логика (sort by range) дала бы B первой; композит ставит
+    # ликвидную A выше — меньше слиппедж/стоп-аутов (research проф-скальперов).
+    tickers = [
+        _ticker("ALIQUSDT", 100, 111, 100, 1000e6),   # range 11%
+        _ticker("BVOLUSDT", 100, 112, 100, 160e6),    # range 12%
+        _ticker("CLOWUSDT", 100, 106.5, 100, 200e6),  # range 6.5%
+    ]
+    picked = rank_universe(tickers, top_n=10, min_turnover=150e6,
+                           min_range_pct=6.0, max_range_pct=30.0,
+                           max_spread_bps=5.0)
+    assert picked == ["ALIQUSDT", "BVOLUSDT", "CLOWUSDT"]
+
+
+def test_rank_universe_no_cap_when_top_n_zero():
+    # top_n<=0 → без лимита: берём ВСЕ прошедшие фильтр (качество, не число)
+    tickers = [_ticker(f"C{i}USDT", 10, 11 + i * 0.1, 10, (200 + i) * 1e6)
+               for i in range(8)]
+    picked = rank_universe(tickers, top_n=0, min_turnover=150e6,
+                           min_range_pct=6.0, max_range_pct=30.0,
+                           max_spread_bps=0.0)
+    assert len(picked) == 8

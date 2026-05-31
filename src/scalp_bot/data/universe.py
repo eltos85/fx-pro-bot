@@ -4,7 +4,12 @@
 торгует хардкод-список. Источник — Bybit ``get_tickers`` (24h snapshot), офдок:
 https://bybit-exchange.github.io/docs/v5/market/tickers
 
-Критерии (математика fee-guard + практика скальпа, не подгонка):
+Принцип «качество, а не количество» (запрос пользователя 2026-05-31): берём
+ВСЕ монеты рынка, прошедшие фильтр, а не фиксированные N. Подошло 5 — берём 5;
+через 30 мин подошло 2 — берём 2. ``top_n`` — лишь safety-кап на число
+WS-подписок (≤0 = без лимита).
+
+ФИЛЬТРЫ (hard, математика fee-guard + практика скальпа, не подгонка):
 - ``range% = (high24h − low24h)/last`` — амплитуда. Нужна широкая: fee-guard
   требует стоп ``R ≥ 0.22%`` цены (round-trip taker 0.11% × min_target_fee_mult
   / take_profit_r), а дневной range — прокси микро-волатильности свипов.
@@ -14,12 +19,29 @@ https://bybit-exchange.github.io/docs/v5/market/tickers
   (рабочие монеты были 248–799M$); скальп торгуют только ликвидные перпы.
 - range cap 30% — отсечь pump-and-dump (event-пампы XLM 37%/ALLO 43%).
 - spread cap (bps) — не входить в дорогих по спреду.
-Сортировка: range% убыв. (макс. волатильность под наш edge), tie-break turnover.
+
+РАНЖИРОВАНИЕ (композитный скор, как у проф-скальперов крипты). Раньше сортировка
+была чисто по range% (биас в самые «горячие»/рискованные), ликвидность — лишь
+tie-break. Профи (Volity «5-filter framework», stoic.ai, dev.to trendrider 2026)
+единогласно: ликвидность и волатильность co-equal, спред — «скрытая комиссия»,
+съедающая edge на каждом round-trip. Поэтому скор:
+
+    score = W_VOL·vol_n + W_LIQ·liq_n + W_SPREAD·(1 − spread_n)
+
+где *_n — min-max нормировка метрики ВНУТРИ прошедшего фильтр пула (сравниваем
+кандидатов между собой). Эффект: ликвидная монета с хорошей (не макс.)
+волатильностью обходит «тонкую» гипер-волатильную — меньше слиппедж/стоп-аутов.
 
 ВАЖНО (no-data-fitting.mdc): пороги — конфиг (env), привязаны к fee-guard и
-live-границе, а не оптимизированы под прошлый P&L.
+live-границе; веса скора — research-обоснованы, а не оптимизированы под P&L.
 """
 from __future__ import annotations
+
+# Веса композитного скора (research: ликвидность ≈ волатильность по важности;
+# спред уже отсечён hard-фильтром, поэтому малый вес как тонкий tie-break).
+W_VOL = 0.45
+W_LIQ = 0.45
+W_SPREAD = 0.10
 
 
 def _f(v: object) -> float | None:
@@ -27,6 +49,18 @@ def _f(v: object) -> float | None:
         return float(v)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _norm(vals: list[float]) -> list[float]:
+    """Min-max нормировка в [0,1]. Если все равны (span=0) — нейтральные 1.0
+    (термин одинаков для всех → не влияет на порядок)."""
+    if not vals:
+        return []
+    lo, hi = min(vals), max(vals)
+    span = hi - lo
+    if span <= 0:
+        return [1.0] * len(vals)
+    return [(v - lo) / span for v in vals]
 
 
 def score_ticker(t: dict) -> dict | None:
@@ -54,7 +88,11 @@ def score_ticker(t: dict) -> dict | None:
 def rank_universe(tickers: list[dict], *, top_n: int, min_turnover: float,
                   min_range_pct: float, max_range_pct: float,
                   max_spread_bps: float) -> list[str]:
-    """Фильтр + ранжирование → топ-N символов под стратегию."""
+    """Hard-фильтр + композитное ранжирование → все прошедшие символы.
+
+    ``top_n`` — safety-кап на число WS-подписок: ≤0 = без лимита (берём все,
+    прошедшие фильтр). Количество определяется КАЧЕСТВОМ (фильтрами), а не
+    фиксированным числом."""
     rows: list[dict] = []
     for t in tickers or []:
         m = score_ticker(t)
@@ -67,5 +105,15 @@ def rank_universe(tickers: list[dict], *, top_n: int, min_turnover: float,
         if max_spread_bps > 0 and m["spread_bps"] > max_spread_bps:
             continue
         rows.append(m)
-    rows.sort(key=lambda m: (m["range_pct"], m["turnover"]), reverse=True)
-    return [m["symbol"] for m in rows[:top_n]]
+    if not rows:
+        return []
+    vol_n = _norm([m["range_pct"] for m in rows])
+    liq_n = _norm([m["turnover"] for m in rows])
+    spr_n = _norm([m["spread_bps"] for m in rows])
+    for i, m in enumerate(rows):
+        m["score"] = (W_VOL * vol_n[i] + W_LIQ * liq_n[i]
+                      + W_SPREAD * (1.0 - spr_n[i]))
+    # tie-break turnover (детерминизм при равных скорах — напр. одинаковые тикеры)
+    rows.sort(key=lambda m: (m["score"], m["turnover"]), reverse=True)
+    picked = rows if top_n <= 0 else rows[:top_n]
+    return [m["symbol"] for m in picked]
