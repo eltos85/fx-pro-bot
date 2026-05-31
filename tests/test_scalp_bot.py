@@ -14,10 +14,7 @@ from scalp_bot.analysis.signals import (
     cvd_divergence,
     detect_sweep,
     diagnose,
-    evaluate,
     flow_invalidated,
-    funding_supportive,
-    liq_flush,
     ob_supportive,
     reclaimed,
     reversal_momentum,
@@ -33,8 +30,6 @@ from scalp_bot.trading.executor import (
 
 def _cfg(**over):
     base = dict(
-        min_confluence=3, liq_flush_usd=50000.0,
-        funding_extreme_pos=0.0005, funding_extreme_neg=0.0003,
         ob_imbalance_min=0.58, take_profit_r=2.0, sl_buffer_bps=8.0,
         require_reclaim=True, reclaim_frac=0.5, momentum_window_sec=3.0,
         round_trip_fee_frac=0.00075, min_target_fee_mult=3.0,
@@ -104,32 +99,7 @@ def test_split_too_few_samples():
     assert cvd_divergence([CvdSample(1, 100, 0)], "short") is False
 
 
-# ─── liquidations ────────────────────────────────────────────────────────
-
-def test_liq_flush_long_counts_buy_side():
-    # Bybit S="Buy" = ликвидирован ЛОНГ (forced sell) → fade лонгом
-    liqs = [LiqEvent(1, "Buy", 30000, 100), LiqEvent(2, "Buy", 30000, 100),
-            LiqEvent(3, "Sell", 99999, 100)]
-    assert liq_flush(liqs, "long", 50000) is True   # Buy sum=60000
-    # short считает Sell-ликвидации (ликвидирован шорт, forced buy)
-    assert liq_flush(liqs, "short", 50000) is True  # Sell sum=99999
-    assert liq_flush(liqs, "long", 200000) is False
-
-
-def test_liq_flush_below_threshold():
-    assert liq_flush([LiqEvent(1, "Buy", 10000, 100)], "long", 50000) is False
-
-
-# ─── funding / orderbook ───────────────────────────────────────────────────
-
-def test_funding_supportive_asymmetric():
-    # long требует funding ≤ −neg(0.0003); short требует funding ≥ +pos(0.0005)
-    assert funding_supportive(-0.0004, "long", 0.0005, 0.0003) is True
-    assert funding_supportive(-0.0002, "long", 0.0005, 0.0003) is False
-    assert funding_supportive(0.0006, "short", 0.0005, 0.0003) is True
-    assert funding_supportive(0.0004, "short", 0.0005, 0.0003) is False  # < pos-порог
-    assert funding_supportive(None, "long", 0.0005, 0.0003) is False
-
+# ─── orderbook ─────────────────────────────────────────────────────────────
 
 def test_ob_supportive():
     assert ob_supportive(0.60, "long", 0.58) is True
@@ -169,7 +139,7 @@ def test_flow_invalidated_long_when_cvd_turns_down():
     assert flow_invalidated(snap, "short", 3.0) is False
 
 
-# ─── evaluate (интеграция правил) ──────────────────────────────────────────
+# ─── build_signal (SL/TP/fee-guard) + diagnose ────────────────────────────
 
 def _snap(samples, **over):
     base = dict(
@@ -182,69 +152,32 @@ def _snap(samples, **over):
     return SymbolSnapshot(**base)
 
 
-def test_evaluate_long_signal_full_confluence():
-    sig = evaluate(_snap(_long_samples()), _cfg())
+def test_build_signal_sl_below_swept_tp_above_entry():
+    # LONG: SL ниже свипнутого уровня + буфер, TP выше входа
+    snap = _snap(_long_samples())
+    swept = 96.5
+    sig = build_signal(snap, "long", swept, _cfg(entry_order_type="market"), 4, ["x"])
     assert sig is not None
-    assert sig.side == "long"
-    assert sig.score >= 3
-    assert "cvd_div" in sig.reasons
-    # SL ниже свипнутого лоя, TP выше входа
-    assert sig.sl_level < min(s.price for s in _long_samples())
+    assert sig.sl_level < swept
     assert sig.tp_level > sig.entry_ref
 
 
-def test_evaluate_none_when_no_divergence():
-    # цена+cvd падают вместе → div=False → правило обязательное не выполнено
-    s = [CvdSample(1, 100, 0), CvdSample(2, 99, -1), CvdSample(3, 98, -2),
-         CvdSample(4, 97, -5), CvdSample(5, 96, -7), CvdSample(6, 95, -9)]
-    assert evaluate(_snap(s, funding_rate=-0.0005), _cfg()) is None
-
-
-def test_evaluate_none_when_stale():
-    assert evaluate(_snap(_long_samples(), stale=True), _cfg()) is None
-
-
-def test_evaluate_below_confluence_returns_none():
-    # убираем поддержку funding+ob+liq → остаётся sweep+cvd = 2 < 3
-    snap = _snap(_long_samples(), funding_rate=0.0, ob_imbalance=0.50,
-                 liq_events=[])
-    assert evaluate(snap, _cfg(min_confluence=3)) is None
-
-
-def test_evaluate_none_when_no_reclaim():
-    # require_reclaim=True, но цена осталась на свип-лоях → нет reclaim → None
-    early = [CvdSample(1, 100, -1), CvdSample(2, 99, -3), CvdSample(3, 98, -5)]
-    late = [CvdSample(4, 97, -4), CvdSample(5, 96.5, -2), CvdSample(6, 96.4, -1)]
-    snap = _snap(early + late, last_price=96.4)
-    assert evaluate(snap, _cfg()) is None
-
-
-def test_evaluate_fee_guard_blocks_tiny_target():
+def test_build_signal_fee_guard_blocks_tiny_target():
     # завышаем требуемый множитель → ход до TP < min → сигнал отброшен
-    assert evaluate(_snap(_long_samples()), _cfg(min_target_fee_mult=1000.0)) is None
+    snap = _snap(_long_samples())
+    assert build_signal(snap, "long", 96.5,
+                        _cfg(min_target_fee_mult=1000.0), 4, ["x"]) is None
 
 
-def test_evaluate_passes_with_require_reclaim_off():
-    # отключив подтверждение разворота, сигнал проходит на голом конфлюенсе
-    sig = evaluate(_snap(_long_samples()), _cfg(require_reclaim=False))
-    assert sig is not None and sig.side == "long"
-
-
-def test_evaluate_sl_from_recent_sweep_half():
-    # SL берётся по экстремуму поздней половины (свежий свип), не глоб. минимуму
-    sig = evaluate(_snap(_long_samples()), _cfg())
-    late_min = min(96.5, 97.0, 97.5)  # поздняя половина _long_samples
-    assert sig is not None
-    assert sig.sl_level == pytest.approx(late_min * (1 - 8 / 1e4))
-
-
-def test_diagnose_reports_rule_states():
+def test_diagnose_reports_live_detector_flags():
     d = diagnose(_snap(_long_samples()), _cfg())
     assert d is not None
     assert d["side"] == "long"
     assert d["div"] is True and d["sweep"] is True
-    assert d["signal"] is True
-    assert d["score"] >= 3
+    # diagnose теперь отражает фазы детектора (sweep/div/reclaim/momentum/ob),
+    # без legacy-полей liq/funding/signal
+    assert "liq" not in d and "funding" not in d and "signal" not in d
+    assert set(d) >= {"sweep", "div", "reclaim", "momentum", "ob", "score"}
 
 
 def test_diagnose_none_when_stale():
@@ -634,7 +567,8 @@ def _sweep_strat(now_t=None):
     cfg = SimpleNamespace(active_exit_enabled=True, active_exit_min_age_sec=10.0,
                           momentum_window_sec=3.0, round_trip_fee_frac=0.0011,
                           scratch_on_flow_flip=True, scratch_min_age_sec=20.0,
-                          flow_exit_activate_r=1.0)  # v0.7.1: профит-лок ≥1R
+                          flow_exit_activate_r=1.0,   # v0.7.1: профит-лок ≥1R
+                          scratch_min_adverse_r=0.7)  # v0.9.2: порог глубины
     return SweepFadeStrategy(cfg, [])
 
 
@@ -680,8 +614,8 @@ def test_flow_exit_respects_min_age():
 
 
 def test_flow_scratch_fires_when_underwater_and_flow_flips():
-    # ход −0.20 (≥ round-trip 97×0.0011≈0.107) + поток против + созрела (25с) →
-    # режем убыток рано (flow_scratch), не ждём SL/тайм-стоп
+    # ход −0.20 = −1.0R (≥ порог глубины 0.7R=0.14) + поток против + созрела (25с)
+    # → режем убыток рано (flow_scratch), не ждём SL/тайм-стоп
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=96.80)
     tr = SimpleNamespace(id=5, side="long", entry=97.0, sl=96.80, ts_open=80.0)
@@ -691,11 +625,29 @@ def test_flow_scratch_fires_when_underwater_and_flow_flips():
 
 
 def test_flow_scratch_skips_small_underwater():
-    # мелкий минус −0.05 < комиссии → НЕ скретчим (иначе −fee на шуме)
+    # мелкий минус −0.05 (−0.25R) < порог 0.7R → НЕ скретчим (даём развиться)
     st = _sweep_strat()
     snap = _snap(_flow_flip_samples(), last_price=96.95)
     tr = SimpleNamespace(id=6, side="long", entry=97.0, sl=96.80, ts_open=80.0)
     assert st.should_exit(tr, snap, now=105.0) is None
+
+
+def test_flow_scratch_holds_shallow_underwater_below_threshold():
+    # v0.9.2: −0.3R против + флип ленты — РАНЬШЕ скретчили (≥комиссии), теперь
+    # ДЕРЖИМ (ниже порога 0.7R), даём уйти в безубыточный time_stop/восстановиться
+    st = _sweep_strat()
+    snap = _snap(_flow_flip_samples(), last_price=96.70)  # R=1.0 → −0.3R
+    tr = SimpleNamespace(id=61, side="long", entry=97.0, sl=96.0, ts_open=80.0)
+    assert st.should_exit(tr, snap, now=105.0) is None
+
+
+def test_flow_scratch_fires_when_deep_underwater():
+    # −0.8R против (≥0.7R) + флип + созрела → режем до полного SL
+    st = _sweep_strat()
+    snap = _snap(_flow_flip_samples(), last_price=96.20)  # R=1.0 → −0.8R
+    tr = SimpleNamespace(id=62, side="long", entry=97.0, sl=96.0, ts_open=80.0)
+    decision = st.should_exit(tr, snap, now=105.0)
+    assert decision is not None and decision[0] == "flow_scratch"
 
 
 def test_flow_scratch_respects_scratch_min_age():
@@ -782,6 +734,7 @@ from scalp_bot.analysis.signals import Signal  # noqa: E402
 from scalp_bot.analysis.strategies import (  # noqa: E402
     DensityBounceStrategy,
     DensityBreakStrategy,
+    RollingBaseline,
     SweepFadeStrategy,
     build_strategies,
     detect_wall,
@@ -929,6 +882,9 @@ def _density_cfg(**over):
         density_wall_mult=8.0, density_round_frac=0.001, density_persist_sec=10.0,
         density_absorb_frac=0.30, density_absorb_window_sec=10.0,
         density_near_bps=8.0, density_min_wall_usd=0.0,
+        # rolling-baseline (v0.9.0): high min_samples → тесты на fallback
+        # (мгновенный baseline), сохраняя прежние ожидания пер-функции.
+        density_baseline_sec=900.0, density_baseline_min_samples=30,
         # для build_signal:
         entry_order_type="market", sl_buffer_bps=8.0, take_profit_r=2.0,
         round_trip_fee_frac=0.0011, min_target_fee_mult=3.0,
@@ -962,6 +918,36 @@ def test_detect_wall_excludes_self_from_baseline():
 
 def test_detect_wall_needs_min_levels():
     assert detect_wall([(100.0, 99), (99.9, 1)], wall_mult=8.0) is None
+
+
+def test_detect_wall_uses_explicit_rolling_baseline():
+    # та же книга, но baseline берём СКОЛЬЗЯЩИЙ (меньше мгновенного) → стена
+    # квалифицируется при том же size, хотя мгновенный знаменатель не дал бы
+    bids = [(100.0, 30.0), (99.99, 10), (99.98, 10), (99.97, 10), (99.96, 10)]
+    # мгновенный baseline (без max) = 10 → 30 < 8×10=80 → не стена
+    assert detect_wall(bids, wall_mult=8.0) is None
+    # rolling baseline низкий (рынок был тонким, типичный уровень ≈3) → 30 ≥ 8×3
+    assert detect_wall(bids, wall_mult=8.0, baseline=3.0) == (100.0, 30.0)
+
+
+def test_rolling_baseline_window_and_warmup():
+    rb = RollingBaseline(window_sec=100.0)
+    assert rb.value() == 0.0
+    assert rb.ready(1) is False
+    rb.add(10.0, 4.0)
+    rb.add(20.0, 6.0)
+    assert rb.value() == pytest.approx(5.0)
+    assert rb.ready(2) is True and rb.ready(3) is False
+    # окно 100с: add(115) → cut=15 → (10,4) выпадает, (20,6)+(115,12) остаются
+    rb.add(115.0, 12.0)
+    assert rb.value() == pytest.approx((6.0 + 12.0) / 2)
+
+
+def test_rolling_baseline_ignores_nonpositive():
+    rb = RollingBaseline(window_sec=100.0)
+    rb.add(1.0, 0.0)
+    rb.add(2.0, -5.0)
+    assert rb.value() == 0.0 and rb.ready(1) is False
 
 
 def test_density_arms_then_fires_after_persist():
@@ -1228,3 +1214,51 @@ def test_apply_pins_keeps_pin_under_top_n_cap():
 def test_apply_pins_empty_is_noop():
     from scalp_bot.data.universe import apply_pins
     assert apply_pins(["XLMUSDT"], [], top_n=15) == ["XLMUSDT"]
+
+
+# ─── HTF-bias (трендовый фильтр старшего ТФ, v0.9.3) ───────────────────────
+
+from scalp_bot.data.htf import HtfTrend, compute_ema  # noqa: E402
+
+
+class _FakeKlineClient:
+    """get_kline возвращает Bybit-формат DESC: [start,o,h,l,close,v,turnover]."""
+
+    def __init__(self, closes_by_sym: dict[str, list[float]]) -> None:
+        self._c = closes_by_sym
+
+    def get_kline(self, symbol, interval, limit=200):
+        closes = self._c.get(symbol, [])
+        return [[0, 0, 0, 0, c, 0, 0] for c in reversed(closes)]
+
+
+def test_compute_ema_needs_full_length():
+    assert compute_ema([1.0, 2.0, 3.0], 5) is None       # данных мало → None
+    assert compute_ema([2.0] * 10, 5) == pytest.approx(2.0)
+
+
+def test_compute_ema_trends_with_prices():
+    # растущий ряд → EMA ниже последней цены, но выше первой
+    ema = compute_ema([float(i) for i in range(1, 21)], 5)
+    assert ema is not None and 15.0 < ema < 20.0
+
+
+def test_htf_direction_long_short_by_ema():
+    htf = HtfTrend(ema_len=200, interval="60")
+    htf.refresh(_FakeKlineClient({"SOLUSDT": [100.0] * 200}), ["SOLUSDT"])
+    assert htf.direction("SOLUSDT", 101.0) == "long"   # цена выше EMA → аптренд
+    assert htf.direction("SOLUSDT", 99.0) == "short"
+
+
+def test_htf_aligned_fail_open_when_no_data():
+    htf = HtfTrend()
+    assert htf.aligned("XXXUSDT", "long", 100.0) is True   # нет данных → разрешаем
+    assert htf.direction("XXXUSDT", 100.0) is None
+
+
+def test_htf_aligned_blocks_counter_trend_fade():
+    htf = HtfTrend(ema_len=200)
+    htf.refresh(_FakeKlineClient({"SOLUSDT": [100.0] * 200}), ["SOLUSDT"])
+    # цена 99 < EMA100 → тренд short: long-fade против тренда блокируется
+    assert htf.aligned("SOLUSDT", "long", 99.0) is False
+    assert htf.aligned("SOLUSDT", "short", 99.0) is True

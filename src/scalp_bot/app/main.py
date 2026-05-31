@@ -3,8 +3,9 @@
 Каждые ``eval_interval_sec`` (default 1с):
 1. Killswitch check (дневной/совокупный убыток).
 2. Сопровождение открытых сделок (тайм-стоп / TP / SL).
-3. Для каждого символа: snapshot микроструктуры из WS-кэша → evaluate()
-   → если сигнал и прошли гейты (cooldown, лимит позиций, rate) → on_signal.
+3. Для каждого символа: snapshot микроструктуры из WS-кэша → стратегии
+   (SweepReclaimDetector и др.) → если сигнал и прошли гейты (cooldown,
+   лимит позиций, rate) → on_signal.
 4. Heartbeat-лог раз в 60с.
 
 Решения принимаются БЕЗ LLM. Запуск: ``python -m scalp_bot.app.main``.
@@ -21,6 +22,7 @@ from scalp_bot.analysis.strategies import build_strategies, resolve
 from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.exec_stream import BybitExecStream
+from scalp_bot.data.htf import HtfTrend
 from scalp_bot.data.market_stream import BybitMarketStream
 from scalp_bot.data.universe import apply_pins, rank_universe
 from scalp_bot.safety import killswitch
@@ -79,9 +81,9 @@ def run() -> None:
             _flatten_on_start(client, db, sorted(flat_syms))
 
     log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
-             "kill day/total=$%.0f/$%.0f | min_conf=%d", mode, ",".join(symbols),
+             "kill day/total=$%.0f/$%.0f | strats=%s", mode, ",".join(symbols),
              cfg.position_usd, cfg.min_position_usd, cfg.max_daily_loss_usd,
-             cfg.max_total_loss_usd, cfg.min_confluence)
+             cfg.max_total_loss_usd, ",".join(cfg.strategy_list))
 
     states: dict[str, SymbolState] = {
         s: SymbolState(s, cvd_window_sec=cfg.cvd_window_sec,
@@ -108,6 +110,18 @@ def run() -> None:
     strategies = build_strategies(cfg, symbols)
     log.info("стратегии: %s", ",".join(s.name for s in strategies))
     executor = Executor(db, cfg, client, notifier=notifier, strategies=strategies)
+
+    # HTF-bias: трендовый фильтр старшего ТФ (EMA200 1H). Первичный прогрев на
+    # старте, далее refresh раз в htf_refresh_sec (метрика медленная).
+    htf = HtfTrend(cfg.htf_ema_len, cfg.htf_interval)
+    last_htf = 0.0
+    if client is not None and cfg.require_htf_trend:
+        try:
+            htf.refresh(client, symbols)
+            last_htf = time.time()
+        except Exception:
+            log.exception("htf initial refresh failed")
+
     cooldown: dict[str, float] = {}
     last_heartbeat = 0.0
     last_universe = time.time()  # уже выбрали на старте — ждём refresh до ротации
@@ -129,6 +143,15 @@ def run() -> None:
                         notifier)
                 except Exception:
                     log.exception("rotate_universe failed")
+
+            # 0a2) HTF-bias refresh (EMA200 1H, метрика медленная — раз в ~5мин)
+            if (client is not None and cfg.require_htf_trend
+                    and now - last_htf >= cfg.htf_refresh_sec):
+                last_htf = now
+                try:
+                    htf.refresh(client, symbols)
+                except Exception:
+                    log.exception("htf refresh failed")
 
             # 0b) забрать исполнения из приватного WS → атрибуция к сделкам
             if exec_stream is not None:
@@ -204,6 +227,15 @@ def run() -> None:
                 sig = resolve(candidates)
                 if sig is None:
                     continue
+                # HTF-bias: фейд только по старшему тренду (EMA200 1H). Контртренд
+                # (ловля ножа) пропускаем; fail-open при отсутствии HTF-данных.
+                if (cfg.require_htf_trend
+                        and not htf.aligned(sig.symbol, sig.side, snap.last_price)):
+                    d = htf.direction(sig.symbol, snap.last_price)
+                    play.info("🧭 [%s] %s против старшего тренда (HTF=%s) — "
+                              "пропускаю (фейдим только по тренду)", sig.symbol,
+                              sig.side, d or "?")
+                    continue
                 funnel["fired"] += 1
                 gate = killswitch.can_open(db, cfg, now)
                 if not gate.allowed:
@@ -264,7 +296,8 @@ def _log_strategy_stats(db: ScalpDB) -> None:
                   st.wins + st.losses, st.pnl_usd)
 
 
-_FUNNEL_RULES = ("sweep", "div", "reclaim", "momentum", "ob", "liq", "funding")
+# Аудит v0.9.0: liq/funding убраны из воронки — больше не факторы входа.
+_FUNNEL_RULES = ("sweep", "div", "reclaim", "momentum", "ob")
 
 
 def _new_funnel() -> dict:

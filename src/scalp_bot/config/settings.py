@@ -105,17 +105,10 @@ class ScalpSettings(BaseSettings):
     ob_levels: int = Field(default=25)
     # Imbalance, выше которого книга считается перекошенной (bid/(bid+ask)).
     ob_imbalance_min: float = Field(default=0.58)
-    # Funding-перекос толпы (АСИММЕТРИЧНО, research 2026):
-    # crowded LONG = funding ≥ +0.05% (TraderSpy/Altrady) → фейдим ШОРТОМ;
-    # crowded SHORT = funding ≤ −0.03% → фейдим ЛОНГОМ.
-    # https://blog.traderspy.app/en/blog/crypto-funding-rates-secret-weapon/
-    funding_extreme_pos: float = Field(default=0.0005)  # порог для short-fade
-    funding_extreme_neg: float = Field(default=0.0003)  # порог для long-fade
-    # Ликвидационный flush: суммарный размер ликвидаций (в USD) за окно.
-    liq_flush_usd: float = Field(default=50000.0)
+    # Окно сбора ликвидаций (сек). Аудит v0.9.0: liq как ФАКТОР входа убран
+    # (0.2% присутствия на 502 входах, не каноничен для 90–120с разворота).
+    # liq_events продолжаем собирать только для heartbeat-наблюдаемости.
     liq_window_sec: float = Field(default=60.0)
-    # Конфлюенс: сколько из 5 микро-правил должно совпасть для входа.
-    min_confluence: int = Field(default=3)
     # Анти-шум между входами по одному символу.
     signal_cooldown_sec: float = Field(default=60.0)
 
@@ -206,6 +199,24 @@ class ScalpSettings(BaseSettings):
     density_near_bps: float = Field(default=8.0)
     # Опциональный абсолютный пол стены в USD (0 = выкл, только относительный).
     density_min_wall_usd: float = Field(default=0.0)
+    # Rolling-baseline (аудит v0.9.0): стена сравнивается со СКОЛЬЗЯЩИМ средним
+    # «типичного» размера уровня за окно, а НЕ с мгновенным top-25. Это и есть
+    # каноничный Kalena «5–8× среднего за 10–15 мин» — мгновенный baseline давал
+    # max-уровень всего 2–4× (стена недостижима, 0/502 входов). 900с = верх
+    # research-окна. Пока не накоплено ≥min_samples — fallback на мгновенный.
+    density_baseline_sec: float = Field(default=900.0)
+    density_baseline_min_samples: int = Field(default=30)
+
+    # ─── HTF-bias: трендовый фильтр старшего ТФ (аудит v0.9.3) ────────────
+    # Канон CAP «без контекста CVD-дивергенция — шум» (gates 1–3); Murphy 1999
+    # (EMA200 primary trend); Asness 2013 (mean-reversion в согласии с трендом).
+    # Фейд берём ТОЛЬКО по тренду: long-fade при price>EMA200_1h, short — ниже.
+    # Контртренд (ловля ножа) блокируем. Гейт в main после resolve, fail-open
+    # при сбое свечей. Без фильтра sweep_fade фейдил «в вакууме» (WR 29–40%).
+    require_htf_trend: bool = Field(default=True)
+    htf_interval: str = Field(default="60")   # 1H (Bybit kline interval)
+    htf_ema_len: int = Field(default=200)      # EMA200 — primary trend (Murphy)
+    htf_refresh_sec: float = Field(default=300.0)
 
     # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────
     # Канон: свипы доходят в London/NY open + overlap, «мёртвые» часы дают
@@ -254,6 +265,17 @@ class ScalpSettings(BaseSettings):
     # Даём сетапу «созреть» перед скретчем (research: ~30с shot-clock; берём 20с,
     # т.к. flow_invalidated сам требует разворота ленты — это уже сильный сигнал).
     scratch_min_age_sec: float = Field(default=20.0)
+    # Порог ГЛУБИНЫ скретча (аудит v0.9.2): режем убыток только когда сделка
+    # реально в минусе ≥ scratch_min_adverse_r × R, а не при «минус ≥ комиссии»
+    # (hair-trigger). Данные (60 свежих сделок, risk≈$1): старый порог давал
+    # flow_scratch на 40% входов, ВСЕ в минус (−$12.31); резал при ходе против
+    # всего −0.29R (далеко от SL −1R), реализуя −0.56R (0.27R съедала комиссия).
+    # 0.7R симметричен анти-клиппингу flow_exit (≥1R): мелкий минус на шумовом
+    # флипе ДЕРЖИМ (даём развиться/уйти в безубыточный time_stop), режем лишь
+    # реально ломающиеся сделки до полного SL. С min_risk_fee_mult=4 (fee≈0.25R)
+    # порог 0.7R заведомо выше комиссии. Не подгонка под P&L: устранение
+    # hair-trigger по механике (fee-gap) + симметрия с flow_exit.
+    scratch_min_adverse_r: float = Field(default=0.7)
 
     # ─── Старт «с чистого листа» ──────────────────────────────────────────
     # При старте закрыть любые открытые позиции по нашим символам и

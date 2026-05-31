@@ -90,6 +90,19 @@ class ScalpBybitClient:
         self._instr[symbol] = info
         return info
 
+    def get_kline(self, symbol: str, interval: str, limit: int = 200) -> list[list]:
+        """HTF-свечи для трендового фильтра (EMA200 1H). list DESC (новые сверху),
+        элемент: [startTime, open, high, low, close, volume, turnover].
+        Офдок: https://bybit-exchange.github.io/docs/v5/market/kline"""
+        try:
+            resp = self._session.get_kline(
+                category=self._category, symbol=symbol,
+                interval=interval, limit=limit)
+        except Exception:
+            log.exception("get_kline %s %s failed", symbol, interval)
+            return []
+        return resp.get("result", {}).get("list", []) or []
+
     def get_tickers(self) -> list[dict]:
         """24h-снапшот по всем инструментам категории (для авто-селектора
         вселенной). Офдок: https://bybit-exchange.github.io/docs/v5/market/tickers

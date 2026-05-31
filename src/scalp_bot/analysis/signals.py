@@ -1,19 +1,24 @@
 """Движок orderflow-сигналов scalp_bot (детерминированные правила).
 
-Сетап — «свип ликвидности + поглощение» (mean-reversion fade), консенсус
-проф-источников 2026 (chartwhisperer order-flow, coinxsight delta-system,
-bookmap liquidity-vacuum, Kalena CVD):
+Сетап — «свип ликвидности + поглощение» (mean-reversion fade), канон CAP
+(chartwhisperer order-flow 2026, Kalena CVD): сигнал = свип стопов за уровень
++ CVD-дивергенция (поглощение) + reclaim (CHoCH, возврат за уровень) +
+разворот ленты. Это и есть вход — без структурного контекста CVD-дивергенция
+сама по себе шум (CAP), но лишних факторов канон не добавляет: «HF-скальпинг
+выигрывает на 2 факторах; 5+ конфлюенсов недобирают» (traderssecondbrain 2026).
 
-  Цена сметает стопы за уровень → агрессоров «поглощают» (CVD-дивергенция)
-  → толпа перегружена (funding) и/или вылетает (ликвидации) → разворот.
+Живой путь (``SweepReclaimDetector``) двухфазный:
+  ВЗВОД (arm):  SWEEP (свежий экстремум, собрал стопы) + CVD_DIVERGENCE
+                (цена ↓ low / CVD ↑ low; зеркально для short). [оба ОБЯЗ.]
+  ВЫСТРЕЛ (fire): RECLAIM (цена вернулась ≥ reclaim_frac за уровень) +
+                  REVERSAL_MOMENTUM (CVD качнулся в сторону сделки). [оба ОБЯЗ.]
+  OB_IMBALANCE — бонус-подтверждение (в reasons; гейтит только при
+                 require_ob_imbalance=True, по умолчанию выкл).
 
-5 микро-правил (бинарные). Вход требует CVD-дивергенцию (обязательна как
-ключевой признак поглощения) + ≥ ``min_confluence`` из 5:
-  1. SWEEP        — цена сделала свежий локальный экстремум (собрала стопы).
-  2. CVD_DIVERG   — цена ↓ low, CVD ↑ low (bull) / зеркально (bear). [ОБЯЗ.]
-  3. LIQ_FLUSH    — каскад вынужденных ликвидаций в сторону капитуляции.
-  4. FUNDING      — funding-перекос толпы в противоположную сделке сторону.
-  5. OB_IMBALANCE — стакан накапливается в сторону сделки.
+Аудит v0.9.0 (2026-05-31): funding-перекос и ликвидационный flush УБРАНЫ как
+факторы входа — на 502 реальных входах они появлялись в 1 сделке каждый (0.2%),
+не гейтили и не каноничны для разворота на 90–120с (funding — 8ч-метрика). Это
+устранение factor-noise (канон: «убери фактор — если WR не падает, он был шумом»).
 
 Все функции чистые → юнит-тестируемы без WS.
 """
@@ -22,7 +27,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot
+from scalp_bot.data.aggregates import CvdSample, SymbolSnapshot
 
 # Отдельный логгер-«плейбук»: пошаговый нарратив торговли простым языком,
 # чтобы на пальцах видеть, где бот идёт по стратегии верно, а где буксует.
@@ -85,32 +90,6 @@ def cvd_divergence(samples: list[CvdSample], side: str, min_late: int = 0) -> bo
     return price_higher_high and cvd_lower_high
 
 
-def liq_flush(liqs: list[LiqEvent], side: str, threshold_usd: float) -> bool:
-    """Каскад ликвидаций в сторону капитуляции.
-
-    Семантика Bybit allLiquidation (офиц. дока): поле S = POSITION side.
-    S="Buy" → ликвидирован ЛОНГ (forced SELL, капитуляция ВНИЗ) → fade ЛОНГОМ.
-    S="Sell" → ликвидирован ШОРТ (forced BUY, сквиз ВВЕРХ) → fade ШОРТОМ.
-    https://bybit-exchange.github.io/docs/v5/websocket/public/all-liquidation
-    """
-    want = "Buy" if side == "long" else "Sell"
-    total = sum(e.size_usd for e in liqs if e.side == want)
-    return total >= threshold_usd
-
-
-def funding_supportive(funding: float | None, side: str,
-                       pos_extreme: float, neg_extreme: float) -> bool:
-    """Перекос толпы против сделки = топливо для разворота (АСИММЕТРИЧНО).
-
-    LONG:  funding ≤ −neg_extreme (толпа в шорте → сквиз вверх).
-    SHORT: funding ≥ +pos_extreme (толпа в лонге → каскад вниз).
-    Research: crowded long обычно глубже (+0.05%), crowded short мельче (−0.03%).
-    """
-    if funding is None:
-        return False
-    return funding <= -neg_extreme if side == "long" else funding >= pos_extreme
-
-
 def reclaimed(samples: list[CvdSample], side: str, frac: float) -> bool:
     """Reclaim (CAP Rule 2): цена ушла за уровень фитилём, но вернулась внутрь.
 
@@ -161,34 +140,29 @@ def ob_supportive(imbalance: float | None, side: str, min_imb: float) -> bool:
 
 
 def diagnose(snap: SymbolSnapshot, cfg) -> dict | None:
-    """Состояние всех правил/гейтов для лучшей стороны — для funnel-диагностики.
+    """Флаги правил ЖИВОГО детектора для лучшей стороны — funnel-диагностика.
 
-    Возвращает dict с булевыми флагами (наблюдаемость, НЕ влияет на торговлю):
-    sweep/div/reclaim/momentum/ob/liq/funding/score/fee_ok/signal.
+    Возвращает dict булевых флагов (наблюдаемость, НЕ влияет на торговлю):
+    sweep/div/reclaim/momentum/ob. Отражает реальные фазы SweepReclaimDetector
+    (взвод sweep+div → выстрел reclaim+momentum, ob — бонус), а НЕ legacy-скоринг.
     """
     if snap.stale or snap.last_price is None or len(snap.cvd_samples) < 6:
         return None
     s = snap.cvd_samples
     best = None
     for side in ("long", "short"):
-        div = cvd_divergence(s, side, getattr(cfg, "div_min_late_trades", 0))
         d = {
             "side": side,
             "sweep": detect_sweep(s, side),
-            "div": div,
-            "liq": liq_flush(snap.liq_events, side, cfg.liq_flush_usd),
-            "funding": funding_supportive(snap.funding_rate, side,
-                                          cfg.funding_extreme_pos, cfg.funding_extreme_neg),
+            "div": cvd_divergence(s, side, getattr(cfg, "div_min_late_trades", 0)),
             "ob": ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min),
             "reclaim": reclaimed(s, side, cfg.reclaim_frac),
             "momentum": reversal_momentum(s, side, cfg.momentum_window_sec),
         }
-        d["score"] = sum(1 for k in ("sweep", "div", "liq", "funding", "ob") if d[k])
+        # «качество» стороны: совпали ли обе фазы детектора (взвод+выстрел).
+        d["score"] = sum(1 for k in ("sweep", "div", "reclaim", "momentum") if d[k])
         if best is None or d["score"] > best["score"]:
             best = d
-    sig = evaluate(snap, cfg)
-    best["fee_ok"] = sig is not None or not best["div"]  # грубо: дошли до fee-guard
-    best["signal"] = sig is not None
     return best
 
 
@@ -200,66 +174,6 @@ def flow_invalidated(snap: SymbolSnapshot, side: str, window_sec: float) -> bool
     """
     opp = "short" if side == "long" else "long"
     return reversal_momentum(snap.cvd_samples, opp, window_sec)
-
-
-def _evaluate_side(snap: SymbolSnapshot, side: str, cfg) -> tuple[int, list[str]]:
-    reasons: list[str] = []
-    score = 0
-    if detect_sweep(snap.cvd_samples, side):
-        score += 1
-        reasons.append("sweep")
-    div = cvd_divergence(snap.cvd_samples, side, getattr(cfg, "div_min_late_trades", 0))
-    if div:
-        score += 1
-        reasons.append("cvd_div")
-    if liq_flush(snap.liq_events, side, cfg.liq_flush_usd):
-        score += 1
-        reasons.append("liq_flush")
-    if funding_supportive(snap.funding_rate, side,
-                          cfg.funding_extreme_pos, cfg.funding_extreme_neg):
-        score += 1
-        reasons.append("funding")
-    if ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min):
-        score += 1
-        reasons.append("ob_imb")
-    # CVD-дивергенция обязательна (ключевой признак поглощения).
-    if not div:
-        return (0, [])
-    # Подтверждение разворота: reclaim + разворот ленты (анти «ловля ножа»).
-    if getattr(cfg, "require_reclaim", False):
-        if not reclaimed(snap.cvd_samples, side, cfg.reclaim_frac):
-            return (0, [])
-        if not reversal_momentum(snap.cvd_samples, side, cfg.momentum_window_sec):
-            return (0, [])
-        reasons.append("rcl+mom")
-    return (score, reasons)
-
-
-def evaluate(snap: SymbolSnapshot, cfg) -> Signal | None:
-    """Главная оценка. Возвращает Signal или None.
-
-    cfg — объект с полями min_confluence, liq_flush_usd, funding_extreme,
-    ob_imbalance_min, take_profit_r, sl_buffer_bps (ScalpSettings).
-    """
-    if snap.stale or snap.last_price is None or len(snap.cvd_samples) < 6:
-        return None
-
-    long_score, long_reasons = _evaluate_side(snap, "long", cfg)
-    short_score, short_reasons = _evaluate_side(snap, "short", cfg)
-
-    if long_score >= cfg.min_confluence and long_score >= short_score:
-        side, score, reasons = "long", long_score, long_reasons
-    elif short_score >= cfg.min_confluence:
-        side, score, reasons = "short", short_score, short_reasons
-    else:
-        return None
-
-    # SL за экстремумом ИМЕННО свежего свипа (поздняя половина окна).
-    _, late = _split_halves(snap.cvd_samples)
-    recent = late or snap.cvd_samples
-    swept = (min(s.price for s in recent) if side == "long"
-             else max(s.price for s in recent))
-    return build_signal(snap, side, swept, cfg, score, reasons)
 
 
 def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
@@ -423,16 +337,12 @@ class SweepReclaimDetector:
                           self.symbol, _SIDE_RU.get(side, side),
                           cfg.ob_imbalance_min)
             return None
-        # reclaim + разворот совпали → собираем бонус-подтверждения
+        # reclaim + разворот совпали → ob_imb как единственный бонус (funding/liq
+        # убраны в аудите v0.9.0: 0.2% присутствия на 502 входах, factor-noise).
         reasons = ["sweep", "cvd_div", "reclaim", "mom"]
         if ob_ok:
             reasons.append("ob_imb")
-        if liq_flush(snap.liq_events, side, cfg.liq_flush_usd):
-            reasons.append("liq")
-        if funding_supportive(snap.funding_rate, side,
-                              cfg.funding_extreme_pos, cfg.funding_extreme_neg):
-            reasons.append("funding")
-        bonus = [r for r in reasons if r in ("ob_imb", "liq", "funding")]
+        bonus = [r for r in reasons if r in ("ob_imb",)]
         sig = build_signal(snap, side, a["swept"], cfg, len(reasons), reasons)
         if sig is None:
             # reclaim+разворот были, но риск/комиссии не прошли fee-guard

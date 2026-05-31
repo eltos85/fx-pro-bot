@@ -79,11 +79,13 @@ class SweepFadeStrategy:
          до ≥1R (анти-клиппинг, анализ 427 сделок 2026-05-31: копеечный порог
          клипал 79 вин медианой ~$0.04 и обнулял смысл TP=3.5R). Ниже 1R на
          развороте — ДЕРЖИМ (даём добежать к TP), не клипаем.
-      2. SCRATCH-ПРИ-ОШИБКЕ (flow_scratch): ход в МИНУС ≥ round-trip И поток
-         развернулся И сделка «созрела» (≥ scratch_min_age_sec) → режем убыток
-         рано, не ждём SL/тайм-стоп (research «exit if wrong» + анализ 304
-         сделок 2026-05-31: убыточные тянулись к 91с/SL).
-    Зона между −комиссией и +1R на развороте — НЕ трогаем (даём развиться).
+      2. SCRATCH-ПРИ-ОШИБКЕ (flow_scratch): ход в МИНУС ≥ scratch_min_adverse_r×R
+         И поток развернулся И сделка «созрела» (≥ scratch_min_age_sec) → режем
+         убыток рано, не ждём SL/тайм-стоп. v0.9.2: порог поднят с «≥ комиссии»
+         (hair-trigger: 40% входов, все в минус, резал при −0.29R далеко от SL,
+         реализуя −0.56R с комиссией) до ≥0.7R — симметрично анти-клиппингу
+         flow_exit. Мелкий минус на шумовом флипе ДЕРЖИМ.
+    Зона между −0.7R и +1R на развороте — НЕ трогаем (даём развиться).
     """
 
     name = "sweep_fade"
@@ -128,7 +130,6 @@ class SweepFadeStrategy:
             return None
         favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
         risk = abs(tr.entry - getattr(tr, "sl", tr.entry))
-        fee_px = tr.entry * cfg.round_trip_fee_frac
         flipped = flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
         if not flipped:
             return None  # лента ещё за нас — держим
@@ -138,10 +139,12 @@ class SweepFadeStrategy:
         activate = getattr(cfg, "flow_exit_activate_r", 1.0) * risk
         if risk > 0 and favorable >= activate:
             return ("flow_exit", price)
-        # 2) scratch-при-ошибке: явно в минусе ≥ round-trip, поток против и
+        # 2) scratch-при-ошибке: сделка реально в минусе ≥ scratch_min_adverse_r×R
+        #    (v0.9.2: не hair-trigger «≥комиссии», а порог глубины), поток против и
         #    сделка созрела → режем убыток рано (не ждём SL/тайм-стоп)
+        adverse = getattr(cfg, "scratch_min_adverse_r", 0.7) * risk
         if (getattr(cfg, "scratch_on_flow_flip", False)
-                and favorable <= -fee_px
+                and risk > 0 and favorable <= -adverse
                 and now - tr.ts_open >= getattr(cfg, "scratch_min_age_sec", 20.0)):
             return ("flow_scratch", price)
         return None
@@ -177,17 +180,52 @@ def _baseline_avg(sizes: list[float]) -> float:
     return sum(others) / len(others)
 
 
-def detect_wall(levels: list[tuple[float, float]], wall_mult: float,
-                min_usd: float = 0.0) -> tuple[float, float] | None:
-    """Крупнейшая «стена» на стороне книги: size ≥ wall_mult × baseline_avg.
+class RollingBaseline:
+    """Скользящее среднее «типичного» размера уровня за окно (Kalena: стена =
+    кратное среднего за 10–15 мин, а НЕ мгновенного top-N). Каждый тик кормим
+    per-snapshot baseline (``_baseline_avg``), храним (ts, val) за window_sec.
 
-    baseline_avg — средний размер обычного уровня (без самой стены).
+    Аудит v0.9.0: мгновенный baseline давал max-уровень лишь 2–4× среднего —
+    стена 5× недостижима (0/502 входов). Time-windowed baseline нормирует к
+    типичной глубине рынка, ловя реально аномальные уровни (research-каноничный
+    знаменатель Kalena)."""
+
+    __slots__ = ("window", "_samples")
+
+    def __init__(self, window_sec: float) -> None:
+        self.window = window_sec
+        self._samples: list[tuple[float, float]] = []
+
+    def add(self, ts: float, value: float) -> None:
+        if value > 0:
+            self._samples.append((ts, value))
+        cut = ts - self.window
+        if self._samples and self._samples[0][0] < cut:
+            self._samples = [(t, v) for t, v in self._samples if t >= cut]
+
+    def value(self) -> float:
+        if not self._samples:
+            return 0.0
+        return sum(v for _, v in self._samples) / len(self._samples)
+
+    def ready(self, min_samples: int) -> bool:
+        return len(self._samples) >= min_samples
+
+
+def detect_wall(levels: list[tuple[float, float]], wall_mult: float,
+                min_usd: float = 0.0,
+                baseline: float | None = None) -> tuple[float, float] | None:
+    """Крупнейшая «стена» на стороне книги: size ≥ wall_mult × baseline.
+
+    baseline — знаменатель: если передан (>0) — используем СКОЛЬЗЯЩИЙ (Kalena
+    10–15мин, v0.9.0); иначе fallback на мгновенный ``_baseline_avg`` (warmup).
     min_usd — опциональный абсолютный пол (price×size).
     Возвращает (price, size) стены или None.
     """
     if len(levels) < 5:
         return None
-    base = _baseline_avg([sz for _, sz in levels])
+    base = baseline if (baseline is not None and baseline > 0) \
+        else _baseline_avg([sz for _, sz in levels])
     if base <= 0:
         return None
     price, size = max(levels, key=lambda ps: ps[1])
@@ -199,11 +237,13 @@ def detect_wall(levels: list[tuple[float, float]], wall_mult: float,
 
 
 def _wall_in_range(levels: list[tuple[float, float]], lo: float, hi: float,
-                   wall_mult: float, min_usd: float = 0.0) -> bool:
+                   wall_mult: float, min_usd: float = 0.0,
+                   baseline: float | None = None) -> bool:
     """Есть ли всё ещё квалифицирующая стена в ценовом диапазоне [lo, hi]."""
     if len(levels) < 5:
         return False
-    base = _baseline_avg([sz for _, sz in levels])
+    base = baseline if (baseline is not None and baseline > 0) \
+        else _baseline_avg([sz for _, sz in levels])
     if base <= 0:
         return False
     for price, size in levels:
@@ -218,8 +258,10 @@ class DensityBounceStrategy:
 
     ─── Research basis ───
     Kalena «Crypto Wall Detection» 2026: стена = ≥5–8× средний размер уровня
-    (относительный порог, не абсолютный $; берём 5× — нижний край диапазона:
-    8× недостижим на мгновенном top-25 Bybit, см. settings 2026-05-31); если
+    за 10–15 мин (относительный порог, не абсолютный $; берём 5×). v0.9.0:
+    знаменатель = СКОЛЬЗЯЩИЙ baseline за density_baseline_sec (RollingBaseline),
+    а не мгновенный top-25 — мгновенный давал max-уровень 2–4× (5× недостижим,
+    0/502 входов); time-windowed baseline = каноничный знаменатель Kalena. Если
     >30% стены ушло за <10с —
     остаток скоро снимут (спуфинг) → не торгуем. arXiv 2604.20949: depth-
     сигналы причинно раньше flow. Данилов (YouTube 2025): отскок от плотности
@@ -243,7 +285,23 @@ class DensityBounceStrategy:
         self._track: dict[str, dict[str, dict | None]] = {
             s: {"bid": None, "ask": None} for s in symbols
         }
+        self._base: dict[str, dict[str, RollingBaseline]] = {
+            s: self._new_base() for s in symbols
+        }
         self._last_log: dict[str, float] = {}
+
+    def _new_base(self) -> dict[str, RollingBaseline]:
+        w = getattr(self.cfg, "density_baseline_sec", 900.0)
+        return {"bid": RollingBaseline(w), "ask": RollingBaseline(w)}
+
+    def _wall_baseline(self, sym: str, book_side: str,
+                       levels: list[tuple[float, float]], now: float) -> float | None:
+        """Кормим rolling-baseline текущим per-snapshot средним и возвращаем
+        скользящее значение (или None пока идёт прогрев → fallback на мгновенный)."""
+        rb = self._base.setdefault(sym, self._new_base())[book_side]
+        rb.add(now, _baseline_avg([sz for _, sz in levels]))
+        min_n = getattr(self.cfg, "density_baseline_min_samples", 30)
+        return rb.value() if rb.ready(min_n) else None
 
     def armed(self, symbol: str) -> bool:
         t = self._track.get(symbol)
@@ -256,12 +314,15 @@ class DensityBounceStrategy:
     def ensure_symbols(self, symbols: list[str]) -> None:
         for s in symbols:
             self._track.setdefault(s, {"bid": None, "ask": None})
+            self._base.setdefault(s, self._new_base())
 
     def _update_track(self, sym: str, book_side: str,
                       levels: list[tuple[float, float]], now: float) -> None:
         cfg = self.cfg
         t = self._track[sym]
-        wall = detect_wall(levels, cfg.density_wall_mult, cfg.density_min_wall_usd)
+        base = self._wall_baseline(sym, book_side, levels, now)
+        wall = detect_wall(levels, cfg.density_wall_mult, cfg.density_min_wall_usd,
+                           baseline=base)
         cur = t[book_side]
         if wall is None or not near_round(wall[0], cfg.density_round_frac):
             t[book_side] = None
@@ -326,11 +387,15 @@ class DensityBounceStrategy:
         if now - tr.ts_open < cfg.active_exit_min_age_sec:
             return None
         if tr.side == "long":
+            base = self._wall_baseline(snap.symbol, "bid", snap.bids, now)
             present = _wall_in_range(snap.bids, tr.sl, tr.entry,
-                                     cfg.density_wall_mult, cfg.density_min_wall_usd)
+                                     cfg.density_wall_mult, cfg.density_min_wall_usd,
+                                     baseline=base)
         else:
+            base = self._wall_baseline(snap.symbol, "ask", snap.asks, now)
             present = _wall_in_range(snap.asks, tr.entry, tr.sl,
-                                     cfg.density_wall_mult, cfg.density_min_wall_usd)
+                                     cfg.density_wall_mult, cfg.density_min_wall_usd,
+                                     baseline=base)
         if not present:
             return ("density_gone", snap.last_price)
         return None
@@ -349,7 +414,9 @@ class DensityBreakStrategy:
     разрежение → цена ускоряется. Анти-спуфинг (ключ!): торгуем снос ТОЛЬКО у
     стены, которая реально ВЫСТОЯЛА ≥ persist_sec; стена, мелькнувшая <persist —
     спуфинг, НЕ сигнал (в density_bounce то же событие = инвалидация; здесь
-    выстоявшая+пробитая = вход ПО ХОДУ пробоя).
+    выстоявшая+пробитая = вход ПО ХОДУ пробоя). Знаменатель стены — СКОЛЬЗЯЩИЙ
+    baseline за 10–15 мин (RollingBaseline, v0.9.0), как в Kalena, а не
+    мгновенный top-25 (тот давал 0/502 входов — стена 5× недостижима).
 
     Логика (на символ, momentum/breakout — ПРОТИВОПОЛОЖНА fade):
     1. Наблюдаем крупную стену у круглого числа (detect_wall + near_round).
@@ -372,6 +439,20 @@ class DensityBreakStrategy:
         self._track: dict[str, dict[str, dict | None]] = {
             s: {"bid": None, "ask": None} for s in symbols
         }
+        self._base: dict[str, dict[str, RollingBaseline]] = {
+            s: self._new_base() for s in symbols
+        }
+
+    def _new_base(self) -> dict[str, RollingBaseline]:
+        w = getattr(self.cfg, "density_baseline_sec", 900.0)
+        return {"bid": RollingBaseline(w), "ask": RollingBaseline(w)}
+
+    def _wall_baseline(self, sym: str, book_side: str,
+                       levels: list[tuple[float, float]], now: float) -> float | None:
+        rb = self._base.setdefault(sym, self._new_base())[book_side]
+        rb.add(now, _baseline_avg([sz for _, sz in levels]))
+        min_n = getattr(self.cfg, "density_baseline_min_samples", 30)
+        return rb.value() if rb.ready(min_n) else None
 
     def armed(self, symbol: str) -> bool:
         t = self._track.get(symbol)
@@ -385,6 +466,7 @@ class DensityBreakStrategy:
     def ensure_symbols(self, symbols: list[str]) -> None:
         for s in symbols:
             self._track.setdefault(s, {"bid": None, "ask": None})
+            self._base.setdefault(s, self._new_base())
 
     def _track_side(self, sym: str, book_side: str,
                     levels: list[tuple[float, float]], now: float) -> float | None:
@@ -394,7 +476,9 @@ class DensityBreakStrategy:
         cfg = self.cfg
         t = self._track[sym]
         cur = t[book_side]
-        wall = detect_wall(levels, cfg.density_wall_mult, cfg.density_min_wall_usd)
+        base = self._wall_baseline(sym, book_side, levels, now)
+        wall = detect_wall(levels, cfg.density_wall_mult, cfg.density_min_wall_usd,
+                           baseline=base)
         if cur is None:
             if wall is not None and near_round(wall[0], cfg.density_round_frac):
                 t[book_side] = {"price": wall[0], "size0": wall[1],

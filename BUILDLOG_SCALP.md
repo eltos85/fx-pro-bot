@@ -6,6 +6,155 @@
 
 ## 2026-05-31
 
+### v0.9.3 — HTF-bias: фейд только по тренду EMA200 1H (контекст, аудит №4)
+`<hash>`
+
+**Контекст (находка аудита №4).** Канон CAP: «без структурного контекста
+CVD-дивергенция — шум» (gates 1–3: HTF-структура/сессия). sweep_fade фейдил
+микроструктуру В ВАКУУМЕ — ни HTF-bias, ни сессии, ни VWAP-локации. Вероятная
+причина низкого WR (29–40%): часть фейдов — ловля ножа против старшего тренда.
+
+**Правка (одобрено пользователем 2026-05-31, вариант «htf», дизайн согласован).**
+Трендовый фильтр старшего ТФ: EMA200 на 1H (Bybit `get_kline` interval=60,
+refresh раз в `htf_refresh_sec`=300с, кэш per-symbol). Правило (trend-aligned
+fade): long-fade только при `price > EMA200_1h`, short — только ниже; контртренд
+блокируем. Гейт в main-loop ПОСЛЕ `resolve(sig)` (HTF — market-regime фильтр,
+общий для всех стратегий, как killswitch/funding-window), детектор не трогаем.
+**Fail-open**: нет HTF-данных (REST-сбой / новый листинг < ema_len свечей) →
+НЕ блокируем (сбой свечей не должен глушить торговлю).
+
+**Research:** Murphy 1999 (EMA200 = primary trend filter; уже канон в fx_pro_bot
+strategy-guard как блокирующий H1-фильтр); Asness et al. 2013 «Value & Momentum
+Everywhere» (mean-reversion в согласии с трендом, не против); chartwhisperer CAP
+(структурный контекст до входа).
+
+**Влияние:** режет частоту (контртренд-фейды ~половина) → должен поднять WR и
+убрать худшие ловли ножа. Подтвердим live forward-тестом (≥100 сделок,
+sample-size.mdc).
+
+**Файлы:** `data/htf.py` (NEW — `HtfTrend`, `compute_ema`, fail-open),
+`trading/client.py` (`get_kline`), `config/settings.py` (4 поля HTF),
+`app/main.py` (инстанс+refresh+гейт после resolve), `docker-compose.yml` (4 env),
+`tests/test_scalp_bot.py` (+5 тестов HTF; 111 passed, полный набор 1034 passed).
+
+### v0.9.2 — flow_scratch: порог глубины 0.7R вместо hair-trigger «≥комиссии»
+`<hash>`
+
+**Проблема (данные, 60 свежих сделок, risk≈$1).** flow_scratch — главный
+кровосос: **24 из 60 входов (40%), все в минус, −$12.31**. Резал при ходе против
+медианно **−0.29R** (далеко от SL −1R), а реализовывал **−0.56R** — разницу 0.27R
+съедала комиссия. Условие срабатывания было `минус ≥ round-trip комиссии`
+(≈−0.25R) + любой флип ленты + 20с → hair-trigger: убивал сделки на шумовой
+просадке, не дав развиться. 75% скретчей (по всей истории) — при ходе всего
+0–0.5R против.
+
+**Асимметрия (корень).** flow_exit мы подняли до ≥1R (анти-клиппинг вин), а
+flow_scratch резал при ≥0.25R минуса — мелкий профит держим, мелкий минус рубим
+на шуме + платим комиссию. Это душило «Философию B» (дай развиться).
+
+**Правка (одобрено пользователем 2026-05-31, вариант «0.7R»).** Добавлен
+`scratch_min_adverse_r` (default **0.7**): скретчим только когда сделка реально
+в минусе ≥ 0.7R × R И лента развернулась И созрела. Симметрично анти-клиппингу
+flow_exit. Мелкий минус на шумовом флипе ДЕРЖИМ (уйдёт в безубыточный time_stop
+medR +0.04 или восстановится), режем лишь реально ломающиеся сделки до полного
+SL. С min_risk_fee_mult=4 (fee≈0.25R) порог 0.7R заведомо выше комиссии. Не
+подгонка под P&L: устранение hair-trigger по механике (fee-gap) + симметрия.
+
+**Файлы:** `config/settings.py` (`scratch_min_adverse_r`),
+`analysis/strategies.py` (порог глубины в should_exit + docstring,
+убран неиспользуемый fee_px), `docker-compose.yml` (env),
+`tests/test_scalp_bot.py` (+2 теста: держим −0.3R, режем −0.8R; обновлены 2;
+106 passed).
+
+**Sample-size disclaimer.** Окно ~3ч/60 сделок (один режим). Но проблема
+МЕХАНИЧЕСКАЯ (hair-trigger + fee-gap 0.27R) и совпадает с подтверждённым выводом
+v0.8.1 — не оптимизация под выборку (no-data-fitting.mdc, sample-size.mdc).
+
+### v0.9.1 — density: rolling-baseline стены (Kalena 10–15мин вместо мгновенного)
+`<hash>`
+
+**Проблема (данные).** density_bounce/density_break = **0 из 502 входов** за всю
+историю. Корень (диагностика на живых книгах, BUILDLOG v0.8.3): `_baseline_avg`
+берёт знаменатель из **мгновенного** top-25 стакана, где самый крупный уровень
+лишь 2–4× среднего → порог 5× недостижим. Research Kalena меряет стену против
+среднего размера уровня **за 10–15 мин**, а не мгновенного — это и был расхождение
+реализации с источником.
+
+**Правка (одобрено пользователем 2026-05-31, вариант «fix»).** Добавлен
+`RollingBaseline` — скользящее среднее per-snapshot baseline за
+`density_baseline_sec` (900с = верх research-окна). `detect_wall`/`_wall_in_range`
+получили опциональный параметр `baseline`: если передан скользящий — сравниваем
+стену с ним; пока не накоплено `density_baseline_min_samples` (30) — fallback на
+мгновенный (warmup-совместимость). Обе density-стратегии кормят baseline каждый
+тик в `update`/`should_exit`. Это каноничный знаменатель Kalena, не подгонка порога.
+
+**Честно про ожидания (no-data-fitting).** Глубину стакана исторически бэктестить
+нельзя — частоту входов после правки подтвердим только live (forward-test). Не
+обещаю, что страты «оживут»: time-windowed baseline даёт research-каноничный
+знаменатель, но если на текущих монетах реально нет аномальных стен — входов будет
+мало. Это первый корректный шаг, не гарантия частоты.
+
+**Файлы:** `analysis/strategies.py` (`RollingBaseline`, baseline-параметр в
+detect_wall/_wall_in_range, аккумуляторы в обеих density-стратегиях + research-
+докстринги), `config/settings.py` (2 поля), `docker-compose.yml` (2 env),
+`tests/test_scalp_bot.py` (+3 теста: RollingBaseline окно/warmup/non-positive,
+detect_wall с явным baseline; 104 passed, полный набор пройдёт перед коммитом).
+
+### v0.9.0 — аудит sweep_fade: удаление factor-noise и мёртвого пути
+`<hash>`
+
+**Контекст.** Пользователь попросил аудит основной стратегии против канонов
+скальпинга — найти лишнюю/вредную логику, которую «натянули/перепридумали».
+Перечитал весь код входа + освежил каноны (chartwhisperer CAP, Kalena DOM,
+traderssecondbrain «confluence math»).
+
+**Канон (источники).** CAP-сигнал = свип + CVD-дивергенция + reclaim (CHoCH);
+funding/ликвидации в гейтах CAP ОТСУТСТВУЮТ. «HF-скальпинг выигрывает на 2
+факторах; 5+ конфлюенсов систематически недобирают» (traderssecondbrain 2026).
+Аудит-правило канона: «убери фактор по одному — если WR/прибыль не падает, он
+был шумом».
+
+**Данные (502 входа из БД, ground-truth по reasons).** Все 502 входа —
+sweep_fade. Распределение reasons:
+- `sweep+cvd_div+reclaim+mom` — 361 (72%, чистое ядро без бонусов);
+- `+ob_imb` — 138 (27%);
+- `+liq` — **1 (0.2%)**; `+funding` — **1 (0.2%)**.
+→ funding и liq как факторы входа — **мёртвый декор** (присутствие 0.2%), не
+гейтят и не каноничны для разворота на 90–120с (funding — 8ч-метрика).
+
+**Находки и правки (рефактор, поведение ЖИВОГО входа не меняется):**
+1. **Убраны funding/liq как факторы входа** — из фазы ВЫСТРЕЛ детектора, из
+   funnel (`_FUNNEL_RULES`), из `diagnose`. Удалены функции `funding_supportive`,
+   `liq_flush` и поля `funding_extreme_pos/neg`, `liq_flush_usd`. liq_events
+   продолжаем собирать только для heartbeat-наблюдаемости.
+2. **Удалён мёртвый legacy-путь** `evaluate()` / `_evaluate_side()` /
+   `min_confluence`: живой путь — только `SweepReclaimDetector.update`, а
+   evaluate жил лишь в `diagnose`+тестах. Docstring `signals.py`/`main.py`
+   описывал «≥min_confluence из 5» — это поведение МЁРТВОГО пути (документация
+   рассинхронилась с детектором). `diagnose` переписан на фазы детектора
+   (sweep/div/reclaim/momentum/ob), без legacy-скоринга.
+
+**Что НЕ тронуто (каноничное ядро).** Свип-детект, обязательная CVD-дивергенция,
+reclaim, momentum-подтверждение, SL за свипом+буфер, fee-guard, мин-R пол,
+риск-сайзинг, flow_exit, killswitch — всё совпадает с CAP/канон.
+
+**Не сделано в этой правке (вынесено на отдельные решения):**
+- density_bounce/density_break = 0/502 входов — кандидат на disable-до-фикса
+  (rolling-baseline) либо фикс. Решение за пользователем.
+- Отсутствие HTF-bias / сессии / VWAP-локации — канонический пробел КОНТЕКСТА
+  («без контекста CVD-дивергенция — шум», CAP). Кандидат на эксперимент с данными.
+- flow_scratch hair-trigger (отдельный разбор) — ждёт выбора порога.
+
+**Файлы:** `analysis/signals.py` (−funding/liq/evaluate/_evaluate_side, docstring,
+diagnose-рерайт), `config/settings.py` (−3 поля), `app/main.py` (docstring,
+startup-лог, `_FUNNEL_RULES`), `docker-compose.yml` (−3 env),
+`tests/test_scalp_bot.py` (−5 legacy-тестов, +2 build_signal/diagnose; 101 passed,
+полный набор 1024 passed).
+
+**Sample-size disclaimer.** Удаление factor-noise обосновано присутствием 0.2%
+на n=502 + каноном (CAP не использует funding/liq), а не оптимизацией под P&L
+(no-data-fitting.mdc). Поведение живых входов не меняется (factors не гейтили).
+
 ### v0.8.3 — density wall 8×→5× + round-band 0.1%→0.3% (страты не срабатывали)
 `<hash>`
 

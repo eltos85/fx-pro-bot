@@ -298,6 +298,10 @@ services:
       # срабатывала — 0 сделок) + round-band 0.1%→0.3% (был слишком жёсткий гейт).
       SCALP_DENSITY_WALL_MULT: ${SCALP_DENSITY_WALL_MULT:-5.0}
       SCALP_DENSITY_ROUND_FRAC: ${SCALP_DENSITY_ROUND_FRAC:-0.003}
+      # Rolling-baseline (v0.9.0): стена vs скользящее среднее за 10–15мин (Kalena),
+      # а не мгновенный top-25 (тот давал 0/502 входов — 5× недостижим).
+      SCALP_DENSITY_BASELINE_SEC: ${SCALP_DENSITY_BASELINE_SEC:-900}
+      SCALP_DENSITY_BASELINE_MIN_SAMPLES: ${SCALP_DENSITY_BASELINE_MIN_SAMPLES:-30}
       SCALP_UNIVERSE_MIN_RANGE_PCT: ${SCALP_UNIVERSE_MIN_RANGE_PCT:-6}
       SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-30}
       SCALP_UNIVERSE_MAX_SPREAD_BPS: ${SCALP_UNIVERSE_MAX_SPREAD_BPS:-5}
@@ -322,9 +326,8 @@ services:
       SCALP_MAX_OPEN_POSITIONS: ${SCALP_MAX_OPEN_POSITIONS:-2}
       SCALP_MAX_TRADES_PER_HOUR: ${SCALP_MAX_TRADES_PER_HOUR:-20}
       # Сигналы (research-based дефолты — см. settings.py / BUILDLOG_SCALP.md)
-      SCALP_MIN_CONFLUENCE: ${SCALP_MIN_CONFLUENCE:-3}
-      SCALP_FUNDING_EXTREME: ${SCALP_FUNDING_EXTREME:-0.0003}
-      SCALP_LIQ_FLUSH_USD: ${SCALP_LIQ_FLUSH_USD:-50000}
+      # Аудит v0.9.0: MIN_CONFLUENCE / FUNDING_EXTREME / LIQ_FLUSH_USD удалены —
+      # legacy-скоринг и factor-noise (funding/liq = 0.2% входов, не каноничны).
       SCALP_OB_IMBALANCE_MIN: ${SCALP_OB_IMBALANCE_MIN:-0.58}
       # ob_imb — БОНУС (не блокирует вход), v0.7.0: гейт отсекал «жирные» вины.
       SCALP_REQUIRE_OB_IMBALANCE: ${SCALP_REQUIRE_OB_IMBALANCE:-false}
@@ -335,6 +338,15 @@ services:
       # Анти-клиппинг (v0.7.1): flow_exit фиксирует по развороту ленты только
       # после ≥1R прибыли (был копеечный порог ≥комиссии → клипал вины, обнулял TP).
       SCALP_FLOW_EXIT_ACTIVATE_R: ${SCALP_FLOW_EXIT_ACTIVATE_R:-1.0}
+      # Порог глубины flow_scratch (v0.9.2): режем убыток только при ≥0.7R против
+      # (был hair-trigger «≥комиссии» → 40% входов в минус). Симметрия с flow_exit.
+      SCALP_SCRATCH_MIN_ADVERSE_R: ${SCALP_SCRATCH_MIN_ADVERSE_R:-0.7}
+      # HTF-bias (v0.9.3): фейд только по тренду EMA200 1H (CAP-контекст,
+      # Murphy/Asness). Контртренд блокируем; fail-open при сбое свечей.
+      SCALP_REQUIRE_HTF_TREND: ${SCALP_REQUIRE_HTF_TREND:-true}
+      SCALP_HTF_INTERVAL: ${SCALP_HTF_INTERVAL:-60}
+      SCALP_HTF_EMA_LEN: ${SCALP_HTF_EMA_LEN:-200}
+      SCALP_HTF_REFRESH_SEC: ${SCALP_HTF_REFRESH_SEC:-300}
       # Мин-R пол + риск-сайзинг (v0.8.1): R ≥ 4×fee → fee ≤ 0.25R (R≈0.44%),
       # размер = риск$/дистанция_SL (канон профи), фикс $-риск/сделку.
       SCALP_MIN_RISK_FEE_MULT: ${SCALP_MIN_RISK_FEE_MULT:-4.0}
