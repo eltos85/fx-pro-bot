@@ -22,7 +22,8 @@ from scalp_bot.analysis.signals import (
 from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot, SymbolState
 from scalp_bot.safety import killswitch
 from scalp_bot.trading.executor import (
-    Executor, paper_pnl, position_size, position_size_by_risk, taker_pnl,
+    Executor, bracket_exit_reason, paper_pnl, position_size,
+    position_size_by_risk, taker_pnl,
 )
 
 
@@ -100,6 +101,17 @@ def test_split_too_few_samples():
 
 
 # ─── orderbook ─────────────────────────────────────────────────────────────
+
+def test_bracket_exit_reason_splits_tp_sl():
+    # LONG: exit выше входа → биржевой TP; ниже → биржевой SL
+    assert bracket_exit_reason("long", 100.0, 103.5) == "tp_hit"
+    assert bracket_exit_reason("long", 100.0, 99.0) == "sl_hit"
+    # SHORT зеркально
+    assert bracket_exit_reason("short", 100.0, 96.5) == "tp_hit"
+    assert bracket_exit_reason("short", 100.0, 101.0) == "sl_hit"
+    # exit неизвестен → legacy-фолбэк tp_sl
+    assert bracket_exit_reason("long", 100.0, None) == "tp_sl"
+
 
 def test_ob_supportive():
     assert ob_supportive(0.60, "long", 0.58) is True

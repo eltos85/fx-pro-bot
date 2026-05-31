@@ -34,12 +34,26 @@ TAKER_FEE = 0.00055
 # Закрытие → человеческая причина для плейбук-логов
 _CLOSE_RU = {
     "tp": "цель достигнута (TP)", "sl": "выбило по стопу (SL)",
-    "tp_sl": "биржа закрыла по TP/SL", "time_stop": "тайм-стоп (не пошло за время)",
+    "tp_hit": "цель достигнута (биржевой TP)",
+    "sl_hit": "выбило по стопу (биржевой SL)",
+    "tp_sl": "биржа закрыла по TP/SL",  # legacy (старые строки до v0.9.4)
+    "time_stop": "тайм-стоп (не пошло за время)",
     "flow_exit": "поток развернулся против — фиксирую профит раньше",
     "flow_scratch": "поток развернулся против в минусе — режу убыток рано",
     "density_gone": "стена в стакане исчезла — тезис снят, выхожу",
     "entry_Cancelled": "ордер входа отменён биржей", "entry_timeout": "вход не исполнился вовремя",
 }
+
+
+def bracket_exit_reason(side: str, entry: float, exit_price: float | None) -> str:
+    """Расщепляет биржевой bracket-выход (v0.9.4) на tp_hit / sl_hit по знаку
+    хода цены. Биржа сама закрыла позицию — это наш TP@take_profit_r или SL@−1R;
+    раньше всё писалось одним ярлыком tp_sl, что мешало отличить «цель добежала»
+    от «выбило стопом». exit_price неизвестен → tp_sl (legacy-фолбэк)."""
+    if exit_price is None or entry <= 0:
+        return "tp_sl"
+    favorable = (exit_price - entry) if side == "long" else (entry - exit_price)
+    return "tp_hit" if favorable >= 0 else "sl_hit"
 
 
 def qty_decimals(step: float) -> int:
@@ -377,7 +391,6 @@ class Executor:
     def _manage_paper(self, tr, price: float | None, snap=None) -> None:
         if price is None:
             return
-        age = self._now() - tr.ts_open
         hit_tp = price >= tr.tp if tr.side == "long" else price <= tr.tp
         hit_sl = price <= tr.sl if tr.side == "long" else price >= tr.sl
         reason = exit_px = None
@@ -388,8 +401,8 @@ class Executor:
             reason, exit_px = "tp", tr.tp
         elif strat_exit is not None:
             reason, exit_px = strat_exit
-        elif age >= self._cfg.time_stop_sec:
-            reason, exit_px = "time_stop", price
+        # v0.9.5: time_stop удалён — победителю даём бежать (Философия B);
+        # стоячую/убыточную сделку режут flow_scratch + биржевой SL/TP.
         if reason is None:
             return
         pnl, fees = paper_pnl(tr.side, tr.entry, exit_px, tr.qty)
@@ -412,9 +425,9 @@ class Executor:
                 pend["ts"] = self._now()
                 log.info("LIVE #%d %s — позиция открыта", tr.id, status)
                 play.info("✅ [%s] филл #%d %s @%.4f — позиция открыта, "
-                          "слежу за TP %.4f / SL %.4f / тайм-стопом %.0fс",
+                          "слежу за TP %.4f / SL %.4f / разворотом ленты",
                           tr.symbol, tr.id, tr.side.upper(), tr.entry, tr.tp,
-                          tr.sl, self._cfg.time_stop_sec)
+                          tr.sl)
                 self._notify(pend.get("open_text", f"🟢 open #{tr.id} {tr.symbol}"))
                 return
             if status in ("Cancelled", "Rejected", "Deactivated"):
@@ -448,20 +461,21 @@ class Executor:
             # по символу к открытой сделке внутри ingest_executions)
             pnl, exitp, is_real = self._realized_or_estimate(
                 tr, pos.mark_price or tr.entry)
+            reason = bracket_exit_reason(tr.side, tr.entry, exitp)
             self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,
-                                 fees_usd=0.0, close_reason="tp_sl",
+                                 fees_usd=0.0, close_reason=reason,
                                  ts_close=self._now(), provisional=not is_real)
             if is_real:
                 self._forget_trade(tr.id)
             self._pending.pop(tr.id, None)
             self._hold_log.pop(tr.id, None)
-            log.info("LIVE close #%d %s pnl=%.4f (биржа TP/SL)", tr.id, tr.symbol,
-                     pnl or 0.0)
-            self._on_close(tr, pnl, "tp_sl", "TP/SL", is_real)
+            log.info("LIVE close #%d %s pnl=%.4f (биржа %s)", tr.id, tr.symbol,
+                     pnl or 0.0, reason)
+            self._on_close(tr, pnl, reason, _CLOSE_RU.get(reason, reason), is_real)
             return
         strat_exit = self._strategy_exit(tr, snap)
-        if strat_exit is not None or self._now() - tr.ts_open >= self._cfg.time_stop_sec:
-            close_reason = strat_exit[0] if strat_exit is not None else "time_stop"
+        if strat_exit is not None:  # v0.9.5: только дискреционный выход; TP/SL — биржа
+            close_reason = strat_exit[0]
             side = "Buy" if tr.side == "long" else "Sell"
             close_link = f"scalp_{close_reason}_{tr.id}"
             self._link2trade[close_link] = tr.id  # филлы выхода → эта сделка
