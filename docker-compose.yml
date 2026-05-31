@@ -324,13 +324,17 @@ services:
       SCALP_MAX_DAILY_LOSS_USD: ${SCALP_MAX_DAILY_LOSS_USD:-500}
       SCALP_MAX_TOTAL_LOSS_USD: ${SCALP_MAX_TOTAL_LOSS_USD:-800}
       SCALP_MAX_OPEN_POSITIONS: ${SCALP_MAX_OPEN_POSITIONS:-2}
-      SCALP_MAX_TRADES_PER_HOUR: ${SCALP_MAX_TRADES_PER_HOUR:-20}
+      # 20→5/ч (v0.10.0): анти-overtrade. Канон 3–12 сигналов/день; у нас было
+      # ~17/ч у кэпа при gross edge ≈0 (402 сделки/24ч → −$60).
+      SCALP_MAX_TRADES_PER_HOUR: ${SCALP_MAX_TRADES_PER_HOUR:-5}
       # Сигналы (research-based дефолты — см. settings.py / BUILDLOG_SCALP.md)
       # Аудит v0.9.0: MIN_CONFLUENCE / FUNDING_EXTREME / LIQ_FLUSH_USD удалены —
       # legacy-скоринг и factor-noise (funding/liq = 0.2% входов, не каноничны).
       SCALP_OB_IMBALANCE_MIN: ${SCALP_OB_IMBALANCE_MIN:-0.58}
-      # ob_imb — БОНУС (не блокирует вход), v0.7.0: гейт отсекал «жирные» вины.
-      SCALP_REQUIRE_OB_IMBALANCE: ${SCALP_REQUIRE_OB_IMBALANCE:-false}
+      # ob_imb СНОВА обязателен (v0.10.0, score≥5): score=5 (ob есть) gross
+      # +0.11R vs score=4 (ob нет, 73% объёма) gross 0.00R — торгуем только
+      # где edge доказан (реверс v0.7.0-бонуса по данным 402 сделок).
+      SCALP_REQUIRE_OB_IMBALANCE: ${SCALP_REQUIRE_OB_IMBALANCE:-true}
       # Философия B: дай победителю бежать. TP 3.5R (асимметричный payoff).
       # v0.9.5: time_stop УДАЛЁН (противоречил «дай бежать» — резал по таймеру);
       # выход только flow_exit/flow_scratch/биржевой TP/SL.

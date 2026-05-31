@@ -6,6 +6,41 @@
 
 ## 2026-05-31
 
+### v0.10.0 — профи-пакет против overtrade/no-edge (maker + score≥5 + 5/ч)
+`<hash>`
+
+**Корень найден (не flow_scratch).** Разбор 402 сделок/24ч (`_entry_probe`):
+- **gross edge/сделку = +0.031R ≈ ноль** — сырой sweep_fade почти не предсказывает.
+- **net edge = −0.318R** → ×402 = −$60/сутки. Разрыв −0.35R = комиссия+слиппедж.
+- score=4 (293 шт, **73% объёма**) gross РОВНО 0.00R; score=5 (104) gross +0.11R.
+- WR 34% (канон скальпа 52–60%); частота ~17/ч у rate-кэпа (канон 3–12/день).
+- Единственный профит-символ — ALLOUSDT (net +0.28R).
+
+**Канон (research, сопоставлен с цифрами).** Net expectancy ≥1.5×кост иначе
+«даришь капитал брокеру» (fxroboteasy 2026); тейкер съедает 30–67% gross, профи
+берут maker (OneKey/StratBase/Echo Zero 2026); overtrading — главная причина
+слива; net-of-fees equity — единственная метрика (DEV 24-мес тест). Наша
+стратегия нарушала ВСЕ 5 осей одновременно.
+
+**Пакет (одобрен пользователем «full», strategy-guard):**
+1. **Maker-вход** — снят `SCALP_ENTRY_ORDER_TYPE=market` override (VPS .env), дефолт
+   `post_only_limit`. RT-кост 0.11%→0.075%, убран entry-слиппедж. `round_trip_fee_frac`
+   0.0011→0.00075. Компромисс: непролив лимитки = пропуск сделки (канон 3–12/день).
+2. **score≥5** = `require_ob_imbalance=True` (реверс v0.7.0-бонуса). score = sweep+
+   div+reclaim+mom (4) +ob_imb (5); режем весь score=4 (нулевой gross edge, 73%).
+3. **rate-limit 20→5/ч** — forcing function против переторговли.
+4. **net-expectancy гейт** — реализуемая форма = `min_target_fee_mult=3.0` (TP-reward
+   ≥3×кост, строже 1.5×; realized-edge pre-trade невозможен — WR заранее неизвестен).
+
+**Sample-size.** score=5 n=104, но ~1 день/1 режим → форвард-тест, валидируем за
+2 недели. Правки делают фильтр СТРОЖЕ (консервативно, низкий риск оверфита) +
+структурный аргумент (комиссия — не подгонка под P&L). Per-symbol disable НЕ
+делаем (LAB/WLD/ALLO n=19–46 — мало).
+
+**Файлы:** `config/settings.py` (max_trades_per_hour 20→5, require_ob_imbalance
+True, round_trip_fee_frac→0.00075), `docker-compose.yml` (env-дефолты), VPS `.env`
+(entry_order_type market→post_only_limit). 112 passed.
+
 ### v0.9.5 — удалён time_stop (противоречие Философии B)
 `<hash>`
 

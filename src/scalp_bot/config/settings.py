@@ -73,11 +73,16 @@ class ScalpSettings(BaseSettings):
     min_position_usd: float = Field(default=10.0)
     max_leverage: int = Field(default=5)
     # Killswitch (demo): дневной убыток $500, совокупный $800 (буфер до
-    # обнуления $1000 депо), max 2 позиции, 20 сделок/час (анти-overtrade).
+    # обнуления $1000 депо), max 2 позиции, 5 сделок/час (анти-overtrade).
     max_daily_loss_usd: float = Field(default=500.0)
     max_total_loss_usd: float = Field(default=800.0)
     max_open_positions: int = Field(default=2)
-    max_trades_per_hour: int = Field(default=20)
+    # 20→5/час (v0.10.0): анализ 402 сделок/24ч показал переторговлю — ~17/ч у
+    # rate-limit-кэпа, при этом gross edge ≈0 (+0.031R). Канон: жизнеспособная
+    # частота скальпа 3–12 сигналов/день, 8–12 уже даёт net PF<1 (StratBase 2026);
+    # «overtrading — главная причина слива» (fxroboteasy/Echo Zero 2026). 5/ч —
+    # forcing function против шумовых входов на нулевом edge.
+    max_trades_per_hour: int = Field(default=5)
 
     # ─── Исполнение ──────────────────────────────────────────────────────
     # LIVE на demo по умолчанию (демо-счёт, риска нет). False = PAPER-режим
@@ -119,14 +124,16 @@ class ScalpSettings(BaseSettings):
     # «ловли ножа»: detect_sweep ловит экстремум, но без reclaim бот мог
     # входить в реальный пробой.
     require_reclaim: bool = Field(default=True)
-    # Стакан как подтверждение входа sweep_fade. ВНОВЬ БОНУС (был обязательным
-    # в v0.6.1). Анализ 430 сделок (2026-05-31, BUILDLOG_SCALP v0.7.0): гейт
-    # поднимал WR 29%→40%, НО отсекал «жирные» вины (>$0.5) — а именно они
-    # дают асимметричный payoff (Философия B: «дай победителям бежать»). При
-    # WR fade-входа ~29% выживание возможно только через большие редкие вины,
-    # а не через рост WR (для этого нужен WR ~58% — нереально). Поэтому ob_imb
-    # снова не блокирует, а лишь добавляет очко в reasons.
-    require_ob_imbalance: bool = Field(default=False)
+    # Стакан как подтверждение входа sweep_fade. СНОВА ОБЯЗАТЕЛЕН (v0.10.0,
+    # реверс v0.7.0-бонуса). score = sweep+div+reclaim+mom (=4) +ob_imb (=5).
+    # Анализ 402 сделок/24ч (2026-05-31): score=5 (ob есть, n=104) gross
+    # +0.11R, score=4 (ob нет, n=294 = 73% объёма) gross РОВНО 0.00R — чистый
+    # слив на комиссии. Канон «строгий quantifiable edge-фильтр против
+    # переторговли» (fxroboteasy/Echo Zero 2026): торгуем ТОЛЬКО где edge
+    # доказан. v0.7.0 боялся потерять «жирные вины» no-ob входов, но их net
+    # по факту −$47 (294 шт) — асимметрия не спасает нулевой edge. Sample
+    # n=104/1 день → форвард-тест, валидируем за 2 недели (sample-size.mdc).
+    require_ob_imbalance: bool = Field(default=True)
     # Доля возврата цены от свип-экстремума к свипнутому уровню (0..1).
     reclaim_frac: float = Field(default=0.5)
     # Двухфазный детектор: сколько секунд держим «взвод» после свипа, ожидая
@@ -147,13 +154,22 @@ class ScalpSettings(BaseSettings):
     div_min_late_trades: int = Field(default=4)
 
     # ─── Анти fee-trap (комиссии съедают мелкую цель) ────────────────────
-    # Round-trip издержки. С маркет-входом (SCALP_ENTRY_ORDER_TYPE=market) обе
-    # ноги — TAKER: 0.055% × 2 = 0.11%. Подтверждено реальными сделками бота
-    # 2026-05-30 (openFee+closeFee ≈ 0.109$ на $100). Раньше стоял 0.075%
-    # (maker-вход + taker-выход) — недооценивал издержки на маркете.
+    # Round-trip издержки. v0.10.0: возврат на MAKER-вход (post_only_limit) —
+    # вход 0.02% (maker) + выход 0.055% (taker market-close/bracket) = 0.075%.
+    # Раньше market-вход давал 0.11% (taker обе ноги). Анализ 402 сделок/24ч:
+    # market-исполнение давало drag ~0.35R/сделку (fee+slippage), обнуляя
+    # gross edge. Канон: «тейкер съедает 30–67% gross на тонкой цели; профи
+    # берут maker-рибейты» (OneKey/StratBase/Echo Zero 2026 — maker = главный
+    # рычаг профитности скальпа). Maker-вход убирает и entry-слиппедж (филл по
+    # своей цене), не только удешевляет комиссию. Цена компромисса — непролив
+    # лимитки на волатильном reclaim → пропуск сделки (канон: 3–12/день, ОК).
     # Источники: liberatedstocktrader, 1minscalper, VT Markets (цель ≥3×).
     # Сигнал отбрасывается, если ход до TP < min_target_fee_mult × round_trip.
-    round_trip_fee_frac: float = Field(default=0.0011)
+    round_trip_fee_frac: float = Field(default=0.00075)
+    # Net-expectancy гейт (канон: net edge ≥1.5× round-trip кост, иначе «даришь
+    # капитал брокеру» — fxroboteasy 2026). Реализуемая pre-trade форма = цель
+    # TP ≥ 3× round-trip (reward-gate строже 1.5×; реальный realized-edge гейт
+    # pre-trade невозможен — WR заранее неизвестен). Оставляем 3.0×.
     min_target_fee_mult: float = Field(default=3.0)
     # Мин-R пол: дистанция стопа должна быть достаточно широкой, чтобы комиссия
     # была МАЛОЙ долей риска. R ≥ min_risk_fee_mult × round_trip_fee →
