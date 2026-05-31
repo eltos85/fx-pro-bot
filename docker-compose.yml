@@ -313,8 +313,12 @@ services:
       SCALP_FUNDING_EXTREME: ${SCALP_FUNDING_EXTREME:-0.0003}
       SCALP_LIQ_FLUSH_USD: ${SCALP_LIQ_FLUSH_USD:-50000}
       SCALP_OB_IMBALANCE_MIN: ${SCALP_OB_IMBALANCE_MIN:-0.58}
-      SCALP_TIME_STOP_SEC: ${SCALP_TIME_STOP_SEC:-90}
-      SCALP_TAKE_PROFIT_R: ${SCALP_TAKE_PROFIT_R:-1.5}
+      # ob_imb — БОНУС (не блокирует вход), v0.7.0: гейт отсекал «жирные» вины.
+      SCALP_REQUIRE_OB_IMBALANCE: ${SCALP_REQUIRE_OB_IMBALANCE:-false}
+      # Философия B (v0.7.0): дай победителю бежать. time_stop 120с (flow_scratch
+      # режет убытки рано, тугой бэкстоп не нужен), TP 3.5R (асимметричный payoff).
+      SCALP_TIME_STOP_SEC: ${SCALP_TIME_STOP_SEC:-120}
+      SCALP_TAKE_PROFIT_R: ${SCALP_TAKE_PROFIT_R:-3.5}
       # Telegram-нотификации (переиспользуем отдельного бота от ai_arena).
       SCALP_TELEGRAM_ENABLED: ${SCALP_TELEGRAM_ENABLED:-false}
       SCALP_TELEGRAM_BOT_TOKEN: ${SCALP_TELEGRAM_BOT_TOKEN:-}

@@ -402,8 +402,10 @@ class SweepReclaimDetector:
                               "развернулся — вход держу", self.symbol,
                               _SIDE_RU.get(side, side), last)
             return None
-        # фильтр качества входа: стакан должен подтверждать сторону сделки
-        # (обязателен по умолчанию — см. require_ob_imbalance в settings).
+        # стакан как подтверждение стороны сделки. По умолчанию — БОНУС (не
+        # блокирует, как в исходном дизайне v0.3.1); гейт включается только при
+        # require_ob_imbalance=True. v0.7.0: вернули в бонус — ob-гейт отсекал
+        # «жирные» вины (асимметричный payoff важнее WR, см. settings).
         ob_ok = ob_supportive(snap.ob_imbalance, side, cfg.ob_imbalance_min)
         if getattr(cfg, "require_ob_imbalance", False) and not ob_ok:
             iv = getattr(cfg, "narrate_interval_sec", 15.0)

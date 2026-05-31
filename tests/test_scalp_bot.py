@@ -37,7 +37,7 @@ def _cfg(**over):
         require_reclaim=True, reclaim_frac=0.5, momentum_window_sec=3.0,
         round_trip_fee_frac=0.00075, min_target_fee_mult=3.0,
         div_min_late_trades=2, arm_timeout_sec=60.0,
-        require_ob_imbalance=True,
+        require_ob_imbalance=False,  # v0.7.0: ob_imb — бонус (дефолт прода)
     )
     base.update(over)
     return SimpleNamespace(**base)
