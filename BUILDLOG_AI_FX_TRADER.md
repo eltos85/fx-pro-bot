@@ -2,6 +2,31 @@
 
 ## 2026-06-01
 
+### chore(observability): рационал в логе CLOSE + актуальный стартовый баннер
+
+`HASH_PLACEHOLDER2`
+
+Две косметические правки наблюдаемости (торговую логику не трогают),
+по итогам аудита рассуждений LLM:
+
+1. **CLOSE-рационал.** Раньше `APPLY: [LIVE] CLOSE …` логировался без
+   причины (в отличие от OPEN, где есть `— {reason}`), из-за чего закрытие
+   против ещё-цельного макро-тезиса выглядело необъяснимым (кейс NG=F id=34
+   закрыт в −$3.80 при печатаемом бычьем NOAA-драйвере). Теперь во все три
+   ветки `_apply_close` (broker_auto-recovery, broker-NET, fallback)
+   добавлен суффикс `close_note` = `thesis={status}: {invalidator} | {reason}`
+   из полей `CloseAction`.
+2. **Стартовый баннер.** Убран устаревший текст
+   `"FX AI Trader Phase 1 (gold XAUUSD + oil BRENT, paper-mode)"` — он врал
+   про paper-mode (реально LIVE) и про 2 символа (торгуется 3, вкл. NG=F).
+   Заменён на динамический `Mode: LIVE/PAPER` + актуальный список символов.
+
+**Тесты:** в `tests/test_fx_ai_trader.py` к close-тестам добавлены assert'ы,
+что reason попадает в `result.summary`. Полный набор 1039 passed.
+
+**Файлы:** src/fx_ai_trader/trading/executor.py, src/fx_ai_trader/app/main.py,
+tests/test_fx_ai_trader.py
+
 ### fix(ctrader-orders): relative SL/TP снапается к точности символа (digits) — иначе INVALID_REQUEST
 
 `6ab712b`

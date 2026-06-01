@@ -419,7 +419,22 @@ def _apply_close(
     settings: AiFxTraderSettings,
 ) -> ApplyResult:
     assert isinstance(action.model, CloseAction)
-    pos_id = action.model.position_id
+    cm = action.model
+    pos_id = cm.position_id
+
+    # Рационал закрытия для лога — по образцу OPEN (раньше CLOSE логировался
+    # без причины, поэтому close против ещё-цельного тезиса выглядел
+    # необъяснимым; BUILDLOG_AI_FX_TRADER.md 2026-06-01). thesis_status/
+    # invalidator — audit-поля persistent-thesis; reason — текст LLM.
+    _thesis = ""
+    if cm.thesis_status and cm.thesis_invalidator:
+        _thesis = f"thesis={cm.thesis_status}: {cm.thesis_invalidator}"
+    elif cm.thesis_status:
+        _thesis = f"thesis={cm.thesis_status}"
+    _reason = cm.reason or action.raw.get("reason", "")
+    _parts = [p for p in (_thesis, _reason) if p]
+    close_note = (" — " + " | ".join(_parts)) if _parts else ""
+
     db_positions = store.get_open_positions()
     pos = next((p for p in db_positions if p.id == pos_id), None)
     if pos is None:
@@ -505,7 +520,7 @@ def _apply_close(
                             f"lots={pos.volume_lots} entry=${pos.entry_price:.6g} "
                             f"exit=${deal['exit_price']:.6g} "
                             f"pnl=${broker_net:+.2f} (broker_auto SL/TP, "
-                            f"recovered from POSITION_NOT_FOUND)"
+                            f"recovered from POSITION_NOT_FOUND){close_note}"
                         ),
                     )
             return ApplyResult(
@@ -553,7 +568,7 @@ def _apply_close(
                     f"pnl=${broker_net:+.2f} (net: gross="
                     f"${deal_meta['gross_pnl_usd']:+.2f} + swap="
                     f"${deal_meta['swap_usd']:+.2f} + comm="
-                    f"${deal_meta['commission_usd']:+.2f})"
+                    f"${deal_meta['commission_usd']:+.2f}){close_note}"
                 ),
             )
         # Broker deal не нашёлся за 3 попытки — fallback на idealized
@@ -576,7 +591,7 @@ def _apply_close(
         summary=(
             f"[{mode}] CLOSE id={pos.id} {pos.side} {pos.symbol} "
             f"lots={pos.volume_lots} entry=${pos.entry_price:.6g} "
-            f"exit=${current_price:.6g} pnl=${pnl_usd:+.2f}"
+            f"exit=${current_price:.6g} pnl=${pnl_usd:+.2f}{close_note}"
         ),
     )
 

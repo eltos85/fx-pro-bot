@@ -1065,6 +1065,8 @@ class TestBrokerReconcile:
         )
         assert result.executed is True
         assert "broker_auto" in result.summary
+        # рационал закрытия теперь логируется в summary (2026-06-01)
+        assert "sl breach" in result.summary
         # PnL в БД — broker'ская net-цифра, не our_calc на current_price.
         with store._conn() as c:
             row = c.execute(
@@ -1146,6 +1148,8 @@ class TestBrokerReconcile:
                 "SELECT realized_pnl_usd, exit_price, close_reason "
                 "FROM positions WHERE id = ?", (pid,),
             ).fetchone()
+        # рационал закрытия теперь логируется в summary (2026-06-01)
+        assert "mean-rev invalidated" in result.summary
         assert row[0] == pytest.approx(-2.51), (
             f"realized_pnl_usd должен быть broker NET (-2.51), не idealized "
             f"gross. Получено: {row[0]}"

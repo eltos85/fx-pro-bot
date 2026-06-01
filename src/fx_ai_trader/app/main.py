@@ -99,11 +99,10 @@ def run() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    _mode = "LIVE" if settings.trading_enabled else "PAPER"
     log.info("=" * 60)
-    log.info("FX AI Trader Phase 1 (gold XAUUSD + oil BRENT, paper-mode)")
-    log.info("Symbols: %s | Mode: %s",
-             ", ".join(settings.symbols),
-             "LIVE" if settings.trading_enabled else "PAPER")
+    log.info("FX AI Trader (DeepSeek on cTrader FxPro) | Mode: %s", _mode)
+    log.info("Symbols: %s | Mode: %s", ", ".join(settings.symbols), _mode)
     log.info("Full poll: %ds | Review poll: %ds",
              settings.poll_interval_sec, settings.review_interval_sec)
     log.info(
