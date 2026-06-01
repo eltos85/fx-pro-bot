@@ -102,6 +102,34 @@ def test_split_too_few_samples():
 
 # ─── orderbook ─────────────────────────────────────────────────────────────
 
+def test_sec_to_next_funding_intervals():
+    from scalp_bot.data.funding import sec_to_next_funding
+    assert sec_to_next_funding(0.0, 480) == 8 * 3600
+    assert sec_to_next_funding(0.0, 240) == 4 * 3600
+    assert sec_to_next_funding(0.0, 60) == 3600
+    # в 03:00 UTC до следующей 4ч-метки (04:00) = 1ч; до 8ч-метки (08:00) = 5ч
+    assert sec_to_next_funding(3 * 3600, 240) == 3600
+    assert sec_to_next_funding(3 * 3600, 480) == 5 * 3600
+
+
+def test_funding_schedule_per_symbol_and_fallback():
+    from scalp_bot.data.funding import FundingSchedule, DEFAULT_INTERVAL_MIN
+
+    class _Cl:
+        def get_funding_interval(self, sym):
+            return {"ALLOUSDT": 240, "BNBUSDT": 480}.get(sym)  # XLM → None
+
+    fs = FundingSchedule()
+    fs.refresh(_Cl(), ["ALLOUSDT", "BNBUSDT", "XLMUSDT"])
+    assert fs.interval("ALLOUSDT") == 240
+    assert fs.interval("BNBUSDT") == 480
+    assert fs.interval("XLMUSDT") == DEFAULT_INTERVAL_MIN  # фолбэк 8ч
+    # 03:59 UTC: ALLO(4ч) в окне перед 04:00 → blocked; BNB(8ч) — нет
+    t = 4 * 3600 - 60
+    assert fs.blocked("ALLOUSDT", t, 120.0) is True
+    assert fs.blocked("BNBUSDT", t, 120.0) is False
+
+
 def test_bracket_exit_reason_splits_tp_sl():
     # LONG: exit выше входа → биржевой TP; ниже → биржевой SL
     assert bracket_exit_reason("long", 100.0, 103.5) == "tp_hit"

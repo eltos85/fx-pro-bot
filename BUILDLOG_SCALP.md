@@ -6,6 +6,33 @@
 
 ## 2026-05-31
 
+### v0.10.1 — funding-окно per-symbol по реальному fundingInterval
+`<hash>`
+
+**Симптом → причина.** `sec_to_next_funding` был зашит под 8ч (00/08/16 UTC),
+но instruments-info показал: **ALLOUSDT и LABUSDT — 4ч** funding (00/04/08/12/16/20
+UTC), BNB/NEAR — 8ч. Значит на наших самых торгуемых монетах мы избегали лишь
+половину списаний (пропускали 04/12/20). При ставке LAB −0.967%/интервал одно
+неучтённое списание ≈ 2× нашего R≈0.44% — перекрывает серию вин. Плюс funding
+не попадал ни в cost-модель, ни в PnL-атрибуцию (exec_stream скипает settlement).
+
+**Фикс** (одобрено пользователем «persym», bug-fix корректности по офиц. API —
+правило api-docs). Тянем `fundingInterval` (мин) по каждому символу из
+instruments-info и считаем окно «не открываться перед списанием» по РЕАЛЬНОМУ
+графику символа (8/4/1ч). Глобальный gate (пауза всего цикла) заменён на
+**per-symbol** (пропускаем только тот символ, как HTF-гейт). Фолбэк при
+неизвестном интервале = 8ч (старое поведение, без регресса). refresh на старте
+и при ротации вселенной (интервал статичен per-instrument).
+
+Не трогали: funding в PnL-атрибуции (blind spot с кошельком остаётся — отдельная
+задача, пользователь выбрал только per-symbol расписание).
+
+**Файлы:** `data/funding.py` (NEW: `sec_to_next_funding`, `FundingSchedule`),
+`trading/client.py` (`get_funding_interval`), `app/main.py` (per-symbol гейт,
+refresh; удалён зашитый 8ч-`sec_to_next_funding`), `tests/test_scalp_bot.py`
+(+2 теста). 114 passed.
+Источник: https://bybit-exchange.github.io/docs/v5/market/instrument (fundingInterval)
+
 ### v0.10.0 — профи-пакет против overtrade/no-edge (maker + score≥5 + 5/ч)
 `<hash>`
 

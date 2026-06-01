@@ -103,6 +103,26 @@ class ScalpBybitClient:
             return []
         return resp.get("result", {}).get("list", []) or []
 
+    def get_funding_interval(self, symbol: str) -> int | None:
+        """fundingInterval символа в МИНУТАХ (480=8ч / 240=4ч / 60=1ч). Нужен,
+        чтобы не открываться перед списанием по РЕАЛЬНОМУ графику символа (ALLO/
+        LAB — 4ч, а не 8ч). Офдок (поле fundingInterval):
+        https://bybit-exchange.github.io/docs/v5/market/instrument"""
+        try:
+            resp = self._session.get_instruments_info(
+                category=self._category, symbol=symbol)
+        except Exception:
+            log.exception("get_instruments_info(funding) %s failed", symbol)
+            return None
+        items = resp.get("result", {}).get("list", []) or []
+        if not items:
+            return None
+        fi = items[0].get("fundingInterval")
+        try:
+            return int(fi) if fi else None
+        except (ValueError, TypeError):
+            return None
+
     def get_tickers(self) -> list[dict]:
         """24h-снапшот по всем инструментам категории (для авто-селектора
         вселенной). Офдок: https://bybit-exchange.github.io/docs/v5/market/tickers

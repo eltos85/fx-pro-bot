@@ -22,6 +22,7 @@ from scalp_bot.analysis.strategies import build_strategies, resolve
 from scalp_bot.config.settings import load_settings
 from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.exec_stream import BybitExecStream
+from scalp_bot.data.funding import FundingSchedule
 from scalp_bot.data.htf import HtfTrend
 from scalp_bot.data.market_stream import BybitMarketStream
 from scalp_bot.data.universe import apply_pins, rank_universe
@@ -122,6 +123,15 @@ def run() -> None:
         except Exception:
             log.exception("htf initial refresh failed")
 
+    # Funding-график по РЕАЛЬНОМУ интервалу символа (8/4/1ч), а не зашитые 8ч.
+    # Интервал статичен per-instrument → refresh на старте и при ротации.
+    funding = FundingSchedule()
+    if client is not None:
+        try:
+            funding.refresh(client, symbols)
+        except Exception:
+            log.exception("funding initial refresh failed")
+
     cooldown: dict[str, float] = {}
     last_heartbeat = 0.0
     last_universe = time.time()  # уже выбрали на старте — ждём refresh до ротации
@@ -141,6 +151,7 @@ def run() -> None:
                     stream, states, symbols = _rotate_universe(
                         client, cfg, db, stream, states, strategies, symbols,
                         notifier)
+                    funding.refresh(client, symbols)  # новые символы → их график
                 except Exception:
                     log.exception("rotate_universe failed")
 
@@ -180,15 +191,6 @@ def run() -> None:
             kill_notified = False
 
             open_symbols = {tr.symbol for tr in db.open_trades()}
-
-            # 2b) funding-окно: не открываемся перед списанием (00/08/16 UTC)
-            to_funding = sec_to_next_funding(now)
-            if to_funding < cfg.avoid_funding_window_sec:
-                if now - last_heartbeat >= 60:
-                    log.info("funding через %.0fс — входы на паузе (окно %.0fс)",
-                             to_funding, cfg.avoid_funding_window_sec)
-                time.sleep(cfg.eval_interval_sec)
-                continue
 
             # 2c) сессионный фильтр (опц.): только активные часы (London/NY)
             if cfg.session_filter_enabled and not in_active_session(now, cfg):
@@ -235,6 +237,14 @@ def run() -> None:
                     play.info("🧭 [%s] %s против старшего тренда (HTF=%s) — "
                               "пропускаю (фейдим только по тренду)", sig.symbol,
                               sig.side, d or "?")
+                    continue
+                # funding-окно (per-symbol по реальному интервалу): не открываемся
+                # перед списанием — funding кратно превышает R на волатильных альтах.
+                if funding.blocked(sig.symbol, now, cfg.avoid_funding_window_sec):
+                    play.info("💸 [%s] funding через %.0fс (интервал %dм) — "
+                              "пропускаю вход", sig.symbol,
+                              funding.sec_to_next(sig.symbol, now),
+                              funding.interval(sig.symbol))
                     continue
                 funnel["fired"] += 1
                 gate = killswitch.can_open(db, cfg, now)
@@ -429,15 +439,6 @@ def in_active_session(now: float, cfg) -> bool:
 def now_utc_day() -> float:
     now = time.time()
     return now - (now % 86400.0)
-
-
-def sec_to_next_funding(now: float) -> float:
-    """Секунд до ближайшего funding settlement Bybit (00:00/08:00/16:00 UTC)."""
-    sec_of_day = now % 86400.0
-    for boundary in (0.0, 28800.0, 57600.0, 86400.0):
-        if boundary > sec_of_day:
-            return boundary - sec_of_day
-    return 86400.0 - sec_of_day
 
 
 if __name__ == "__main__":
