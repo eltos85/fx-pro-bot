@@ -4,7 +4,7 @@
 
 ### fix(ctrader-orders): relative SL/TP снапается к точности символа (digits) — иначе INVALID_REQUEST
 
-`HASH_PLACEHOLDER`
+`6ab712b`
 
 **Симптом:** на VPS ордера на открытие периодически отклонялись брокером
 (за сутки ≥3 раза — NG=F 00:49, XAUUSD 05:02, NG=F 06:45):
