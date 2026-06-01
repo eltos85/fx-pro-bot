@@ -55,14 +55,16 @@ class ScalpSettings(BaseSettings):
     # грубый прокси; реальный страж ликвидности для скальпа = spread cap (5bps).
     # Не подгонка под P&L: возврат floor его исходного смысла на сдвинувшемся рынке.
     universe_min_turnover_usd: float = Field(default=100_000_000.0)
-    # Пины: force-include в ОБХОД фильтра (запрос пользователя 2026-05-31 —
-    # вернуть ALLO, который отсекает range-cap 30% как памп 42% + turnover $76M).
-    # Осознанный риск памп-н-дампа на КОНКРЕТНОЙ монете, не общее ослабление
-    # фильтра. Риск-сайзинг (v0.8.1) частично страхует: широкий range ALLO →
-    # большой R → малый лот (qty=$1/дистанция). Пусто = чистый авто-режим.
-    universe_pin_symbols: str = Field(default="ALLOUSDT")
+    # Пины: force-include в ОБХОД фильтра. v0.12.0 (2026-06-01): УБРАН пин ALLO —
+    # канон-ревизия подбора монет (Volity/stoic.ai/dev.to 2026): «избегать pump/
+    # dump-монет». ALLO (range 42%, дамп −32%) — параболическая, пин нарушал канон
+    # (был ручной override «верни ALLO»). Пусто = чистый авто-режим по фильтрам.
+    universe_pin_symbols: str = Field(default="")
     universe_min_range_pct: float = Field(default=6.0)
-    universe_max_range_pct: float = Field(default=30.0)
+    # Range-cap: канон «>20%/день = манипуляция, избегать» (stoic.ai 2026; Volity:
+    # >5% ATR = hot, size down). 30→20 (v0.12.0): 30% пропускал манипулятивные
+    # движения. Research-cited порог, НЕ тюнинг под наш P&L (no-data-fitting).
+    universe_max_range_pct: float = Field(default=20.0)
     universe_max_spread_bps: float = Field(default=5.0)
 
     # ─── Капитал / риск ──────────────────────────────────────────────────

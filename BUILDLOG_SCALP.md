@@ -6,6 +6,33 @@
 
 ## 2026-05-31
 
+### v0.12.0 — канон-ревизия подбора монет: убран пин ALLO + range-cap 30→20
+`<hash>`
+
+**Запрос пользователя**: «пересмотри подбор монет по канонам как у проф-трейдеров».
+Подняты источники 2026 ([Volity 5-filter](https://volity.io/crypto/how-to-pick-crypto-for-day-trading/),
+[stoic.ai](https://stoic.ai/blog/best-cryptocurrencies-for-day-trading-complete-guide-to-top-trading-opportunities/),
+[dev.to trendrider](https://dev.to/trendrider/how-i-pick-crypto-trading-pairs-for-my-bot-a-data-driven-framework-14en)).
+Сверка наших фильтров с каноном выявила 2 отклонения:
+
+1. **Пин ALLO** (`universe_pin_symbols=ALLOUSDT`) force-включал монету в обход
+   ВСЕХ фильтров (range 42%>cap, turnover $76M<$100M, дамп −32%). Нарушение канона
+   «избегать pump/dump-монет». Был ручной override (v0.8.2 «верни ALLO»). → УБРАН
+   (пусто = чистый авто-режим). Это восстановление канона, НЕ disable по статистике
+   (sample-size не нарушается — убираем хак, а не режем по убыткам).
+2. **`max_range_pct=30%`** пропускал манипулятивные движения. Канон: **«>20%/день =
+   манипуляция, избегать»** (stoic.ai 2026; Volity: >5% ATR = hot, size down). →
+   30→20. Research-cited порог, НЕ тюнинг под P&L (no-data-fitting).
+
+В каноне и без изменений: turnover floor $100M, spread cap 5bps, min_range 6%
+(обоснованный fee-guard deviation). NEAR/ZEC проходят канон честно (range 8-9%,
+turnover >$100M, спред 0.2-0.4bps) — НЕ трогаем (их убытки n=5 = шум).
+
+Backlog (не сделано): корреляц.-дедуп <0.8 BTC; ADX-регим-гейт в подборе.
+
+**Файлы:** `config/settings.py` (`universe_pin_symbols` ""→, `universe_max_range_pct`
+30→20), `data/universe.py` (docstring), `docker-compose.yml` (env). 115 passed.
+
 ### v0.11.0 — ТФ-выравнивание: bar-close подтверждение reclaim (1м)
 `<hash>`
 

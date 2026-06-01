@@ -291,9 +291,9 @@ services:
       # 150M→100M (v0.8.2): рынок просел ~2×, floor $150M выкидывал рабочие
       # NEAR/ZEC; страж ликвидности = spread cap. Range-cap 30% (анти-памп) оставлен.
       SCALP_UNIVERSE_MIN_TURNOVER_USD: ${SCALP_UNIVERSE_MIN_TURNOVER_USD:-100000000}
-      # Пины (v0.8.2): force-include в обход фильтра (запрос пользователя — вернуть
-      # ALLO, отсечённый как памп). Осознанный риск на конкретной монете.
-      SCALP_UNIVERSE_PIN_SYMBOLS: ${SCALP_UNIVERSE_PIN_SYMBOLS:-ALLOUSDT}
+      # Пины: v0.12.0 (канон-ревизия) — пусто. Убран ALLO: канон «избегать pump/
+      # dump» (Volity/stoic.ai/dev.to). Пин был ручной override в обход фильтра.
+      SCALP_UNIVERSE_PIN_SYMBOLS: ${SCALP_UNIVERSE_PIN_SYMBOLS:-}
       # density (v0.8.3): wall 8×→5× (8× недостижим на top-25 Bybit, density не
       # срабатывала — 0 сделок) + round-band 0.1%→0.3% (был слишком жёсткий гейт).
       SCALP_DENSITY_WALL_MULT: ${SCALP_DENSITY_WALL_MULT:-5.0}
@@ -303,7 +303,8 @@ services:
       SCALP_DENSITY_BASELINE_SEC: ${SCALP_DENSITY_BASELINE_SEC:-900}
       SCALP_DENSITY_BASELINE_MIN_SAMPLES: ${SCALP_DENSITY_BASELINE_MIN_SAMPLES:-30}
       SCALP_UNIVERSE_MIN_RANGE_PCT: ${SCALP_UNIVERSE_MIN_RANGE_PCT:-6}
-      SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-30}
+      # v0.12.0: 30→20 — канон «>20%/день = манипуляция» (stoic.ai 2026).
+      SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-20}
       SCALP_UNIVERSE_MAX_SPREAD_BPS: ${SCALP_UNIVERSE_MAX_SPREAD_BPS:-5}
       # Bybit — ОТДЕЛЬНЫЕ ключи (или те же что ai-trader/bybit-bot, но
       # рекомендуется отдельный subaccount для аудита PnL).
