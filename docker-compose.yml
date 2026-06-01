@@ -335,6 +335,11 @@ services:
       # +0.11R vs score=4 (ob нет, 73% объёма) gross 0.00R — торгуем только
       # где edge доказан (реверс v0.7.0-бонуса по данным 402 сделок).
       SCALP_REQUIRE_OB_IMBALANCE: ${SCALP_REQUIRE_OB_IMBALANCE:-true}
+      # ТФ-выравнивание (v0.11.0): reclaim подтверждаем на ЗАКРЫТИИ 1м-бара
+      # (не на тиковом проколе) — холд стал 3-4мин, цель 5-15м, а триггер был 30с.
+      # arm_timeout 60→120с: дать ≥2 закрытия бара на подтверждение. 0 = тик-режим.
+      SCALP_CONFIRM_BAR_SEC: ${SCALP_CONFIRM_BAR_SEC:-60}
+      SCALP_ARM_TIMEOUT_SEC: ${SCALP_ARM_TIMEOUT_SEC:-120}
       # Философия B: дай победителю бежать. TP 3.5R (асимметричный payoff).
       # v0.9.5: time_stop УДАЛЁН (противоречил «дай бежать» — резал по таймеру);
       # выход только flow_exit/flow_scratch/биржевой TP/SL.

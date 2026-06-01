@@ -312,6 +312,20 @@ def test_detector_fires_with_ob_imbalance_required():
     assert sig is not None and "ob_imb" in sig.reasons
 
 
+def test_detector_waits_for_bar_close_confirmation():
+    # confirm_bar_sec=60: reclaim+разворот есть, но БЕЗ закрытия бара входа нет;
+    # на границе бара (120) — выстрел (denoise тикового прокола, v0.11.0).
+    det = SweepReclaimDetector("SOLUSDT", _cfg(confirm_bar_sec=60.0))
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)  # бар 1
+    assert det.armed is True
+    # ещё бар 1 (110//60==1): reclaim+mom истинны, но бар не закрылся → держим
+    assert det.update(_snap(_fire_samples(), last_price=97.6), now=110.0) is None
+    assert det.armed is True
+    # 120 → бар 2 (закрытие 1-го бара) → подтверждение → выстрел
+    sig = det.update(_snap(_fire_samples(), last_price=97.6), now=120.0)
+    assert sig is not None and sig.side == "long"
+
+
 # ─── aggregates (SymbolState) ──────────────────────────────────────────────
 
 def test_symbolstate_cvd_accumulates_signed():
