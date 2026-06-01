@@ -441,9 +441,9 @@ class CTraderFxAdapter:
         rel_sl = None
         rel_tp = None
         if sl_price is not None and sl_price > 0:
-            rel_sl = price_to_relative(abs(current_price - sl_price))
+            rel_sl = price_to_relative(abs(current_price - sl_price), info.digits)
         if tp_price is not None and tp_price > 0:
-            rel_tp = price_to_relative(abs(current_price - tp_price))
+            rel_tp = price_to_relative(abs(current_price - tp_price), info.digits)
 
         try:
             result = self._client.send_new_order(

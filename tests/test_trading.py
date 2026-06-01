@@ -50,6 +50,26 @@ class TestSymbolMapping:
         assert price_to_relative(0.0050) == 500
         assert price_to_relative(0.50) == 50_000
 
+    def test_price_to_relative_digits_snap(self):
+        # digits=5 (FX-мажоры) и None — поведение без снапа сохраняется
+        assert price_to_relative(0.00321, digits=5) == 321
+        assert price_to_relative(0.00321) == 321
+
+        # XAUUSD digits=2 → шаг 1000 (=0.01 цены): субтиковая часть снапится
+        # 12.345 * 100000 = 1234500 → round к ближайшему 1000 = 1234000
+        assert price_to_relative(12.345, digits=2) == 1_234_000
+        assert price_to_relative(12.345, digits=2) % 1000 == 0
+        # ровная дистанция остаётся как есть
+        assert price_to_relative(25.0, digits=2) == 2_500_000
+
+        # NG=F / BRENT digits=3 → шаг 100 (=0.001 цены)
+        # 0.04567 * 100000 = 4567 → round к ближайшему 100 = 4600
+        assert price_to_relative(0.04567, digits=3) == 4_600
+        assert price_to_relative(0.04567, digits=3) % 100 == 0
+
+        # guard: крошечная ненулевая дистанция не схлопывается в 0 — минимум 1 тик
+        assert price_to_relative(0.000001, digits=2) == 1000
+
     def test_symbol_cache(self):
         cache = SymbolCache()
         assert not cache.loaded

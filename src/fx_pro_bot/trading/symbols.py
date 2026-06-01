@@ -165,6 +165,19 @@ def volume_to_lots(volume: int, contract_size: int = 10_000_000) -> float:
     return volume / contract_size
 
 
-def price_to_relative(price_diff: float) -> int:
-    """Абсолютная разница цены → относительное значение cTrader (1/100000)."""
-    return int(round(abs(price_diff) * 100_000))
+def price_to_relative(price_diff: float, digits: int | None = None) -> int:
+    """Абсолютная разница цены → относительное значение cTrader (1/100000).
+
+    cTrader пересчитывает абсолютный SL/TP от цены заливки и требует, чтобы
+    результат попадал в `digits` символа. relative задаётся в 1/100000 цены,
+    поэтому при `digits < 5` значение нужно снапить к шагу 10^(5-digits), иначе
+    итоговая цена SL/TP становится суб-тиковой → INVALID_REQUEST
+    "Relative stop loss has invalid precision" (напр. XAUUSD digits=2 → шаг 1000).
+    """
+    rel = int(round(abs(price_diff) * 100_000))
+    if digits is not None and 0 <= digits < 5:
+        step = 10 ** (5 - digits)
+        snapped = int(round(rel / step)) * step
+        # ненулевую дистанцию не схлопываем в 0 — минимум один тик
+        rel = snapped if snapped > 0 else step
+    return rel

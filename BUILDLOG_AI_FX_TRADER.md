@@ -1,5 +1,42 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-06-01
+
+### fix(ctrader-orders): relative SL/TP снапается к точности символа (digits) — иначе INVALID_REQUEST
+
+`HASH_PLACEHOLDER`
+
+**Симптом:** на VPS ордера на открытие периодически отклонялись брокером
+(за сутки ≥3 раза — NG=F 00:49, XAUUSD 05:02, NG=F 06:45):
+
+```
+cTrader error (type=2132): INVALID_REQUEST — Relative stop loss has invalid precision
+place_market_order failed → Apply error: broker open_failed
+```
+
+LLM решал OPEN, но реальный вход срывался.
+
+**Причина:** `price_to_relative()` (`src/fx_pro_bot/trading/symbols.py`)
+переводил дистанцию SL/TP в относительные единицы cTrader (1/100000 цены)
+**без привязки к точности символа**. cTrader пересчитывает абсолютный SL/TP
+от цены заливки и требует попадания в `digits`. Подтверждённые digits из лога
+стартапа контейнера: XAUUSD `digits=2`, BZ=F/BRENT `digits=3`, NG=F/NAT.GAS
+`digits=3` — все low-digit, поэтому несоснапленное relative давало суб-тиковую
+цену SL → reject. (FX-мажоры digits=5 не задеты, но мы ими не торгуем.)
+
+**Фикс:** опциональный параметр `digits` в `price_to_relative`; при `digits < 5`
+значение снапится к шагу `10^(5-digits)` (XAUUSD → 1000, NG=F/BRENT → 100),
+с guard'ом «не схлопывать ненулевую дистанцию в 0». Адаптер передаёт
+`info.digits`. `send_new_order` не трогали. Изоляция: `price_to_relative`
+зовётся **только** в `fx_ai_trader` — advisor и `ai_trader` (Bybit, свой
+`stopLoss` через pybit) не затронуты.
+
+**Тесты:** `tests/test_trading.py::test_price_to_relative_digits_snap` —
+кейсы digits=2/3/5/None + guard. Полный набор 1039 passed.
+
+**Файлы:** src/fx_pro_bot/trading/symbols.py,
+src/fx_ai_trader/trading/client_adapter.py, tests/test_trading.py
+
 ## 2026-05-29
 
 ### chore(repo): удаление ботов bybit_bot и ai_arena (оставлены только ai_trader + fx_ai_trader + advisor-инфра)
