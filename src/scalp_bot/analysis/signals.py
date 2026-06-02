@@ -11,8 +11,8 @@
   ВЗВОД (arm):  SWEEP (свежий экстремум, собрал стопы) + CVD_DIVERGENCE
                 (цена ↓ low / CVD ↑ low; зеркально для short). [оба ОБЯЗ.]
   ВЫСТРЕЛ (fire): RECLAIM (цена вернулась ≥ reclaim_frac за уровень) +
-                  REVERSAL_MOMENTUM (CVD качнулся) + BAR-CLOSE подтверждение
-                  (держится до закрытия confirm_bar_sec-бара). [все ОБЯЗ.]
+                  REVERSAL_MOMENTUM (CVD качнулся) — вход по ленте. [все ОБЯЗ.]
+                  BAR-CLOSE опционален (confirm_bar_sec, v0.14.0 default=0).
   OB_IMBALANCE — гейт стороны (v0.10.0 require_ob_imbalance=True: score≥5).
 
 Аудит v0.9.0 (2026-05-31): funding-перекос и ликвидационный flush УБРАНЫ как
@@ -21,11 +21,11 @@
 устранение factor-noise (канон: «убери фактор — если WR не падает, он был шумом»).
 
 ТФ-выравнивание v0.11.0 (2026-06-01): после удаления time_stop медиана холда
-198с (вины 251с, до 16мин), цель TP 3.5R≈1.55% = 5-15м движение, а триггер
-стрелял по 30с-momentum на ТИКАХ → рассинхрон. Добавлено BAR-CLOSE подтверждение
-(confirm_bar_sec=60с): вход на ЗАКРЫТИИ 1м-бара, не на тиковом проколе. Канон:
-подтверждать на close таймфрейма сделки (Al Brooks 2012; chartwhisperer CAP
-Rule 2/5 CHoCH; StratBase 2026 — тест на 1м-барах, confirm на close).
+198с, цель TP 3.5R. v0.11.0 добавлял BAR-CLOSE подтверждение (confirm_bar_sec=60с)
+для denoise тиков. v0.14.0 ВЫКЛЮЧИЛ его (default=0): канон order-flow прямо против —
+«waiting for a candle close can price you out of the move» (Kalena 2026; TradeAlgo),
+подтверждать надо ЛЕНТОЙ (разворот CVD + ob_imbalance — у нас уже есть). Механика
+bar-close сохранена как опция (confirm_bar_sec>0 = fallback на ожидание бара).
 
 Все функции чистые → юнит-тестируемы без WS.
 """
@@ -241,10 +241,10 @@ class SweepReclaimDetector:
     Фаза ВЗВОД (arm): sweep + CVD-дивергенция у экстремума → запоминаем
       сторону, свипнутый уровень и амплитуду прокола.
     Фаза ВЫСТРЕЛ (fire): в течение arm_timeout_sec, если цена сделала reclaim
-      (вернулась ≥ reclaim_frac пути за уровень) И CVD развернулся (momentum) И
-      это подтвердилось на ЗАКРЫТИИ confirm-бара (confirm_bar_sec=60с, v0.11.0 —
-      denoise: тиковый прокол не триггерит, ТФ входа = ТФ холда/цели) → вход.
+      (вернулась ≥ reclaim_frac пути за уровень) И CVD развернулся (momentum) →
+      вход по ленте (v0.14.0: без ожидания закрытия бара — канон order-flow).
       ob — бонус-подтверждение стороны (в reasons; гейт при require_ob_imbalance).
+      confirm_bar_sec>0 (default 0) — опц. fallback: ждать закрытия N-сек бара.
     """
 
     def __init__(self, symbol: str, cfg) -> None:

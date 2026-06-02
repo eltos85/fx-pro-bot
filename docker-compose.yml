@@ -306,6 +306,10 @@ services:
       # v0.12.0: 30→20 — канон «>20%/день = манипуляция» (stoic.ai 2026).
       SCALP_UNIVERSE_MAX_RANGE_PCT: ${SCALP_UNIVERSE_MAX_RANGE_PCT:-20}
       SCALP_UNIVERSE_MAX_SPREAD_BPS: ${SCALP_UNIVERSE_MAX_SPREAD_BPS:-5}
+      # v0.14.0: свежий intraday-отбор. RVOL по амплитуде (rolling-1ч/медиана
+      # часовых за сутки): гейтим затихшие в последний час, ранжируем по «в игре
+      # сейчас». 1.0 = не тише обычного для себя (канон RVOL). 0 = только 24h-фильтр.
+      SCALP_UNIVERSE_MIN_RVOL: ${SCALP_UNIVERSE_MIN_RVOL:-1.0}
       # Bybit — ОТДЕЛЬНЫЕ ключи (или те же что ai-trader/bybit-bot, но
       # рекомендуется отдельный subaccount для аудита PnL).
       SCALP_BYBIT_API_KEY: ${SCALP_BYBIT_API_KEY:-}
@@ -336,11 +340,12 @@ services:
       # +0.11R vs score=4 (ob нет, 73% объёма) gross 0.00R — торгуем только
       # где edge доказан (реверс v0.7.0-бонуса по данным 402 сделок).
       SCALP_REQUIRE_OB_IMBALANCE: ${SCALP_REQUIRE_OB_IMBALANCE:-true}
-      # ТФ-выравнивание (v0.11.0): reclaim подтверждаем на ЗАКРЫТИИ 1м-бара
-      # (не на тиковом проколе) — холд стал 3-4мин, цель 5-15м, а триггер был 30с.
-      # arm_timeout 60→120с: дать ≥2 закрытия бара на подтверждение. 0 = тик-режим.
-      SCALP_CONFIRM_BAR_SEC: ${SCALP_CONFIRM_BAR_SEC:-60}
-      SCALP_ARM_TIMEOUT_SEC: ${SCALP_ARM_TIMEOUT_SEC:-120}
+      # v0.14.0: bar-close ВЫКЛЮЧЕН (0) — канон order-flow «не жди закрытия бара,
+      # оно прайсит из движения; подтверждай лентой» (Kalena/TradeAlgo 2026). У нас
+      # лента уже есть (разворот CVD + ob_imbalance). arm_timeout 120→60: 120 был
+      # только под bar-close; канон shot-clock ~30с. >0 = вернуть ожидание бара.
+      SCALP_CONFIRM_BAR_SEC: ${SCALP_CONFIRM_BAR_SEC:-0}
+      SCALP_ARM_TIMEOUT_SEC: ${SCALP_ARM_TIMEOUT_SEC:-60}
       # Философия B: дай победителю бежать. TP 3.5R (асимметричный payoff).
       # v0.9.5: time_stop УДАЛЁН (противоречил «дай бежать» — резал по таймеру);
       # выход только flow_exit/flow_scratch/биржевой TP/SL.

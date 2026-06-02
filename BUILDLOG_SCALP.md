@@ -6,6 +6,53 @@
 
 ## 2026-06-02
 
+### v0.14.0 — вход по ленте (убран bar-close) + свежий RVOL-отбор монет
+`<hash>`
+
+**Запрос пользователя**: «узнать как профи про arm_timeout/bar-close + посчитать
+по логам + чаще обновлять валюты, запоздалые данные».
+
+**Research (канон order-flow скальпа):**
+- Setup expiry: сетап живёт 2-15с, shot-clock ~30с, нереализовавшийся бросаем
+  ([Kalena 2026](https://blog.kalena.ai/crypto-scalping-with-order-flow-the-15-second-anatomy-of-a-dom-based-scalp-trade-from-signal-to-exit),
+  [TradeAlgo](https://www.tradealgo.com/trading-guides/day-trading/scalping-strategy-guide)).
+  Наш arm_timeout=120с был уже 4× канона.
+- Bar-close: «waiting for a candle close can **price you out** of the move» —
+  подтверждать ЛЕНТОЙ (агрессивные ордера/CVD), не закрытием бара. Раскол с
+  chart/SMC-лагерем ([GrandAlgo](https://grandalgo.com/blog/1-minute-scalping-strategy-smart-money)),
+  но мы — order-flow бот → наш канон против bar-close.
+- Отбор монет: intraday RVOL (текущая активность vs своя норма), рескан 15-60мин,
+  абсолютный liquidity floor + относительные (Z/RVOL) метрики
+  ([TradingSim](https://www.tradingsim.com/blog/relative-volume-rvol),
+  [anomiq](https://anomiq.io/blog/custom-crypto-scanner-filters-timeframes/)).
+
+**Подсчёт по логам** (сессия ~3ч, n=84 истёкших взводов, `data/scalp_expiries.txt`):
+reclaim-уровень добивался в 70% случаев в течение 30с после истечения, 76% за
+120с. С оговорками (1m-гранулярность завышает, касание цены ≠ валидный вход т.к.
+нужен CVD-флип, высокий % может = чоп, n мал). Вывод: 120с НЕ мало — но bar-close
++ длинное окно тормозили вход (live BNB 2026-06-02 #799-окрестности).
+
+**Изменения:**
+1. **bar-close ВЫКЛЮЧЕН** (`confirm_bar_sec` 60→0): вход по ленте (разворот CVD +
+   ob_imbalance — уже есть). Механика сохранена (>0 = fallback).
+2. **arm_timeout 120→60с**: 120 поднимали ТОЛЬКО под bar-close; канон shot-clock
+   ~30с, 60с = умеренный компромисс под fade-темп.
+3. **Свежий RVOL-отбор монет** (`universe_min_rvol`=1.0): 24h-фильтр оставлен как
+   стабильный гейт (ликвидность/спред/анти-памп), но волатильность для гейта+
+   ранга — теперь intraday RVOL по амплитуде (rolling-1ч из 5м-свечей / медиана
+   часовых за сутки). Гейтим затихшие в последний час, ранжируем по «в игре
+   сейчас». Self-нормировка (RVOL≥1 = не тише своей нормы) — не абсолютный порог,
+   не подгонка. fail-open при сбое klines. Частота рескана не менялась (5мин уже
+   чаще канона) — менялся ИСТОЧНИК (свежие 5м klines вместо лагающего 24h-снимка).
+
+**Оговорки**: правки research-обоснованы, но требуют форвард-валидации (n мал).
+arm_timeout/bar-close — ослабление фильтра входа: следить, не вырос ли шум входов.
+
+**Файлы:** `config/settings.py` (`confirm_bar_sec` 60→0, `arm_timeout_sec`
+120→60, `universe_min_rvol`), `analysis/signals.py` (docstring), `data/universe.py`
+(`filter_tickers`/`rank_rows`/`hourly_range_rvol`), `app/main.py` (`_select_universe`
++ RVOL fetch), `docker-compose.yml` (env). 118 passed (+3 RVOL/rank).
+
 ### v0.13.0 — выходы: flow_exit 1.0→1.5R, flow_scratch ВЫКЛЮЧЕН
 `<hash>`
 

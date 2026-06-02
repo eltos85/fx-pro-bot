@@ -1249,6 +1249,51 @@ def test_rank_universe_no_cap_when_top_n_zero():
     assert len(picked) == 8
 
 
+def _kl5m(ranges_pct: list[float], price: float = 100.0) -> list[list]:
+    """Синтетические 5м-свечи (DESC, новые сверху) с заданной %-амплитудой каждого
+    бара. ranges_pct[0] — самый СВЕЖИЙ бар. Возвращаем список из window-блоков
+    (по 12 баров на «час») — каждый элемент списка задаёт амплитуду блока."""
+    bars = []
+    # ranges_pct трактуем как амплитуду каждого 12-барного блока: разворачиваем в
+    # 12 одинаковых баров на блок (новые сверху)
+    for rp in ranges_pct:  # от свежего к старому
+        rng = price * rp / 100.0
+        for _ in range(12):
+            bars.append([0, str(price), str(price + rng / 2), str(price - rng / 2),
+                         str(price)])
+    return bars  # уже DESC (свежие блоки первыми)
+
+
+def test_hourly_range_rvol_hot_and_quiet():
+    from scalp_bot.data.universe import hourly_range_rvol
+    # текущий час амплитуда 4%, исторические по 1% → RVOL ≈ 4
+    kl = _kl5m([4.0] + [1.0] * 24)
+    v = hourly_range_rvol(kl)
+    assert v is not None and v == pytest.approx(4.0, abs=0.2)
+    # текущий час тише истории: 0.5% против 2% → RVOL ≈ 0.25 (затихла)
+    kl2 = _kl5m([0.5] + [2.0] * 24)
+    v2 = hourly_range_rvol(kl2)
+    assert v2 is not None and v2 < 1.0
+
+
+def test_hourly_range_rvol_insufficient_data():
+    from scalp_bot.data.universe import hourly_range_rvol
+    assert hourly_range_rvol([]) is None
+    assert hourly_range_rvol(_kl5m([3.0])) is None  # только текущий блок, нет истории
+
+
+def test_rank_rows_uses_fresh_vol_metric_over_24h():
+    from scalp_bot.data.universe import filter_tickers, rank_rows
+    # A: 24h range мал (7%), но СВЕЖИЙ RVOL высокий; B: 24h range больше (12%),
+    # но RVOL низкий. Свежая метрика должна вытащить A вперёд.
+    rows = filter_tickers(
+        [_ticker("AUSDT", 100, 107, 100, 300e6),
+         _ticker("BUSDT", 100, 112, 100, 300e6)],
+        min_turnover=150e6, min_range_pct=6.0, max_range_pct=30.0, max_spread_bps=5.0)
+    picked = rank_rows(rows, top_n=5, vol_metric={"AUSDT": 3.0, "BUSDT": 0.4})
+    assert picked[0] == "AUSDT"
+
+
 def test_apply_pins_force_includes_and_dedups():
     from scalp_bot.data.universe import apply_pins
     # пин впереди, дедуп если уже в ranked, остальное добивает остаток

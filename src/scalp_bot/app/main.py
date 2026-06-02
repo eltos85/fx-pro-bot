@@ -25,7 +25,8 @@ from scalp_bot.data.exec_stream import BybitExecStream
 from scalp_bot.data.funding import FundingSchedule
 from scalp_bot.data.htf import HtfTrend
 from scalp_bot.data.market_stream import BybitMarketStream
-from scalp_bot.data.universe import apply_pins, rank_universe
+from scalp_bot.data.universe import (apply_pins, filter_tickers,
+                                     hourly_range_rvol, rank_rows)
 from scalp_bot.safety import killswitch
 from scalp_bot.state.db import ScalpDB
 from scalp_bot.telegram.notifier import TelegramNotifier
@@ -381,15 +382,43 @@ def _flatten_on_start(client, db, symbols: list[str]) -> None:
                  tr.symbol, pnl or 0.0)
 
 
+def _fresh_rvol(client, cfg, rows: list[dict]) -> dict[str, float]:
+    """Свежий RVOL по амплитуде для прошедших 24h-фильтр символов (v0.14.0).
+    Тянем 5м-свечи (~сутки) и считаем rolling-1ч amplitude / медиану часовых.
+    fail-open: символ без klines не попадает в словарь → в гейте/ранге он на
+    нейтральном fallback (24h range / keep)."""
+    rvol: dict[str, float] = {}
+    for m in rows[:40]:  # safety-кап на число get_kline за рефреш (rate-limit)
+        try:
+            kl = client.get_kline(m["symbol"], "5", limit=289)
+            v = hourly_range_rvol(kl)
+            if v is not None:
+                rvol[m["symbol"]] = v
+        except Exception:
+            log.exception("rvol get_kline %s failed", m["symbol"])
+    return rvol
+
+
 def _select_universe(client, cfg) -> list[str]:
-    """Топ-N монет под стратегию из get_tickers (см. data/universe.py) +
-    force-include «пиннутых» монет в обход фильтра (universe_pin_symbols)."""
-    ranked = rank_universe(
-        client.get_tickers(), top_n=cfg.universe_top_n,
+    """Монеты под стратегию: 24h hard-фильтр (ликвидность/спред/анти-памп) →
+    свежий intraday RVOL-гейт+ранжирование (что «в игре сейчас», v0.14.0) →
+    пины. См. data/universe.py."""
+    rows = filter_tickers(
+        client.get_tickers(),
         min_turnover=cfg.universe_min_turnover_usd,
         min_range_pct=cfg.universe_min_range_pct,
         max_range_pct=cfg.universe_max_range_pct,
         max_spread_bps=cfg.universe_max_spread_bps)
+    if not rows:
+        return apply_pins([], cfg.universe_pin_list, cfg.universe_top_n)
+    rvol = _fresh_rvol(client, cfg, rows) if cfg.universe_min_rvol > 0 else {}
+    if cfg.universe_min_rvol > 0:
+        # гейт по свежести: затихшие в последний час режем (RVOL < порога).
+        # fail-open: символ без klines (нет в rvol) — keep (REST-хиккап не пустошит).
+        kept = [m for m in rows
+                if rvol.get(m["symbol"], cfg.universe_min_rvol) >= cfg.universe_min_rvol]
+        rows = kept or rows  # если гейт всё срезал — не оставлять пусто
+    ranked = rank_rows(rows, top_n=cfg.universe_top_n, vol_metric=rvol)
     return apply_pins(ranked, cfg.universe_pin_list, cfg.universe_top_n)
 
 
