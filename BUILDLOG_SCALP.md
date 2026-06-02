@@ -4,6 +4,42 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-02
+
+### v0.13.0 — выходы: flow_exit 1.0→1.5R, flow_scratch ВЫКЛЮЧЕН
+`<hash>`
+
+**Запрос пользователя**: «flow_exit надо подкрутить, flow_scratch — подумать».
+Тюнить на live n=43 нельзя (sample-size/no-data-fitting) → прогнал **sweep обоих
+порогов на 15-дневной истории** (`scripts/scalp_backtest_regime.py --sweep`,
+артефакт `data/scalp_sweep.txt`, n до 9275). Бэктест без ob-гейта (нет истории
+L2) = edgeless, поэтому абсолютный netR не значим — читаем **относительную
+механику/форму кривой** (переносима).
+
+1. **flow_exit 1.0→1.5R**. Sweep: подъём `flow_exit_activate_r` монотонно
+   укрупняет средний зафиксированный винер (avgR flow_exit +1.05→+1.55→+2.02 при
+   1.0/1.5/2.0), при этом avgR всей выборки маргинально лучший на 1.5 (−0.219 vs
+   −0.238). Винеры дольше бегут к TP=3.5R. Research-сторона «let winners run»
+   (Schwager/Brooks, Философия B), НЕ пик-хантинг — кривая по avgR плоская, это
+   выбор направления + форвард-валидация на live.
+2. **flow_scratch ВЫКЛЮЧЕН** (`scratch_on_flow_flip` True→False). Контрфактуал
+   (n больших) + sweep сходятся: чем меньше режем, тем выше WR и avgR
+   (scratch_adverse 0.7→0.85→OFF: WR 36→41→43%, avgR −0.238→−0.227→−0.215; sa=1.0
+   ≡ OFF т.к. порог=SL). SL уже на −1R, scratch при −0.7R резал лишь 0.3R недохода
+   до стопа, ловил мало, но убивал ~12% сделок что отскочили бы (противоречит MR
+   «дождаться отскока» — гипотеза пользователя подтверждена). Полагаемся на
+   биржевой SL; меньше дискреционных путей выхода. Механика сохранена (можно
+   вернуть env `SCALP_SCRATCH_ON_FLOW_FLIP=true`).
+
+**Оговорка**: оба изменения в пределах шума по avgR на edgeless-бэктесте —
+направление research+контрфактуал, не доказательство. Реальный рычаг —
+качество входа (ob-гейт), не выходы. Решение требует форвард-валидации на live.
+
+**Файлы:** `config/settings.py` (`flow_exit_activate_r` 1.0→1.5,
+`scratch_on_flow_flip` True→False), `analysis/strategies.py` (docstring),
+`scripts/scalp_backtest_regime.py` (CLI-оверрайды `--fe-activate`/
+`--scratch-adverse`/`--no-scratch`/`--sweep`), `docker-compose.yml` (env). 115 passed.
+
 ## 2026-05-31
 
 ### v0.12.0 — канон-ревизия подбора монет: убран пин ALLO + range-cap 30→20

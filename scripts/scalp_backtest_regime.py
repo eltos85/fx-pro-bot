@@ -174,7 +174,10 @@ def _adx(high, low, close, n=14):
 
 
 # ─── replay одного символа ─────────────────────────────────────────────────
-def replay(symbol: str, ticks: list, cfg, regime_at) -> list[dict]:
+def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False) -> list[dict]:
+    """scratch_cf=True: КОНТРФАКТУАЛ — не закрываем по flow_scratch, а помечаем
+    момент (would_scratch, scratch_R) и даём сделке дойти до естественного конца
+    (TP/SL/flow_exit). Так видим: скретч спас от SL или зарезал отскок к TP."""
     clk = SimpleNamespace(t=0.0)
     state = SymbolState(symbol, cvd_window_sec=cfg.cvd_window_sec,
                         liq_window_sec=cfg.liq_window_sec, ob_levels=cfg.ob_levels,
@@ -219,8 +222,16 @@ def replay(symbol: str, ticks: list, cfg, regime_at) -> list[dict]:
                                  sl=pos["sl"], side=pos["side"], strategy="sweep_fade")
             ex = strat.should_exit(tr, snap, ts)
             if ex is not None:
-                trades.append(_close(pos, ex[0], ex[1], ts, fee))
-                pos = None
+                if ex[0] == "flow_scratch" and scratch_cf:
+                    if not pos.get("would_scratch"):
+                        e = pos["entry"]; risk = pos["risk"] or 1e-9
+                        fav = (ex[1] - e) if pos["side"] == "long" else (e - ex[1])
+                        pos["would_scratch"] = True
+                        pos["scratch_R"] = (fav - fee * e) / risk
+                    # НЕ закрываем — держим до естественного конца (контрфактуал)
+                else:
+                    trades.append(_close(pos, ex[0], ex[1], ts, fee))
+                    pos = None
     return trades
 
 
@@ -232,7 +243,9 @@ def _close(pos, reason, exit_price, ts, fee):
     net_R = (fav - fee * e) / risk
     return {"regime": pos["regime"], "adx": pos["adx"], "side": pos["side"],
             "reason": reason, "gross_R": gross_R, "net_R": net_R,
-            "net_frac": net_frac, "hold": ts - pos["ts_open"]}
+            "net_frac": net_frac, "hold": ts - pos["ts_open"],
+            "would_scratch": pos.get("would_scratch", False),
+            "scratch_R": pos.get("scratch_R")}
 
 
 # ─── агрегаты ──────────────────────────────────────────────────────────────
@@ -257,14 +270,50 @@ def report(trades: list[dict]):
     print(">>> ПО ПРИЧИНЕ ВЫХОДА:")
     for rs in ("tp_hit", "flow_exit", "flow_scratch", "sl_hit"):
         block([r for r in trades if r["reason"] == rs], rs)
+    # контрфактуал: судьба сделок, которые БЫЛИ БЫ скретчнуты, но мы дали им жить
+    cf = [r for r in trades if r.get("would_scratch")]
+    if cf:
+        print(f"\n>>> КОНТРФАКТУАЛ flow_scratch (n={len(cf)} «скретч-кандидатов»):")
+        scratch_net = sum(r["scratch_R"] for r in cf)       # что дал бы скретч
+        natural_net = sum(r["net_R"] for r in cf)            # что дало удержание
+        print(f"  Если РЕЗАТЬ (scratch): netR={scratch_net:>+7.1f} "
+              f"(avg {scratch_net/len(cf):>+5.2f})")
+        print(f"  Если ДЕРЖАТЬ (отскок): netR={natural_net:>+7.1f} "
+              f"(avg {natural_net/len(cf):>+5.2f})")
+        diff = natural_net - scratch_net
+        verdict = "СКРЕТЧ ТЕРЯЕТ деньги (надо держать)" if diff > 0 \
+            else "СКРЕТЧ СПАСАЕТ деньги (резать верно)"
+        print(f"  Δ(держать−резать) = {diff:>+7.1f}R → {verdict}")
+        print("  Естественная судьба скретч-кандидатов (если держать):")
+        for rs in ("tp_hit", "flow_exit", "sl_hit"):
+            block([r for r in cf if r["reason"] == rs], rs)
+
+
+def _argf(flag, default):
+    if flag in sys.argv:
+        return float(sys.argv[sys.argv.index(flag) + 1])
+    return default
 
 
 def main():
     syms = sys.argv[1].split(",")
     start, end = sys.argv[2], sys.argv[3]
-    cfg = load_settings().model_copy(update={"require_ob_imbalance": False})
-    print(f"конфиг: confirm_bar={cfg.confirm_bar_sec}с tp={cfg.take_profit_r}R "
-          f"fee={cfg.round_trip_fee_frac} ob-гейт=ВЫКЛ (нет стакана)")
+    # оверрайды порогов выхода для sweep (OOS-исследование, не тюнинг под live)
+    fe = _argf("--fe-activate", None)        # flow_exit_activate_r
+    sa = _argf("--scratch-adverse", None)    # scratch_min_adverse_r
+    upd = {"require_ob_imbalance": False}
+    if fe is not None:
+        upd["flow_exit_activate_r"] = fe
+    if sa is not None:
+        upd["scratch_min_adverse_r"] = sa
+    if "--no-scratch" in sys.argv:
+        upd["scratch_on_flow_flip"] = False
+    cfg = load_settings().model_copy(update=upd)
+    sweep = "--sweep" in sys.argv
+    print(f"конфиг: fe_activate={cfg.flow_exit_activate_r}R "
+          f"scratch_adverse={cfg.scratch_min_adverse_r}R "
+          f"scratch_on={cfg.scratch_on_flow_flip} tp={cfg.take_profit_r}R "
+          f"ob-гейт=ВЫКЛ")
     all_trades = []
     for sym in syms:
         ticks = []
@@ -276,11 +325,23 @@ def main():
         raw = len(ticks)
         ticks = bin_ticks(ticks, 0.25)
         regime_at = load_regime(sym, start, end)
-        tr = replay(sym, ticks, cfg, regime_at)
+        scratch_cf = "--scratch-cf" in sys.argv
+        tr = replay(sym, ticks, cfg, regime_at, scratch_cf=scratch_cf)
         all_trades.extend(tr)
-        net = sum(r["net_R"] for r in tr)
-        print(f"{sym}: тиков={raw:>9}→бинов={len(ticks):>8} сделок={len(tr):>4} "
-              f"netR={net:>+7.1f}")
+        if not sweep:
+            net = sum(r["net_R"] for r in tr)
+            print(f"{sym}: тиков={raw:>9}→бинов={len(ticks):>8} сделок={len(tr):>4} "
+                  f"netR={net:>+7.1f}")
+    if sweep:
+        t = all_trades
+        net = sum(r["net_R"] for r in t)
+        w = len([r for r in t if r["net_R"] > 0])
+        fx = [r for r in t if r["reason"] == "flow_exit"]
+        print(f"SWEEP fe={cfg.flow_exit_activate_r} sa={cfg.scratch_min_adverse_r} "
+              f"scr={cfg.scratch_on_flow_flip} | n={len(t)} WR={w/max(len(t),1)*100:.0f}% "
+              f"netR={net:+.0f} avgR={net/max(len(t),1):+.3f} | "
+              f"flow_exit n={len(fx)} avgR={sum(r['net_R'] for r in fx)/max(len(fx),1):+.2f}")
+        return
     report(all_trades)
 
 

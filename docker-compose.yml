@@ -345,11 +345,14 @@ services:
       # v0.9.5: time_stop УДАЛЁН (противоречил «дай бежать» — резал по таймеру);
       # выход только flow_exit/flow_scratch/биржевой TP/SL.
       SCALP_TAKE_PROFIT_R: ${SCALP_TAKE_PROFIT_R:-3.5}
-      # Анти-клиппинг (v0.7.1): flow_exit фиксирует по развороту ленты только
-      # после ≥1R прибыли (был копеечный порог ≥комиссии → клипал вины, обнулял TP).
-      SCALP_FLOW_EXIT_ACTIVATE_R: ${SCALP_FLOW_EXIT_ACTIVATE_R:-1.0}
-      # Порог глубины flow_scratch (v0.9.2): режем убыток только при ≥0.7R против
-      # (был hair-trigger «≥комиссии» → 40% входов в минус). Симметрия с flow_exit.
+      # flow_exit профит-лок. v0.13.0: 1.0→1.5 — sweep 15д (data/scalp_sweep.txt):
+      # выше порог = крупнее средний зафиксированный винер, винеры бегут дальше к
+      # TP=3.5R (Философия B «let winners run», Schwager/Brooks).
+      SCALP_FLOW_EXIT_ACTIVATE_R: ${SCALP_FLOW_EXIT_ACTIVATE_R:-1.5}
+      # flow_scratch ВЫКЛЮЧЕН (v0.13.0): контрфактуал + sweep — scratch при −0.7R
+      # маргинально вредит (режет 0.3R до SL, убивает ~12% отскоков). Полагаемся
+      # на биржевой SL. Меньше путей выхода. true = вернуть ранний скретч.
+      SCALP_SCRATCH_ON_FLOW_FLIP: ${SCALP_SCRATCH_ON_FLOW_FLIP:-false}
       SCALP_SCRATCH_MIN_ADVERSE_R: ${SCALP_SCRATCH_MIN_ADVERSE_R:-0.7}
       # HTF-bias (v0.9.3): фейд только по тренду EMA200 1H (CAP-контекст,
       # Murphy/Asness). Контртренд блокируем; fail-open при сбое свечей.
