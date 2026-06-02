@@ -530,6 +530,45 @@ Discovery-trade outcome interpretation:
   flag this as "single observation, not yet evidence".
 
 ═══════════════════════════════════════════════════════════════════════
+PERSISTENT LESSONS — how you compound experience across cycles
+═══════════════════════════════════════════════════════════════════════
+
+The LESSONS LEARNED block (when present) lists short behavioural
+takeaways YOU authored on previous closes. They are PERSISTENT: unlike
+the PERFORMANCE / RECENT CLOSED TRADES blocks, they survive the
+regime-change window and the last-10 cap, so a hard-won insight is not
+forgotten once the trade scrolls out of recent history. This is how you
+get stronger over time instead of relearning the same mistake.
+
+How to USE lessons:
+- Treat each lesson as a PRIOR / heuristic, weighed against current
+  market data — NOT as a hard rule and NEVER as a disable switch.
+  "Gold needs a wider noise-band stop" is a valid lesson; "never trade
+  gold" is NOT (that violates the sample-size principle — a handful of
+  losses is not statistical proof a market is untradeable).
+- Before opening, scan lessons for the symbol/side you are considering:
+  does a past lesson warn about this exact setup, hour, or stop-sizing?
+  If so, adjust (more confluence, wider SL, smaller size) rather than
+  blindly repeating or blindly avoiding.
+
+How to AUTHOR lessons (the `lesson` field on a close):
+- Emit `lesson` ONLY when the outcome taught something GENERALIZABLE
+  and ACTIONABLE for future trades — a recurring mistake, a sizing
+  insight, a regime/timing pattern. If the close was routine and
+  taught nothing new, OMIT the field (do not manufacture filler — the
+  block is capped and noise crowds out real signal).
+- Make it concrete and self-contained (≤240 chars): what happened →
+  what to do differently. Bad: "lost on gold, be careful." Good:
+  "XAUUSD longs stopped out twice on intraday noise with <1.0R stops;
+  use ≥1.5 ATR stops on gold or wait for deeper pullback."
+- If a NEW close refines or invalidates an EXISTING lesson, set
+  `lesson_supersedes_id` to that lesson's id (shown in the LESSONS
+  LEARNED block) so the stale version is retired and not double-counted.
+- A single trade is weak evidence (sample-size): phrase early lessons
+  as tentative ("first sign that ..."), strengthen them only when the
+  pattern repeats. Do NOT encode a permanent ban from one or two losses.
+
+═══════════════════════════════════════════════════════════════════════
 REGIME-CHANGE WINDOW — why the stats window may show "since YYYY-MM-DD"
 ═══════════════════════════════════════════════════════════════════════
 
@@ -815,7 +854,9 @@ Close:
   "position_id": <id>,
   "reason": "<≤200 chars>",
   "thesis_status": "broken" | "intact" | "partial",
-  "thesis_invalidator": "<≤150 chars; REQUIRED if status != \"intact\"; for \"intact\" cite alt trigger (locked-profit, age, news)>"
+  "thesis_invalidator": "<≤150 chars; REQUIRED if status != \"intact\"; for \"intact\" cite alt trigger (locked-profit, age, news)>",
+  "lesson": "<OPTIONAL ≤240 chars; a durable behavioural takeaway from THIS trade's outcome — see PERSISTENT LESSONS. Omit if no genuine generalizable lesson.>",
+  "lesson_supersedes_id": <OPTIONAL int; id of a prior lesson (from LESSONS LEARNED block) this one refines/replaces>
 }
 
 Hold:
@@ -1102,6 +1143,38 @@ def format_recent_trades(
     return f"{header}\n{body}"
 
 
+def format_lessons(lessons: list[dict[str, Any]] | None) -> str:
+    """Render persistent LESSONS LEARNED блок (2026-06-02).
+
+    Уроки — короткие поведенческие выводы, которые бот сам сформулировал
+    на CLOSE из исхода реальных закрытых сделок (таблица ``lessons``,
+    источник `AiFxTraderStore.get_active_lessons`). В отличие от
+    SELF-REFLECTION (реконструируется каждый цикл из окна статистики),
+    уроки **персистентны** — переживают regime-window и last-10. Это
+    приоры для reasoning'а, НЕ disable-правила (compliance с
+    .cursor/rules/sample-size.mdc + no-data-fitting.mdc).
+
+    Порядок oldest → newest (как из ``get_active_lessons``) — LLM сильнее
+    взвешивает последние строки. Пусто / None → "".
+    """
+    if not lessons:
+        return ""
+    lines = ["=== LESSONS LEARNED (your own, persistent across cycles) ==="]
+    for ls in lessons:
+        sym = ls.get("symbol") or "GENERAL"
+        side = ls.get("side")
+        tag = f"{sym} {side}" if side else sym
+        out = ls.get("outcome_usd")
+        tid = ls.get("trade_id")
+        src = (
+            f" (trade #{tid}, {out:+.2f}$)"
+            if tid is not None and out is not None
+            else ""
+        )
+        lines.append(f"- [{tag}]{src} {ls['lesson_text']}")
+    return "\n".join(lines)
+
+
 def format_event_trigger(triggers: list[str] | None) -> str:
     """Render нейтральный EVENT TRIGGER блок для USER_PROMPT.
 
@@ -1154,6 +1227,7 @@ def build_user_prompt(
     performance_by_symbol: str | None = None,
     performance_by_symbol_side: str | None = None,
     recent_trades: str | None = None,
+    lessons: str | None = None,
     event_trigger: str = "",
 ) -> str:
     """Full-cycle USER_PROMPT.
@@ -1192,6 +1266,10 @@ def build_user_prompt(
         parts.append(performance_by_symbol_side)
     if recent_trades:
         parts.append(recent_trades)
+    # LESSONS LEARNED — последним в history (наибольший recency-вес): это
+    # дистиллированные приоры из прошлых исходов, культминация перед рынком.
+    if lessons:
+        parts.append(lessons)
     history_block = ("\n\n".join(parts) + "\n\n") if parts else ""
     # Phase 3.1 (2026-05-29): если цикл разбужен датчиком — сигнал идёт
     # первым блоком (framing «почему тебя позвали»), ПЕРЕД историей и

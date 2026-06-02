@@ -112,6 +112,26 @@ CREATE TABLE IF NOT EXISTS kv_state (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Persistent lessons (2026-06-02, BUILDLOG_AI_FX_TRADER.md): короткие
+-- поведенческие выводы, которые LLM сам формулирует на CLOSE из исхода
+-- реальной сделки. Переживают окно статистики и last-10 (в отличие от
+-- SELF-REFLECTION, который реконструируется каждый цикл). НЕ disable-
+-- правила: подаются в промпт как приоры, механически ничего не блокируют
+-- (compliance с .cursor/rules/sample-size.mdc + no-data-fitting.mdc).
+CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    symbol TEXT,                          -- инструмент урока (NULL = общий)
+    side TEXT,                            -- 'BUY' | 'SELL' | NULL
+    trade_id INTEGER,                     -- positions.id, из которой выведен
+    outcome_usd REAL,                     -- realized pnl той сделки
+    lesson_text TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,    -- 0 = superseded / вытеснен капом
+    supersedes_id INTEGER                 -- lessons.id, который заменён
+);
+
+CREATE INDEX IF NOT EXISTS idx_lessons_active ON lessons(active, created_at);
 """
 
 
@@ -628,4 +648,108 @@ class AiFxTraderStore:
                 }
             )
         out.reverse()  # oldest → newest для prompt readability
+        return out
+
+    # ─── Lessons (persistent experience) ─────────────────────────────────
+
+    def add_lesson(
+        self,
+        *,
+        lesson_text: str,
+        symbol: str | None = None,
+        side: str | None = None,
+        trade_id: int | None = None,
+        outcome_usd: float | None = None,
+        supersedes_id: int | None = None,
+        max_active: int = 12,
+        text_clamp: int = 240,
+    ) -> int:
+        """Сохранить урок, выведенный LLM из закрытой сделки.
+
+        - ``supersedes_id``: если задан и есть активный урок с этим id —
+          он деактивируется (active=0), новый ссылается на него. Так LLM
+          явно «обновляет» устаревший вывод (lifecycle: cap + supersede).
+        - cap ``max_active``: после вставки активные сверх лимита
+          деактивируются (FIFO по created_at), чтобы промпт не раздувался
+          и не закреплялся шум (.cursor/rules/sample-size.mdc).
+
+        Возвращает id нового урока; пустой/whitespace текст игнорируется
+        (возврат 0) — не плодим мусорные строки.
+        """
+        text = (lesson_text or "").strip()[:text_clamp]
+        if not text:
+            return 0
+        with self._conn() as c:
+            if supersedes_id:
+                c.execute(
+                    "UPDATE lessons SET active = 0 WHERE id = ? AND active = 1",
+                    (int(supersedes_id),),
+                )
+            cur = c.execute(
+                """
+                INSERT INTO lessons
+                (created_at, symbol, side, trade_id, outcome_usd,
+                 lesson_text, active, supersedes_id)
+                VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    datetime.now(tz=UTC).isoformat(),
+                    symbol,
+                    side,
+                    int(trade_id) if trade_id is not None else None,
+                    float(outcome_usd) if outcome_usd is not None else None,
+                    text,
+                    int(supersedes_id) if supersedes_id else None,
+                ),
+            )
+            new_id = int(cur.lastrowid or 0)
+            if max_active and max_active > 0:
+                # деактивируем старейшие активные сверх лимита (FIFO)
+                stale = c.execute(
+                    """
+                    SELECT id FROM lessons WHERE active = 1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT -1 OFFSET ?
+                    """,
+                    (int(max_active),),
+                ).fetchall()
+                for row in stale:
+                    c.execute(
+                        "UPDATE lessons SET active = 0 WHERE id = ?",
+                        (int(row["id"]),),
+                    )
+            return new_id
+
+    def get_active_lessons(self, limit: int = 12) -> list[dict[str, Any]]:
+        """Активные уроки, oldest → newest (LLM сильнее взвешивает последние).
+
+        Источник для блока `=== LESSONS LEARNED ===` в full-cycle prompt.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT id, created_at, symbol, side, trade_id, outcome_usd,
+                       lesson_text
+                FROM lessons
+                WHERE active = 1
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        out: list[dict[str, Any]] = [
+            {
+                "id": int(r["id"]),
+                "created_at": r["created_at"],
+                "symbol": r["symbol"],
+                "side": r["side"],
+                "trade_id": int(r["trade_id"]) if r["trade_id"] is not None else None,
+                "outcome_usd": (
+                    float(r["outcome_usd"]) if r["outcome_usd"] is not None else None
+                ),
+                "lesson_text": r["lesson_text"],
+            }
+            for r in rows
+        ]
+        out.reverse()
         return out

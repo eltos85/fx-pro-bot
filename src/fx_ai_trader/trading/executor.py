@@ -149,6 +149,11 @@ ClampedTitleSnippet = Annotated[
 ClampedThesisInvalidator = Annotated[
     str, BeforeValidator(_coerce_capped_str(200)), Field(max_length=200)
 ]
+# Persistent lessons (2026-06-02): короткий поведенческий вывод из исхода
+# сделки. Clamp 240 (DB clamp тот же), чтобы блок LESSONS не раздувался.
+ClampedLesson = Annotated[
+    str, BeforeValidator(_coerce_capped_str(240)), Field(max_length=240)
+]
 
 
 class SentimentItem(BaseModel):
@@ -201,6 +206,12 @@ class CloseAction(BaseModel):
     reason: ClampedReason = ""
     thesis_status: Optional[Literal["broken", "intact", "partial"]] = None
     thesis_invalidator: Optional[ClampedThesisInvalidator] = None
+    # Persistent lessons (2026-06-02): опциональный поведенческий вывод,
+    # который LLM формулирует из исхода ЭТОЙ сделки; сохраняется в таблицу
+    # `lessons` и подаётся в будущие промпты. `lesson_supersedes_id` —
+    # id прошлого урока, который этот вывод заменяет (lifecycle cap+supersede).
+    lesson: Optional[ClampedLesson] = None
+    lesson_supersedes_id: Optional[int] = Field(default=None, gt=0)
 
 
 class HoldAction(BaseModel):
@@ -450,6 +461,25 @@ def _apply_close(
             executed=False, summary="",
             error=f"current price unavailable for {pos.symbol}",
         )
+
+    def _persist_lesson(pnl: float) -> None:
+        """Persistent lessons (2026-06-02): сохранить вывод LLM из исхода
+        ЭТОЙ сделки. Best-effort — сбой записи урока НЕ должен валить close.
+        """
+        if not cm.lesson:
+            return
+        try:
+            store.add_lesson(
+                lesson_text=cm.lesson,
+                symbol=pos.symbol,
+                side=pos.side,
+                trade_id=pos.id,
+                outcome_usd=pnl,
+                supersedes_id=cm.lesson_supersedes_id,
+                max_active=settings.lessons_max_active,
+            )
+        except Exception:
+            log.exception("add_lesson failed for pos=%s (non-fatal)", pos.id)
     # Idealized gross PnL — fallback для paper-mode и если broker NET
     # не подтянется через get_closing_deal_for_position. НЕ ровно тому,
     # что брокер реально спишет (нет swap/commission); см. broker NET
@@ -513,6 +543,7 @@ def _apply_close(
                         realized_pnl_usd=broker_net,
                         close_reason="broker_auto",
                     )
+                    _persist_lesson(broker_net)
                     return ApplyResult(
                         executed=True,
                         summary=(
@@ -559,6 +590,7 @@ def _apply_close(
                 realized_pnl_usd=broker_net,
                 close_reason=action.raw.get("reason", "llm_close"),
             )
+            _persist_lesson(broker_net)
             return ApplyResult(
                 executed=True,
                 summary=(
@@ -585,6 +617,7 @@ def _apply_close(
         realized_pnl_usd=pnl_usd,
         close_reason=action.raw.get("reason", "llm_close"),
     )
+    _persist_lesson(pnl_usd)
     mode = "PAPER" if pos.is_paper else "LIVE"
     return ApplyResult(
         executed=True,

@@ -28,6 +28,7 @@ from fx_ai_trader.llm.prompts import (
     build_user_prompt,
     build_user_prompt_review,
     format_event_trigger,
+    format_lessons,
     format_performance_by_symbol,
     format_performance_by_symbol_side,
     format_recent_trades,
@@ -546,6 +547,9 @@ def _run_full_cycle(
         list(settings.symbols), since=since
     )
     recent_trades = store.get_recent_closed_trades(limit=10, since=since)
+    # Persistent lessons (2026-06-02): уроки НЕ фильтруются окном — они
+    # дистиллированы из исходов и должны переживать regime-cutoff/last-10.
+    lessons = store.get_active_lessons(limit=settings.lessons_max_active)
     user_prompt = build_user_prompt(
         format_context_for_prompt(ctx),
         performance_by_symbol=format_performance_by_symbol(
@@ -557,17 +561,19 @@ def _run_full_cycle(
         recent_trades=format_recent_trades(
             recent_trades, window_label=window_label
         ),
+        lessons=format_lessons(lessons),
         event_trigger=format_event_trigger(event_triggers),
     )
 
     log.info(
         "LLM call (full): positions=%d news_total=%d macro_symbols=%s "
-        "us_rates=%s self_reflection=closed_trades:%d",
+        "us_rates=%s self_reflection=closed_trades:%d lessons=%d",
         len(ctx.open_positions),
         sum(len(v) for v in ctx.news_per_symbol.values()),
         ",".join(sorted(ctx.macro_per_symbol.keys())) or "none",
         "on" if ctx.macro_rates_block else "off",
         len(recent_trades),
+        len(lessons),
     )
     resp = llm.ask(SYSTEM_PROMPT, user_prompt)
     store.add_api_cost(resp.cost_usd)

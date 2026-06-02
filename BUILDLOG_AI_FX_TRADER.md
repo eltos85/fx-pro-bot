@@ -1,5 +1,49 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-06-02
+
+### feat(learning): persistent lessons — бот дистиллирует уроки из закрытых сделок
+
+`HASH_PLACEHOLDER3`
+
+**Запрос:** «бот должен учиться и становиться сильнее от полученного опыта».
+Аудит показал: «обучение» было только in-context через SELF-REFLECTION,
+который реконструируется каждый цикл из окна статистики (`stats_window_start`)
+и last-10 — уроки терялись, как только сделка уходила за окно. Добавлен
+**персистентный слой опыта**.
+
+**Как работает (LLM-authored, on-close):**
+- LLM на закрытии может вернуть поле `lesson` (≤240 chars) — конкретный
+  generalizable вывод из исхода ЭТОЙ сделки; `lesson_supersedes_id` —
+  id прошлого урока, который этот вывод уточняет/заменяет.
+- `executor._apply_close` сохраняет урок (best-effort, сбой не валит close)
+  во все три close-ветки с привязкой `trade_id` + `outcome_usd`.
+- Топ-N активных уроков (`lessons_max_active=12`) подаются в full-cycle
+  промпт блоком `=== LESSONS LEARNED ===` (последним в history, max recency).
+- Уроки **НЕ фильтруются** regime-window — переживают cutoff и last-10.
+
+**Lifecycle (выбран cap + supersede):**
+- `lessons` table (`active` flag, `supersedes_id`). `supersedes_id` гасит
+  старый урок; FIFO-cap деактивирует старейшие сверх `max_active`.
+
+**Анти-оверфит (sample-size.mdc / no-data-fitting.mdc):**
+- Уроки — приоры в промпте, **механически ничего не блокируют** (как и
+  весь self-reflection). SYSTEM_PROMPT секция PERSISTENT LESSONS явно
+  запрещает «never trade X» из пары лоссов; ранние уроки формулируются
+  как tentative, усиливаются только при повторении паттерна.
+- Каждый урок привязан к реальному `trade_id` + `outcome_usd` (артефакт).
+
+**Тесты:** `tests/test_fx_ai_trader_lessons.py` (15 шт): DB add/get/order/
+supersede/cap/empty-guard/clamp, parse_action с lesson-полями, executor
+persist на paper-close, format_lessons + build_user_prompt. Полный набор
+1054 passed.
+
+**Файлы:** src/fx_ai_trader/state/db.py (lessons table + add_lesson/
+get_active_lessons), src/fx_ai_trader/trading/executor.py (CloseAction.lesson
++ _persist_lesson), src/fx_ai_trader/llm/prompts.py (format_lessons +
+PERSISTENT LESSONS секция + close JSON schema), src/fx_ai_trader/app/main.py,
+src/fx_ai_trader/config/settings.py, tests/test_fx_ai_trader_lessons.py
+
 ## 2026-06-01
 
 ### chore(observability): рационал в логе CLOSE + актуальный стартовый баннер

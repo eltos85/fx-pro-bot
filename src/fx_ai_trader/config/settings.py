@@ -209,6 +209,14 @@ class AiFxTraderSettings(BaseSettings):
         default="fx_ai_trader.sqlite", validation_alias="AI_FX_TRADER_DB_FILENAME"
     )
 
+    # ─── Persistent lessons (2026-06-02) ──────────────────────────────────
+    # Сколько активных уроков держать (cap) и подавать в full-cycle prompt.
+    # Уроки — поведенческие приоры из закрытых сделок (LLM пишет на CLOSE);
+    # cap защищает от раздувания промпта и закрепления шума (sample-size.mdc).
+    lessons_max_active: int = Field(
+        default=12, validation_alias="AI_FX_TRADER_LESSONS_MAX_ACTIVE"
+    )
+
     # ─── News (RSS + EIA) ────────────────────────────────────────────────
     news_enabled: bool = Field(
         default=True, validation_alias="AI_FX_TRADER_NEWS_ENABLED"
