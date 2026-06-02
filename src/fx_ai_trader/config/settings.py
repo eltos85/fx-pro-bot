@@ -243,9 +243,11 @@ class AiFxTraderSettings(BaseSettings):
         default=True, validation_alias="AI_FX_TRADER_MACRO_RATES_ENABLED"
     )
     macro_rates_cache_ttl_sec: int = Field(
-        default=1800,
+        default=900,
         validation_alias="AI_FX_TRADER_MACRO_RATES_CACHE_TTL_SEC",
-    )  # 30 минут — достаточно freshness, без HTTP-перегруза
+    )  # 2026-06-02: 1800→900 (= full-cycle poll). С intraday-last в
+    # macro_rates 30-мин кэш маскировал свежесть; 900с даёт fresh spot
+    # каждому плановому циклу без HTTP-перегруза (yfinance daily медленный).
     # FRED API key (бесплатная регистрация на fred.stlouisfed.org).
     # Пустой ключ → real-yield (DFII10) / breakeven (T10YIE) НЕ тянутся,
     # остаётся TIP-прокси через yfinance (graceful degrade). С ключом
@@ -263,8 +265,9 @@ class AiFxTraderSettings(BaseSettings):
         default=True, validation_alias="AI_FX_TRADER_RISK_REGIME_ENABLED"
     )
     risk_regime_cache_ttl_sec: int = Field(
-        default=1800, validation_alias="AI_FX_TRADER_RISK_REGIME_CACHE_TTL_SEC"
-    )
+        default=900, validation_alias="AI_FX_TRADER_RISK_REGIME_CACHE_TTL_SEC"
+    )  # 2026-06-02: 1800→900. VIX скачет внутри дня; с intraday-last
+    # 30-мин кэш прятал стресс. 900с = full-cycle, fresh VIX каждый цикл.
 
     # ─── CFTC COT positioning — Enhancement A (2026-05-29) ──────────────
     # Commitments of Traders (CFTC public API, без ключа, weekly Tue snapshot).

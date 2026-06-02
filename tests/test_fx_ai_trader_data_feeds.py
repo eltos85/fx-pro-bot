@@ -124,6 +124,60 @@ class TestRiskRegime:
         from fx_ai_trader.data.risk_regime import format_risk_regime_snapshot
         assert format_risk_regime_snapshot(None) is None
 
+    def test_vix_deltas_uses_intraday_last_over_daily(self):
+        """Intraday-last (2026-06-02): уровень VIX живой, Δ — day-over-day."""
+        from fx_ai_trader.data.risk_regime import _vix_deltas
+
+        daily = [15.0, 16.0, 16.5, 17.0, 18.0, 20.0]  # daily closes
+        # intraday spike до 24 — должно попасть в last, baselines дневные
+        last, pct_24h, pct_5d = _vix_deltas(daily, intraday_last=24.0)
+        assert last == 24.0  # живое значение, НЕ daily close 20.0
+        assert pct_24h == pytest.approx((24.0 - 18.0) / 18.0 * 100)  # vs [-2]
+        assert pct_5d == pytest.approx((24.0 - 15.0) / 15.0 * 100)  # vs [-6]
+
+    def test_vix_deltas_fallback_to_daily_when_no_intraday(self):
+        from fx_ai_trader.data.risk_regime import _vix_deltas
+
+        daily = [15.0, 16.0, 16.5, 17.0, 18.0, 20.0]
+        last, pct_24h, pct_5d = _vix_deltas(daily, intraday_last=None)
+        assert last == 20.0  # последний daily close
+        assert pct_24h == pytest.approx((20.0 - 18.0) / 18.0 * 100)
+
+
+class TestMacroRatesIntradaySeries:
+    def test_compute_series_uses_intraday_last(self):
+        """spot = intraday-last; 24h/5d Δ остаются vs дневные closes."""
+        from fx_ai_trader.data.macro_rates import _compute_series
+
+        daily = [104.0, 104.5, 104.8, 105.0, 105.2, 105.3]
+        out = _compute_series(daily, intraday_last=105.9)
+        assert out["last"] == 105.9  # живой spot, не daily 105.3
+        assert out["prev_close_24h"] == 105.2  # baseline дневной [-2]
+        assert out["prev_close_5d"] == 104.0  # baseline дневной [-6]
+        assert out["pct_24h"] == pytest.approx((105.9 - 105.2) / 105.2 * 100)
+        assert out["pct_5d"] == pytest.approx((105.9 - 104.0) / 104.0 * 100)
+
+    def test_compute_series_fallback_to_daily_close(self):
+        from fx_ai_trader.data.macro_rates import _compute_series
+
+        daily = [104.0, 104.5, 104.8, 105.0, 105.2, 105.3]
+        out = _compute_series(daily, intraday_last=None)
+        assert out["last"] == 105.3  # последний daily close
+
+    def test_compute_series_empty(self):
+        from fx_ai_trader.data.macro_rates import _compute_series
+
+        out = _compute_series([], intraday_last=None)
+        assert out["last"] is None and out["pct_24h"] is None
+
+    def test_compute_series_short_history_no_5d(self):
+        from fx_ai_trader.data.macro_rates import _compute_series
+
+        out = _compute_series([104.0, 105.0], intraday_last=106.0)
+        assert out["last"] == 106.0
+        assert out["pct_24h"] == pytest.approx((106.0 - 104.0) / 104.0 * 100)
+        assert out["pct_5d"] is None
+
 
 # ─── A: CFTC COT ───────────────────────────────────────────────────────
 

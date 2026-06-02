@@ -107,7 +107,13 @@ def collect_market_context(
     for sym in symbols:
         bars_1h = adapter.get_bars(sym, period_minutes=60, count=100)
         bars_4h = adapter.get_bars(sym, period_minutes=240, count=50)
-        current = bars_1h[-1].close if bars_1h else None
+        # Цена для LLM = ЖИВОЙ spot mid (Phase 1), как у executor и датчиков
+        # (2026-06-02). Раньше тут стоял bars_1h[-1].close — формирующийся
+        # H1 close, отстающий до ~60 мин: LLM и брокер видели разные цены.
+        # get_current_price сам фолбэчит на M1-close при отсутствии spot.
+        current = adapter.get_current_price(sym)
+        if current is None:
+            current = bars_1h[-1].close if bars_1h else None
         ind_1h = ind_4h = None
         if len(bars_1h) >= 50:
             ind_1h = compute_snapshot(
@@ -252,7 +258,10 @@ def collect_review_context(
     snapshots: list[SymbolSnapshot] = []
     for sym in review_symbols:
         bars_1h = adapter.get_bars(sym, period_minutes=60, count=50)
-        current = bars_1h[-1].close if bars_1h else None
+        # Живой spot mid вместо H1-close (2026-06-02) — см. collect_market_context.
+        current = adapter.get_current_price(sym)
+        if current is None:
+            current = bars_1h[-1].close if bars_1h else None
         ind_1h = None
         if len(bars_1h) >= 30:
             ind_1h = compute_snapshot(

@@ -2,6 +2,45 @@
 
 ## 2026-06-02
 
+### fix(freshness): живая цена в промпт LLM + intraday-spot для VIX/DXY/UST
+
+`<хеш>`
+
+**Симптом (запрос):** «данные устаревают пока идут до ИИ». Аудит пайплайна
+подтвердил частично — нашёл конкретный архитектурный разрыв.
+
+**Причина (главное, баг):** Phase 1 (2026-05-29) подключила live spot-стрим;
+`get_current_price()` отдаёт суб-секундный mid, и его используют executor и
+event-датчики. Но в промпт LLM цена шла как `bars_1h[-1].close`
+(`context.py:110` / review `:261`) — формирующийся H1-close, отстающий до
+~60 мин + до 15 мин между full-циклами. Итог: **LLM и брокер видели разные
+цены** (комментарии Phase 1 обещали замену H1-close, до `collect_market_context`
+её не довели).
+
+**Фикс:**
+- `context.py` (full + review): `current_price = adapter.get_current_price(sym)`
+  с фолбэком на `bars_1h[-1].close`. Бары/индикаторы (RSI/MACD/EMA на 1H/4H)
+  не трогаем — их лаг на таймфрейм корректен by design.
+- `macro_rates.py` / `risk_regime.py`: добавлен intraday-«last»
+  (`period="1d", interval="5m"`) — spot (DXY/UST10Y/TIP/VIX) теперь живой,
+  а 24h/5d Δ остаются day-over-day (vs дневные closes). Вынесены чистые
+  `_compute_series` / `_vix_deltas` для unit-тестов без сети. FRED daily
+  оставлен (intraday недоступен — inherent latency).
+- `settings.py`: TTL кэша macro_rates и risk_regime 1800→900 (= full-cycle
+  poll), иначе 30-мин кэш маскировал intraday-свежесть.
+
+**Не баг (inherent latency, не трогали):** COT weekly, EIA weekly, NOAA daily,
+GDELT 3d tone, FRED daily, 1H/4H индикаторы. RSS (10м кэш / 12ч окно) — норм.
+
+**Тесты:** +11 (`test_fx_ai_trader_live_price.py` — context живой spot vs H1,
+фолбэк; `test_fx_ai_trader_data_feeds.py` — `_vix_deltas` / `_compute_series`
+intraday-override + фолбэк + edge). Полный набор 1065 passed.
+
+**Файлы:** `src/fx_ai_trader/trading/context.py`,
+`src/fx_ai_trader/data/macro_rates.py`, `src/fx_ai_trader/data/risk_regime.py`,
+`src/fx_ai_trader/config/settings.py`, `tests/test_fx_ai_trader_live_price.py`,
+`tests/test_fx_ai_trader_data_feeds.py`
+
 ### feat(learning): persistent lessons — бот дистиллирует уроки из закрытых сделок
 
 `8bfa891`

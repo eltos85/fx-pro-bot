@@ -39,6 +39,9 @@ LLM получает 24h-direction TIP, чего достаточно для con
 Реализация:
 
 - Тянем daily history `period="10d"` (для надёжного 5d-окна с holiday-buffer).
+- 2026-06-02: + intraday-last (`period="1d", interval="5m"`) — spot теперь
+  ЖИВОЙ (5-мин свежесть), а 24h/5d Δ по-прежнему меряются vs дневные closes
+  (day-over-day семантика сохранена). См. `_compute_series`.
 - Из дневных closes считаем: spot, 24h Δ (vs iloc[-2]), 5d Δ (vs iloc[-6]).
 - Если истории < N точек → возвращаем `None` для соответствующего Δ
   (graceful degradation, не падаем).
@@ -209,13 +212,71 @@ class MacroRatesProvider:
         )
 
 
-def _fetch_pct_series(ticker: str) -> dict[str, float | None]:
-    """Тянет daily history через yfinance и считает spot + 24h + 5d Δ.
+def _compute_series(
+    daily_closes: list[float], intraday_last: float | None,
+) -> dict[str, float | None]:
+    """Pure: из daily closes + (опц.) intraday-последней цены считает
+    spot + 24h + 5d Δ.
 
-    Возвращает dict с ключами: ``last`` (последний Close), ``pct_24h``
-    (% change vs iloc[-2]), ``pct_5d`` (% change vs iloc[-6]),
-    ``prev_close_24h`` и ``prev_close_5d`` (нужны для UST10Y bps-расчёта
-    вне этой функции).
+    ``last`` = ``intraday_last`` если задан (intraday-свежесть), иначе
+    последний daily close. Δ-baselines всегда дневные: ``daily_closes[-2]``
+    (вчерашний close) для 24h и ``daily_closes[-6]`` для 5d — т.е. дельта
+    меряется «текущая цена vs дневной close N дней назад» (стандартный
+    intraday-daily change). Это сохраняет research-семантику day-over-day
+    дельт и одновременно делает spot живым.
+
+    Выделено в чистую функцию для unit-тестов без сети (yfinance).
+    """
+    out: dict[str, float | None] = {
+        "last": None,
+        "pct_24h": None,
+        "pct_5d": None,
+        "prev_close_24h": None,
+        "prev_close_5d": None,
+    }
+    if not daily_closes:
+        return out
+    last = intraday_last if intraday_last is not None else daily_closes[-1]
+    out["last"] = last
+    if len(daily_closes) >= 2:
+        prev_24h = daily_closes[-2]
+        out["prev_close_24h"] = prev_24h
+        if prev_24h != 0:
+            out["pct_24h"] = (last - prev_24h) / prev_24h * 100.0
+    if len(daily_closes) >= 6:
+        prev_5d = daily_closes[-6]
+        out["prev_close_5d"] = prev_5d
+        if prev_5d != 0:
+            out["pct_5d"] = (last - prev_5d) / prev_5d * 100.0
+    return out
+
+
+def _latest_intraday_close(ticker: str) -> float | None:
+    """Последний intraday Close (5-мин бары за день) — для свежего spot.
+
+    Отдельный лёгкий запрос поверх daily history: daily даёт baselines для
+    day-over-day Δ, intraday — актуальное значение (вместо «вчерашнего/
+    формирующегося» daily close). None при сбое / пустых данных — caller
+    тогда остаётся на daily close (graceful).
+    """
+    import yfinance as yf
+
+    try:
+        df = yf.Ticker(ticker).history(
+            period="1d", interval="5m", auto_adjust=False
+        )
+    except Exception:
+        log.exception("yfinance intraday failure для %s", ticker)
+        return None
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    vals = [float(x) for x in df["Close"].tolist() if x == x]
+    return vals[-1] if vals else None
+
+
+def _fetch_pct_series(ticker: str) -> dict[str, float | None]:
+    """Тянет daily history + intraday-last через yfinance, считает
+    spot + 24h + 5d Δ (см. :func:`_compute_series`).
 
     Все поля могут быть None если ряд короче ожидаемого (US holiday
     streak, illiquid symbol). Не raise'ит на пустых данных, только
@@ -244,18 +305,9 @@ def _fetch_pct_series(ticker: str) -> dict[str, float | None]:
     if not closes:
         return out
 
-    out["last"] = closes[-1]
-    if len(closes) >= 2:
-        prev_24h = closes[-2]
-        out["prev_close_24h"] = prev_24h
-        if prev_24h != 0:
-            out["pct_24h"] = (closes[-1] - prev_24h) / prev_24h * 100.0
-    if len(closes) >= 6:
-        prev_5d = closes[-6]
-        out["prev_close_5d"] = prev_5d
-        if prev_5d != 0:
-            out["pct_5d"] = (closes[-1] - prev_5d) / prev_5d * 100.0
-    return out
+    # Intraday-свежесть для spot; baselines остаются дневными.
+    intraday_last = _latest_intraday_close(ticker)
+    return _compute_series(closes, intraday_last)
 
 
 _FRED_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"

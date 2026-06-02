@@ -81,23 +81,57 @@ class RiskRegimeProvider:
         closes = [float(x) for x in df["Close"].tolist() if x == x]
         if not closes:
             return None
-        last = closes[-1]
-        pct_24h = (
-            (closes[-1] - closes[-2]) / closes[-2] * 100.0
-            if len(closes) >= 2 and closes[-2] != 0
-            else None
-        )
-        pct_5d = (
-            (closes[-1] - closes[-6]) / closes[-6] * 100.0
-            if len(closes) >= 6 and closes[-6] != 0
-            else None
-        )
+        # Intraday-свежесть VIX (2026-06-02): VIX скачет внутри дня, daily
+        # close прятал стресс. Берём живой 5-мин last; 24h/5d Δ остаются
+        # day-over-day (vs дневные closes). См. _vix_deltas.
+        intraday_last = _latest_intraday_close(_TICKER_VIX)
+        last, pct_24h, pct_5d = _vix_deltas(closes, intraday_last)
         return RiskRegimeSnapshot(
             vix_last=last,
             vix_change_24h_pct=pct_24h,
             vix_change_5d_pct=pct_5d,
             fetched_at_utc=datetime.now(UTC).isoformat(timespec="seconds"),
         )
+
+
+def _vix_deltas(
+    daily_closes: list[float], intraday_last: float | None,
+) -> tuple[float, float | None, float | None]:
+    """Pure: (last, 24h%%, 5d%%) из daily closes + (опц.) intraday-last.
+
+    ``last`` = intraday-last если есть, иначе последний daily close.
+    Δ-baselines дневные (``[-2]`` / ``[-6]``) — day-over-day семантика
+    сохранена, а уровень VIX живой. Выделено для unit-тестов без сети.
+    """
+    last = intraday_last if intraday_last is not None else daily_closes[-1]
+    pct_24h = (
+        (last - daily_closes[-2]) / daily_closes[-2] * 100.0
+        if len(daily_closes) >= 2 and daily_closes[-2] != 0
+        else None
+    )
+    pct_5d = (
+        (last - daily_closes[-6]) / daily_closes[-6] * 100.0
+        if len(daily_closes) >= 6 and daily_closes[-6] != 0
+        else None
+    )
+    return last, pct_24h, pct_5d
+
+
+def _latest_intraday_close(ticker: str) -> float | None:
+    """Последний intraday Close (5-мин бары за день). None при сбое/пустоте."""
+    import yfinance as yf
+
+    try:
+        df = yf.Ticker(ticker).history(
+            period="1d", interval="5m", auto_adjust=False
+        )
+    except Exception:
+        log.exception("yfinance intraday failure для %s", ticker)
+        return None
+    if df is None or df.empty or "Close" not in df.columns:
+        return None
+    vals = [float(x) for x in df["Close"].tolist() if x == x]
+    return vals[-1] if vals else None
 
 
 def format_risk_regime_snapshot(snap: RiskRegimeSnapshot | None) -> str | None:

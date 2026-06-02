@@ -200,3 +200,51 @@ class TestAdapterGetCurrentPrice:
         monkeypatch.setattr(adapter, "get_symbol_info", lambda s: _fake_symbol_info(41))
         monkeypatch.setattr(adapter, "get_bars", lambda *a, **k: [])
         assert adapter.get_current_price("XAUUSD") is None
+
+
+class _LivePriceAdapter:
+    """Adapter c расходящимися live spot и H1-close — для context-теста."""
+
+    def __init__(self, *, live_price: float | None, h1_close: float) -> None:
+        self._live = live_price
+        self._h1 = h1_close
+
+    def get_bars(self, sym, period_minutes, count):
+        n = max(count, 30)
+        return [
+            Bar(ts=i, open=self._h1, high=self._h1, low=self._h1,
+                close=self._h1, volume=1)
+            for i in range(n)
+        ]
+
+    def get_current_price(self, internal_symbol):
+        return self._live
+
+
+class TestContextUsesLivePrice:
+    """2026-06-02: current_price в промпте = get_current_price (live spot),
+    а не bars_1h[-1].close. Закрывает разрыв Phase 1 ↔ collect_market_context."""
+
+    def test_full_context_uses_live_spot_over_h1_close(self):
+        from unittest.mock import MagicMock
+
+        from fx_ai_trader.trading.context import collect_market_context
+
+        adapter = _LivePriceAdapter(live_price=2055.7, h1_close=2010.0)
+        store = MagicMock()
+        store.get_open_positions.return_value = []
+
+        ctx = collect_market_context(adapter, store, ("XAUUSD",), 500.0)
+        assert ctx.snapshots[0].current_price == pytest.approx(2055.7)
+
+    def test_full_context_falls_back_to_h1_when_no_live(self):
+        from unittest.mock import MagicMock
+
+        from fx_ai_trader.trading.context import collect_market_context
+
+        adapter = _LivePriceAdapter(live_price=None, h1_close=2010.0)
+        store = MagicMock()
+        store.get_open_positions.return_value = []
+
+        ctx = collect_market_context(adapter, store, ("XAUUSD",), 500.0)
+        assert ctx.snapshots[0].current_price == pytest.approx(2010.0)
