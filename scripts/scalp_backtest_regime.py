@@ -100,8 +100,25 @@ def daterange(a: str, b: str):
 
 
 # ─── режим: ADX(14) на 1H-клинах ───────────────────────────────────────────
+def _ema(vals: list[float], n: int) -> list[float]:
+    """EMA длиной len(vals); прогрев = SMA первых n (как HtfTrend в проде)."""
+    out = [0.0] * len(vals)
+    if len(vals) < n:
+        return out
+    sma = sum(vals[:n]) / n
+    out[n - 1] = sma
+    k = 2 / (n + 1)
+    ema = sma
+    for i in range(n, len(vals)):
+        ema = vals[i] * k + ema * (1 - k)
+        out[i] = ema
+    return out
+
+
 def load_regime(symbol: str, start: str, end: str):
-    """Возвращает функцию regime_at(ts)->('trend'|'range'|'mixed', adx)."""
+    """Возвращает regime_at(ts)->('trend'|'range'|'mixed', adx, htf_dir), где
+    htf_dir ∈ {'long','short','n/a'} — направление H1 по EMA200 (как прод-фильтр
+    require_htf_trend). Для A/B HTF-фильтра (EMA200-H1 vs ADX-режим)."""
     from pybit.unified_trading import HTTP
     sess = HTTP(testnet=False)
     start_ms = int(date.fromisoformat(start).strftime("%s")) * 1000 - 15 * 86400_000
@@ -122,12 +139,13 @@ def load_regime(symbol: str, start: str, end: str):
     # уникализируем и сортируем по времени (Bybit отдаёт свежие первыми)
     kl = sorted({int(x[0]): x for x in rows}.values(), key=lambda x: int(x[0]))
     if len(kl) < 30:
-        return lambda ts: ("n/a", 0.0)
+        return lambda ts: ("n/a", 0.0, "n/a")
     ts_arr = [int(x[0]) / 1000 for x in kl]
     high = [float(x[2]) for x in kl]
     low = [float(x[3]) for x in kl]
     close = [float(x[4]) for x in kl]
     adx = _adx(high, low, close, 14)
+    ema200 = _ema(close, 200)
     def regime_at(ts: float):
         i = 0
         for j in range(len(ts_arr)):
@@ -137,7 +155,9 @@ def load_regime(symbol: str, start: str, end: str):
                 break
         a = adx[i]
         reg = "trend" if a >= 25 else ("range" if a < 20 else "mixed")
-        return reg, a
+        e = ema200[i]
+        htf = "n/a" if e <= 0 else ("long" if close[i] > e else "short")
+        return reg, a, htf
     return regime_at
 
 
@@ -174,7 +194,27 @@ def _adx(high, low, close, n=14):
 
 
 # ─── replay одного символа ─────────────────────────────────────────────────
-def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False) -> list[dict]:
+def _blocked(side: str, htf: str, adx: float, mode: str, adx_thresh: float) -> bool:
+    """Фильтр входа. ema: направленный EMA200-H1 (как прод require_htf_trend) —
+    фейд только ПО тренду H1. adx: режим-гейт по СИЛЕ тренда (канон MR) — фейд в
+    ОБЕ стороны, но только когда тренд не сильный (adx < порога). none: без фильтра."""
+    if mode == "ema":
+        if htf == "long" and side == "short":
+            return True
+        if htf == "short" and side == "long":
+            return True
+        return False
+    if mode == "adx":
+        return adx >= adx_thresh
+    return False
+
+
+def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
+           filter_mode: str = "none", adx_thresh: float = 25.0,
+           sl_cooldown: float = 0.0) -> list[dict]:
+    """sl_cooldown>0: после выхода по SL блокируем НОВЫЙ вход в ТУ ЖЕ сторону на
+    sl_cooldown секунд (канон: не перефейдивать провалившийся уровень сразу,
+    Connors/Raschke). Противоположную сторону не трогаем."""
     """scratch_cf=True: КОНТРФАКТУАЛ — не закрываем по flow_scratch, а помечаем
     момент (would_scratch, scratch_R) и даём сделке дойти до естественного конца
     (TP/SL/flow_exit). Так видим: скретч спас от SL или зарезал отскок к TP."""
@@ -187,6 +227,7 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False) -
     trades = []
     pos = None
     eval_next = 0.0
+    last_sl_ts = {"long": -1e18, "short": -1e18}  # для sl_cooldown
     for ts, side, size, price in ticks:
         clk.t = ts
         state.on_trade(price, size, side)
@@ -205,6 +246,8 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False) -
                     hit = ("tp_hit", pos["tp"])
             if hit:
                 trades.append(_close(pos, hit[0], hit[1], ts, fee))
+                if hit[0] == "sl_hit":
+                    last_sl_ts[pos["side"]] = ts
                 pos = None
         if ts < eval_next:
             continue
@@ -213,7 +256,11 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False) -
         if pos is None:
             sig = strat.update(snap, ts)
             if sig is not None:
-                reg, adx = regime_at(ts)
+                reg, adx, htf = regime_at(ts)
+                if _blocked(sig.side, htf, adx, filter_mode, adx_thresh):
+                    continue  # фильтр входа зарезал сигнал
+                if sl_cooldown > 0 and ts - last_sl_ts[sig.side] < sl_cooldown:
+                    continue  # cooldown после SL в ту же сторону
                 pos = {"side": sig.side, "entry": sig.entry_ref, "sl": sig.sl_level,
                        "tp": sig.tp_level, "ts_open": ts, "regime": reg, "adx": adx,
                        "risk": abs(sig.entry_ref - sig.sl_level)}
@@ -310,10 +357,13 @@ def main():
         upd["scratch_on_flow_flip"] = False
     cfg = load_settings().model_copy(update=upd)
     sweep = "--sweep" in sys.argv
+    fmode = sys.argv[sys.argv.index("--filter") + 1] if "--filter" in sys.argv else "none"
+    adx_thresh = _argf("--adx-thresh", 25.0)
+    sl_cd = _argf("--sl-cooldown", 0.0)
     print(f"конфиг: fe_activate={cfg.flow_exit_activate_r}R "
           f"scratch_adverse={cfg.scratch_min_adverse_r}R "
           f"scratch_on={cfg.scratch_on_flow_flip} tp={cfg.take_profit_r}R "
-          f"ob-гейт=ВЫКЛ")
+          f"ob-гейт=ВЫКЛ | filter={fmode} (adx_thresh={adx_thresh})")
     all_trades = []
     for sym in syms:
         ticks = []
@@ -326,7 +376,8 @@ def main():
         ticks = bin_ticks(ticks, 0.25)
         regime_at = load_regime(sym, start, end)
         scratch_cf = "--scratch-cf" in sys.argv
-        tr = replay(sym, ticks, cfg, regime_at, scratch_cf=scratch_cf)
+        tr = replay(sym, ticks, cfg, regime_at, scratch_cf=scratch_cf,
+                    filter_mode=fmode, adx_thresh=adx_thresh, sl_cooldown=sl_cd)
         all_trades.extend(tr)
         if not sweep:
             net = sum(r["net_R"] for r in tr)
@@ -341,6 +392,15 @@ def main():
               f"scr={cfg.scratch_on_flow_flip} | n={len(t)} WR={w/max(len(t),1)*100:.0f}% "
               f"netR={net:+.0f} avgR={net/max(len(t),1):+.3f} | "
               f"flow_exit n={len(fx)} avgR={sum(r['net_R'] for r in fx)/max(len(fx),1):+.2f}")
+        return
+    if "--filter" in sys.argv or "--sl-cooldown" in sys.argv:
+        t = all_trades
+        net = sum(r["net_R"] for r in t)
+        gross = sum(r["gross_R"] for r in t)
+        w = len([r for r in t if r["net_R"] > 0])
+        n = max(len(t), 1)
+        print(f"\nFILTER={fmode} sl_cd={sl_cd:.0f}s | n={len(t)} WR={w/n*100:.0f}% "
+              f"netR={net:+.0f} (avg {net/n:+.3f}) grossR={gross:+.0f} (avg {gross/n:+.3f})")
         return
     report(all_trades)
 

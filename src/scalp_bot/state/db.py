@@ -193,6 +193,18 @@ class ScalpDB:
         ).fetchone()
         return int(row["c"] or 0)
 
+    def last_sl_close_ts(self, symbol: str, side: str) -> float | None:
+        """ts_close последнего выхода по SL (close_reason='sl_hit') для символа+
+        стороны. Для sl_cooldown_sec: не перефейдить провалившийся уровень сразу
+        (см. settings.sl_cooldown_sec). None — такого закрытия не было."""
+        row = self._conn.execute(
+            "SELECT MAX(ts_close) AS t FROM trades WHERE status='closed' "
+            "AND close_reason='sl_hit' AND symbol=? AND side=?",
+            (symbol, side),
+        ).fetchone()
+        t = row["t"] if row else None
+        return float(t) if t is not None else None
+
     def open_count(self) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) AS c FROM trades WHERE status='open'"

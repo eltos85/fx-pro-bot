@@ -880,6 +880,37 @@ def test_db_stats_excludes_reconcile_closes(tmp_path):
     db.close()
 
 
+def test_last_sl_close_ts(tmp_path):
+    """sl_cooldown: last_sl_close_ts отдаёт ts последнего SL по символу+стороне,
+    игнорируя не-SL выходы и другую сторону/символ (v0.15.0)."""
+    db = ScalpDB(str(tmp_path))
+
+    def closed(symbol, side, reason, ts_close):
+        tid = db.insert_open(symbol=symbol, side=side, qty=1.0, entry=100.0,
+                             sl=99.0, tp=102.0, score=5, reasons="x", mode="paper",
+                             strategy="sweep_fade", ts_open=ts_close - 60)
+        db.mark_closed(tid, exit_price=99.0, pnl_usd=-1.0, fees_usd=0.0,
+                       close_reason=reason, ts_close=ts_close)
+
+    # нет закрытий → None
+    assert db.last_sl_close_ts("XLMUSDT", "long") is None
+    # два SL по XLM long — берём максимальный ts
+    closed("XLMUSDT", "long", "sl_hit", 1000.0)
+    closed("XLMUSDT", "long", "sl_hit", 1500.0)
+    assert db.last_sl_close_ts("XLMUSDT", "long") == pytest.approx(1500.0)
+    # TP/flow_exit не считаются стопом
+    closed("XLMUSDT", "long", "tp_hit", 2000.0)
+    closed("XLMUSDT", "long", "flow_exit", 2100.0)
+    assert db.last_sl_close_ts("XLMUSDT", "long") == pytest.approx(1500.0)
+    # другая сторона и другой символ изолированы
+    assert db.last_sl_close_ts("XLMUSDT", "short") is None
+    assert db.last_sl_close_ts("ZECUSDT", "long") is None
+    closed("XLMUSDT", "short", "sl_hit", 3000.0)
+    assert db.last_sl_close_ts("XLMUSDT", "short") == pytest.approx(3000.0)
+    assert db.last_sl_close_ts("XLMUSDT", "long") == pytest.approx(1500.0)
+    db.close()
+
+
 def test_db_migration_adds_strategy_column(tmp_path):
     import sqlite3
     # старая БД без колонки strategy

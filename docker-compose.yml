@@ -346,6 +346,12 @@ services:
       # только под bar-close; канон shot-clock ~30с. >0 = вернуть ожидание бара.
       SCALP_CONFIRM_BAR_SEC: ${SCALP_CONFIRM_BAR_SEC:-0}
       SCALP_ARM_TIMEOUT_SEC: ${SCALP_ARM_TIMEOUT_SEC:-60}
+      # v0.15.0: пауза после SL перед повторным входом в ТУ ЖЕ сторону. Backtest
+      # 15д n=6325 (data/scalp_sl_cooldown.txt, filter=ema): «месть-перефейд»
+      # после стопа в среднем убыточен; cooldown 300с = колено кривой (gross
+      # +0.087→+0.103R). Connors/Raschke «не перефейдить провалившийся уровень».
+      # 0 = выключить.
+      SCALP_SL_COOLDOWN_SEC: ${SCALP_SL_COOLDOWN_SEC:-300}
       # Философия B: дай победителю бежать. TP 3.5R (асимметричный payoff).
       # v0.9.5: time_stop УДАЛЁН (противоречил «дай бежать» — резал по таймеру);
       # выход только flow_exit/flow_scratch/биржевой TP/SL.

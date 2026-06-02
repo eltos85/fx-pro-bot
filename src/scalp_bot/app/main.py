@@ -239,6 +239,19 @@ def run() -> None:
                               "пропускаю (фейдим только по тренду)", sig.symbol,
                               sig.side, d or "?")
                     continue
+                # SL-cooldown: не перефейдиваем провалившийся уровень сразу.
+                # Повторный вход той же стороной сразу после SL — в среднем
+                # убыточен (backtest 15д, data/scalp_sl_cooldown.txt; live-кейс
+                # XLMUSDT #816 SL→#817 SL за 3мин). Противоположную сторону не
+                # трогаем (реальный разворот ловим).
+                if cfg.sl_cooldown_sec > 0:
+                    last_sl = db.last_sl_close_ts(sig.symbol, sig.side)
+                    if last_sl is not None and now - last_sl < cfg.sl_cooldown_sec:
+                        play.info("🧊 [%s] %s — недавний SL %.0fс назад (<%.0fс "
+                                  "cooldown), не перефейдиваю уровень сразу",
+                                  sig.symbol, sig.side, now - last_sl,
+                                  cfg.sl_cooldown_sec)
+                        continue
                 # funding-окно (per-symbol по реальному интервалу): не открываемся
                 # перед списанием — funding кратно превышает R на волатильных альтах.
                 if funding.blocked(sig.symbol, now, cfg.avoid_funding_window_sec):
