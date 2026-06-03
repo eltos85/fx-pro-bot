@@ -19,6 +19,8 @@ dist/
 /data/backtest_*.log
 /data/fxpro_klines/
 /data/fxpro_klines_*/
+# Тиковый кэш scalp-бэктеста (регенерируется из Bybit, ~2.6 ГБ — НЕ в git)
+/data/scalp_ticks/
 # Research outputs (регенерируются скриптами из scripts/)
 /data/bottom_up_*.txt
 /data/carry_*.txt
