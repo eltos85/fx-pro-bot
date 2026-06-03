@@ -380,6 +380,10 @@ services:
       SCALP_HTF_ADX_GATE: ${SCALP_HTF_ADX_GATE:-true}
       SCALP_HTF_ADX_LEN: ${SCALP_HTF_ADX_LEN:-14}
       SCALP_HTF_ADX_MAX: ${SCALP_HTF_ADX_MAX:-25}
+      # v0.18.0: НЕ флэтить открытые позиции при рестарте — биржевые SL/TP их
+      # защищают, manage() продолжает сопровождать (кейс #926: рестарт срезал
+      # прибыльный шорт). true = legacy «чистый лист» (закрыть всё по рынку).
+      SCALP_FLATTEN_ON_START: ${SCALP_FLATTEN_ON_START:-false}
       # Мин-R пол + риск-сайзинг (v0.8.1): R ≥ 4×fee → fee ≤ 0.25R (R≈0.44%),
       # размер = риск$/дистанция_SL (канон профи), фикс $-риск/сделку.
       SCALP_MIN_RISK_FEE_MULT: ${SCALP_MIN_RISK_FEE_MULT:-4.0}

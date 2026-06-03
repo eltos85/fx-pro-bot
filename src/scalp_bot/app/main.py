@@ -81,6 +81,9 @@ def run() -> None:
             # закрыть позиции по выбранным символам И по символам открытых сделок
             flat_syms = set(symbols) | {tr.symbol for tr in db.open_trades()}
             _flatten_on_start(client, db, sorted(flat_syms))
+        else:
+            # v0.18.0: НЕ флэтим — даём открытым позициям дожить до TP/SL
+            _adopt_on_start(client, db)
 
     log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
              "kill day/total=$%.0f/$%.0f | strats=%s", mode, ",".join(symbols),
@@ -380,6 +383,59 @@ def _log_funnel(f: dict) -> None:
     else:
         play.info("📊 за минуту: есть свипы и дивергенции, но взвод не удержался — "
                   "проверь div_min_late_trades/окно, если так каждую минуту")
+
+
+def _adopt_on_start(client, db) -> None:
+    """Старт БЕЗ флэта (v0.18.0): открытые позиции НЕ закрываем — биржевые SL/TP
+    (вешаются на позицию в place_entry) защищают их, manage() со следующего цикла
+    читает их из БД и продолжает сопровождать (flow_exit/time-stop/bracket), даёт
+    дойти до TP/SL. Кейс #926: рестарт-флэт срезал прибыльный шорт и записал
+    pnl=0 — теперь позиция доживает сама.
+
+    Для open-сделок БЕЗ живой позиции:
+    • резящий НЕзаполненный maker-вход (статус New/PartiallyFilled) — снимаем
+      ТОЧЕЧНО по сохранённому link (cancel_all не зовём — аккаунт может быть
+      общим) и помечаем entry_timeout;
+    • реально закрылось пока бот лежал — реконсил реальным closed_pnl (tp/sl по
+      знаку), а не restart_flat=0."""
+    now = time.time()
+    for tr in db.open_trades():
+        try:
+            pos = client.get_position(tr.symbol)
+        except Exception:
+            log.exception("adopt: get_position %s failed", tr.symbol)
+            continue
+        if pos and pos.size > 0:
+            log.info("adopt: #%d %s %s size=%.6f — продолжаю сопровождать "
+                     "(биржевые SL/TP активны)", tr.id, tr.symbol, tr.side, pos.size)
+            continue
+        status = None
+        if tr.entry_order_id:
+            try:
+                status = client.order_status(tr.symbol, tr.entry_order_id)
+            except Exception:
+                log.exception("adopt: order_status %s failed", tr.symbol)
+        if status in ("New", "PartiallyFilled", "Untriggered"):
+            if tr.entry_order_id:
+                client.cancel_order(tr.symbol, tr.entry_order_id)
+            db.mark_closed(tr.id, exit_price=tr.entry, pnl_usd=0.0, fees_usd=0.0,
+                           close_reason="entry_timeout", ts_close=now)
+            log.info("adopt: #%d %s резящий вход снят при рестарте", tr.id, tr.symbol)
+            continue
+        pnl = None
+        try:
+            pnl = client.closed_pnl(tr.symbol, qty=tr.qty,
+                                    since_ms=int(tr.ts_open * 1000))
+        except Exception:
+            log.exception("adopt: closed_pnl %s failed", tr.symbol)
+        if pnl is None:
+            reason = "restart_flat"
+        else:
+            reason = "tp_hit" if pnl >= 0 else "sl_hit"
+        db.mark_closed(tr.id, exit_price=tr.entry, pnl_usd=pnl or 0.0,
+                       fees_usd=0.0, close_reason=reason, ts_close=now)
+        log.info("adopt: #%d %s закрылось пока лежали → %s pnl=%.4f", tr.id,
+                 tr.symbol, reason, pnl or 0.0)
 
 
 def _flatten_on_start(client, db, symbols: list[str]) -> None:

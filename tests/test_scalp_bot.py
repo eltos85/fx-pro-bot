@@ -1469,3 +1469,83 @@ def test_htf_adx_gate_defaults():
     assert s.htf_adx_gate is True
     assert s.htf_adx_len == 14
     assert s.htf_adx_max == 25.0
+
+
+# ─── adopt-старт без флэта (v0.18.0) ───────────────────────────────────────
+
+class _FakeAdoptClient:
+    """Минимальный клиент для _adopt_on_start: позиции/статусы/pnl по словарям."""
+
+    def __init__(self, positions=None, statuses=None, pnls=None):
+        self.positions = positions or {}   # sym -> obj(size, side) | None
+        self.statuses = statuses or {}     # link -> orderStatus
+        self.pnls = pnls or {}             # sym -> closed_pnl
+        self.cancelled = []
+
+    def get_position(self, sym):
+        return self.positions.get(sym)
+
+    def order_status(self, sym, link):
+        return self.statuses.get(link)
+
+    def cancel_order(self, sym, link):
+        self.cancelled.append((sym, link)); return {"ok": True}
+
+    def closed_pnl(self, sym, qty=None, since_ms=None):
+        return self.pnls.get(sym)
+
+
+def _row(db, tid):
+    return db._conn.execute(
+        "SELECT status, pnl_usd, close_reason FROM trades WHERE id=?", (tid,)
+    ).fetchone()
+
+
+def test_adopt_on_start_keeps_live_position(tmp_path):
+    """Живая позиция при рестарте НЕ закрывается — даём дойти до TP/SL (кейс #926)."""
+    from types import SimpleNamespace
+    from scalp_bot.app.main import _adopt_on_start
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="BNBUSDT", side="short", qty=0.26, entry=637.2,
+                         sl=641.0, tp=623.8, score=5, reasons="x", mode="live",
+                         strategy="density_break", entry_order_id="lnk1")
+    cl = _FakeAdoptClient(positions={"BNBUSDT": SimpleNamespace(size=0.26, side="Sell")})
+    _adopt_on_start(cl, db)
+    assert [t.id for t in db.open_trades()] == [tid]   # осталась открытой
+    assert cl.cancelled == []                          # ничего не отменяли
+
+
+def test_adopt_on_start_cancels_resting_entry(tmp_path):
+    """Резящий НЕзаполненный maker-вход при рестарте снимается точечно по link."""
+    from scalp_bot.app.main import _adopt_on_start
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="XLMUSDT", side="long", qty=10.0, entry=0.22,
+                         sl=0.219, tp=0.223, score=5, reasons="x", mode="live",
+                         strategy="sweep_fade", entry_order_id="lnk2")
+    cl = _FakeAdoptClient(positions={"XLMUSDT": None}, statuses={"lnk2": "New"})
+    _adopt_on_start(cl, db)
+    assert db.open_trades() == []
+    assert cl.cancelled == [("XLMUSDT", "lnk2")]
+    assert _row(db, tid)[2] == "entry_timeout"
+
+
+def test_adopt_on_start_reconciles_closed_while_down(tmp_path):
+    """Позиция закрылась пока бот лежал → реальный PnL (tp/sl), не restart_flat=0."""
+    from scalp_bot.app.main import _adopt_on_start
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="BNBUSDT", side="short", qty=0.26, entry=637.2,
+                         sl=641.0, tp=623.8, score=5, reasons="x", mode="live",
+                         strategy="density_break", entry_order_id="lnk3")
+    cl = _FakeAdoptClient(positions={"BNBUSDT": None}, statuses={"lnk3": "Filled"},
+                          pnls={"BNBUSDT": 1.05})
+    _adopt_on_start(cl, db)
+    status, pnl, reason = _row(db, tid)
+    assert status == "closed" and reason == "tp_hit" and pnl == pytest.approx(1.05)
+
+
+def test_flatten_on_start_default_false():
+    """v0.18.0: НЕ флэтим открытые позиции при рестарте (биржевые SL/TP защищают,
+    manage() продолжает сопровождать). Кейс #926: рестарт-флэт срезал прибыльный
+    шорт BNBUSDT (+$1.05) и записал pnl=0. Замок на решение."""
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().flatten_on_start is False
