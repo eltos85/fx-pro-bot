@@ -6,6 +6,44 @@
 
 ## 2026-06-03
 
+### v0.18.1 — HTF+ADX фильтры только для MR; density_break (momentum) свободен
+`<hash>`
+
+**Запрос пользователя**: «проверь сделки после ADX» → при проверке всплыло, что
+`#945 ZECUSDT density_break` шёл под ADX-гейтом. Это **мой недосмотр в v0.17.0**:
+ADX-гейт (и HTF EMA) я поставил глобально в main-loop (как общий фильтр), и они
+применялись КО ВСЕМ стратегиям, включая `density_break`.
+
+**Проблема**: `density_break` — momentum/breakout в ОБЕ стороны (снос стены вверх
+или вниз, «ПРОТИВОПОЛОЖНА fade», strategies.py). Для него MR-фильтры backwards:
+- **ADX-гейт** «не торговать при ADX≥25» — пробой ХОЧЕТ сильного тренда, гейт
+  резал бы лучшие условия;
+- **HTF EMA** направленный — режет прибыльные контртренд-пробои.
+
+**Research** (Quant Signals, **175 backtests**, EMA200 trend filter): *«London
+Breakout strategies — universal failure при наложении трендового фильтра: убирает
+~½ сигналов, включая profitable counter-trend breakouts»*; *«breakout-системы
+ловят движения в ОБЕ стороны»*. То есть направленный EMA-фильтр вредит пробойным
+стратегиям обеих сторон. ADX-гейт валидирован (A/B v0.17.0) ТОЛЬКО на sweep_fade.
+
+**Фикс**: фильтры стали per-strategy через атрибуты класса:
+- `SweepFadeStrategy`: `htf_filtered=True`, `regime_gated=True` (MR, валидировано);
+- `DensityBounceStrategy`: `True/True` (MR — отскок от стены = фейд подхода);
+- `DensityBreakStrategy`: `htf_filtered=False`, `regime_gated=False` (momentum).
+main-loop строит `htf_strats`/`adx_strats` из атрибутов (getattr default True) и
+гейтит только входящие в набор. density_break теперь торгует пробои в обе стороны,
+риск-контроль свой (wall_break+persist+round + hard SL за уровнем + биржевые TP/SL,
+Философия B). HTF EMA для density_break убран по research (counter-trend breaks),
+не по нашим данным (харнес реплеит только sweep_fade) — форвард-тест + мониторинг.
+
+**Sample-size**: правка не основана на n=4 после ADX (шум). Это исправление
+ошибки применения фильтра (логика+research), не оптимизация под P&L.
+
+**Файлы:** `src/scalp_bot/analysis/strategies.py` (атрибуты `htf_filtered`/
+`regime_gated` на 3 стратегиях + docstring density_break), `src/scalp_bot/app/
+main.py` (`htf_strats`/`adx_strats`, гейты per-strategy), `tests/test_scalp_bot.py`
+(+`test_strategy_filter_applicability_v0181`). Тесты: 131 passed.
+
 ### v0.18.0 — старт без флэта: позиции доживают до TP/SL (adopt)
 `<hash>`
 

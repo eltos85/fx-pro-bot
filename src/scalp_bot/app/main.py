@@ -114,6 +114,12 @@ def run() -> None:
 
     strategies = build_strategies(cfg, symbols)
     log.info("стратегии: %s", ",".join(s.name for s in strategies))
+    # Применимость фильтров per-strategy (v0.18.1): MR-стратегии (sweep_fade,
+    # density_bounce) — под HTF-направлением и ADX-режим-гейтом; momentum
+    # (density_break) — НЕТ (направленный EMA режет контртренд-пробои, ADX-гейт
+    # backwards для пробоя). Атрибут на классе стратегии (getattr default True).
+    htf_strats = {s.name for s in strategies if getattr(s, "htf_filtered", True)}
+    adx_strats = {s.name for s in strategies if getattr(s, "regime_gated", True)}
     executor = Executor(db, cfg, client, notifier=notifier, strategies=strategies)
 
     # HTF-bias: трендовый фильтр старшего ТФ (EMA200 1H). Первичный прогрев на
@@ -233,9 +239,11 @@ def run() -> None:
                 sig = resolve(candidates)
                 if sig is None:
                     continue
-                # HTF-bias: фейд только по старшему тренду (EMA200 1H). Контртренд
+                # HTF-bias: фейд только по старшему тренду (EMA200 15m). Контртренд
                 # (ловля ножа) пропускаем; fail-open при отсутствии HTF-данных.
-                if (cfg.require_htf_trend
+                # ТОЛЬКО для MR-стратегий (sig.strategy in htf_strats) — momentum
+                # density_break торгует пробои в обе стороны (v0.18.1).
+                if (cfg.require_htf_trend and sig.strategy in htf_strats
                         and not htf.aligned(sig.symbol, sig.side, snap.last_price)):
                     d = htf.direction(sig.symbol, snap.last_price)
                     play.info("🧭 [%s] %s против старшего тренда (HTF=%s) — "
@@ -246,9 +254,11 @@ def run() -> None:
                 # СЛИШКОМ сильный (ADX≥adx_max, «трендовый день») — фейд запрещён
                 # ВНЕ зависимости от направления. Канон MR: «never fade a one-
                 # timeframe trending market» (Connors/Raschke; Dalton). Additive
-                # поверх EMA. Fail-open: нет ADX → не блокируем. Backtest 15д:
-                # ema+adx@25 gross +0.140R vs +0.122R у EMA (data/scalp_adx_gate.txt).
-                if (cfg.htf_adx_gate
+                # поверх EMA. Fail-open: нет ADX → не блокируем. ТОЛЬКО для MR
+                # (sig.strategy in adx_strats): для momentum density_break гейт
+                # backwards — пробой ХОЧЕТ сильного тренда (v0.18.1). Backtest 15д:
+                # ema+adx@25 gross +0.140R vs +0.122R EMA (валидирован на sweep_fade).
+                if (cfg.htf_adx_gate and sig.strategy in adx_strats
                         and htf.is_strong_trend(sig.symbol, cfg.htf_adx_max)):
                     play.info("🚂 [%s] %s — сильный тренд (ADX=%.0f≥%.0f, трендовый "
                               "день) — не фейдю (канон: не фейдить one-TF тренд)",

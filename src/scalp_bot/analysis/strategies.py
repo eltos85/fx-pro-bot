@@ -89,6 +89,11 @@ class SweepFadeStrategy:
     """
 
     name = "sweep_fade"
+    # mean-reversion: фейд ТОЛЬКО по HTF-тренду (на наших данных EMA даёт
+    # +0.087R vs +0.042 без; A/B BUILDLOG 2026-06-02) и НЕ в трендовый день
+    # (ADX≥25 → +15% gross edge, v0.17.0). Оба фильтра уместны.
+    htf_filtered = True
+    regime_gated = True
 
     def __init__(self, cfg, symbols: list[str]) -> None:
         self.cfg = cfg
@@ -278,6 +283,10 @@ class DensityBounceStrategy:
     """
 
     name = "density_bounce"
+    # mean-reversion: отскок ОТ стены (фейд подхода к плотности) — те же фильтры,
+    # что у sweep_fade (фейд по тренду + не в трендовый день).
+    htf_filtered = True
+    regime_gated = True
 
     def __init__(self, cfg, symbols: list[str]) -> None:
         self.cfg = cfg
@@ -433,6 +442,17 @@ class DensityBreakStrategy:
     """
 
     name = "density_break"
+    # momentum/breakout в ОБЕ стороны (снос стены вверх ИЛИ вниз). НЕ под MR-
+    # фильтрами (v0.18.1):
+    #  • htf_filtered=False — направленный EMA-фильтр режет прибыльные контртренд-
+    #    пробои (Quant Signals, 175 backtests: «London Breakout — universal failure
+    #    с трендовым фильтром, убирает ~½ сигналов вкл. profitable counter-trend»);
+    #  • regime_gated=False — пробой ХОЧЕТ сильного тренда (ADX≥25), MR-гейт «не
+    #    торговать в тренд» здесь backwards (резал бы лучшие условия для momentum).
+    # Риск-контроль свой: wall_break+persist+round + hard SL за уровнем (ложный
+    # пробой = SL) + биржевые TP/SL. Философия B (winners run, без дискреции).
+    htf_filtered = False
+    regime_gated = False
 
     def __init__(self, cfg, symbols: list[str]) -> None:
         self.cfg = cfg

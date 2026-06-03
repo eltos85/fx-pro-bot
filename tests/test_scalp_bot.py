@@ -1549,3 +1549,21 @@ def test_flatten_on_start_default_false():
     шорт BNBUSDT (+$1.05) и записал pnl=0. Замок на решение."""
     from scalp_bot.config.settings import ScalpSettings
     assert ScalpSettings().flatten_on_start is False
+
+
+def test_strategy_filter_applicability_v0181():
+    """v0.18.1: MR-стратегии под HTF+ADX фильтрами, momentum density_break — НЕТ.
+    Направленный EMA-фильтр режет прибыльные контртренд-пробои (Quant Signals,
+    175 backtests: «London Breakout universal failure с трендовым фильтром»);
+    ADX-гейт «не торговать в тренд» для пробоя backwards (пробой ХОЧЕТ тренда).
+    Замок на решение."""
+    from scalp_bot.analysis.strategies import (DensityBounceStrategy,
+                                               DensityBreakStrategy,
+                                               SweepFadeStrategy)
+    assert SweepFadeStrategy.htf_filtered is True
+    assert SweepFadeStrategy.regime_gated is True
+    assert DensityBounceStrategy.htf_filtered is True
+    assert DensityBounceStrategy.regime_gated is True
+    # momentum: вне обоих MR-фильтров
+    assert DensityBreakStrategy.htf_filtered is False
+    assert DensityBreakStrategy.regime_gated is False
