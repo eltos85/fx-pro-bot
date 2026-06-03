@@ -467,8 +467,8 @@ def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
     new_stream.start()
     for st in strategies:
         st.ensure_symbols(target)
-    if notifier is not None and notifier.active:
-        notifier.send("🔄 вселенная обновлена: " + ",".join(target))
+    # TG-уведомление о ротации убрано (спам — с RVOL-отбором состав меняется
+    # часто). Смена состава видна в логах (log.info «ротация вселенной» выше).
     return new_stream, new_states, target
 
 
