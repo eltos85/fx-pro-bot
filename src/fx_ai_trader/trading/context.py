@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from fx_ai_trader.analysis.indicators import (
     IndicatorSnapshot,
@@ -289,8 +290,39 @@ def collect_review_context(
 # ─── Format for LLM ──────────────────────────────────────────────────────
 
 
+def _ng_weather_season(month: int) -> str:
+    """NG demand-season ярлык по месяцу — детерминирует знак погодного гайда.
+
+    Источник правды: SYSTEM_PROMPT секция NATURAL GAS, SEASONAL SIGN RULE
+    (May–Sep = CDD cooling, Oct–Mar = HDD heating, Apr/Sep shoulder).
+    Делаем явным, чтобы LLM не инвертировал знак (баг 2026-06: «above-normal
+    temps bearish» летом — зимняя логика). См. BUILDLOG_AI_FX_TRADER.md.
+    """
+    if month in (5, 6, 7, 8, 9):
+        return (
+            "CDD cooling season — above-normal/warm temps = BULLISH gas "
+            "(more A/C burn), cool anomaly = bearish"
+        )
+    if month in (11, 12, 1, 2, 3):
+        return (
+            "HDD heating season — below-normal/cold temps = BULLISH gas "
+            "(more heating), warm/mild anomaly = bearish"
+        )
+    # Apr (4), Oct (10) — shoulder/transition: знак слабый.
+    return (
+        "shoulder/transition month — weather demand sign is weak; treat "
+        "temperature anomalies as low-conviction unless extreme"
+    )
+
+
 def format_context_for_prompt(ctx: MarketContext) -> str:
     parts: list[str] = []
+    now = datetime.now(tz=UTC)
+    parts.append(
+        f"AS OF: {now.isoformat(timespec='minutes')} "
+        f"(month={now.strftime('%B')})"
+    )
+    parts.append(f"NG WEATHER SEASON: {_ng_weather_season(now.month)}")
     parts.append(f"VIRTUAL CAPITAL: ${ctx.virtual_capital_usd:.2f}")
     parts.append(f"OPEN POSITIONS: {len(ctx.open_positions)}")
     parts.append("")

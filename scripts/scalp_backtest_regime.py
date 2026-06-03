@@ -216,7 +216,8 @@ def _blocked(side: str, htf: str, adx: float, mode: str, adx_thresh: float) -> b
 def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
            filter_mode: str = "none", adx_thresh: float = 25.0,
            sl_cooldown: float = 0.0, session_hours: set | None = None,
-           slippage_bps: float = 0.0) -> list[dict]:
+           slippage_bps: float = 0.0, post_out: list | None = None,
+           post_window_sec: float = 1800.0) -> list[dict]:
     """slippage_bps>0: стресс-модель транзакционных издержек. Каждое плечо
     (entry+exit) кросит ``slippage_bps`` б.п. цены сверх комиссии — round-trip
     стоимость = fee + 2·slippage_bps/1e4 (доля нотионала). Канон cost-sensitivity
@@ -230,6 +231,10 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
     """scratch_cf=True: КОНТРФАКТУАЛ — не закрываем по flow_scratch, а помечаем
     момент (would_scratch, scratch_R) и даём сделке дойти до естественного конца
     (TP/SL/flow_exit). Так видим: скретч спас от SL или зарезал отскок к TP."""
+    """post_out!=None: STOP-REVERSE диагностика. После каждого sl_hit ставим
+    «наблюдателя» на post_window_sec секунд и меряем, ушла ли цена в нашу сторону
+    уже ПОСЛЕ стопа (MFE от стопа и от входа в R, дошла ли до исходного TP).
+    Отвечает: систематически ли стопы выносят перед движением (stop-hunt rate)."""
     clk = SimpleNamespace(t=0.0)
     state = SymbolState(symbol, cvd_window_sec=cfg.cvd_window_sec,
                         liq_window_sec=cfg.liq_window_sec, ob_levels=cfg.ob_levels,
@@ -240,9 +245,22 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
     pos = None
     eval_next = 0.0
     last_sl_ts = {"long": -1e18, "short": -1e18}  # для sl_cooldown
+    post_watch: list = []  # активные stop-reverse наблюдатели
     for ts, side, size, price in ticks:
         clk.t = ts
         state.on_trade(price, size, side)
+        if post_out is not None and post_watch:
+            still = []
+            for w in post_watch:
+                if w["side"] == "short":
+                    w["lo"] = min(w["lo"], price)
+                else:
+                    w["hi"] = max(w["hi"], price)
+                if ts - w["t0"] >= post_window_sec:
+                    post_out.append(_finalize_post(w))
+                else:
+                    still.append(w)
+            post_watch = still
         # интрабар TP/SL по тиковой цене
         if pos is not None:
             hit = None
@@ -260,6 +278,12 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
                 trades.append(_close(pos, hit[0], hit[1], ts, fee, slippage_bps))
                 if hit[0] == "sl_hit":
                     last_sl_ts[pos["side"]] = ts
+                    if post_out is not None:
+                        post_watch.append({
+                            "side": pos["side"], "entry": pos["entry"],
+                            "sl": hit[1], "tp": pos["tp"],
+                            "risk": pos["risk"] or 1e-9, "t0": ts,
+                            "lo": hit[1], "hi": hit[1]})
                 pos = None
         if ts < eval_next:
             continue
@@ -295,7 +319,28 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
                 else:
                     trades.append(_close(pos, ex[0], ex[1], ts, fee, slippage_bps))
                     pos = None
+    if post_out is not None:  # финализируем хвост наблюдателей (окно не истекло)
+        for w in post_watch:
+            post_out.append(_finalize_post(w))
     return trades
+
+
+def _finalize_post(w: dict) -> dict:
+    """Итог stop-reverse наблюдателя: насколько цена ушла в нашу сторону после
+    стопа (MFE от стопа и от входа, в R по исходному risk), дошла ли до TP."""
+    risk = w["risk"]
+    if w["side"] == "short":
+        ext = w["lo"]
+        fav_from_stop = w["sl"] - ext
+        fav_from_entry = w["entry"] - ext
+        hit_tp = ext <= w["tp"]
+    else:
+        ext = w["hi"]
+        fav_from_stop = ext - w["sl"]
+        fav_from_entry = ext - w["entry"]
+        hit_tp = ext >= w["tp"]
+    return {"side": w["side"], "mfe_from_stop_R": fav_from_stop / risk,
+            "mfe_from_entry_R": fav_from_entry / risk, "hit_tp": hit_tp}
 
 
 def _close(pos, reason, exit_price, ts, fee, slippage_bps=0.0):
@@ -381,6 +426,8 @@ def main():
     slip_bps = _argf("--slippage-bps", 0.0)
     htf_iv = (sys.argv[sys.argv.index("--htf-interval") + 1]
               if "--htf-interval" in sys.argv else "60")
+    stop_rev = "--stop-reverse" in sys.argv
+    post_win = _argf("--post-window", 1800.0)
     session_hours = None
     if "--session-hours" in sys.argv:
         raw = sys.argv[sys.argv.index("--session-hours") + 1]
@@ -392,6 +439,7 @@ def main():
           f"htf_tf={htf_iv}m slippage={slip_bps}bps/side")
     slip_sweep = "--slip-sweep" in sys.argv
     per_coin: dict[str, list[dict]] = {}
+    post_all: list = []
     all_trades = []
     for sym in syms:
         ticks = []
@@ -406,7 +454,9 @@ def main():
         scratch_cf = "--scratch-cf" in sys.argv
         tr = replay(sym, ticks, cfg, regime_at, scratch_cf=scratch_cf,
                     filter_mode=fmode, adx_thresh=adx_thresh, sl_cooldown=sl_cd,
-                    session_hours=session_hours, slippage_bps=slip_bps)
+                    session_hours=session_hours, slippage_bps=slip_bps,
+                    post_out=(post_all if stop_rev else None),
+                    post_window_sec=post_win)
         all_trades.extend(tr)
         per_coin[sym] = tr
         if slip_sweep:
@@ -417,6 +467,33 @@ def main():
             n = max(len(tr), 1)
             print(f"{sym}: тиков={raw:>9}→бинов={len(ticks):>8} сделок={len(tr):>4} "
                   f"WR={w/n*100:>3.0f}% netR={net:>+7.1f} avgR={net/n:>+6.3f}")
+    if stop_rev:
+        tp_r = cfg.take_profit_r
+        n = len(post_all)
+        if n == 0:
+            print("нет SL-выходов для анализа"); return
+        from_stop = sorted(r["mfe_from_stop_R"] for r in post_all)
+        hit_tp = sum(1 for r in post_all if r["hit_tp"])
+        ge = lambda thr: sum(1 for r in post_all if r["mfe_from_stop_R"] >= thr)
+
+        def pct(k):
+            return f"{k/n*100:.0f}%"
+        med = from_stop[n // 2]
+        avg = sum(from_stop) / n
+        print(f"\n===== STOP-REVERSE (filter={fmode} htf_tf={htf_iv}m, "
+              f"окно после стопа={post_win:.0f}с) =====")
+        print(f"SL-выходов: n={n} | TP={tp_r}R, SL=1R")
+        print(f"\nДошла бы до ИСХОДНОГО TP после стопа: {hit_tp} ({pct(hit_tp)})")
+        print(f"  → во столько случаев стоп выбил перед полным движением к TP\n")
+        print("MFE ПОСЛЕ стопа (как далеко ушла в нашу сторону ОТ цены стопа), в R:")
+        print(f"  среднее {avg:+.2f}R | медиана {med:+.2f}R")
+        print(f"  ушла ≥0.5R после стопа: {ge(0.5)} ({pct(ge(0.5))})")
+        print(f"  ушла ≥1.0R после стопа: {ge(1.0)} ({pct(ge(1.0))})")
+        print(f"  ушла ≥2.0R после стопа: {ge(2.0)} ({pct(ge(2.0))})")
+        print(f"  ушла ≥{tp_r}R (=TP) после стопа: {ge(tp_r)} ({pct(ge(tp_r))})")
+        print("\nЧтение: высокий % ≥1R = нас часто выносят прямо перед движением")
+        print("(stop-hunt). ~0% = стопы срабатывают по делу (сетап реально сломан).")
+        return
     if slip_sweep:
         fee = cfg.round_trip_fee_frac
         levels = [0.0, 1.0, 2.0, 3.0, 5.0, 8.0]  # bps на сторону

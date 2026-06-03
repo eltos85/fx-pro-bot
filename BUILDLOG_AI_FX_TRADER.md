@@ -2,6 +2,53 @@
 
 ## 2026-06-03
 
+### fix(ng-weather): сезонный гард знака погоды для NG (анти-инверсия)
+
+`<pending>`
+
+**Симптом (запрос «ИИ начал путаться»):** аудит decisions (n=844 за
+27.05–03.06, артефакт `/tmp/fxai_reasons.txt` из БД VPS) показал, что
+LLM непоследовательно трактует один и тот же погодный сигнал NOAA по
+NG=F. «above-normal/warm temps» помечается то **bullish** (~50+ решений,
+верно для лета), то **bearish demand** (≥5 решений: 28.05, 29.05, 01.06,
+02.06) — это зимняя HDD-логика, применённая летом.
+
+**Реальные лоссы от инверсии:**
+- id=34 (01.06): закрыл лонг на «above-normal temps bearish demand» −$3.8
+- id=37 (02.06): **открыл ШОРТ** на «above-normal temps bearish demand»,
+  через 15 мин закрыл, сославшись на противоположное («bullish cooling
+  demand») → −$0.5 — самопротиворечие в рамках одной позиции
+- id=39 (03.06): открыл/держал лонг на «bullish cooling», закрыл на
+  «bearish for cooling» за 80 мин → −$1.2
+
+**Диагноз:** не баг кода/данных/lessons. `SYSTEM_PROMPT` (NG WEATHER) уже
+давал верный сезонный канон, но допускал срыв на «зимний» знак. XAUUSD
+(real yields/DXY) и BZ=F (геополитика) — логика консистентна, инверсий
+нет. Локализовано в NG×weather. n=9 (net ≈ −$35.5 с 29.05) — шум по
+`sample-size.mdc`, инструмент НЕ трогаем; правка — фикс логической
+инверсии (класс bug-fix, `no-data-fitting.mdc`), не подгонка thresholds.
+
+**Фикс (усиление промпта + детерминизм контекста):**
+- `prompts.py` NG WEATHER: добавлен явный **SEASONAL SIGN RULE** (рамкой)
+  — знак аномалии ЗАВИСИТ от сезона: CDD May–Sep (жара=bullish), HDD
+  Oct–Mar (холод=bullish), Apr/Oct shoulder. HARD CHECK против «warm =
+  bearish» летом. Топ-строка в NG MISTAKES TO AVOID: «INVERTING THE
+  SEASONAL WEATHER SIGN» + запрет переворачивать свой же прежний read той
+  же аномалии внутри одной позиции.
+- `context.py`: `_ng_weather_season(month)` + строки `AS OF: <ISO>` и
+  `NG WEATHER SEASON: <ярлык>` в шапке контекста — знак сезона приходит
+  детерминированно из месяца (LLM не выводит сам). Канон знака = тот же,
+  что в SYSTEM_PROMPT.
+
+**Тесты:** +9 (`test_fx_ai_trader_ng_season.py`): `_ng_weather_season`
+по месяцам (CDD/HDD/shoulder + регресс «июнь≠heating»), наличие
+SEASONAL SIGN RULE и mistake в SYSTEM_PROMPT, season-строка в шапке
+контекста. Полный набор 1093 passed.
+
+**Файлы:** `src/fx_ai_trader/llm/prompts.py`,
+`src/fx_ai_trader/trading/context.py`,
+`tests/test_fx_ai_trader_ng_season.py`
+
 ### fix(market-hours): не зовём LLM по закрытым рынкам (weekend guard)
 
 `77b2111`

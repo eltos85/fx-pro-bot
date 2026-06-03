@@ -275,12 +275,36 @@ oil despite both being "energy":
    - Storage < -5% vs 5y avg = structurally bullish (cold snap = squeeze).
 
 2. WEATHER (the catalyst).
+   ┌─────────────────────────────────────────────────────────────────┐
+   │ SEASONAL SIGN RULE — READ THE CURRENT DATE FIRST, THEN APPLY:     │
+   │                                                                   │
+   │ The DEMAND SIGN of a temperature anomaly FLIPS with the season.   │
+   │ Determine the current month from the timestamp in this prompt,    │
+   │ then apply EXACTLY ONE of these — never mix them:                 │
+   │                                                                   │
+   │ • COOLING season (CDD), May–Sep: demand = air-conditioning.       │
+   │     ABOVE-normal / warm / hot anomaly  ⇒ MORE A/C burn ⇒ BULLISH. │
+   │     BELOW-normal / cool anomaly        ⇒ less A/C      ⇒ BEARISH. │
+   │                                                                   │
+   │ • HEATING season (HDD), Oct–Mar: demand = furnaces/heating.       │
+   │     BELOW-normal / cold anomaly        ⇒ MORE heating  ⇒ BULLISH. │
+   │     ABOVE-normal / warm / mild anomaly ⇒ less heating  ⇒ BEARISH. │
+   │                                                                   │
+   │ • Apr & Oct are shoulder months — demand sign is weak; treat      │
+   │   weather as low-conviction unless an extreme anomaly is cited.   │
+   │                                                                   │
+   │ HARD CHECK before you write "warm/above-normal = bearish": that   │
+   │ is HEATING-season logic and is WRONG in May–Sep. In summer,       │
+   │ above-normal temps RAISE cooling demand and are BULLISH for gas.  │
+   │ State the season explicitly in your analysis, e.g. "June = CDD    │
+   │ cooling season, so above-normal temps are bullish".               │
+   └─────────────────────────────────────────────────────────────────┘
    - HEATING-DEGREE-DAYS (HDD) Oct–Mar: dominant demand. Cold anomaly
      forecasts = bullish, mild winter = bearish. Storm-track news
      (polar vortex incursion) can move NG 10%+ in hours.
-   - COOLING-DEGREE-DAYS (CDD) Jun–Aug: power-generation demand for
-     A/C. Hot summer anomaly = bullish. Less violent than winter HDD
-     events but a multi-day heatwave is real.
+   - COOLING-DEGREE-DAYS (CDD) May–Sep: power-generation demand for
+     A/C. Hot summer anomaly = bullish, cool anomaly = bearish. Less
+     violent than winter HDD events but a multi-day heatwave is real.
    - NOAA 6-10 day and 8-14 day outlooks are followed religiously by
      the NG complex. A forecast revision alone can move NG 5%.
 
@@ -306,6 +330,14 @@ oil despite both being "energy":
    decays similarly to oil.
 
 NG MISTAKES TO AVOID:
+- INVERTING THE SEASONAL WEATHER SIGN. The single most common reasoning
+  error: calling above-normal/warm temps "bearish demand" in summer.
+  That is heating-season (winter) logic. In May–Sep (CDD), above-normal
+  temps are BULLISH (cooling demand). Re-check the SEASONAL SIGN RULE
+  above and never flip your own prior read of the SAME anomaly within
+  one position — if you opened long on "warm = bullish cooling", do not
+  later close it citing "warm = bearish"; that is self-contradiction,
+  not new information.
 - Sizing for BRENT-style stops on NG without checking ATR — NG is
   routinely 2× more volatile than Brent in same-currency terms.
 - Trading the EIA Thursday storage print pre-release. Most pros wait
