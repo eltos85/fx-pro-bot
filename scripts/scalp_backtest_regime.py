@@ -202,10 +202,17 @@ def _blocked(side: str, htf: str, adx: float, mode: str, adx_thresh: float) -> b
     """Фильтр входа. ema: направленный EMA200-H1 (как прод require_htf_trend) —
     фейд только ПО тренду H1. adx: режим-гейт по СИЛЕ тренда (канон MR) — фейд в
     ОБЕ стороны, но только когда тренд не сильный (adx < порога). none: без фильтра."""
-    if mode == "ema":
+    if mode in ("ema", "ema+adx"):
         if htf == "long" and side == "short":
             return True
         if htf == "short" and side == "long":
+            return True
+        # ema+adx: ВДОБАВОК к направлению — режим-гейт по силе тренда (канон
+        # Connors/Raschke «Street Smarts» + Dalton: «never fade a one-timeframe
+        # trending market»). Даже фейд ПО тренду EMA запрещаем, если тренд слишком
+        # силён (трендовый день, adx >= порога) — иначе нормальная волатильность
+        # сносит MR-стоп. Так связка = направление И режим вместе.
+        if mode == "ema+adx" and adx >= adx_thresh:
             return True
         return False
     if mode == "adx":

@@ -1403,3 +1403,69 @@ def test_htf_default_context_is_15m():
     assert s.htf_interval == "15"
     assert s.htf_ema_len == 200
     assert s.htf_refresh_sec == 120.0
+
+
+# ─── ADX режим-гейт (v0.17.0) ──────────────────────────────────────────────
+
+class _FakeOHLCClient:
+    """get_kline → Bybit DESC: [start,o,h,l,close,v,turnover] с заданными OHLC."""
+
+    def __init__(self, ohlc_by_sym: dict[str, list[tuple]]) -> None:
+        self._d = ohlc_by_sym  # sym -> list[(o,h,l,c)] ПО ВОЗРАСТАНИЮ
+
+    def get_kline(self, symbol, interval, limit=200):
+        rows = self._d.get(symbol, [])
+        return [[0, o, h, l, c, 0, 0] for (o, h, l, c) in reversed(rows)]
+
+
+def test_compute_adx_high_in_strong_trend():
+    from scalp_bot.data.htf import compute_adx
+    n = 200
+    highs = [100 + i + 0.5 for i in range(n)]
+    lows = [100 + i - 0.5 for i in range(n)]
+    closes = [100.0 + i for i in range(n)]
+    adx = compute_adx(highs, lows, closes, 14)
+    assert adx is not None and adx >= 25.0   # стабильный аптренд → сильный ADX
+
+
+def test_compute_adx_low_in_range():
+    from scalp_bot.data.htf import compute_adx
+    n = 200
+    closes = [100.0 + (1.0 if i % 2 else 0.0) for i in range(n)]
+    highs = [c + 0.2 for c in closes]
+    lows = [c - 0.2 for c in closes]
+    adx = compute_adx(highs, lows, closes, 14)
+    assert adx is not None and adx < 25.0    # пила → слабый ADX (диапазон)
+
+
+def test_compute_adx_needs_warmup():
+    from scalp_bot.data.htf import compute_adx
+    assert compute_adx([1.0, 2.0, 3.0], [0.0, 1.0, 2.0],
+                       [0.5, 1.5, 2.5], 14) is None   # <2n+1 свечей → None
+
+
+def test_htf_adx_gate_blocks_strong_trend():
+    n = 200
+    rows = [(100.0 + i, 100 + i + 0.5, 100 + i - 0.5, 100.0 + i) for i in range(n)]
+    htf = HtfTrend(ema_len=200, adx_len=14)
+    htf.refresh(_FakeOHLCClient({"SOLUSDT": rows}), ["SOLUSDT"])
+    assert htf.trend_strength("SOLUSDT") >= 25.0
+    assert htf.is_strong_trend("SOLUSDT", 25.0) is True   # трендовый день → фейд стоп
+
+
+def test_htf_adx_gate_fail_open_no_data():
+    htf = HtfTrend()
+    assert htf.trend_strength("XXXUSDT") is None
+    assert htf.is_strong_trend("XXXUSDT", 25.0) is False  # нет ADX → не блокируем
+
+
+def test_htf_adx_gate_defaults():
+    """v0.17.0: ADX режим-гейт поверх EMA (additive). Канон MR: не фейдить сильный
+    тренд — «never fade a one-timeframe trending market» (Connors/Raschke «Street
+    Smarts» 1995; Wilder ADX 1978). A/B 15д (n=6220→3104, data/scalp_adx_gate.txt):
+    ema+adx@25 gross +0.140R/сделку vs +0.122R EMA (+15%). Замок на решение."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.htf_adx_gate is True
+    assert s.htf_adx_len == 14
+    assert s.htf_adx_max == 25.0

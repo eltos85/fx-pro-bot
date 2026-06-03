@@ -374,6 +374,12 @@ services:
       SCALP_HTF_INTERVAL: ${SCALP_HTF_INTERVAL:-15}
       SCALP_HTF_EMA_LEN: ${SCALP_HTF_EMA_LEN:-200}
       SCALP_HTF_REFRESH_SEC: ${SCALP_HTF_REFRESH_SEC:-120}
+      # v0.17.0: ADX режим-гейт поверх EMA — не фейдить сильный тренд («never fade
+      # a one-timeframe trending market», Connors/Raschke; Wilder ADX 1978).
+      # A/B 15д (data/scalp_adx_gate.txt): ema+adx@25 gross +0.140R vs +0.122R EMA.
+      SCALP_HTF_ADX_GATE: ${SCALP_HTF_ADX_GATE:-true}
+      SCALP_HTF_ADX_LEN: ${SCALP_HTF_ADX_LEN:-14}
+      SCALP_HTF_ADX_MAX: ${SCALP_HTF_ADX_MAX:-25}
       # Мин-R пол + риск-сайзинг (v0.8.1): R ≥ 4×fee → fee ≤ 0.25R (R≈0.44%),
       # размер = риск$/дистанция_SL (канон профи), фикс $-риск/сделку.
       SCALP_MIN_RISK_FEE_MULT: ${SCALP_MIN_RISK_FEE_MULT:-4.0}

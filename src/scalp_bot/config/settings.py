@@ -280,6 +280,15 @@ class ScalpSettings(BaseSettings):
     # 15m-бар закрывается раз в 900с → refresh 120с быстро подхватывает новый бар
     # (Bybit get_kline rate-limit с запасом: ~13 символов/120с). Было 300с под 1H.
     htf_refresh_sec: float = Field(default=120.0)
+    # v0.17.0: ADX режим-гейт ПОВЕРХ EMA (additive). EMA даёт направление, ADX —
+    # СИЛУ тренда. Канон MR запрещает фейд в сильный тренд: «never fade a one-
+    # timeframe trending market» (Connors/Raschke «Street Smarts» 1995; Dalton).
+    # ADX(14) Wilder 1978: <20 диапазон, ≥25 established trend. A/B 15д (n=6220→
+    # 3104, data/scalp_adx_gate.txt): ema+adx@25 gross +0.140R/сделку vs +0.122R у
+    # одного EMA (+15%), net −0.088 vs −0.100; пороги 30/35 выгоды не дают.
+    htf_adx_gate: bool = Field(default=True)
+    htf_adx_len: int = Field(default=14)       # ADX(14) — Wilder canonical
+    htf_adx_max: float = Field(default=25.0)   # ≥25 = трендовый день → фейд стоп
 
     # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────
     # Канон: свипы доходят в London/NY open + overlap, «мёртвые» часы дают

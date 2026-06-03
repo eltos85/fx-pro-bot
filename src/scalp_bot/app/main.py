@@ -115,7 +115,7 @@ def run() -> None:
 
     # HTF-bias: трендовый фильтр старшего ТФ (EMA200 1H). Первичный прогрев на
     # старте, далее refresh раз в htf_refresh_sec (метрика медленная).
-    htf = HtfTrend(cfg.htf_ema_len, cfg.htf_interval)
+    htf = HtfTrend(cfg.htf_ema_len, cfg.htf_interval, cfg.htf_adx_len)
     last_htf = 0.0
     if client is not None and cfg.require_htf_trend:
         try:
@@ -238,6 +238,19 @@ def run() -> None:
                     play.info("🧭 [%s] %s против старшего тренда (HTF=%s) — "
                               "пропускаю (фейдим только по тренду)", sig.symbol,
                               sig.side, d or "?")
+                    continue
+                # ADX режим-гейт (v0.17.0): EMA дала направление, но если тренд
+                # СЛИШКОМ сильный (ADX≥adx_max, «трендовый день») — фейд запрещён
+                # ВНЕ зависимости от направления. Канон MR: «never fade a one-
+                # timeframe trending market» (Connors/Raschke; Dalton). Additive
+                # поверх EMA. Fail-open: нет ADX → не блокируем. Backtest 15д:
+                # ema+adx@25 gross +0.140R vs +0.122R у EMA (data/scalp_adx_gate.txt).
+                if (cfg.htf_adx_gate
+                        and htf.is_strong_trend(sig.symbol, cfg.htf_adx_max)):
+                    play.info("🚂 [%s] %s — сильный тренд (ADX=%.0f≥%.0f, трендовый "
+                              "день) — не фейдю (канон: не фейдить one-TF тренд)",
+                              sig.symbol, sig.side,
+                              htf.trend_strength(sig.symbol) or 0.0, cfg.htf_adx_max)
                     continue
                 # SL-cooldown: не перефейдиваем провалившийся уровень сразу.
                 # Повторный вход той же стороной сразу после SL — в среднем
