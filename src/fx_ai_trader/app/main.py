@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import signal
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -444,6 +445,32 @@ def _check_event_sensors(
     return EventDecision(fire=False), EventDecision(fire=False)
 
 
+def _tradable_symbols(
+    adapter: CTraderFxAdapter, symbols: Iterable[str]
+) -> list[str]:
+    """Символы с доступной живой ценой = рынок открыт сейчас.
+
+    cTrader шлёт spot-тики и формирует M1-бары только при открытом рынке;
+    ``get_current_price`` возвращает None, когда нет ни свежего spot, ни
+    свежих M1 (рынок закрыт — выходные / session break). Используем это
+    как самосогласующийся признак «tradable» БЕЗ хардкода расписания:
+    в воскресенье вечером, как только пойдут тики, символ снова попадёт
+    в список автоматически.
+
+    Мотивация (BUILDLOG 2026-06-03): анализ decisions показал 84 пустых
+    open-интента за выходные 30–31.05 (`current price unavailable`) —
+    LLM «думал» над закрытым рынком, жёг токены и засорял логи.
+    """
+    out: list[str] = []
+    for s in symbols:
+        try:
+            if adapter.get_current_price(s) is not None:
+                out.append(s)
+        except Exception:
+            log.exception("tradable-check failed для %s", s)
+    return out
+
+
 def _run_full_cycle(
     cycle: int,
     settings: AiFxTraderSettings,
@@ -488,8 +515,22 @@ def _run_full_cycle(
         log.warning("KILLSWITCH: %s — пропускаю цикл", gen.reason)
         return
 
+    # Market-hours guard (2026-06-03): не зовём LLM по закрытым рынкам.
+    # Признак — наличие живой цены (без хардкода расписания: вс-вечерний
+    # reopen снимается сам). Все закрыты → пропуск без LLM-вызова.
+    tradable = _tradable_symbols(adapter, settings.symbols)
+    if not tradable:
+        log.info(
+            "MARKET CLOSED: нет живой цены ни по одному символу "
+            "(выходные / session break) — пропускаю full-цикл без LLM"
+        )
+        return
+    if len(tradable) < len(settings.symbols):
+        closed = [s for s in settings.symbols if s not in tradable]
+        log.info("Market-hours: открыты %s | закрыты %s", tradable, closed)
+
     ctx = collect_market_context(
-        adapter, store, settings.symbols, settings.virtual_capital_usd,
+        adapter, store, tuple(tradable), settings.virtual_capital_usd,
         news_provider=news_provider, eia_provider=eia_provider,
         noaa_provider=noaa_provider,
         macro_rates_provider=macro_rates_provider,
@@ -686,6 +727,16 @@ def _run_review_cycle(
     open_positions = store.get_open_positions()
     if not open_positions:
         log.info("Нет открытых позиций — пропускаю review")
+        return
+
+    # Market-hours guard (2026-06-03): если рынки закрыты по всем открытым
+    # позициям — управлять ими нельзя (нет цены, broker отвергнет) — пропуск.
+    pos_symbols = {p.symbol for p in open_positions}
+    if not _tradable_symbols(adapter, pos_symbols):
+        log.info(
+            "MARKET CLOSED: рынки закрыты по всем открытым позициям "
+            "— пропускаю review без LLM"
+        )
         return
 
     ctx = collect_review_context(adapter, store, settings.virtual_capital_usd)

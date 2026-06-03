@@ -248,3 +248,48 @@ class TestContextUsesLivePrice:
 
         ctx = collect_market_context(adapter, store, ("XAUUSD",), 500.0)
         assert ctx.snapshots[0].current_price == pytest.approx(2010.0)
+
+
+class _PriceAvailAdapter:
+    """Adapter с заданной картой цен (None = рынок закрыт)."""
+
+    def __init__(self, prices: dict[str, float | None]) -> None:
+        self._prices = prices
+
+    def get_current_price(self, internal_symbol: str) -> float | None:
+        return self._prices.get(internal_symbol)
+
+
+class TestTradableSymbolsGuard:
+    """Market-hours guard (2026-06-03): tradable = есть живая цена."""
+
+    def test_all_open_returns_all(self):
+        from fx_ai_trader.app.main import _tradable_symbols
+
+        a = _PriceAvailAdapter({"XAUUSD": 2400.0, "BZ=F": 80.0, "NG=F": 3.1})
+        assert _tradable_symbols(a, ["XAUUSD", "BZ=F", "NG=F"]) == [
+            "XAUUSD", "BZ=F", "NG=F"
+        ]
+
+    def test_weekend_all_closed_returns_empty(self):
+        from fx_ai_trader.app.main import _tradable_symbols
+
+        a = _PriceAvailAdapter({"XAUUSD": None, "BZ=F": None, "NG=F": None})
+        assert _tradable_symbols(a, ["XAUUSD", "BZ=F", "NG=F"]) == []
+
+    def test_partial_open_returns_only_tradable(self):
+        from fx_ai_trader.app.main import _tradable_symbols
+
+        a = _PriceAvailAdapter({"XAUUSD": 2400.0, "BZ=F": None, "NG=F": None})
+        assert _tradable_symbols(a, ["XAUUSD", "BZ=F", "NG=F"]) == ["XAUUSD"]
+
+    def test_exception_is_swallowed_symbol_skipped(self):
+        from fx_ai_trader.app.main import _tradable_symbols
+
+        class _Boom:
+            def get_current_price(self, s):
+                if s == "BZ=F":
+                    raise RuntimeError("client down")
+                return 2400.0
+
+        assert _tradable_symbols(_Boom(), ["XAUUSD", "BZ=F"]) == ["XAUUSD"]

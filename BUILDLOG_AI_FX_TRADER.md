@@ -1,5 +1,42 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-06-03
+
+### fix(market-hours): не зовём LLM по закрытым рынкам (weekend guard)
+
+`<хеш>`
+
+**Находка (анализ БД decisions, n=2365):** из 139 OPEN-интентов LLM
+исполнилось лишь 37. Разбор 101 неисполненного открытия:
+- **84 — `current price unavailable`** на **выходных** (Сб 30.05 = 39,
+  Вс 31.05 = 43; по часам равномерно). Рынок закрыт → нет ни spot-тика,
+  ни M1-баров → `get_current_price` = None → вход отброшен.
+- ~7 — корректные срабатывания риск-гейтов (`risk_usd > $25`, `R:R < 1.5`,
+  порядок SL/TP). 6 — историческая precision-ошибка (уже исправлена).
+- **Это НЕ потерянные валидные входы** и НЕ баг pipeline: LLM «думал» над
+  закрытым рынком, жёг токены и засорял логи.
+
+**Фикс — market-hours guard на признаке живой цены (без хардкода
+расписания):** cTrader шлёт тики/формирует M1 только при открытом рынке,
+поэтому `get_current_price is not None` = «tradable сейчас». Воскресный
+вечерний reopen (~21:00–22:00 UTC) снимается **сам**, как только идут тики
+— никаких таблиц сессий (важно: у gold/oil/gas расписания разные).
+- `_tradable_symbols(adapter, symbols)` — список открытых символов.
+- Full-цикл: все закрыты → пропуск без LLM; частично → в контекст идут
+  только открытые символы (`tuple(tradable)`).
+- Review-цикл: все открытые позиции на закрытых рынках → пропуск без LLM.
+
+**Важная переоценка:** статистика «текущей стратегии» (n=7, −$31.6 на демо)
+— НЕ испорчена багом (90 отброшенных = выходные, торговать нельзя), а
+просто мала (шум). Эдж LLM пока не доказан — нужна выборка по
+`sample-size.mdc` (≥100 сделок). Латентность не вредит (avg hold 64 мин).
+
+**Тесты:** +5 (`test_fx_ai_trader_live_price.py::TestTradableSymbolsGuard`):
+all-open / weekend-all-closed / partial / exception-swallow. 1070 passed.
+
+**Файлы:** `src/fx_ai_trader/app/main.py`,
+`tests/test_fx_ai_trader_live_price.py`
+
 ## 2026-06-02
 
 ### fix(freshness): живая цена в промпт LLM + intraday-spot для VIX/DXY/UST
