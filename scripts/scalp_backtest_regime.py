@@ -115,18 +115,22 @@ def _ema(vals: list[float], n: int) -> list[float]:
     return out
 
 
-def load_regime(symbol: str, start: str, end: str):
+def load_regime(symbol: str, start: str, end: str, htf_interval: str = "60"):
     """Возвращает regime_at(ts)->('trend'|'range'|'mixed', adx, htf_dir), где
-    htf_dir ∈ {'long','short','n/a'} — направление H1 по EMA200 (как прод-фильтр
-    require_htf_trend). Для A/B HTF-фильтра (EMA200-H1 vs ADX-режим)."""
+    htf_dir ∈ {'long','short','n/a'} — направление по EMA200 на ``htf_interval``
+    (как прод-фильтр require_htf_trend). Для A/B HTF-фильтра (EMA200-1H vs
+    EMA200-15m: research — для скальпа контекст 15m, ChartScout/DYOR/VWAP-guide
+    2026). interval в минутах ('60'=1H, '15'=15m, '5'=5m)."""
     from pybit.unified_trading import HTTP
     sess = HTTP(testnet=False)
+    interval_ms = int(htf_interval) * 60_000
+    # warmup ≥200 баров: 15 дней с запасом для 1H (≈8д) и 15m (≈2д)
     start_ms = int(date.fromisoformat(start).strftime("%s")) * 1000 - 15 * 86400_000
     end_ms = (int(date.fromisoformat(end).strftime("%s")) + 86400) * 1000
     rows = []
     cur = start_ms
     while cur < end_ms:
-        r = sess.get_kline(category="linear", symbol=symbol, interval="60",
+        r = sess.get_kline(category="linear", symbol=symbol, interval=htf_interval,
                            start=cur, limit=1000)["result"]["list"]
         if not r:
             break
@@ -135,7 +139,7 @@ def load_regime(symbol: str, start: str, end: str):
         newest = max(int(x[0]) for x in r)
         if newest <= cur:
             break
-        cur = newest + 3600_000
+        cur = newest + interval_ms
     # уникализируем и сортируем по времени (Bybit отдаёт свежие первыми)
     kl = sorted({int(x[0]): x for x in rows}.values(), key=lambda x: int(x[0]))
     if len(kl) < 30:
@@ -211,7 +215,15 @@ def _blocked(side: str, htf: str, adx: float, mode: str, adx_thresh: float) -> b
 
 def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
            filter_mode: str = "none", adx_thresh: float = 25.0,
-           sl_cooldown: float = 0.0) -> list[dict]:
+           sl_cooldown: float = 0.0, session_hours: set | None = None,
+           slippage_bps: float = 0.0) -> list[dict]:
+    """slippage_bps>0: стресс-модель транзакционных издержек. Каждое плечо
+    (entry+exit) кросит ``slippage_bps`` б.п. цены сверх комиссии — round-trip
+    стоимость = fee + 2·slippage_bps/1e4 (доля нотионала). Канон cost-sensitivity
+    (Roll 1984 effective spread; market-order пересекает спред + impact на тонкой
+    книге). Path-эффект (TP/SL сдвиг от худшего филла) — 2-го порядка, не
+    моделируем; net_R интерпретируем как cost-adjusted edge. Цель — найти
+    breakeven-слиппедж по монете: переживёт ли edge реальную книгу."""
     """sl_cooldown>0: после выхода по SL блокируем НОВЫЙ вход в ТУ ЖЕ сторону на
     sl_cooldown секунд (канон: не перефейдивать провалившийся уровень сразу,
     Connors/Raschke). Противоположную сторону не трогаем."""
@@ -245,7 +257,7 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
                 elif price <= pos["tp"]:
                     hit = ("tp_hit", pos["tp"])
             if hit:
-                trades.append(_close(pos, hit[0], hit[1], ts, fee))
+                trades.append(_close(pos, hit[0], hit[1], ts, fee, slippage_bps))
                 if hit[0] == "sl_hit":
                     last_sl_ts[pos["side"]] = ts
                 pos = None
@@ -261,6 +273,10 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
                     continue  # фильтр входа зарезал сигнал
                 if sl_cooldown > 0 and ts - last_sl_ts[sig.side] < sl_cooldown:
                     continue  # cooldown после SL в ту же сторону
+                if session_hours is not None:
+                    hr = int((ts % 86400.0) // 3600.0)  # UTC-час входа
+                    if hr not in session_hours:
+                        continue  # вне активной торговой сессии
                 pos = {"side": sig.side, "entry": sig.entry_ref, "sl": sig.sl_level,
                        "tp": sig.tp_level, "ts_open": ts, "regime": reg, "adx": adx,
                        "risk": abs(sig.entry_ref - sig.sl_level)}
@@ -277,20 +293,22 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
                         pos["scratch_R"] = (fav - fee * e) / risk
                     # НЕ закрываем — держим до естественного конца (контрфактуал)
                 else:
-                    trades.append(_close(pos, ex[0], ex[1], ts, fee))
+                    trades.append(_close(pos, ex[0], ex[1], ts, fee, slippage_bps))
                     pos = None
     return trades
 
 
-def _close(pos, reason, exit_price, ts, fee):
+def _close(pos, reason, exit_price, ts, fee, slippage_bps=0.0):
     e = pos["entry"]; risk = pos["risk"] or 1e-9
     fav = (exit_price - e) if pos["side"] == "long" else (e - exit_price)
+    cost = fee + 2.0 * slippage_bps / 1e4  # round-trip: fee + слиппедж на оба плеча
     gross_R = fav / risk
-    net_frac = fav / e - fee
-    net_R = (fav - fee * e) / risk
+    net_frac = fav / e - cost
+    net_R = (fav - cost * e) / risk
     return {"regime": pos["regime"], "adx": pos["adx"], "side": pos["side"],
             "reason": reason, "gross_R": gross_R, "net_R": net_R,
             "net_frac": net_frac, "hold": ts - pos["ts_open"],
+            "e_over_risk": e / risk,  # для аналитического slip-sweep
             "would_scratch": pos.get("would_scratch", False),
             "scratch_R": pos.get("scratch_R")}
 
@@ -360,10 +378,20 @@ def main():
     fmode = sys.argv[sys.argv.index("--filter") + 1] if "--filter" in sys.argv else "none"
     adx_thresh = _argf("--adx-thresh", 25.0)
     sl_cd = _argf("--sl-cooldown", 0.0)
+    slip_bps = _argf("--slippage-bps", 0.0)
+    htf_iv = (sys.argv[sys.argv.index("--htf-interval") + 1]
+              if "--htf-interval" in sys.argv else "60")
+    session_hours = None
+    if "--session-hours" in sys.argv:
+        raw = sys.argv[sys.argv.index("--session-hours") + 1]
+        session_hours = {int(h) for h in raw.split(",") if h.strip()}
     print(f"конфиг: fe_activate={cfg.flow_exit_activate_r}R "
           f"scratch_adverse={cfg.scratch_min_adverse_r}R "
           f"scratch_on={cfg.scratch_on_flow_flip} tp={cfg.take_profit_r}R "
-          f"ob-гейт=ВЫКЛ | filter={fmode} (adx_thresh={adx_thresh})")
+          f"ob-гейт=ВЫКЛ | filter={fmode} (adx_thresh={adx_thresh}) "
+          f"htf_tf={htf_iv}m slippage={slip_bps}bps/side")
+    slip_sweep = "--slip-sweep" in sys.argv
+    per_coin: dict[str, list[dict]] = {}
     all_trades = []
     for sym in syms:
         ticks = []
@@ -374,15 +402,57 @@ def main():
             print(f"{sym}: нет тиков"); continue
         raw = len(ticks)
         ticks = bin_ticks(ticks, 0.25)
-        regime_at = load_regime(sym, start, end)
+        regime_at = load_regime(sym, start, end, htf_iv)
         scratch_cf = "--scratch-cf" in sys.argv
         tr = replay(sym, ticks, cfg, regime_at, scratch_cf=scratch_cf,
-                    filter_mode=fmode, adx_thresh=adx_thresh, sl_cooldown=sl_cd)
+                    filter_mode=fmode, adx_thresh=adx_thresh, sl_cooldown=sl_cd,
+                    session_hours=session_hours, slippage_bps=slip_bps)
         all_trades.extend(tr)
+        per_coin[sym] = tr
+        if slip_sweep:
+            continue
         if not sweep:
             net = sum(r["net_R"] for r in tr)
+            w = len([r for r in tr if r["net_R"] > 0])
+            n = max(len(tr), 1)
             print(f"{sym}: тиков={raw:>9}→бинов={len(ticks):>8} сделок={len(tr):>4} "
-                  f"netR={net:>+7.1f}")
+                  f"WR={w/n*100:>3.0f}% netR={net:>+7.1f} avgR={net/n:>+6.3f}")
+    if slip_sweep:
+        fee = cfg.round_trip_fee_frac
+        levels = [0.0, 1.0, 2.0, 3.0, 5.0, 8.0]  # bps на сторону
+
+        def net_at(rows, s):
+            c = fee + 2.0 * s / 1e4
+            return sum(r["gross_R"] - c * r["e_over_risk"] for r in rows)
+
+        def breakeven(rows):
+            sg = sum(r["gross_R"] for r in rows)
+            se = sum(r["e_over_risk"] for r in rows)
+            if se <= 0:
+                return None
+            return (sg / se - fee) * 1e4 / 2.0  # bps/side где total net=0
+
+        print(f"\n===== SLIP-SWEEP (filter={fmode}) avg net_R/сделку по слиппеджу =====")
+        hdr = "  ".join(f"{int(s)}bp" for s in levels)
+        print(f"{'symbol':10} {'n':>4}  {hdr}   {'breakeven':>10}")
+        for sym in syms:
+            rows = per_coin.get(sym) or []
+            if not rows:
+                print(f"{sym:10} n=0"); continue
+            n = len(rows)
+            cells = "  ".join(f"{net_at(rows, s)/n:>+4.2f}" for s in levels)
+            be = breakeven(rows)
+            bestr = f"{be:>+7.1f}bp" if be is not None else "   n/a"
+            print(f"{sym:10} {n:>4}  {cells}   {bestr:>10}")
+        allrows = all_trades
+        n = max(len(allrows), 1)
+        cells = "  ".join(f"{net_at(allrows, s)/n:>+4.2f}" for s in levels)
+        be = breakeven(allrows)
+        print(f"{'ALL':10} {len(allrows):>4}  {cells}   "
+              f"{(f'{be:>+7.1f}bp' if be is not None else 'n/a'):>10}")
+        print("\nbreakeven = слиппедж (bps/сторону), при котором edge монеты → 0.")
+        print("сравни с реальным спредом монеты: если breakeven >> спреда — edge живой.")
+        return
     if sweep:
         t = all_trades
         net = sum(r["net_R"] for r in t)
@@ -393,14 +463,26 @@ def main():
               f"netR={net:+.0f} avgR={net/max(len(t),1):+.3f} | "
               f"flow_exit n={len(fx)} avgR={sum(r['net_R'] for r in fx)/max(len(fx),1):+.2f}")
         return
-    if "--filter" in sys.argv or "--sl-cooldown" in sys.argv:
+    if "--filter" in sys.argv or "--sl-cooldown" in sys.argv \
+            or "--session-hours" in sys.argv:
         t = all_trades
         net = sum(r["net_R"] for r in t)
         gross = sum(r["gross_R"] for r in t)
         w = len([r for r in t if r["net_R"] > 0])
         n = max(len(t), 1)
-        print(f"\nFILTER={fmode} sl_cd={sl_cd:.0f}s | n={len(t)} WR={w/n*100:.0f}% "
-              f"netR={net:+.0f} (avg {net/n:+.3f}) grossR={gross:+.0f} (avg {gross/n:+.3f})")
+        sh = "24h" if session_hours is None else f"{len(session_hours)}h"
+        print(f"\n--- per-coin (filter={fmode} htf_tf={htf_iv}m) ---")
+        for sym in syms:
+            rows = per_coin.get(sym) or []
+            if not rows:
+                print(f"{sym:10} n=0"); continue
+            cn = len(rows); cnet = sum(r["net_R"] for r in rows)
+            cw = len([r for r in rows if r["net_R"] > 0])
+            print(f"{sym:10} n={cn:>4} WR={cw/cn*100:>3.0f}% "
+                  f"netR={cnet:>+7.1f} avgR={cnet/cn:>+6.3f}")
+        print(f"\nFILTER={fmode} htf_tf={htf_iv}m sl_cd={sl_cd:.0f}s sess={sh} | "
+              f"n={len(t)} WR={w/n*100:.0f}% netR={net:+.0f} (avg {net/n:+.3f}) "
+              f"grossR={gross:+.0f} (avg {gross/n:+.3f})")
         return
     report(all_trades)
 

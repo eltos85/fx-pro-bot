@@ -1392,3 +1392,14 @@ def test_htf_aligned_blocks_counter_trend_fade():
     # цена 99 < EMA100 → тренд short: long-fade против тренда блокируется
     assert htf.aligned("SOLUSDT", "long", 99.0) is False
     assert htf.aligned("SOLUSDT", "short", 99.0) is True
+
+
+def test_htf_default_context_is_15m():
+    """v0.16.0: контекст-ТФ скальпа = 15m (research: DYOR/VWAP-guide/ChartScout
+    2026; A/B 15д n=6220 gross +0.122R vs +0.087R у 1H). EMA200 сохраняется,
+    refresh учащён под более быстрый 15m-бар. Замок на решение."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.htf_interval == "15"
+    assert s.htf_ema_len == 200
+    assert s.htf_refresh_sec == 120.0

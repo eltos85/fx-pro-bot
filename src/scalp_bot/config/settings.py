@@ -264,13 +264,22 @@ class ScalpSettings(BaseSettings):
     # ─── HTF-bias: трендовый фильтр старшего ТФ (аудит v0.9.3) ────────────
     # Канон CAP «без контекста CVD-дивергенция — шум» (gates 1–3); Murphy 1999
     # (EMA200 primary trend); Asness 2013 (mean-reversion в согласии с трендом).
-    # Фейд берём ТОЛЬКО по тренду: long-fade при price>EMA200_1h, short — ниже.
+    # Фейд берём ТОЛЬКО по тренду: long-fade при price>EMA200, short — ниже.
     # Контртренд (ловля ножа) блокируем. Гейт в main после resolve, fail-open
     # при сбое свечей. Без фильтра sweep_fade фейдил «в вакууме» (WR 29–40%).
     require_htf_trend: bool = Field(default=True)
-    htf_interval: str = Field(default="60")   # 1H (Bybit kline interval)
+    # v0.16.0: контекст-ТФ 1H→15m. Research: для СКАЛЬПА контекст ставят на 15m
+    # (DYOR Academy «scalping: context 1h/15m», VWAP-pullback guide «EMA200 на
+    # 15m для bias», ChartScout «scalping: 15m context / 5m setup / 1m entry»;
+    # правило соотношения ТФ 1:4–1:6 — наш вход ~1м → контекст 5–15м, а 1H в ~60×
+    # старше входа = слишком медленный). A/B на истории (15д, n=6220,
+    # data/scalp_htf_ab.txt): EMA200-15m даёт gross +0.122R/сделку vs +0.087R у
+    # 1H (~+40%) при том же числе сделок; 4/6 монет лучше (NEAR/ZEC сильнее всех).
+    htf_interval: str = Field(default="15")   # 15m (Bybit kline interval)
     htf_ema_len: int = Field(default=200)      # EMA200 — primary trend (Murphy)
-    htf_refresh_sec: float = Field(default=300.0)
+    # 15m-бар закрывается раз в 900с → refresh 120с быстро подхватывает новый бар
+    # (Bybit get_kline rate-limit с запасом: ~13 символов/120с). Было 300с под 1H.
+    htf_refresh_sec: float = Field(default=120.0)
 
     # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────
     # Канон: свипы доходят в London/NY open + overlap, «мёртвые» часы дают

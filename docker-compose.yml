@@ -365,12 +365,15 @@ services:
       # на биржевой SL. Меньше путей выхода. true = вернуть ранний скретч.
       SCALP_SCRATCH_ON_FLOW_FLIP: ${SCALP_SCRATCH_ON_FLOW_FLIP:-false}
       SCALP_SCRATCH_MIN_ADVERSE_R: ${SCALP_SCRATCH_MIN_ADVERSE_R:-0.7}
-      # HTF-bias (v0.9.3): фейд только по тренду EMA200 1H (CAP-контекст,
+      # HTF-bias (v0.9.3): фейд только по тренду EMA200 (CAP-контекст,
       # Murphy/Asness). Контртренд блокируем; fail-open при сбое свечей.
+      # v0.16.0: контекст-ТФ 1H→15m (research: для скальпа контекст 15m —
+      # DYOR/VWAP-guide/ChartScout 2026; правило соотношения ТФ). A/B 15д n=6220
+      # (data/scalp_htf_ab.txt): gross +0.122R vs +0.087R у 1H (~+40%), 4/6 лучше.
       SCALP_REQUIRE_HTF_TREND: ${SCALP_REQUIRE_HTF_TREND:-true}
-      SCALP_HTF_INTERVAL: ${SCALP_HTF_INTERVAL:-60}
+      SCALP_HTF_INTERVAL: ${SCALP_HTF_INTERVAL:-15}
       SCALP_HTF_EMA_LEN: ${SCALP_HTF_EMA_LEN:-200}
-      SCALP_HTF_REFRESH_SEC: ${SCALP_HTF_REFRESH_SEC:-300}
+      SCALP_HTF_REFRESH_SEC: ${SCALP_HTF_REFRESH_SEC:-120}
       # Мин-R пол + риск-сайзинг (v0.8.1): R ≥ 4×fee → fee ≤ 0.25R (R≈0.44%),
       # размер = риск$/дистанция_SL (канон профи), фикс $-риск/сделку.
       SCALP_MIN_RISK_FEE_MULT: ${SCALP_MIN_RISK_FEE_MULT:-4.0}
