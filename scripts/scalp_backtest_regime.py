@@ -636,6 +636,23 @@ def main():
             print(f"{sd:6} {n:>4} {w/n*100:>3.0f}% {net:>+7.1f} {net/n:>+7.3f} "
                   f"{len(sl):>4} {len(sl)/n*100:>6.0f}% {len(fx):>4} {fxavg:>+7.2f}")
         return
+    if "--by-symbol-side" in sys.argv:
+        print(f"\n===== BY-SYMBOL×SIDE (filter={fmode} htf_tf={htf_iv}m) =====")
+        print(f"{'symbol':10} {'side':5} {'n':>4} {'WR':>4} {'netR':>7} "
+              f"{'avgR':>7} {'SLshare':>7}")
+        for sym in syms:
+            rows = per_coin.get(sym) or []
+            for sd in ("long", "short"):
+                g = [r for r in rows if r["side"] == sd]
+                n = len(g)
+                if not n:
+                    print(f"{sym:10} {sd:5} n=0"); continue
+                w = sum(1 for r in g if r["net_R"] > 0)
+                net = sum(r["net_R"] for r in g)
+                sl = sum(1 for r in g if r["reason"] == "sl_hit")
+                print(f"{sym:10} {sd:5} {n:>4} {w/n*100:>3.0f}% {net:>+7.1f} "
+                      f"{net/n:>+7.3f} {sl/n*100:>6.0f}%")
+        return
     if "--adx-buckets" in sys.argv:
         t = all_trades
 

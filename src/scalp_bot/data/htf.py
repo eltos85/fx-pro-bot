@@ -131,13 +131,33 @@ def compute_di_dir(highs: list[float], lows: list[float], closes: list[float],
     """Направление доминирующей стороны по Wilder DMI: 'long' (+DI>−DI) | 'short'
     (−DI≥+DI) | None (данных мало).
 
+    ─── Research basis ───
     J. Welles Wilder «New Concepts in Technical Trading» (1978): +DI измеряет
     бычье давление (up-moves), −DI медвежье (down-moves). Кто больше — тот и
     доминирует. Быстрее EMA200-кросса ловит смену стороны (не лаг по цене), что
     критично для отсечения контртренд-лонгов в дип на даунтрендовых альтах
     (v0.18.4, диагноз live: лонги 20% WR vs шорты 54%). Тот же Wilder-расчёт,
-    что и ADX (compute_adx), но возвращаем направление, а не силу. Требуем
-    ≥ length+1 свечей (прогрев Wilder-сглаживания). Меньше → None (fail-open)."""
+    что и ADX (compute_adx), но возвращаем направление, а не силу.
+
+    Канон «DMI для bias стороны, не для тайминга»:
+    • StratBase.ai «Momentum Strategy With ADX Filter»: «only take long signals
+      when +DI > −DI, short when −DI > +DI» — добавление DI-направления подняло
+      PF 1.52→1.64 (+8%), «prevents entering trades against dominant trend».
+    • StratBase.ai «ADX Guide»: классическая система Уайлдера — «enter long when
+      +DI > −DI AND ADX > 25» (ADX-режим + DI-направление вместе).
+    • trendsandbreakouts.com «DMI Settings»: «only take longs when +DI is above
+      −DI… use DMI for bias, not timing» — мы применяем как ГЕЙТ, не триггер.
+    Анти-статик: FX Strategy Analyzer «a fixed whitelist often fails because
+    market regimes evolve; a dynamic filter… is more durable» — поэтому
+    направленный side-фильтр динамический (DMI), а НЕ статический per-coin
+    long/short whitelist (наш by-symbol×side A/B: ZEC перевернулся июнь-лонг→
+    май-шорт, side-bias монеты = функция режима, не свойство; артефакт
+    data/scalp_di_long_gate.txt). ОГРАНИЧЕНИЕ: A/B на 2 окнах ОДНОГО макрорежима
+    (даунтренд альтов) — в аптренде перепроверить (канон: валидировать на ≥2
+    смены режима перед боевым капиталом).
+
+    Требуем ≥ length+1 свечей (прогрев Wilder-сглаживания). Меньше → None
+    (fail-open)."""
     n = length
     if n <= 0 or len(closes) < n + 1:
         return None
