@@ -6,6 +6,46 @@
 
 ## 2026-06-04
 
+### v0.18.3 — density_break TP 3.5R→2.5R (пер-стратегийный, forward-test)
+`<hash>`
+
+**Запрос**: «посмотри стату density_break, сколько вошло бы в вин если чуть
+уменьшить ожидания — на графике видно недобираем».
+
+**Анализ** (артефакт: `/tmp/q_db_mfe.py`, MFE по 1m-клинам Bybit, n=25
+density_break сделок 31.05–04.06): систематический недобор до TP=3.5R. SL-сделки
+доходили до 2–3.4R и разворачивались: #973 NEAR MFE **3.43R**→SL, #977 2.82,
+#661 2.55, #999 2.21, #894 2.04. Контрфактуал по TP (gross R, n=25):
+
+| TP | wins | WR | grossR | netR≈ |
+|---|---|---|---|---|
+| 3.5R (было) | 7 | 28% | +4.1 | −1.4 |
+| 3.0R | 9 | 36% | +8.2 | +2.7 |
+| **2.5R** | 11 | 44% | **+11.0** | +5.5 |
+| 2.0R (sample-пик) | 13 | 52% | +13.9 | +8.4 |
+
+**Решение** (по согласованию с пользователем): TP density_break 3.5R→**2.5R**.
+Выбран 2.5R, а НЕ sample-оптимум 2.0R — намеренно мягче, чтобы не оверфитить под
+выборку и сохранить часть «winners run» (Философия B: #862 сходил 5.46R, #625 —
+7.1R; на 2.0R режутся сильнее).
+
+**Статус — LIVE FORWARD-TEST, не валидированный эдж.** n=25 = ШУМ (sample-size
+<100). Это НЕ доказанное преимущество, а гипотеза, проверяемая вперёд от baseline
+2026-06-04. Пересмотр на ≥100 density_break сделок (sample-size.mdc). Харнес пока
+density_break не реплеит — OOS-бэктест отложен, валидация через live forward-test.
+Откат одной env: `SCALP_DENSITY_BREAK_TAKE_PROFIT_R=3.5`.
+
+**Реализация** (пер-стратегийный TP, sweep_fade/density_bounce НЕ тронуты — их
+3.5R остаётся): `build_signal(..., tp_r=None)` override; density_break передаёт
+`cfg.density_break_take_profit_r`; новый конфиг `density_break_take_profit_r=2.5`;
+fee-guard считается от эффективного tp_r.
+
+**Файлы:** `src/scalp_bot/config/settings.py` (+`density_break_take_profit_r`),
+`src/scalp_bot/analysis/signals.py` (`build_signal` tp_r override + fee-guard),
+`src/scalp_bot/analysis/strategies.py` (density_break передаёт свой TP),
+`docker-compose.yml` (`SCALP_DENSITY_BREAK_TAKE_PROFIT_R`),
+`tests/test_scalp_bot.py` (+2 теста, _density_cfg). Тесты: 135 passed.
+
 ### slope-фильтр EMA200 — ОТКЛОНЁН по OOS на актуальных данных
 `<hash>`
 

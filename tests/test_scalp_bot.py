@@ -972,6 +972,7 @@ def _density_cfg(**over):
         density_baseline_sec=900.0, density_baseline_min_samples=30,
         # для build_signal:
         entry_order_type="market", sl_buffer_bps=8.0, take_profit_r=2.0,
+        density_break_take_profit_r=2.5,  # v0.18.3 пер-стратегийный TP
         round_trip_fee_frac=0.0011, min_target_fee_mult=3.0,
         active_exit_min_age_sec=10.0,
     )
@@ -1414,6 +1415,32 @@ def test_htf_has_data_false_until_warmed():
     htf.refresh(_FakeKlineClient({"SOLUSDT": [100.0] * 200}), ["SOLUSDT"])
     assert htf.has_data("SOLUSDT") is True          # прогрет
     assert htf.has_data("XXXUSDT") is False         # другой символ — нет
+
+
+def test_density_break_tp_r_default_2_5():
+    """v0.18.3: density_break_take_profit_r=2.5 (forward-test недобора на 3.5R по
+    MFE n=25), глобальный take_profit_r=3.5 для sweep_fade/density_bounce не тронут.
+    Замок на решение."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.density_break_take_profit_r == 2.5
+    assert s.take_profit_r == 3.5
+
+
+def test_build_signal_tp_r_override():
+    """build_signal с tp_r override ставит TP на нужном R; без override — cfg."""
+    from scalp_bot.analysis.signals import build_signal
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = ScalpSettings().model_copy(update={
+        "min_risk_fee_mult": 0.0, "min_target_fee_mult": 0.0, "sl_buffer_bps": 0.0})
+    snap = SimpleNamespace(symbol="X", best_bid=100.0, best_ask=100.0,
+                           last_price=100.0)
+    # swept=99 → long, risk=entry-sl=100-99=1 → TP при 2.5R = 102.5; при 3.5R=103.5
+    s25 = build_signal(snap, "long", 99.0, cfg, 3, ["r"], tp_r=2.5)
+    s35 = build_signal(snap, "long", 99.0, cfg, 3, ["r"])
+    assert s25 is not None and s35 is not None
+    assert s25.tp_level == pytest.approx(102.5)
+    assert s35.tp_level == pytest.approx(103.5)  # дефолт = cfg.take_profit_r=3.5
 
 
 def test_htf_has_data_false_on_thin_history():

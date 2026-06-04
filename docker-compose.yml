@@ -356,6 +356,9 @@ services:
       # v0.9.5: time_stop УДАЛЁН (противоречил «дай бежать» — резал по таймеру);
       # выход только flow_exit/flow_scratch/биржевой TP/SL.
       SCALP_TAKE_PROFIT_R: ${SCALP_TAKE_PROFIT_R:-3.5}
+      # v0.18.3: пер-стратегийный TP для density_break (forward-test 2.5R, недобор
+      # на 3.5R по MFE n=25). Откат: SCALP_DENSITY_BREAK_TAKE_PROFIT_R=3.5.
+      SCALP_DENSITY_BREAK_TAKE_PROFIT_R: ${SCALP_DENSITY_BREAK_TAKE_PROFIT_R:-2.5}
       # flow_exit профит-лок. v0.13.0: 1.0→1.5 — sweep 15д (data/scalp_sweep.txt):
       # выше порог = крупнее средний зафиксированный винер, винеры бегут дальше к
       # TP=3.5R (Философия B «let winners run», Schwager/Brooks).

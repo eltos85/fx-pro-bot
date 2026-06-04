@@ -313,6 +313,17 @@ class ScalpSettings(BaseSettings):
     # flow_exit (профит-лок по развороту ленты) НЕ тронут: если поток держит —
     # сделка бежит к 3.5R, если развернулся — фиксируем накопленное раньше.
     take_profit_r: float = Field(default=3.5)
+    # density_break: ПЕР-СТРАТЕГИЙНЫЙ TP (v0.18.3). Глобальный 3.5R (выше) остаётся
+    # для sweep_fade/density_bounce. Для density_break ставим 2.5R как LIVE
+    # FORWARD-TEST (НЕ валидированный эдж!): контрфактуал по MFE 25 сделок
+    # (1m-клины, артефакт q_db_mfe) показал систематический недобор — пробои
+    # доходили до 2-3.4R и разворачивались до 3.5R (#973 MFE 3.43R→SL, #977 2.82,
+    # #661 2.55). При TP=2.5R gross +4.1→+11.0R, WR 28→44% НА ТОЙ ВЫБОРКЕ. n=25 —
+    # это ШУМ (sample-size <100), поэтому не правда, а ГИПОТЕЗА на forward-test от
+    # baseline 2026-06-04. 2.5R (а не sample-оптимум 2.0R) — намеренно мягче, чтобы
+    # не оверфитить под выборку и сохранить часть «winners run». Пересмотр на ≥100
+    # density_break сделок. Откат: SCALP_DENSITY_BREAK_TAKE_PROFIT_R=3.5.
+    density_break_take_profit_r: float = Field(default=2.5)
     sl_buffer_bps: float = Field(default=8.0)  # буфер за свип-уровнем, б.п.
     # Активный выход (hard invalidation): закрыть раньше тайм-стопа, если
     # ордер-флоу (CVD) развернулся ПРОТИВ позиции. Все скальп-источники:

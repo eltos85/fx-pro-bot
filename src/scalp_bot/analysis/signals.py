@@ -184,9 +184,12 @@ def flow_invalidated(snap: SymbolSnapshot, side: str, window_sec: float) -> bool
 
 
 def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
-                 score: int, reasons: list[str]) -> Signal | None:
+                 score: int, reasons: list[str],
+                 tp_r: float | None = None) -> Signal | None:
     """Строит Signal: entry по книге, SL за свипнутым уровнем + буфер,
-    TP = take_profit_r × R, с fee-guard (цель ≥ min_target_fee_mult × издержки).
+    TP = tp_r × R (или cfg.take_profit_r если tp_r=None), с fee-guard (цель ≥
+    min_target_fee_mult × издержки). tp_r — пер-стратегийный override (density_break
+    v0.18.3 использует свой 2.5R, остальные — глобальный 3.5R).
 
     Цена входа зависит от типа ордера:
     - post_only_limit (maker): ставим по СВОЕЙ стороне книги (long→best_bid,
@@ -220,9 +223,10 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
     if min_risk > 0 and risk < min_risk:
         risk = min_risk
         sl = entry - risk if side == "long" else entry + risk
-    tp = entry + cfg.take_profit_r * risk if side == "long" else entry - cfg.take_profit_r * risk
+    tpr = cfg.take_profit_r if tp_r is None else tp_r
+    tp = entry + tpr * risk if side == "long" else entry - tpr * risk
     # Fee-guard: ход до TP ≥ min_target_fee_mult × round-trip издержек.
-    tp_move_frac = (cfg.take_profit_r * risk) / entry
+    tp_move_frac = (tpr * risk) / entry
     if tp_move_frac < cfg.min_target_fee_mult * cfg.round_trip_fee_frac:
         return None
     return Signal(

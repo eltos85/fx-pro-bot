@@ -541,7 +541,9 @@ class DensityBreakStrategy:
                           level, last)
                 continue
             reasons = ["wall_break", "persist", "round"]
-            sig = build_signal(snap, side, level, cfg, len(reasons), reasons)
+            # v0.18.3: пер-стратегийный TP (2.5R forward-test) — недобор на 3.5R
+            sig = build_signal(snap, side, level, cfg, len(reasons), reasons,
+                               tp_r=cfg.density_break_take_profit_r)
             if sig is None:
                 play.info("⛔ [%s] пробой %s стены %.6f, но fee-guard — ход мал, "
                           "комиссия не покрыта", sym, _SIDE_RU.get(side, side), level)
