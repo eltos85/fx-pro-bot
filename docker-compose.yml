@@ -383,6 +383,11 @@ services:
       SCALP_HTF_ADX_GATE: ${SCALP_HTF_ADX_GATE:-true}
       SCALP_HTF_ADX_LEN: ${SCALP_HTF_ADX_LEN:-14}
       SCALP_HTF_ADX_MAX: ${SCALP_HTF_ADX_MAX:-25}
+      # v0.18.4: асимметричный DMI-гейт направления ТОЛЬКО для лонгов (Wilder DMI
+      # +DI/−DI 1978). Диагноз: live лонги 20% WR vs шорты 54% — EMA лагает на
+      # даунтренд-альтах. A/B 3 окна (data/scalp_di_long_gate.txt): лонги avgR
+      # −0.092/−0.100/−0.098 → +0.004/+0.023/−0.006. Шорты/density_break не тронуты.
+      SCALP_HTF_DI_LONG_GATE: ${SCALP_HTF_DI_LONG_GATE:-true}
       # v0.18.0: НЕ флэтить открытые позиции при рестарте — биржевые SL/TP их
       # защищают, manage() продолжает сопровождать (кейс #926: рестарт срезал
       # прибыльный шорт). true = legacy «чистый лист» (закрыть всё по рынку).

@@ -1517,6 +1517,53 @@ def test_htf_adx_gate_defaults():
     assert s.htf_adx_max == 25.0
 
 
+def test_compute_di_dir_uptrend_long():
+    from scalp_bot.data.htf import compute_di_dir
+    n = 60
+    highs = [100 + i + 0.5 for i in range(n)]
+    lows = [100 + i - 0.5 for i in range(n)]
+    closes = [100.0 + i for i in range(n)]
+    assert compute_di_dir(highs, lows, closes, 14) == "long"  # +DI доминирует
+
+
+def test_compute_di_dir_downtrend_short():
+    from scalp_bot.data.htf import compute_di_dir
+    n = 60
+    highs = [100 - i + 0.5 for i in range(n)]
+    lows = [100 - i - 0.5 for i in range(n)]
+    closes = [100.0 - i for i in range(n)]
+    assert compute_di_dir(highs, lows, closes, 14) == "short"  # −DI доминирует
+
+
+def test_compute_di_dir_needs_warmup():
+    from scalp_bot.data.htf import compute_di_dir
+    assert compute_di_dir([1.0, 2.0], [0.0, 1.0], [0.5, 1.5], 14) is None
+
+
+def test_htf_di_long_gate_blocks_counter_trend_long():
+    """v0.18.4: даунтренд по DMI → лонг-фейд блокируется, шорт-фейд нет."""
+    n = 60
+    rows = [(100.0 - i, 100 - i + 0.5, 100 - i - 0.5, 100.0 - i) for i in range(n)]
+    htf = HtfTrend(ema_len=200, adx_len=14)
+    htf.refresh(_FakeOHLCClient({"SOLUSDT": rows}), ["SOLUSDT"])
+    assert htf.di_direction("SOLUSDT") == "short"
+    assert htf.di_blocks_long("SOLUSDT") is True    # контртренд-лонг запрещён
+
+
+def test_htf_di_long_gate_fail_open_no_data():
+    htf = HtfTrend()
+    assert htf.di_direction("XXXUSDT") is None
+    assert htf.di_blocks_long("XXXUSDT") is False   # нет DMI → не блокируем
+
+
+def test_htf_di_long_gate_default():
+    """v0.18.4: асимметричный DMI-гейт направления для лонгов включён по умолчанию.
+    Wilder DMI 1978. A/B 3 окна (data/scalp_di_long_gate.txt): лонги avgR
+    −0.092/−0.100/−0.098 (EMA) → +0.004/+0.023/−0.006 (C), шорты не тронуты."""
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().htf_di_long_gate is True
+
+
 # ─── adopt-старт без флэта (v0.18.0) ───────────────────────────────────────
 
 class _FakeAdoptClient:

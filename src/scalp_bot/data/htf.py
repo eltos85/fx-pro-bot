@@ -126,8 +126,57 @@ def compute_adx(highs: list[float], lows: list[float], closes: list[float],
     return adx
 
 
+def compute_di_dir(highs: list[float], lows: list[float], closes: list[float],
+                   length: int = 14) -> str | None:
+    """Направление доминирующей стороны по Wilder DMI: 'long' (+DI>−DI) | 'short'
+    (−DI≥+DI) | None (данных мало).
+
+    J. Welles Wilder «New Concepts in Technical Trading» (1978): +DI измеряет
+    бычье давление (up-moves), −DI медвежье (down-moves). Кто больше — тот и
+    доминирует. Быстрее EMA200-кросса ловит смену стороны (не лаг по цене), что
+    критично для отсечения контртренд-лонгов в дип на даунтрендовых альтах
+    (v0.18.4, диагноз live: лонги 20% WR vs шорты 54%). Тот же Wilder-расчёт,
+    что и ADX (compute_adx), но возвращаем направление, а не силу. Требуем
+    ≥ length+1 свечей (прогрев Wilder-сглаживания). Меньше → None (fail-open)."""
+    n = length
+    if n <= 0 or len(closes) < n + 1:
+        return None
+
+    def _wilder(x: list[float]) -> list[float]:
+        out = [0.0] * len(x)
+        if len(x) <= n:
+            return out
+        s = sum(x[1:n + 1])
+        out[n] = s
+        for i in range(n + 1, len(x)):
+            s = s - s / n + x[i]
+            out[i] = s
+        return out
+
+    tr = [0.0]
+    pdm = [0.0]
+    ndm = [0.0]
+    for i in range(1, len(closes)):
+        tr.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+                      abs(lows[i] - closes[i - 1])))
+        up = highs[i] - highs[i - 1]
+        dn = lows[i - 1] - lows[i]
+        pdm.append(up if (up > dn and up > 0) else 0.0)
+        ndm.append(dn if (dn > up and dn > 0) else 0.0)
+    atr = _wilder(tr)
+    pdm_s = _wilder(pdm)
+    ndm_s = _wilder(ndm)
+    last = len(closes) - 1
+    if atr[last] <= 0:
+        return None
+    pdi = 100 * (pdm_s[last] / atr[last])
+    ndi = 100 * (ndm_s[last] / atr[last])
+    return "long" if pdi > ndi else "short"
+
+
 class HtfTrend:
-    """Кэш EMA + ADX старшего ТФ по символу: направление (EMA) и сила (ADX) тренда."""
+    """Кэш EMA + ADX + DMI старшего ТФ по символу: направление (EMA), сила (ADX)
+    и доминирующая сторона (DMI +DI/−DI) тренда."""
 
     def __init__(self, ema_len: int = 200, interval: str = "60",
                  adx_len: int = 14) -> None:
@@ -136,6 +185,7 @@ class HtfTrend:
         self.adx_len = adx_len
         self._ema: dict[str, float] = {}
         self._adx: dict[str, float] = {}
+        self._di_dir: dict[str, str] = {}
 
     def refresh(self, client, symbols: list[str]) -> None:
         """Обновить EMA+ADX по символам из ОДНОГО запроса клинов. При сбое одного —
@@ -150,6 +200,9 @@ class HtfTrend:
             adx = compute_adx(highs, lows, closes, self.adx_len)
             if adx is not None:
                 self._adx[sym] = adx
+            di = compute_di_dir(highs, lows, closes, self.adx_len)
+            if di is not None:
+                self._di_dir[sym] = di
 
     def has_data(self, symbol: str) -> bool:
         """EMA по символу хоть раз успешно посчитана (символ прогрет). False для
@@ -180,3 +233,14 @@ class HtfTrend:
         False (fail-open: не блокируем, если ADX не посчитан)."""
         adx = self._adx.get(symbol)
         return adx is not None and adx >= adx_max
+
+    def di_direction(self, symbol: str) -> str | None:
+        """Доминирующая сторона по DMI: 'long' (+DI>−DI) | 'short' | None (нет
+        данных). v0.18.4."""
+        return self._di_dir.get(symbol)
+
+    def di_blocks_long(self, symbol: str) -> bool:
+        """Асимметричный гейт (v0.18.4): DMI смотрит вниз (−DI≥+DI) → лонг-фейд
+        запрещён (контртренд-лонг в дип). Нет данных → False (fail-open: DMI не
+        посчитан, не блокируем; прогрев гарантируется has_data-гейтом по EMA)."""
+        return self._di_dir.get(symbol) == "short"

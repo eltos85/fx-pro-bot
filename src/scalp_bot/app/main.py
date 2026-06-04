@@ -269,6 +269,20 @@ def run() -> None:
                               "пропускаю (фейдим только по тренду)", sig.symbol,
                               sig.side, d or "?")
                     continue
+                # DMI-гейт направления только для ЛОНГОВ (v0.18.4, асимметрия).
+                # Диагноз: live sweep_fade-лонги 20% WR (контртренд в дип),
+                # шорты 54% (EMA на шортах хорош). EMA200-кросс плохо ловит
+                # направление на даунтрендовых альтах → пропускает контртренд-
+                # лонги. Wilder DMI (+DI/−DI, 1978) быстрее ловит доминирующую
+                # сторону. Лонг разрешён только если И EMA, И +DI>−DI вверх;
+                # шорты на чистом EMA (не трогаем). ТОЛЬКО MR (htf_strats),
+                # density_break не зависит. A/B 3 окна (data/scalp_di_long_gate
+                # .txt): лонги avgR −0.092/−0.100/−0.098 → +0.004/+0.023/−0.006.
+                if (cfg.htf_di_long_gate and sig.strategy in htf_strats
+                        and sig.side == "long" and htf.di_blocks_long(sig.symbol)):
+                    play.info("🧭 [%s] long но DMI вниз (−DI≥+DI) — пропускаю "
+                              "(контртренд-лонг в дип, EMA лагает)", sig.symbol)
+                    continue
                 # ADX режим-гейт (v0.17.0): EMA дала направление, но если тренд
                 # СЛИШКОМ сильный (ADX≥adx_max, «трендовый день») — фейд запрещён
                 # ВНЕ зависимости от направления. Канон MR: «never fade a one-

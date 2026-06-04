@@ -146,14 +146,27 @@ def load_regime(symbol: str, start: str, end: str, htf_interval: str = "60",
     # уникализируем и сортируем по времени (Bybit отдаёт свежие первыми)
     kl = sorted({int(x[0]): x for x in rows}.values(), key=lambda x: int(x[0]))
     if len(kl) < 30:
-        return lambda ts: ("n/a", 0.0, "n/a", 0.0)
+        return lambda ts: ("n/a", 0.0, "n/a", 0.0, 0.0, "n/a")
     ts_arr = [int(x[0]) / 1000 for x in kl]
     high = [float(x[2]) for x in kl]
     low = [float(x[3]) for x in kl]
     close = [float(x[4]) for x in kl]
-    adx = _adx(high, low, close, 14)
+    adx, pdi, ndi = _adx(high, low, close, 14)
     ema200 = _ema(close, 200)
     lk = max(1, slope_lookback)
+
+    # SMA20/std20 для Z-score (extreme-deviation gate, канон Bollinger 20,2 /
+    # Keltner — фейд только на статэкстремуме; не-EMA, не страдает от лага тренда)
+    W = 20
+    sma20 = [0.0] * len(close)
+    std20 = [0.0] * len(close)
+    for i in range(len(close)):
+        if i + 1 >= W:
+            seg = close[i - W + 1:i + 1]
+            m = sum(seg) / W
+            sma20[i] = m
+            std20[i] = (sum((x - m) ** 2 for x in seg) / W) ** 0.5
+
     def regime_at(ts: float):
         i = 0
         for j in range(len(ts_arr)):
@@ -168,7 +181,11 @@ def load_regime(symbol: str, start: str, end: str, htf_interval: str = "60",
         slope = 0.0
         if e > 0 and i >= lk and ema200[i - lk] > 0 and close[i] > 0:
             slope = (ema200[i] - ema200[i - lk]) / close[i] * 100.0
-        return reg, a, htf, slope
+        zdev = 0.0
+        if std20[i] > 0:
+            zdev = (close[i] - sma20[i]) / std20[i]
+        di_dir = "long" if pdi[i] > ndi[i] else "short"  # Wilder DMI направление
+        return reg, a, htf, slope, zdev, di_dir
     return regime_at
 
 
@@ -201,7 +218,7 @@ def _adx(high, low, close, n=14):
         s = sum(dx[n + 1:2 * n + 1]) / n; adx[2 * n] = s
         for i in range(2 * n + 1, len(close)):
             s = (s * (n - 1) + dx[i]) / n; adx[i] = s
-    return adx
+    return adx, pdi, ndi  # pdi/ndi — направление (Wilder DMI), быстрее EMA-кросса
 
 
 # ─── replay одного символа ─────────────────────────────────────────────────
@@ -244,7 +261,9 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
            filter_mode: str = "none", adx_thresh: float = 25.0,
            sl_cooldown: float = 0.0, session_hours: set | None = None,
            slippage_bps: float = 0.0, post_out: list | None = None,
-           post_window_sec: float = 1800.0, slope_thresh: float = 0.05) -> list[dict]:
+           post_window_sec: float = 1800.0, slope_thresh: float = 0.05,
+           regime_at2=None, z_thresh: float = 0.0,
+           dir_di: bool = False, dir_di_longs: bool = False) -> list[dict]:
     """slippage_bps>0: стресс-модель транзакционных издержек. Каждое плечо
     (entry+exit) кросит ``slippage_bps`` б.п. цены сверх комиссии — round-trip
     стоимость = fee + 2·slippage_bps/1e4 (доля нотионала). Канон cost-sensitivity
@@ -319,10 +338,29 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
         if pos is None:
             sig = strat.update(snap, ts)
             if sig is not None:
-                reg, adx, htf, slope = regime_at(ts)
-                if _blocked(sig.side, htf, adx, filter_mode, adx_thresh,
+                reg, adx, htf, slope, zdev, di_dir = regime_at(ts)
+                # источник направления: DMI везде / DMI только для лонгов / EMA
+                if dir_di:
+                    dir_h = di_dir
+                elif dir_di_longs and sig.side == "long":
+                    # асимметрия: лонг блокируем если EMA ИЛИ DMI смотрят вниз;
+                    # шорты остаются на чистом EMA (там EMA уже хорош)
+                    dir_h = "short" if (htf == "short" or di_dir == "short") else htf
+                else:
+                    dir_h = htf
+                if _blocked(sig.side, dir_h, adx, filter_mode, adx_thresh,
                             slope, slope_thresh):
                     continue  # фильтр входа зарезал сигнал
+                if regime_at2 is not None:  # MTF-согласие: 2-й ТФ тоже за фейд
+                    htf2 = regime_at2(ts)[2]
+                    if (htf2 == "long" and sig.side == "short") or \
+                       (htf2 == "short" and sig.side == "long"):
+                        continue
+                if z_thresh > 0:  # extreme-deviation: фейд только на статэкстремуме
+                    if sig.side == "long" and zdev > -z_thresh:
+                        continue  # цена недостаточно НИЗКО (не дип)
+                    if sig.side == "short" and zdev < z_thresh:
+                        continue  # цена недостаточно ВЫСОКО (не пик)
                 if sl_cooldown > 0 and ts - last_sl_ts[sig.side] < sl_cooldown:
                     continue  # cooldown после SL в ту же сторону
                 if session_hours is not None:
@@ -446,6 +484,12 @@ def main():
         upd["scratch_min_adverse_r"] = sa
     if "--no-scratch" in sys.argv:
         upd["scratch_on_flow_flip"] = False
+    tp_r = _argf("--tp-r", None)             # fixed take_profit_r override (OOS-свип)
+    if tp_r is not None:
+        upd["take_profit_r"] = tp_r
+    cb = _argf("--confirm-bar", None)        # confirm_bar_sec (v0.14.0: 60→0 tape)
+    if cb is not None:
+        upd["confirm_bar_sec"] = cb
     cfg = load_settings().model_copy(update=upd)
     sweep = "--sweep" in sys.argv
     fmode = sys.argv[sys.argv.index("--filter") + 1] if "--filter" in sys.argv else "none"
@@ -454,8 +498,17 @@ def main():
     slope_lk = int(_argf("--slope-lookback", 5))
     sl_cd = _argf("--sl-cooldown", 0.0)
     slip_bps = _argf("--slippage-bps", 0.0)
+    # default ДОЛЖЕН совпадать с прод (settings.htf_interval="15", v0.16.0):
+    # иначе прогон без флага молча тестирует старый 1H-конфиг, не прод.
     htf_iv = (sys.argv[sys.argv.index("--htf-interval") + 1]
-              if "--htf-interval" in sys.argv else "60")
+              if "--htf-interval" in sys.argv else "15")
+    # MTF-согласие: 2-й (старший) ТФ EMA200 тоже должен быть за фейд (анти
+    # контртренд-лонг на whipsaw 15m). None = выкл.
+    mtf_iv = (sys.argv[sys.argv.index("--mtf-interval") + 1]
+              if "--mtf-interval" in sys.argv else None)
+    z_thresh = _argf("--z-thresh", 0.0)      # extreme-deviation gate (Z vs SMA20)
+    dir_di = "--dir-di" in sys.argv          # направление по DMI (+DI/-DI) вместо EMA
+    dir_di_longs = "--dir-di-longs" in sys.argv  # DMI-подтверждение только для лонгов
     stop_rev = "--stop-reverse" in sys.argv
     post_win = _argf("--post-window", 1800.0)
     session_hours = None
@@ -482,12 +535,16 @@ def main():
         raw = len(ticks)
         ticks = bin_ticks(ticks, 0.25)
         regime_at = load_regime(sym, start, end, htf_iv, slope_lk)
+        regime_at2 = (load_regime(sym, start, end, mtf_iv, slope_lk)
+                      if mtf_iv else None)
         scratch_cf = "--scratch-cf" in sys.argv
         tr = replay(sym, ticks, cfg, regime_at, scratch_cf=scratch_cf,
                     filter_mode=fmode, adx_thresh=adx_thresh, sl_cooldown=sl_cd,
                     session_hours=session_hours, slippage_bps=slip_bps,
                     post_out=(post_all if stop_rev else None),
-                    post_window_sec=post_win, slope_thresh=slope_thresh)
+                    post_window_sec=post_win, slope_thresh=slope_thresh,
+                    regime_at2=regime_at2, z_thresh=z_thresh, dir_di=dir_di,
+                    dir_di_longs=dir_di_longs)
         all_trades.extend(tr)
         per_coin[sym] = tr
         if slip_sweep:
@@ -560,6 +617,57 @@ def main():
               f"{(f'{be:>+7.1f}bp' if be is not None else 'n/a'):>10}")
         print("\nbreakeven = слиппедж (bps/сторону), при котором edge монеты → 0.")
         print("сравни с реальным спредом монеты: если breakeven >> спреда — edge живой.")
+        return
+    if "--by-side" in sys.argv:
+        t = all_trades
+        print(f"\n===== BY-SIDE (filter={fmode} htf_tf={htf_iv}m) =====")
+        print(f"{'side':6} {'n':>4} {'WR':>4} {'netR':>7} {'avgR':>7} "
+              f"{'SLn':>4} {'SLshare':>7} {'FXn':>4} {'FXavgR':>7}")
+        for sd in ("long", "short"):
+            g = [r for r in t if r["side"] == sd]
+            n = len(g)
+            if not n:
+                print(f"{sd:6} n=0"); continue
+            w = sum(1 for r in g if r["net_R"] > 0)
+            net = sum(r["net_R"] for r in g)
+            sl = [r for r in g if r["reason"] == "sl_hit"]
+            fx = [r for r in g if r["reason"] == "flow_exit"]
+            fxavg = sum(r["net_R"] for r in fx) / max(len(fx), 1)
+            print(f"{sd:6} {n:>4} {w/n*100:>3.0f}% {net:>+7.1f} {net/n:>+7.3f} "
+                  f"{len(sl):>4} {len(sl)/n*100:>6.0f}% {len(fx):>4} {fxavg:>+7.2f}")
+        return
+    if "--adx-buckets" in sys.argv:
+        t = all_trades
+
+        def bk(a):
+            if a is None:
+                return "n/a"
+            if a < 20:
+                return "0 <20 range"
+            if a < 25:
+                return "1 20-25 gray"
+            if a < 30:
+                return "2 25-30 trend"
+            return "3 >=30 strong"
+        from collections import defaultdict
+        G: dict[str, list] = defaultdict(list)
+        for r in t:
+            G[bk(r.get("adx"))].append(r)
+        print(f"\n===== ADX-BUCKETS (filter={fmode} htf_tf={htf_iv}m, ADX@вход) =====")
+        print(f"{'bucket':14} {'n':>4} {'WR':>4} {'netR':>7} {'avgR':>7} "
+              f"{'SLn':>4} {'SLshare':>7} {'SLnetR':>7} {'FXn':>4} {'FXavgR':>7}")
+        for k in sorted(G):
+            g = G[k]
+            n = len(g)
+            w = sum(1 for r in g if r["net_R"] > 0)
+            net = sum(r["net_R"] for r in g)
+            sl = [r for r in g if r["reason"] == "sl_hit"]
+            fx = [r for r in g if r["reason"] == "flow_exit"]
+            slnet = sum(r["net_R"] for r in sl)
+            fxavg = sum(r["net_R"] for r in fx) / max(len(fx), 1)
+            print(f"{k:14} {n:>4} {w/max(n,1)*100:>3.0f}% {net:>+7.1f} "
+                  f"{net/max(n,1):>+7.3f} {len(sl):>4} {len(sl)/max(n,1)*100:>6.0f}% "
+                  f"{slnet:>+7.1f} {len(fx):>4} {fxavg:>+7.2f}")
         return
     if sweep:
         t = all_trades

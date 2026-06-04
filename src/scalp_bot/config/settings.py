@@ -289,6 +289,18 @@ class ScalpSettings(BaseSettings):
     htf_adx_gate: bool = Field(default=True)
     htf_adx_len: int = Field(default=14)       # ADX(14) — Wilder canonical
     htf_adx_max: float = Field(default=25.0)   # ≥25 = трендовый день → фейд стоп
+    # v0.18.4: АСИММЕТРИЧНЫЙ DMI-гейт направления только для ЛОНГОВ. Диагноз: live
+    # sweep_fade-лонги катастрофа (20% WR), шорты прибыльны (54%) — EMA200-кросс
+    # плохо ловит направление на даунтрендовых альтах (whipsaw на 15m, лаг на 1H),
+    # пропускает контртренд-лонги в дип. Wilder DMI (+DI/−DI, 1978) — более быстрый
+    # детектор доминирующей стороны, уже считается для ADX. Фикс: лонг разрешён,
+    # только если EMA И +DI>−DI вверх; шорты остаются на чистом EMA (там EMA уже
+    # хорош, −0.025R). A/B харнес (3 окна, data/scalp_di_long_gate.txt): лонги
+    # avgR −0.092/−0.100/−0.098 (EMA) → +0.004/+0.023/−0.006 (C), шорты не тронуты;
+    # net total на каждом окне лучше, на 1–3 июн даже +7.2R. ТОЛЬКО MR (htf_strats),
+    # density_break не трогаем. Канон: комбинировать EMA+DMI для направления
+    # (Wilder 1978; multi-confirmation trend filter).
+    htf_di_long_gate: bool = Field(default=True)
 
     # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────
     # Канон: свипы доходят в London/NY open + overlap, «мёртвые» часы дают
