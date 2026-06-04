@@ -339,6 +339,22 @@ class ScalpSettings(BaseSettings):
     # density_break сделок. Откат: SCALP_DENSITY_BREAK_TAKE_PROFIT_R=3.5.
     density_break_take_profit_r: float = Field(default=2.5)
     sl_buffer_bps: float = Field(default=8.0)  # буфер за свип-уровнем, б.п.
+    # Research-ручка: множитель ИТОГОВОГО риска (ширины SL) после мин-R пола.
+    # default 1.0 = no-op (алгебраически тождественно). Для A/B гипотезы «шире
+    # стоп → выше WR» (буфер один не годится: мин-R пол ~0.44% его маскирует).
+    # TP масштабируется вместе (tp_r × risk), $-риск постоянен (risk-sizing → лот).
+    sl_risk_mult: float = Field(default=1.0)
+    # ПЕР-СТРАТЕГИЙНЫЙ множитель ширины SL для sweep_fade (LIVE FORWARD-TEST, НЕ
+    # валидированный эдж). None = fallback на глобальный sl_risk_mult (так харнес
+    # --sl-mult продолжает работать). В проде ставим 1.5 через env, density_break
+    # и density_bounce НЕ трогаются (они идут по глобальному 1.0).
+    # Обоснование (research, не подгонка под выборку): MAE/Sweeney 1996 — текущий
+    # стоп задан структурой+комиссией (min_risk_fee_mult), а не реальным ходом
+    # против входа; контрфактуал по 117 реальным стоп-вылетам бота (30.05–04.06):
+    # при ×1.5 ~28% выбиваний были шумом и развернулись бы в плюс, при ×2.0 ~35%.
+    # Канон mean-reversion: тугой стоп (1 ATR) убивает edge, шире — сохраняет
+    # (aligrithm 3.27 2026; hoc-trade/TradeMedic 500k счетов). $-риск постоянен.
+    sweep_fade_sl_risk_mult: float | None = Field(default=None)
     # Активный выход (hard invalidation): закрыть раньше тайм-стопа, если
     # ордер-флоу (CVD) развернулся ПРОТИВ позиции. Все скальп-источники:
     # «exit immediately when order flow flips» (Kalena, tradezella, tradealgo).

@@ -490,6 +490,12 @@ def main():
     cb = _argf("--confirm-bar", None)        # confirm_bar_sec (v0.14.0: 60→0 tape)
     if cb is not None:
         upd["confirm_bar_sec"] = cb
+    slb = _argf("--sl-buffer-bps", None)     # буфер SL за свип-уровнем (б.п.)
+    if slb is not None:
+        upd["sl_buffer_bps"] = slb
+    slm = _argf("--sl-mult", None)           # множитель ширины SL (гипотеза шире-стоп)
+    if slm is not None:
+        upd["sl_risk_mult"] = slm
     cfg = load_settings().model_copy(update=upd)
     sweep = "--sweep" in sys.argv
     fmode = sys.argv[sys.argv.index("--filter") + 1] if "--filter" in sys.argv else "none"

@@ -185,7 +185,8 @@ def flow_invalidated(snap: SymbolSnapshot, side: str, window_sec: float) -> bool
 
 def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
                  score: int, reasons: list[str],
-                 tp_r: float | None = None) -> Signal | None:
+                 tp_r: float | None = None,
+                 sl_mult: float | None = None) -> Signal | None:
     """Строит Signal: entry по книге, SL за свипнутым уровнем + буфер,
     TP = tp_r × R (или cfg.take_profit_r если tp_r=None), с fee-guard (цель ≥
     min_target_fee_mult × издержки). tp_r — пер-стратегийный override (density_break
@@ -222,7 +223,13 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
     min_risk = getattr(cfg, "min_risk_fee_mult", 0.0) * cfg.round_trip_fee_frac * entry
     if min_risk > 0 and risk < min_risk:
         risk = min_risk
-        sl = entry - risk if side == "long" else entry + risk
+    # Research-множитель ширины SL (default 1.0 = no-op; A/B гипотезы шире-стоп).
+    # sl_mult — пер-стратегийный override (sweep_fade); None → глобальный
+    # sl_risk_mult (он же используется харнесом через --sl-mult).
+    mult = getattr(cfg, "sl_risk_mult", 1.0) if sl_mult is None else sl_mult
+    if mult and mult > 0:
+        risk *= mult
+    sl = entry - risk if side == "long" else entry + risk
     tpr = cfg.take_profit_r if tp_r is None else tp_r
     tp = entry + tpr * risk if side == "long" else entry - tpr * risk
     # Fee-guard: ход до TP ≥ min_target_fee_mult × round-trip издержек.
@@ -376,7 +383,12 @@ class SweepReclaimDetector:
         if ob_ok:
             reasons.append("ob_imb")
         bonus = [r for r in reasons if r in ("ob_imb",)]
-        sig = build_signal(snap, side, a["swept"], cfg, len(reasons), reasons)
+        # Пер-стратегийный множитель ширины SL для sweep_fade (MAE/Sweeney:
+        # структурный+fee стоп всё ещё в шумовой зоне ~30% сделок). None →
+        # fallback на глобальный sl_risk_mult (харнес --sl-mult работает как был).
+        sf_mult = getattr(cfg, "sweep_fade_sl_risk_mult", None)
+        sig = build_signal(snap, side, a["swept"], cfg, len(reasons), reasons,
+                           sl_mult=sf_mult)
         if sig is None:
             # reclaim+разворот были, но риск/комиссии не прошли fee-guard
             play.info("⛔ [%s] %s: reclaim+разворот ✓, но fee-guard — цель не "

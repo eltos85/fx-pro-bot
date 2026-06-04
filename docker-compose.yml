@@ -359,6 +359,12 @@ services:
       # v0.18.3: пер-стратегийный TP для density_break (forward-test 2.5R, недобор
       # на 3.5R по MFE n=25). Откат: SCALP_DENSITY_BREAK_TAKE_PROFIT_R=3.5.
       SCALP_DENSITY_BREAK_TAKE_PROFIT_R: ${SCALP_DENSITY_BREAK_TAKE_PROFIT_R:-2.5}
+      # v0.18.6: пер-стратегийный множитель ширины SL ТОЛЬКО для sweep_fade
+      # (forward-test ×1.5). MAE/Sweeney: текущий стоп задан комиссией, не шумом;
+      # 117 реальных стоп-вылетов → ~28% при ×1.5 были шумом и развернулись в плюс.
+      # $-риск постоянен (risk-sizing). density_break/density_bounce НЕ тронуты.
+      # Откат: SCALP_SWEEP_FADE_SL_RISK_MULT=1.0 (или пусто → глобальный 1.0).
+      SCALP_SWEEP_FADE_SL_RISK_MULT: ${SCALP_SWEEP_FADE_SL_RISK_MULT:-1.5}
       # flow_exit профит-лок. v0.13.0: 1.0→1.5 — sweep 15д (data/scalp_sweep.txt):
       # выше порог = крупнее средний зафиксированный винер, винеры бегут дальше к
       # TP=3.5R (Философия B «let winners run», Schwager/Brooks).
