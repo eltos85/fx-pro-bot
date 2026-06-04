@@ -396,7 +396,9 @@ services:
       # размер = риск$/дистанция_SL (канон профи), фикс $-риск/сделку.
       SCALP_MIN_RISK_FEE_MULT: ${SCALP_MIN_RISK_FEE_MULT:-4.0}
       SCALP_RISK_BASED_SIZING: ${SCALP_RISK_BASED_SIZING:-true}
-      SCALP_RISK_PER_TRADE_USD: ${SCALP_RISK_PER_TRADE_USD:-1.0}
+      # v0.18.5: $1→$10 фикс-риск/сделку (более крупные позиции по запросу).
+      # notional≈$2.3–3.3k, killswitch $500/день = ~50 SL. Откат: =1.
+      SCALP_RISK_PER_TRADE_USD: ${SCALP_RISK_PER_TRADE_USD:-10.0}
       # Telegram-нотификации (переиспользуем отдельного бота от ai_arena).
       SCALP_TELEGRAM_ENABLED: ${SCALP_TELEGRAM_ENABLED:-false}
       SCALP_TELEGRAM_BOT_TOKEN: ${SCALP_TELEGRAM_BOT_TOKEN:-}

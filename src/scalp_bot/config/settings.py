@@ -225,9 +225,11 @@ class ScalpSettings(BaseSettings):
     # растит $-риск, а лишь уменьшает лот. Источники: TradeOlogy/DYOR/StockCharts
     # 2026 («size is the output, never the input»). False = старый фикс-notional.
     risk_based_sizing: bool = Field(default=True)
-    # Фиксированный $-риск на сделку (1% депо $1000 — Tharp/Van Tharp; при R≈0.44%
-    # notional≈$227, в пределах killswitch $500/день и 2 одновременных позиций).
-    risk_per_trade_usd: float = Field(default=1.0)
+    # Фиксированный $-риск на сделку. v0.18.5: $1→$10 (запрос пользователя —
+    # «более рискованные позиции»). При R≈0.3–0.44% notional≈$2.3–3.3k; killswitch
+    # $500/день = ~50 SL до стопа торгов (запас под ~30–60 сделок/день при WR ~40%).
+    # Откат: SCALP_RISK_PER_TRADE_USD=1.
+    risk_per_trade_usd: float = Field(default=10.0)
 
     # ─── density_bounce (стратегия №2: отскок от плотности в стакане) ─────
     # Стена = крупная лимитка ≥ wall_mult × средний размер уровня на своей
