@@ -131,30 +131,38 @@ def compute_di_dir(highs: list[float], lows: list[float], closes: list[float],
     """Направление доминирующей стороны по Wilder DMI: 'long' (+DI>−DI) | 'short'
     (−DI≥+DI) | None (данных мало).
 
-    ─── Research basis ───
-    J. Welles Wilder «New Concepts in Technical Trading» (1978): +DI измеряет
-    бычье давление (up-moves), −DI медвежье (down-moves). Кто больше — тот и
-    доминирует. Быстрее EMA200-кросса ловит смену стороны (не лаг по цене), что
-    критично для отсечения контртренд-лонгов в дип на даунтрендовых альтах
-    (v0.18.4, диагноз live: лонги 20% WR vs шорты 54%). Тот же Wilder-расчёт,
-    что и ADX (compute_adx), но возвращаем направление, а не силу.
+    ─── Формула (первоисточник) ───
+    J. Welles Wilder «New Concepts in Technical Trading» (1978): +DI = бычье
+    давление (up-moves), −DI = медвежье (down-moves), кто больше — тот доминирует.
+    Цитируется ТОЛЬКО как определение расчёта (не как замер эджа). Тот же Wilder-
+    расчёт, что и ADX (compute_adx), но возвращаем направление, а не силу.
+    Современный крипто-стек использует ровно эту формулу (IBKR Campus; arxiv
+    2511.00665 2025 «TA Meets ML: Bitcoin Evidence» — MACD+ADX на BTC, 2024).
 
-    Канон «DMI для bias стороны, не для тайминга»:
-    • StratBase.ai «Momentum Strategy With ADX Filter»: «only take long signals
-      when +DI > −DI, short when −DI > +DI» — добавление DI-направления подняло
-      PF 1.52→1.64 (+8%), «prevents entering trades against dominant trend».
-    • StratBase.ai «ADX Guide»: классическая система Уайлдера — «enter long when
-      +DI > −DI AND ADX > 25» (ADX-режим + DI-направление вместе).
-    • trendsandbreakouts.com «DMI Settings»: «only take longs when +DI is above
-      −DI… use DMI for bias, not timing» — мы применяем как ГЕЙТ, не триггер.
-    Анти-статик: FX Strategy Analyzer «a fixed whitelist often fails because
-    market regimes evolve; a dynamic filter… is more durable» — поэтому
-    направленный side-фильтр динамический (DMI), а НЕ статический per-coin
-    long/short whitelist (наш by-symbol×side A/B: ZEC перевернулся июнь-лонг→
-    май-шорт, side-bias монеты = функция режима, не свойство; артефакт
-    data/scalp_di_long_gate.txt). ОГРАНИЧЕНИЕ: A/B на 2 окнах ОДНОГО макрорежима
-    (даунтренд альтов) — в аптренде перепроверить (канон: валидировать на ≥2
-    смены режима перед боевым капиталом).
+    ─── Обоснование эджа (источник правды — НАШ A/B) ───
+    Первично: наш A/B на наших крипто-тиках (3 окна, артефакт
+    data/scalp_di_long_gate.txt) — лонги avgR −0.092/−0.100/−0.098 (EMA) →
+    +0.004/+0.023/−0.006 (DMI-гейт), шорты не тронуты. Диагноз live: лонги 20%
+    WR vs шорты 54% — EMA200-кросс лагает на даунтренд-альтах, пропускает
+    контртренд-лонги в дип; +DI/−DI быстрее ловит доминирующую сторону.
+
+    Крипто-контекст (не противоречит канону, не первоисточник эджа):
+    • Динамический режим-гейт MR > статический whitelist: regime-aware multi-
+      strategy (GitHub quantsarahz/btcusdt 2022–2025, walk-forward OOS) включает
+      MR ТОЛЬКО в Range-режимах, 0 в тренде; Vadim «ML Features Crypto Scalping»:
+      «running mean-reversion in a trending market is how you blow up».
+    • Механизм нашей long/short асимметрии (Kalena 2026 «Funding Rate Analysis»):
+      на альт-перпах «extreme positive funding (crowded longs) produces sharper
+      corrections… liquidation cascades on the long side are mechanically more
+      violent (market sells into declining bids)» — контртренд-лонги опаснее
+      шортов МЕХАНИЧЕСКИ, что и видим (20% vs 54%).
+    • Side-bias монеты — time-varying, не свойство: by-symbol×side A/B (ZEC
+      перевернулся июнь-лонг→май-шорт) → статика = оверфит, нужен динамический
+      гейт. MDPI Applied Sci 2025 «Timing Usage of TA in Crypto»: оценка на
+      «selected periods risks overfitting» (метод RSHR rolling-window).
+
+    ОГРАНИЧЕНИЕ: наш A/B на 2 окнах ОДНОГО макрорежима (даунтренд альтов) — в
+    аптренде перепроверить (лонги могут стать хорошими, гейт не должен их резать).
 
     Требуем ≥ length+1 свечей (прогрев Wilder-сглаживания). Меньше → None
     (fail-open)."""

@@ -25,23 +25,35 @@
 гейт v0.18.4): разрешает лонг только когда +DI>−DI, т.е. монета СЕЙЧАС в лонг-
 режиме. Данные асимметрии объясняют, ПОЧЕМУ DMI-гейт работает.
 
-**Подтверждение в ПРО**:
-- StratBase.ai «Momentum+ADX»: «+DI>−DI for long, −DI>+DI for short» → PF
-  1.52→1.64 (+8%), «prevents trades against dominant trend».
-- StratBase.ai «ADX Guide»: классика Уайлдера «long when +DI>−DI AND ADX>25».
-- trendsandbreakouts.com «DMI»: «use DMI for bias, not timing».
-- FX Strategy Analyzer: «a fixed whitelist often fails because market regimes
-  evolve; a dynamic filter is more durable» — прямо против статики.
-- ResearchGate (Momentum/MR crypto): «time-varying dependencies among digital
-  assets», режимы по MA-slope + volatility. Oren Tapiero: монеты надо
-  классифицировать на trending/mean-reverting ДИНАМИЧЕСКИ.
+**Подтверждение — источник правды НАШ A/B, ресёрч = крипто-контекст**:
+Первично: наш A/B на наших крипто-тиках (выше, `data/scalp_di_long_gate.txt`).
+Формула +DI/−DI — Wilder 1978 (только определение расчёта, не замер эджа).
+Крипто-источники (современные, по теме, как контекст — НЕ форекс/не блоги ради
+чисел; прежняя ревизия ошибочно выпячивала StratBase/FX Strategy Analyzer):
+- **Динамика > статика для MR**: GitHub quantsarahz/btcusdt-regime-multistrategy
+  (2022–2025, walk-forward OOS) — MR-вес 1.0 только в Range-режимах, 0 в тренде;
+  Vadim «ML Features Crypto Scalping» — «running mean-reversion in a trending
+  market is how you blow up» (Hurst-гейт).
+- **Механизм нашей long/short асимметрии**: Kalena 2026 «Funding Rate Analysis» —
+  на альт-перпах «crowded longs produce sharper corrections; liquidation cascades
+  on the long side are mechanically more violent» → контртренд-лонги опаснее
+  шортов МЕХАНИЧЕСКИ (объясняет live 20% vs 54%).
+- **Анти-оверфит на одном периоде**: MDPI Applied Sci 2025 «Timing Usage of TA in
+  Crypto» (метод RSHR rolling-window) — оценка на «selected periods risks
+  overfitting»; arxiv 2511.00665 2025 «TA Meets ML: Bitcoin Evidence» — ADX как
+  сила направления на BTC 2024.
 
-**Ограничение (тоже из ресёрча)**: FX Strategy Analyzer — «validate on ≥2 macro
-regime shifts». Оба наших окна = даунтренд альтов (один макрорежим). DMI-гейт
-валидирован на падающем рынке; **в аптренде перепроверить** (лонги могут стать
-хорошими — гейт не должен их резать). Решение по статус-монетам (SUI-long как
-кандидат на hard-фильтр) — только при ≥100 trades на связку символ×сторона в
-разных режимах (sample-size.mdc).
+**Ограничение**: наш A/B на 2 окнах ОДНОГО макрорежима (даунтренд альтов). DMI-
+гейт валидирован на падающем рынке; **в аптренде перепроверить** (лонги могут
+стать хорошими — гейт не должен их резать). Канон (MDPI 2025 RSHR; regime-GitHub
+walk-forward) — валидировать на ≥2 смены режима. Решение по статус-монетам (SUI-
+long как кандидат на hard-фильтр) — только при ≥100 trades на связку символ×
+сторона в разных режимах (sample-size.mdc).
+
+NB по дисциплине источников: ни один крипто-источник не валидирует ИМЕННО
+«+DI/−DI гейт на CVD-фейд-скальпере по альтам» — они подтверждают смежное
+(режим-гейт MR, long/short асимметрия альт-перпов, динамика>статика). Поэтому
+эдж обоснован НАШИМ A/B (no-data-fitting.mdc), ресёрч — лишь «не противоречит».
 
 **Усиления НЕ внедряем сейчас** (осознанно, против оверфита): «ADX rising»
 (+10–15% PF) и «DMI bias + price structure HH/HL» — это моментум-research на
