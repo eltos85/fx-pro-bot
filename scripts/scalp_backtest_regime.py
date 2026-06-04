@@ -115,12 +115,15 @@ def _ema(vals: list[float], n: int) -> list[float]:
     return out
 
 
-def load_regime(symbol: str, start: str, end: str, htf_interval: str = "60"):
-    """Возвращает regime_at(ts)->('trend'|'range'|'mixed', adx, htf_dir), где
-    htf_dir ∈ {'long','short','n/a'} — направление по EMA200 на ``htf_interval``
-    (как прод-фильтр require_htf_trend). Для A/B HTF-фильтра (EMA200-1H vs
-    EMA200-15m: research — для скальпа контекст 15m, ChartScout/DYOR/VWAP-guide
-    2026). interval в минутах ('60'=1H, '15'=15m, '5'=5m)."""
+def load_regime(symbol: str, start: str, end: str, htf_interval: str = "60",
+                slope_lookback: int = 5):
+    """Возвращает regime_at(ts)->('trend'|'range'|'mixed', adx, htf_dir, slope_pct),
+    где htf_dir ∈ {'long','short','n/a'} — направление по EMA200 на ``htf_interval``
+    (как прод-фильтр require_htf_trend), slope_pct — нормированный наклон EMA200
+    ((ema[i]-ema[i-lk])/close[i])×100 за ``slope_lookback`` баров (research:
+    TradingView «EMA Slope Pro» — нормировка на close даёт cross-instrument
+    сопоставимость). Для A/B HTF-фильтра (EMA200-1H vs EMA200-15m: research — для
+    скальпа контекст 15m, ChartScout/DYOR/VWAP-guide 2026). interval в минутах."""
     from pybit.unified_trading import HTTP
     sess = HTTP(testnet=False)
     interval_ms = int(htf_interval) * 60_000
@@ -143,13 +146,14 @@ def load_regime(symbol: str, start: str, end: str, htf_interval: str = "60"):
     # уникализируем и сортируем по времени (Bybit отдаёт свежие первыми)
     kl = sorted({int(x[0]): x for x in rows}.values(), key=lambda x: int(x[0]))
     if len(kl) < 30:
-        return lambda ts: ("n/a", 0.0, "n/a")
+        return lambda ts: ("n/a", 0.0, "n/a", 0.0)
     ts_arr = [int(x[0]) / 1000 for x in kl]
     high = [float(x[2]) for x in kl]
     low = [float(x[3]) for x in kl]
     close = [float(x[4]) for x in kl]
     adx = _adx(high, low, close, 14)
     ema200 = _ema(close, 200)
+    lk = max(1, slope_lookback)
     def regime_at(ts: float):
         i = 0
         for j in range(len(ts_arr)):
@@ -161,7 +165,10 @@ def load_regime(symbol: str, start: str, end: str, htf_interval: str = "60"):
         reg = "trend" if a >= 25 else ("range" if a < 20 else "mixed")
         e = ema200[i]
         htf = "n/a" if e <= 0 else ("long" if close[i] > e else "short")
-        return reg, a, htf
+        slope = 0.0
+        if e > 0 and i >= lk and ema200[i - lk] > 0 and close[i] > 0:
+            slope = (ema200[i] - ema200[i - lk]) / close[i] * 100.0
+        return reg, a, htf, slope
     return regime_at
 
 
@@ -198,22 +205,35 @@ def _adx(high, low, close, n=14):
 
 
 # ─── replay одного символа ─────────────────────────────────────────────────
-def _blocked(side: str, htf: str, adx: float, mode: str, adx_thresh: float) -> bool:
-    """Фильтр входа. ema: направленный EMA200-H1 (как прод require_htf_trend) —
-    фейд только ПО тренду H1. adx: режим-гейт по СИЛЕ тренда (канон MR) — фейд в
-    ОБЕ стороны, но только когда тренд не сильный (adx < порога). none: без фильтра."""
-    if mode in ("ema", "ema+adx"):
+def _blocked(side: str, htf: str, adx: float, mode: str, adx_thresh: float,
+             slope: float = 0.0, slope_thresh: float = 0.05) -> bool:
+    """Фильтр входа. ema: направленный EMA200 (как прод require_htf_trend) — фейд
+    только ПО тренду. adx: режим-гейт по СИЛЕ тренда (канон MR). slope: вето на
+    фейд против НАКЛОНА EMA — лечит лаг EMA (цена прокалывает лаговую EMA на
+    отскоке, но EMA падает → лонг-фейд режем). none: без фильтра.
+
+    Комбо-режимы: ema+adx, ema+slope, ema+adx+slope (additive-гейты, канон
+    профи — слои фильтров: направление+сила+наклон, CryptoProfitCalc 2026)."""
+    if mode.startswith("ema"):
+        # 1) направление (price vs EMA200) — базовый require_htf_trend
         if htf == "long" and side == "short":
             return True
         if htf == "short" and side == "long":
             return True
-        # ema+adx: ВДОБАВОК к направлению — режим-гейт по силе тренда (канон
-        # Connors/Raschke «Street Smarts» + Dalton: «never fade a one-timeframe
-        # trending market»). Даже фейд ПО тренду EMA запрещаем, если тренд слишком
-        # силён (трендовый день, adx >= порога) — иначе нормальная волатильность
-        # сносит MR-стоп. Так связка = направление И режим вместе.
-        if mode == "ema+adx" and adx >= adx_thresh:
+        # 2) ADX-режим (сила): фейд запрещён в сильный тренд (Connors/Raschke,
+        #    Dalton: «never fade a one-timeframe trending market»)
+        if "adx" in mode and adx >= adx_thresh:
             return True
+        # 3) slope-вето (наклон EMA): даже если price>EMA (htf=long, но это лаговый
+        #    отскок), при падающей EMA (slope<=-thresh) лонг-фейд режем; зеркально
+        #    для short. Плоский наклон (|slope|<thresh) = range → фейд разрешаем
+        #    (родная среда MR). Research: EMA как bias + slope-фильтр, flat=neutral
+        #    (CryptoProfitCalc/PipRider/FXNX 2026; TradingView EMA Slope Pro).
+        if "slope" in mode:
+            if side == "long" and slope <= -slope_thresh:
+                return True
+            if side == "short" and slope >= slope_thresh:
+                return True
         return False
     if mode == "adx":
         return adx >= adx_thresh
@@ -224,7 +244,7 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
            filter_mode: str = "none", adx_thresh: float = 25.0,
            sl_cooldown: float = 0.0, session_hours: set | None = None,
            slippage_bps: float = 0.0, post_out: list | None = None,
-           post_window_sec: float = 1800.0) -> list[dict]:
+           post_window_sec: float = 1800.0, slope_thresh: float = 0.05) -> list[dict]:
     """slippage_bps>0: стресс-модель транзакционных издержек. Каждое плечо
     (entry+exit) кросит ``slippage_bps`` б.п. цены сверх комиссии — round-trip
     стоимость = fee + 2·slippage_bps/1e4 (доля нотионала). Канон cost-sensitivity
@@ -299,8 +319,9 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
         if pos is None:
             sig = strat.update(snap, ts)
             if sig is not None:
-                reg, adx, htf = regime_at(ts)
-                if _blocked(sig.side, htf, adx, filter_mode, adx_thresh):
+                reg, adx, htf, slope = regime_at(ts)
+                if _blocked(sig.side, htf, adx, filter_mode, adx_thresh,
+                            slope, slope_thresh):
                     continue  # фильтр входа зарезал сигнал
                 if sl_cooldown > 0 and ts - last_sl_ts[sig.side] < sl_cooldown:
                     continue  # cooldown после SL в ту же сторону
@@ -429,6 +450,8 @@ def main():
     sweep = "--sweep" in sys.argv
     fmode = sys.argv[sys.argv.index("--filter") + 1] if "--filter" in sys.argv else "none"
     adx_thresh = _argf("--adx-thresh", 25.0)
+    slope_thresh = _argf("--slope-thresh", 0.05)
+    slope_lk = int(_argf("--slope-lookback", 5))
     sl_cd = _argf("--sl-cooldown", 0.0)
     slip_bps = _argf("--slippage-bps", 0.0)
     htf_iv = (sys.argv[sys.argv.index("--htf-interval") + 1]
@@ -442,7 +465,8 @@ def main():
     print(f"конфиг: fe_activate={cfg.flow_exit_activate_r}R "
           f"scratch_adverse={cfg.scratch_min_adverse_r}R "
           f"scratch_on={cfg.scratch_on_flow_flip} tp={cfg.take_profit_r}R "
-          f"ob-гейт=ВЫКЛ | filter={fmode} (adx_thresh={adx_thresh}) "
+          f"ob-гейт=ВЫКЛ | filter={fmode} (adx_thresh={adx_thresh} "
+          f"slope_thresh={slope_thresh}% lk={slope_lk}) "
           f"htf_tf={htf_iv}m slippage={slip_bps}bps/side")
     slip_sweep = "--slip-sweep" in sys.argv
     per_coin: dict[str, list[dict]] = {}
@@ -457,13 +481,13 @@ def main():
             print(f"{sym}: нет тиков"); continue
         raw = len(ticks)
         ticks = bin_ticks(ticks, 0.25)
-        regime_at = load_regime(sym, start, end, htf_iv)
+        regime_at = load_regime(sym, start, end, htf_iv, slope_lk)
         scratch_cf = "--scratch-cf" in sys.argv
         tr = replay(sym, ticks, cfg, regime_at, scratch_cf=scratch_cf,
                     filter_mode=fmode, adx_thresh=adx_thresh, sl_cooldown=sl_cd,
                     session_hours=session_hours, slippage_bps=slip_bps,
                     post_out=(post_all if stop_rev else None),
-                    post_window_sec=post_win)
+                    post_window_sec=post_win, slope_thresh=slope_thresh)
         all_trades.extend(tr)
         per_coin[sym] = tr
         if slip_sweep:
