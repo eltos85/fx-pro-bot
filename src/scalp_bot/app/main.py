@@ -158,10 +158,19 @@ def run() -> None:
                     and now - last_universe >= cfg.universe_refresh_sec):
                 last_universe = now
                 try:
+                    prev_syms = set(symbols)
                     stream, states, symbols = _rotate_universe(
                         client, cfg, db, stream, states, strategies, symbols,
                         notifier)
                     funding.refresh(client, symbols)  # новые символы → их график
+                    # v0.18.2: прогрев HTF новых символов СРАЗУ (до того как они
+                    # смогут торговаться) — закрываем fail-open окно ≤htf_refresh_sec.
+                    # Канон QuantConnect: warm up indicator перед торговлей нового
+                    # символа динамической вселенной.
+                    if cfg.require_htf_trend:
+                        new_syms = [s for s in symbols if s not in prev_syms]
+                        if new_syms:
+                            htf.refresh(client, new_syms)
                 except Exception:
                     log.exception("rotate_universe failed")
 
@@ -239,10 +248,20 @@ def run() -> None:
                 sig = resolve(candidates)
                 if sig is None:
                     continue
+                # v0.18.2: fail-CLOSED для непрогретого символа. Канон QuantConnect:
+                # «refuse to trade until indicator ready» — не фейдим символ, у
+                # которого HTF-фильтр ещё ни разу не посчитан (свежая ротация). Без
+                # этого fail-open пропускал контртренд-фейды в окно прогрева. Только
+                # для MR (htf_strats); momentum density_break не зависит от HTF.
+                if (cfg.require_htf_trend and sig.strategy in htf_strats
+                        and not htf.has_data(sig.symbol)):
+                    play.info("⏳ [%s] %s — HTF-фильтр не прогрет (свежий символ) — "
+                              "фейд пропускаю (канон: не торговать до готовности "
+                              "индикатора)", sig.symbol, sig.side)
+                    continue
                 # HTF-bias: фейд только по старшему тренду (EMA200 15m). Контртренд
-                # (ловля ножа) пропускаем; fail-open при отсутствии HTF-данных.
-                # ТОЛЬКО для MR-стратегий (sig.strategy in htf_strats) — momentum
-                # density_break торгует пробои в обе стороны (v0.18.1).
+                # (ловля ножа) пропускаем. ТОЛЬКО для MR-стратегий (sig.strategy in
+                # htf_strats) — momentum density_break торгует пробои в обе стороны.
                 if (cfg.require_htf_trend and sig.strategy in htf_strats
                         and not htf.aligned(sig.symbol, sig.side, snap.last_price)):
                     d = htf.direction(sig.symbol, snap.last_price)

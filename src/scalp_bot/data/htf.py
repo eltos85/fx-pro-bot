@@ -151,6 +151,14 @@ class HtfTrend:
             if adx is not None:
                 self._adx[sym] = adx
 
+    def has_data(self, symbol: str) -> bool:
+        """EMA по символу хоть раз успешно посчитана (символ прогрет). False для
+        НИКОГДА не считавшегося символа (свежая ротация / новый листинг). Нужно
+        для fail-closed MR-гейта: канон QuantConnect — «refuse to trade until
+        indicator ready» (не путать с транзиентным REST-сбоем: там keep-last,
+        символ остаётся в _ema). v0.18.2."""
+        return symbol in self._ema
+
     def direction(self, symbol: str, price: float | None) -> str | None:
         """'long' (price>EMA, аптренд) | 'short' (даунтренд) | None (нет данных)."""
         ema = self._ema.get(symbol)

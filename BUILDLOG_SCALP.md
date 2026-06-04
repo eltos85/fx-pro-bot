@@ -4,6 +4,52 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-04
+
+### v0.18.2 — fail-closed HTF на непрогретых символах + прогрев при ротации
+`<hash>`
+
+**Запрос**: «проведи анализ ADX… sweep_fade большой минус, density_break в плюс»
+→ диагностика sweep_fade-лонгов (n=10, WR 10%, −$9.56 в даунтренде) вскрыла
+структурный разрыв HTF-фильтра.
+
+**Симптом**: лонги-фейды проходили против даунтренда. Две причины:
+1. **fail-open на свежеротированных символах**: ротация (`universe_refresh_sec`
+   300с) и HTF-refresh (`htf_refresh_sec` 120с) на независимых таймерах. Новый
+   символ заходил в состав и до следующего HTF-тика (≤120с) торговался мимо
+   фильтра (`aligned`/`is_strong_trend` fail-open при отсутствии данных).
+2. (отдельно) лаг 15m EMA200 на отскоках — лечится slope-фильтром, см. ниже,
+   идёт через A/B (не в этом коммите).
+
+**Research** (что говорят профи): QuantConnect (институциональная quant-платформа)
+— *«fail-closed logic — refuse to trade until all indicators are confirmed ready
+— is the professional standard»*; для динамической вселенной прогревать индикатор
+нового символа через history-запрос ДО торговли (*«we don't add new securities
+during the warm-up process»*). То есть наш fail-open на НИКОГДА не считавшемся
+символе — против канона.
+
+**Фикс** (correctness, торговые пороги не трогает):
+- `htf.py`: `has_data(symbol)` — был ли EMA хоть раз успешно посчитан (символ в
+  `_ema`). Отличает «никогда не прогрет» (fail-closed) от транзиентного REST-сбоя
+  известного символа (keep-last, как раньше).
+- `main.py` gate: для MR-стратегий (`htf_strats`) если `not htf.has_data(sym)` →
+  фейд пропускаем (⏳ лог), пока HTF не готов. momentum density_break не зависит.
+- `main.py` ротация: после `_rotate_universe` сразу `htf.refresh(client,
+  new_syms)` для новых символов — закрывает fail-open окно до первого тика.
+
+**Sample-size**: правка не основана на n=10 (шум) — это фикс корректности
+применения фильтра (канон QuantConnect), не оптимизация под P&L.
+
+**Файлы:** `src/scalp_bot/data/htf.py` (+`has_data`), `src/scalp_bot/app/main.py`
+(fail-closed gate + warm-up при ротации), `tests/test_scalp_bot.py` (+2 теста).
+Тесты: 133 passed.
+
+**TODO (отдельно, через A/B)**: slope-фильтр EMA200 (наклон, не только цена>EMA)
+против лага EMA на отскоках — research: CryptoProfitCalc/PipRider/FXNX «EMA как
+bias + slope-фильтр, flat=no-trade», нормированный наклон `((EMA_now−EMA[n])/
+close)×100` порог ~0.05% (TradingView EMA Slope Pro). Деплой только при улучшении
+эджа на харнесе.
+
 ## 2026-06-03
 
 ### v0.18.1 — HTF+ADX фильтры только для MR; density_break (momentum) свободен

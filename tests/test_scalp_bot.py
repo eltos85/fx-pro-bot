@@ -1405,6 +1405,25 @@ def test_htf_default_context_is_15m():
     assert s.htf_refresh_sec == 120.0
 
 
+def test_htf_has_data_false_until_warmed():
+    """v0.18.2: has_data=False для непрогретого символа (fail-closed MR-гейт),
+    True после успешного refresh. Канон QuantConnect: не торговать до готовности
+    индикатора."""
+    htf = HtfTrend(ema_len=200)
+    assert htf.has_data("SOLUSDT") is False        # ни разу не считалась
+    htf.refresh(_FakeKlineClient({"SOLUSDT": [100.0] * 200}), ["SOLUSDT"])
+    assert htf.has_data("SOLUSDT") is True          # прогрет
+    assert htf.has_data("XXXUSDT") is False         # другой символ — нет
+
+
+def test_htf_has_data_false_on_thin_history():
+    """Тонкая история (< ema_len свечей) → EMA=None → has_data остаётся False:
+    fail-closed не пускает фейд на новом листинге без полной истории."""
+    htf = HtfTrend(ema_len=200)
+    htf.refresh(_FakeKlineClient({"NEWUSDT": [100.0] * 50}), ["NEWUSDT"])
+    assert htf.has_data("NEWUSDT") is False
+
+
 # ─── ADX режим-гейт (v0.17.0) ──────────────────────────────────────────────
 
 class _FakeOHLCClient:
