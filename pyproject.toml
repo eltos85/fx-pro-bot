@@ -35,6 +35,7 @@ fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
 ai-trader = "ai_trader.app.main:run"
 fx-ai-trader = "fx_ai_trader.app.main:run"
 scalp-bot = "scalp_bot.app.main:run"
+fx-momentum-bot = "fx_momentum_bot.app.main:run"
 ru-stocks-analyst = "ru_stocks_analyst.app.main:run"
 ru-stocks-discover = "ru_stocks_analyst.app.discover_accounts:main"
 ru-stocks-once = "ru_stocks_analyst.app.run_once:main"
@@ -46,6 +47,7 @@ packages = [
   "src/ai_trader",
   "src/fx_ai_trader",
   "src/scalp_bot",
+  "src/fx_momentum_bot",
   "src/ru_stocks_analyst",
   "src/shared_oauth",
   "src/ctrader_token_service",

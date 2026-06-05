@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-06-05
+
+### feat(momentum-bot): добавлен изолированный FX momentum-бот с token-service сессией
+
+`коммит при deploy`
+
+Добавлен новый сервис `fx-momentum-bot` как полностью изолированный бот:
+собственный пакет `src/fx_momentum_bot/`, отдельные `MOMENTUM_BOT_*`
+переменные, отдельный volume `momentum_bot_data` и отдельная SQLite-БД.
+Сессия cTrader берётся через `src/shared_oauth` и `ctrader-token-service`
+(`fetch_token/push_token`), без использования legacy env/data.
+
+**Файлы:** `src/fx_momentum_bot/`, `Dockerfile.momentum-bot`, `docker-compose.yml`, `pyproject.toml`, `.env.example`
+
 ## 2026-05-22
 
 ### chore(advisor): отключён по статистике на n=2386 (sample-size satisfied)
