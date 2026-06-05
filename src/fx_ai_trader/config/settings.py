@@ -129,11 +129,14 @@ class AiFxTraderSettings(BaseSettings):
         default=300, validation_alias="AI_FX_TRADER_REVIEW_INTERVAL_SEC"
     )
 
-    # Виртуальный капитал для расчёта lot size в промпте. Демо FxPro
-    # обычно $1000–$5000, но мы хотим эмулировать поведение на $500
-    # (как у ai_trader). Все размеры считаются как будто это $500.
+    # Виртуальный капитал для расчёта lot size в промпте. С 2026-06-05
+    # депозит увеличен до $2000 и счёт ДЕЛИТСЯ со вторым ботом (валюты).
+    # Баланс счёта колеблется из-за обоих ботов; этот бот всё равно
+    # считает sizing от фиксированной базы $2000 (не читает live equity),
+    # а собственный P&L/killswitch берёт из своей БД по своим сделкам
+    # (label-изоляция, инструменты gold/oil/gas не пересекаются с FX).
     virtual_capital_usd: float = Field(
-        default=500.0, validation_alias="AI_FX_TRADER_VIRTUAL_CAPITAL"
+        default=2000.0, validation_alias="AI_FX_TRADER_VIRTUAL_CAPITAL"
     )
 
     # ─── Broker safety (катастрофические лимиты, НЕ micro-management) ───
@@ -145,11 +148,16 @@ class AiFxTraderSettings(BaseSettings):
     #   1. catastrophic daily/total loss (stop-experiment, не tuning).
     #   2. broker margin safety (max_lot_size, max_open_positions).
     #   3. anti-hallucination gate (sentiment uncertainty > 0.7 в executor).
+    # 2026-06-05: пересчитаны под базу $2000 с сохранением прежней
+    # пропорции риска ($150/$300 на $500 = 30%/60% депозита). На $2000:
+    # 30% = $600 daily, 60% = $1200 total. Это catastrophic stop-experiment
+    # по СОБСТВЕННОМУ P&L бота (store.get_today_pnl/get_total_pnl,
+    # label-изоляция), второй бот сюда не входит.
     max_daily_loss_usd: float = Field(
-        default=150.0, validation_alias="AI_FX_TRADER_MAX_DAILY_LOSS"
+        default=600.0, validation_alias="AI_FX_TRADER_MAX_DAILY_LOSS"
     )
     max_total_loss_usd: float = Field(
-        default=300.0, validation_alias="AI_FX_TRADER_MAX_TOTAL_LOSS"
+        default=1200.0, validation_alias="AI_FX_TRADER_MAX_TOTAL_LOSS"
     )
     # Общий cap на количество одновременно открытых позиций (broker
     # margin sanity). LLM может разместить максимум 3 позиции в любой

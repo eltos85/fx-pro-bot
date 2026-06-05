@@ -1,5 +1,66 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-06-05
+
+### feat(prompt): блок STRATEGY GOAL (success/failure compass) + база $2000, общий счёт
+
+`<pending>`
+
+**Контекст:** разбор ролика Lewis Jackson «How To Build A Self-Improving
+AI Trading Agent» (YouTube `6njREUQAFdg`). Ролик в основном маркетинг
+(инструмент Hermes, Railway, Bittensor subnet, one-shot install) и не
+даёт нам ничего технически нового: наш self-improvement loop (`lessons`
++ self-reflection + persistent thesis) уже зрелее показанного. Единственное
+полезное зерно — критерий «well-defined goal»: явное определение что есть
+success и что есть failure, как ориентир для агента.
+
+**Что добавлено (взято из ролика):**
+- `prompts.py` SYSTEM_PROMPT: новая read-only секция **STRATEGY GOAL —
+  what success and failure look like**, сразу после «YOUR TASK EACH CYCLE».
+  Это PRIOR/компас в стиле LESSONS (НЕ механический фильтр, ничего не
+  блокирует). Содержит: North Star (positive expectancy через качество, не
+  частоту), TOWARD/AWAY-the-goal сигналы (revenge trading, overtrading,
+  расширение стопа, повтор ошибки из lesson) для SELF-REFLECTION.
+
+**Что осознанно ОТВЕРГНУТО (конфликт с правилами проекта):**
+- авто-тюнинг порогов раз в неделю («Cornelius tunes learned-params») —
+  прямой curve-fitting, нарушает `no-data-fitting.mdc` + `sample-size.mdc`
+  (выборка <100 trades = шум);
+- оптимизация под целевой Sharpe на малой выборке — Bailey & López de
+  Prado «Deflated Sharpe Ratio» (2014). В блок встроены явные анти-оверфит
+  ограждения: цель — это НЕ числовой winrate/Sharpe-таргет; LLM не имеет
+  права сам менять пороги; единственные hard lines — катастрофические
+  стопы killswitch.
+
+**Изменение базы капитала + общий счёт (по запросу пользователя):**
+- `settings.py`: `virtual_capital_usd` 500 → **2000** (депозит увеличен).
+- Счёт теперь ДЕЛИТСЯ со вторым ботом (торгует валютами). Архитектурно
+  изоляция уже есть: killswitch (`get_today_pnl`/`get_total_pnl`),
+  self-reflection и performance считаются из собственной БД по своим
+  сделкам (label-изоляция + инструменты gold/oil/gas не пересекаются с
+  FX-парами). Второй бот НЕ триггерит наш killswitch и не загрязняет
+  self-reflection. Общие у ботов только баланс счёта и маржа.
+- В блок STRATEGY GOAL добавлена секция **SHARED ACCOUNT**: баланс счёта
+  движется от обоих ботов → НЕ scoreboard этого агента; свой edge судить
+  ТОЛЬКО по своим closed trades; маржа общая → sizing консервативный.
+
+**Killswitch пересчитан под $2000:** `max_daily_loss_usd` 150 → **600**,
+`max_total_loss_usd` 300 → **1200** — сохранена прежняя пропорция риска
+(30% daily / 60% total депозита, как было на $500). Считается по
+СОБСТВЕННОМУ P&L бота (label-изоляция), второй бот не входит.
+
+**Не менялось:** `max_lot_size=0.50` clamp — на большей базе будет чаще
+ограничивать R-multiple sizing LLM (наблюдаем, при необходимости поднимем
+отдельно по `strategy-guard.mdc`).
+
+**n эксперимента:** добавление read-only приора (как `lessons` 2026-06-02)
++ смена базы капитала — НЕ сброс n=0 (не изменение entry/exit-порогов).
+
+**Файлы:** `src/fx_ai_trader/llm/prompts.py`,
+`src/fx_ai_trader/config/settings.py`
+
+**Тесты:** `pytest -k fx_ai_trader` → 351 passed.
+
 ## 2026-06-03
 
 ### fix(ng-weather): сезонный гард знака погоды для NG (анти-инверсия)
