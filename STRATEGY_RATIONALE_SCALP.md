@@ -1,0 +1,348 @@
+# Обоснования значений и формул — scalp_bot
+
+Назначение: для каждой стратегии отдельно зафиксировать, **откуда взято каждое
+значение и формула**. Где обоснований несколько — указаны ВСЕ. Цель файла —
+последующий анализ противоречий, поэтому честно помечены:
+
+- `[research]` — каноническая литература / статья (источник правды по канону).
+- `[наш A/B]` — наши бэктесты/контрфактуалы на наших данных (артефакты в `data/`).
+- `[forward-test]` — НЕ валидированный эдж, проверяется на живой торговле.
+- `[ограничение]` — известная слабость/оговорка обоснования.
+- `[прагматика]` — инженерное/безопасностное значение (не торговый эдж).
+
+Источник кода: `src/scalp_bot/config/settings.py`, `analysis/signals.py`,
+`analysis/strategies.py`, `data/htf.py`. Журнал — `BUILDLOG_SCALP.md`.
+
+---
+
+## ОБЩЕЕ (общий слой: применяется к нескольким стратегиям)
+
+Эти значения живут в общем движке (вход/риск/комиссии/сайзинг/HTF). В колонке
+«применяется» — к каким стратегиям относится.
+
+### Отбор вселенной (`data/universe.py`) — все стратегии
+
+- `auto_universe_enabled = True` — бот сам выбирает монеты из `get_tickers`.
+  - [research] «качество, не количество», свежий отбор «что в игре сейчас».
+- `universe_top_n = 15` — кап на число WS-подписок, НЕ ранжир-отбор.
+  - [прагматика] safety-кап (≤0 = без лимита); запрос пользователя 2026-05-31.
+- `universe_refresh_sec = 300` (5 мин).
+  - [research] метрики 24h двигаются медленно; ниже 5 мин на 24h-данных новой
+    информации нет. [ограничение] для intraday нужен RVOL (есть отдельно).
+- `universe_min_turnover_usd = 100_000_000` (было 150M).
+  - [наш A/B] рынок просел ~2×, floor 150M выкидывал рабочие NEAR/ZEC; turnover —
+    грубый прокси, реальный страж ликвидности = spread cap. Возврат floor смысла
+    на сдвинувшемся рынке (не подгонка под P&L).
+- `universe_min_range_pct = 6.0` — нужна волатильность для скальпа.
+  - [research] Volity «>5% ATR = hot».
+- `universe_max_range_pct = 20.0` (было 30).
+  - [research] «>20%/день = манипуляция, избегать» (stoic.ai 2026; Volity).
+- `universe_max_spread_bps = 5.0` — страж ликвидности.
+  - [research] спред — реальный кост скальпа (тоньше turnover).
+- `universe_min_rvol = 1.0` — гейт «не тише обычного для себя» + ранжир по RVOL.
+  - [research] RVOL≥2 сильно в игре, ≥1.5 умеренно, <1 затихла (TradingSim/
+    Warrior/anomiq 2026). 1.0 = мягкий self-нормированный floor (не подгонка).
+- `universe_pin_symbols = ""` (пусто, ALLO убран v0.12.0).
+  - [research] «избегать pump/dump» — ALLO (range 42%, дамп −32%) нарушал канон.
+
+### Капитал / killswitch — все стратегии
+
+- `risk_per_trade_usd = 10.0` (было $1, v0.18.5).
+  - [запрос пользователя] «более рискованные позиции». [прагматика] при R≈0.3–
+    0.44% notional≈$2.3–3.3k; killswitch $500 = ~50 SL запас.
+- `risk_based_sizing = True` — `qty = risk_per_trade_usd ÷ |entry−SL|`.
+  - [research] «стоп с графика, размер — следствие» (TradeOlogy/DYOR/StockCharts
+    2026). Широкий стоп → меньше лот, НЕ больше $-риск.
+- `min_position_usd = 10` — пол notional.
+  - [research/прагматика] мельче — комиссия/спред съедают цель скальпа.
+- `max_daily_loss_usd = 500`, `max_total_loss_usd = 800` (буфер до $1000 депо),
+  `max_open_positions = 2`.
+  - [прагматика] killswitch demo.
+- `max_trades_per_hour = 5` (было 20, v0.10.0).
+  - [наш A/B] 402 сделки/24ч: ~17/ч при gross edge ≈0 (+0.031R). [research]
+    жизнеспособная частота 3–12/день, 8–12 уже net PF<1 (StratBase 2026);
+    «overtrading — главная причина слива» (fxroboteasy/Echo Zero 2026).
+
+### Исполнение — все стратегии
+
+- `entry_order_type = post_only_limit` (maker).
+  - [наш A/B] market давал drag ~0.35R/сделку (402 сделки), обнулял edge.
+  - [research] taker съедает 30–67% gross; «maker — главный рычаг профитности»
+    (OneKey/StratBase/Echo Zero 2026). [ограничение] цена — непролив лимитки
+    на волатильном reclaim = пропуск сделки.
+- `avoid_funding_window_sec = 120` — не открываемся в окне перед списанием.
+  - [research] Bybit funding 00/08/16 UTC; для 90-сек скальпа почти не задевает,
+    окно убирает funding-cost совсем.
+- `entry_fill_timeout_sec = 8` — [прагматика] таймаут непролитой maker-лимитки.
+
+### Комиссии / fee-guard — все стратегии (вход через `build_signal`)
+
+- `round_trip_fee_frac = 0.00075` (0.075%): maker-вход 0.02% + taker-выход 0.055%.
+  - [факт] тариф Bybit linear (v0.10.0 возврат на maker-вход).
+- `min_target_fee_mult = 3.0` — сигнал отброшен, если ход до TP < 3× round-trip.
+  - [research] net edge ≥1.5× кост (fxroboteasy 2026); reward-gate 3× строже,
+    т.к. pre-trade WR неизвестен. [ограничение] это reward-прокси, не realized-edge.
+- `min_risk_fee_mult = 4.0` — мин-R пол: `R ≥ 4 × round_trip_fee` → fee ≤ 0.25R.
+  - [research] издержки съедают 50–80% профита при тугом стопе (Echo Zero 2026);
+    стоп = «структура + ATR-буфер» 0.8–1.5× ATR (cryptotrading-guide/VT Markets/
+    Wilder «2 ATR»); цель 0.5–2% (stoic.ai). [наш A/B] 31 flow_scratch: при
+    R≈0.13% комиссия 0.4–0.8R, съедала асимметрию.
+  - [ВАЖНО для противоречий] этот пол задаёт ширину SL по СТОИМОСТИ КОМИССИИ, а
+    НЕ по шуму рынка → именно его «дораскрывает» `sweep_fade_sl_risk_mult` (ниже).
+
+### Формулы входа (CAP-протокол, sweep-and-reclaim) — sweep_fade
+
+- Формула `detect_sweep`: поздняя половина окна пробила экстремум ранней.
+  - [research] CAP Rule (свип ликвидности за уровень).
+- Формула `cvd_divergence`: цена LL, но CVD HL (поглощение); строгое неравенство.
+  - [research] chartwhisperer CAP / Kalena CVD (absorption). [наш фикс] строгое
+    >/< — на тонком окне равенство давало ложную дивергенцию.
+- Формула `reclaimed(frac)`: цена вернулась ≥ frac пути от свип-экстремума к уровню.
+  - [research] CAP Rule 2 (reclaim / CHoCH).
+- Формула `reversal_momentum(window)`: ΔCVD за window в сторону сделки.
+  - [research] CAP Rule 5 / tape-shift.
+- `reclaim_frac = 0.5` — доля возврата.
+  - [research] середина пути как баланс «подтверждён разворот / не упустить вход».
+    [ограничение] конкретно 0.5 — не из отдельного A/B, инженерный центр.
+- `cvd_window_sec = 180`, `sweep_lookback_sec = 300`, `momentum_window_sec = 30`.
+  - [research] окна микроструктуры; 30с разворот = «1–3 свечи после свипа».
+    [ограничение] точные секунды — не из per-параметр A/B.
+- `div_min_late_trades = 4` — анти «пустота» (дивергенция на 2-3 тиках = шум).
+  - [research/прагматика] в активном рынке late-половина = сотни тиков.
+- `ob_imbalance_min = 0.58`, `ob_levels = 25` — стакан-подтверждение стороны.
+  - [research] top-N imbalance. [ограничение] 0.58/25 — инженерные, не из A/B.
+- `require_ob_imbalance = True` (score≥5, реверс v0.7.0).
+  - [наш A/B] 402 сделки: score=5 gross +0.11R, score=4 (73% объёма) gross 0.00R
+    (слив на комиссии). [research] «строгий quantifiable edge-фильтр».
+    [forward-test] sample n=104/1 день, валидировать 2 недели.
+- `arm_timeout_sec = 60` (было 120, v0.14.0).
+  - [research] order-flow shot-clock ~30с; 60с = 2× канона под наш fade-темп.
+    120с поднимались ТОЛЬКО под bar-close (убран).
+- `confirm_bar_sec = 0` — вход по ленте, без ожидания закрытия бара (v0.14.0).
+  - [research] «waiting for a candle close can price you out of the move»
+    (Kalena 2026/TradeAlgo). [наш кейс] BNB 2026-06-02: reclaim добивал через
+    ~1мин после истечения взвода в 70% случаев.
+- `signal_cooldown_sec = 60` — анти-шум между входами по символу. [прагматика].
+- `sl_cooldown_sec = 300` — пауза после SL перед повтором В ТУ ЖЕ сторону.
+  - [наш A/B] 15д n=6325 (`data/scalp_sl_cooldown.txt`): re-entry той же стороной
+    сразу после SL убыточен; свип 0/60/180/300/600с — gross монотонно растёт,
+    300с = колено (плато −0.121, не режет объём как 600с). [research]
+    «не перефейдить провалившийся уровень» (Connors/Raschke 1995).
+
+### HTF-фильтр (направление) — sweep_fade, density_bounce (НЕ density_break)
+
+- `require_htf_trend = True`; формула `aligned`: фейд только по тренду EMA200.
+  - [research] Murphy 1999 (EMA200 primary trend); Asness 2013 (MR в согласии с
+    трендом). [наш A/B] без фильтра WR 29–40% (фейд «в вакууме»).
+- Формула `compute_ema`: стандартная EMA, `k = 2/(len+1)`, нужно ≥len свечей.
+  - [research] каноническая EMA.
+- `htf_ema_len = 200`.
+  - [research] EMA200 — primary trend (Murphy 1999).
+- `htf_interval = "15"` (15m, было 1H, v0.16.0).
+  - [research] скальп ставит bias на 15m (DYOR/VWAP-guide/ChartScout 2026);
+    соотношение ТФ 1:4–1:6 (вход ~1м → контекст 5–15м; 1H в ~60× медленный).
+  - [наш A/B] 15д n=6220 (`data/scalp_htf_ab.txt`): 15m gross +0.122R vs +0.087R
+    у 1H (~+40%), 4/6 монет лучше.
+- `htf_refresh_sec = 120` — [прагматика] 15m-бар = 900с, refresh 120с подхватывает.
+- `aligned` fail-open (нет данных → не блокируем); `has_data` fail-closed для MR.
+  - [research] QuantConnect «refuse to trade until indicator ready» (v0.18.2) —
+    но keep-last при транзиентном REST-сбое (не снимать фильтр на мигании).
+
+### ADX режим-гейт (сила тренда) — sweep_fade, density_bounce (НЕ density_break)
+
+- `htf_adx_gate = True`; формула `is_strong_trend`: ADX ≥ adx_max → фейд запрещён.
+  - [research] «never fade a one-timeframe trending market» (Connors/Raschke 1995;
+    Dalton). ADDITIVE поверх EMA (соло-ADX в прошлом A/B проигрывал).
+- Формула `compute_adx`: Wilder ADX(len), сглаживание DX, прогрев ~2×len.
+  - [research] Wilder 1978 «New Concepts in Technical Trading» (формула).
+- `htf_adx_len = 14`.
+  - [research] Wilder canonical ADX(14).
+- `htf_adx_max = 25.0`.
+  - [research] Wilder: <20 диапазон, ≥25 established trend. [наш A/B] 15д
+    n=6220→3104 (`data/scalp_adx_gate.txt`): ema+adx@25 gross +0.140R vs +0.122R
+    (+15%); пороги 30/35 выгоды не дают.
+
+### DMI-гейт направления (асимметричный, только лонги) — sweep_fade, density_bounce
+
+- `htf_di_long_gate = True`; формула `di_blocks_long`: −DI≥+DI → лонг-фейд запрещён.
+  - [наш A/B — источник правды по эджу] 3 окна (`data/scalp_di_long_gate.txt`):
+    лонги avgR −0.092/−0.100/−0.098 (EMA) → +0.004/+0.023/−0.006 (DMI), шорты не
+    тронуты. Диагноз live: лонги 20% WR vs шорты 54%.
+  - [research — формула] Wilder DMI +DI/−DI (1978), цитируется ТОЛЬКО как расчёт.
+  - [research — механизм асимметрии] Kalena 2026: на альт-перпах liquidation
+    cascades на лонг-стороне механически жёстче → контртренд-лонги опаснее.
+  - [research — почему динамика, не whitelist] side-bias монет time-varying (ZEC
+    июнь-лонг→май-шорт); MDPI 2025 «selected periods risks overfitting».
+  - [ограничение] A/B на 2 окнах ОДНОГО макрорежима (даунтренд альтов); в
+    аптренде перепроверить (лонги могут стать хорошими).
+- Формула `compute_di_dir`: тот же Wilder-расчёт, возвращает сторону (+DI vs −DI).
+  - [research] Wilder 1978; современный крипто-стек использует ту же формулу
+    (IBKR Campus; arxiv 2511.00665 2025).
+
+### Базовый SL/TP и выходы — где общее, помечено
+
+- Формула SL: `sl = swept ∓ sl_buffer_bps`, затем мин-R пол, затем ×sl_mult.
+  - [research] «стоп за свингом/свипом + буфер» (структурная инвалидация).
+- `sl_buffer_bps = 8.0` (0.08%).
+  - [research] буфер за уровень. [ограничение] конкретно 8 б.п. — инженерное,
+    маскируется мин-R полом (см. min_risk_fee_mult).
+- Формула TP: `tp = entry ± tp_r × R`; fee-guard на ход до TP.
+- `take_profit_r = 3.5` (глобальный; sweep_fade + density_bounce).
+  - [research] асимметричный payoff «дай победителю бежать» (Философия B);
+    свип-разворот 2:1–4:1 (CrossTrade), T1≈2-3R (chartwhisperer). Было 2.0→3.5.
+- `time_stop` — УДАЛЁН (v0.9.5).
+  - [наш A/B] 86% потерь шло от тайм-стопа (v0.6.0); противоречил «winners run»
+    (подрезал медленных грайндеров до 3.5R). [одобрено пользователем].
+- `flatten_on_start = False` (v0.18.0).
+  - [наш кейс] #926 BNB: рестарт срезал шорт +$1.05, записал pnl=0. Биржевые
+    SL/TP защищают позицию, manage() подхватывает из БД.
+
+---
+
+## sweep_fade (свип ликвидности + поглощение, mean-reversion fade)
+
+Класс-флаги: `htf_filtered = True`, `regime_gated = True` (под EMA+ADX+DMI).
+Формулы входа, CAP-параметры, HTF/ADX/DMI, базовые SL/TP — см. секцию ОБЩЕЕ.
+Ниже — ТОЛЬКО специфичное для sweep_fade.
+
+### Множитель ширины SL
+
+- `sweep_fade_sl_risk_mult = None` (в проде env = **1.0**, ОТКАЧЕН v0.18.7;
+  ×1.5 был v0.18.6, прерван тренд-днём, n=10 шум).
+  - [forward-test — НЕ валидированный эдж; форвард повторить на нормальном режиме].
+  - [research] MAE/Sweeney «Maximum Adverse Excursion» (Wiley 1996): стоп по
+    реальному ходу против входа, а не по интуиции/комиссии. MR + стоп: тугой
+    (1 ATR) убивает edge, шире сохраняет (aligrithm 3.27 2026); TradeMedic 500k
+    счетов — выбивания шумом главный слив, расширение поднимает WR (hoc-trade).
+  - [наш A/B] 117 реальных стоп-вылетов бота (30.05–04.06, `/tmp/sf_rescue.py`):
+    при ×1.5 ~28% выбиваний были шумом и развернулись бы в плюс, ×2.0 ~35%.
+    Харнес by-side май/июнь (`/tmp/slmay.txt`,`/tmp/sljun.txt`): из минуса в плюс.
+  - [ограничение] данные пересекаются с тюнинг-окном фильтров → форвард на свежем;
+    эффект в netR/avgR, WR почти не двигается (выигрыш структурный).
+  - [ПРОТИВОРЕЧИЕ для анализа] прямо «дораскрывает» комиссионный мин-R пол
+    (`min_risk_fee_mult=4`), который задал текущую ширину по косту, а не по шуму.
+
+### Выходы (`should_exit`) — два триггера по флипу ленты
+
+- `active_exit_enabled = True`, `active_exit_min_age_sec = 10`.
+  - [research] «exit immediately when order flow flips» (Kalena/tradezella/
+    tradealgo); 10с — не дёргаться на шуме.
+- flow_exit (профит-лок): флип ленты И ход ≥ `flow_exit_activate_r × R`.
+- `flow_exit_activate_r = 1.5` (было 1.0; до того «≥ комиссии»).
+  - [наш A/B] 427 сделок: порог «≥комиссии» клипал центы (медиана $0.04) vs
+    добежавшие до TP $0.39. [наш A/B] sweep 15д (`data/scalp_sweep.txt`): порог
+    укрупняет винер (flow_exit avgR +1.05→+1.55→+2.02 при 1.0/1.5/2.0), avgR
+    выборки маргинально лучший на 1.5. [research] «let winners run» (Schwager/
+    Brooks). [ограничение] кривая avgR плоская — это направление, не пик; форвард.
+- flow_scratch (срез убытка): `scratch_on_flow_flip = False` (ВЫКЛЮЧЕН, v0.13.0).
+  - [наш A/B] контрфактуал + sweep 15д: чем меньше режем — тем выше WR/avgR
+    (sa 0.7→0.85→OFF: WR 36→41→43%); scratch при −0.7R убивал ~12% отскоков
+    (противоречит MR «дождаться отскока»). Полагаемся на биржевой SL.
+- `scratch_min_adverse_r = 0.7` (если включат scratch), `scratch_min_age_sec = 20`.
+  - [наш A/B] 60 сделок: старый hair-trigger «≥комиссии» давал scratch на 40%
+    входов, все в минус; 0.7R симметричен анти-клиппингу flow_exit (≥1R).
+    [research] shot-clock ~30с (берём 20с, флип ленты — уже сильный сигнал).
+
+---
+
+## density_bounce (отскок ОТ плотности в стакане, mean-reversion)
+
+Класс-флаги: `htf_filtered = True`, `regime_gated = True` (те же EMA+ADX+DMI,
+что sweep_fade). Базовые SL/TP (3.5R, мин-R пол, sl_buffer) и комиссии — ОБЩЕЕ.
+SL ставится сразу за стеной (`build_signal swept = цена_стены`).
+Множитель SL — ГЛОБАЛЬНЫЙ `sl_risk_mult = 1.0` (НЕ тронут v0.18.6).
+
+### Детект стены и круглого уровня
+
+- Формула `detect_wall`: крупнейший уровень с `size ≥ wall_mult × baseline`.
+  - [research] Kalena 2026 «relative sizing» (стена = кратное среднего).
+- Формула `_baseline_avg`: mean без единственного максимума.
+  - [research] Kalena (аномалию в базу не берём, иначе стена раздувает свой порог).
+- Формула `RollingBaseline`: скользящее среднее «типичного» уровня за окно.
+  - [research] Kalena «5–8× среднего за 10–15 мин» (знаменатель — не мгновенный).
+  - [наш A/B] аудит v0.9.0: мгновенный top-25 давал max-уровень 2–4× → стена 5×
+    недостижима (0/502 входов).
+- Формула `near_round`: цена в пределах `frac×price` от круглого (шаг 10^(порядок−1)).
+  - [research] Данилов: плотности на круглых уровнях держат надёжнее.
+- `density_wall_mult = 5.0` (было 8).
+  - [research] Kalena диапазон 5–8×; 5 = НИЖНИЙ край (не подгонка). [наш A/B] на
+    живых книгах Bybit 8× недостижим (0 сделок за историю).
+  - [ограничение] research меряет vs среднее за 10–15мин, мы — vs мгновенный
+    top-25 при warmup → ratio структурно занижен.
+- `density_round_frac = 0.003` (0.3%, было 0.1%).
+  - [наш A/B] 0.1% глушил все стены (near_round=False на всех живых книгах).
+    [ограничение] 0.3% — расширение под живые данные, не из отдельного research-числа.
+- `density_baseline_sec = 900` (15 мин), `density_baseline_min_samples = 30`.
+  - [research] верх research-окна Kalena 10–15мин; до прогрева — fallback мгновенный.
+
+### Анти-спуфинг / вход / выход
+
+- `density_persist_sec = 10` — стена должна продержаться до входа.
+  - [research] анти-спуфинг (мелькнувшая стена — спуфинг).
+- `density_absorb_frac = 0.30`, `density_absorb_window_sec = 10`.
+  - [research] Kalena: «30% за <10с → выход/не вход» (поглощение = снимут остаток).
+- `density_near_bps = 8.0` — вход, когда цена подошла ≤8 б.п. к стене.
+  - [прагматика/research] близость к стене для отскока. [ограничение] 8 б.п. —
+    инженерное, не из отдельного A/B.
+- `density_min_wall_usd = 0` — абсолютный пол выключен (только относительный).
+  - [research] Kalena — относительный порог приоритетен.
+- Выход `should_exit` = `density_gone`: стена-якорь (возле SL) исчезла → тезис снят.
+  - [research] Bookmap/Kalena (опора убрана → выходим).
+- [ОБЩЕЕ ОГРАНИЧЕНИЕ] density_bounce почти не входил исторически (стена 5× редка)
+  → выборка крайне мала, эджи не валидированы на нём отдельно.
+
+---
+
+## density_break (пробой НА СНОСЕ плотности, momentum/breakout)
+
+Класс-флаги: `htf_filtered = False`, `regime_gated = False` — **НЕ под MR-фильтрами**.
+Детект стены/baseline/круглого — ОБЩИЙ с density_bounce (см. выше). Комиссии/
+мин-R пол/сайзинг — ОБЩЕЕ. Множитель SL — ГЛОБАЛЬНЫЙ `sl_risk_mult = 1.0`
+(НЕ тронут v0.18.6; по решению пользователя density_break не трогаем).
+
+### Почему вне MR-фильтров (ключевое отличие)
+
+- `htf_filtered = False` — направленный EMA-фильтр НЕ применяется.
+  - [research] Quant Signals (175 backtests): трендовый фильтр на пробое убирает
+    ~½ сигналов, включая profitable counter-trend.
+- `regime_gated = False` — ADX-гейт НЕ применяется.
+  - [research] пробой ХОЧЕТ сильного тренда (ADX≥25); MR-гейт «не торговать в
+    тренд» здесь backwards (резал бы лучшие условия для momentum).
+  - [ПРОТИВОРЕЧИЕ для анализа] это прямо обратная трактовка ADX vs sweep_fade —
+    одно и то же значение (ADX≥25) для одной страты «стоп», для другой «можно».
+
+### Вход / логика
+
+- Формула входа: стена выстояла ≥persist, ИСЧЕЗЛА, цена ПРОБИЛА уровень по ходу.
+  - ask-стена пробита вверх → LONG; bid-стена пробита вниз → SHORT.
+  - [research] Данилов (YouTube 2026): снос выстоявшей плотности = «прострел»;
+    Bookmap «liquidity void»; Kalena removal/absorption; arXiv 2604.20949
+    (depth раньше flow).
+- Снос БЕЗ пробоя цены (спуфинг-пулл) — НЕ торгуем (v1).
+  - [research] нет подтверждения пересечением уровня.
+- SL: `build_signal swept = цена_стены` (ложный пробой = возврат за уровень = SL).
+- Использует те же `density_wall_mult=5`, `density_round_frac=0.003`,
+  `density_persist_sec=10`, `density_baseline_*` — см. density_bounce.
+
+### Take-profit (специфичный)
+
+- `density_break_take_profit_r = 2.5` (глобальный 3.5R НЕ применяется, v0.18.3).
+  - [forward-test — НЕ валидированный эдж].
+  - [наш A/B] контрфактуал MFE 25 сделок (1m-клины, `q_db_mfe`): пробои доходили
+    до 2–3.4R и разворачивались до 3.5R (#973 MFE 3.43R→SL, #977 2.82, #661 2.55);
+    при TP=2.5R gross +4.1→+11.0R, WR 28→44% на той выборке.
+  - [ограничение] n=25 — ШУМ (<100, sample-size.mdc) → это ГИПОТЕЗА, не правда.
+    2.5R (а не sample-оптимум 2.0R) намеренно мягче, чтобы не оверфитить и
+    сохранить часть «winners run». Пересмотр на ≥100 сделок.
+- [наш A/B, для протокола] контрфактуал SL-расширения (n=36, `/tmp/db_sl_cf.py`):
+  тот же вектор что у sweep_fade (WR 28→40% к ×2.0), но **не внедрено** (решение
+  пользователя — density_break не трогаем).
+
+### Выход
+
+- `should_exit = None` — дискреционного выхода НЕТ, только общие TP/SL.
+  - [research/no-data-fitting] flow-выход — отдельная итерация после валидации
+    базового эджа. Философия B (winners run, без дискреции).
+- [ПРОТИВОРЕЧИЕ для анализа] density_break использует биржевой TP=2.5R и hard SL,
+  но БЕЗ flow_exit/scratch (в отличие от sweep_fade) → выходная механика двух
+  страт принципиально разная (это by-design, см. философию выше).
