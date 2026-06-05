@@ -285,12 +285,18 @@ class ScalpSettings(BaseSettings):
     # v0.17.0: ADX режим-гейт ПОВЕРХ EMA (additive). EMA даёт направление, ADX —
     # СИЛУ тренда. Канон MR запрещает фейд в сильный тренд: «never fade a one-
     # timeframe trending market» (Connors/Raschke «Street Smarts» 1995; Dalton).
-    # ADX(14) Wilder 1978: <20 диапазон, ≥25 established trend. A/B 15д (n=6220→
-    # 3104, data/scalp_adx_gate.txt): ema+adx@25 gross +0.140R/сделку vs +0.122R у
-    # одного EMA (+15%), net −0.088 vs −0.100; пороги 30/35 выгоды не дают.
+    # ADX(14) Wilder 1978: <20 диапазон, ≥25 established trend, ≥30 strong trend.
+    # v0.18.9 (2026-06-05): порог 25→30 ПОСЛЕ перехода на SL ×2.0. ADX-корзинная
+    # A/B (filter=ema, без гейта) на 2 окнах при ×2.0 (data/scalp_adx_buckets_x2_
+    # jun.txt / _may.txt): корзина 25–30 прибыльна в ОБА окна (netR +18.3/+5.5),
+    # а ≥30 нестабильна (+13.0/−18.1). С широким стопом фейд в умеренном тренде
+    # (25–30) выживает → блокировать с 25 стало слишком строго; режем только ≥30
+    # (Connors/Raschke: «never fade a STRONG trend», ≥30 = strong). Связано с ×2.0:
+    # при ×1.0 25–30 была непостоянна (+7.6/−7.8). [ограничение] валидировано на
+    # sweep_fade; density_bounce делит гейт, но почти не торгует — мониторить.
     htf_adx_gate: bool = Field(default=True)
     htf_adx_len: int = Field(default=14)       # ADX(14) — Wilder canonical
-    htf_adx_max: float = Field(default=25.0)   # ≥25 = трендовый день → фейд стоп
+    htf_adx_max: float = Field(default=30.0)   # ≥30 = strong trend → фейд стоп
     # v0.18.4: АСИММЕТРИЧНЫЙ DMI-гейт направления только для ЛОНГОВ. Диагноз: live
     # sweep_fade-лонги катастрофа (20% WR), шорты прибыльны (54%) — EMA200-кросс
     # плохо ловит направление на даунтрендовых альтах (whipsaw на 15m, лаг на 1H),

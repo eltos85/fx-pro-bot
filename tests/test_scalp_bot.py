@@ -1554,7 +1554,7 @@ def test_htf_adx_gate_defaults():
     s = ScalpSettings()
     assert s.htf_adx_gate is True
     assert s.htf_adx_len == 14
-    assert s.htf_adx_max == 25.0
+    assert s.htf_adx_max == 30.0
 
 
 def test_compute_di_dir_uptrend_long():

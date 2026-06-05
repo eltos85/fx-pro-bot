@@ -397,7 +397,9 @@ services:
       # A/B 15д (data/scalp_adx_gate.txt): ema+adx@25 gross +0.140R vs +0.122R EMA.
       SCALP_HTF_ADX_GATE: ${SCALP_HTF_ADX_GATE:-true}
       SCALP_HTF_ADX_LEN: ${SCALP_HTF_ADX_LEN:-14}
-      SCALP_HTF_ADX_MAX: ${SCALP_HTF_ADX_MAX:-25}
+      # v0.18.9: 25→30 (под SL ×2.0; корзина 25–30 прибыльна OOS в оба окна,
+      # ≥30 нестабильна → режем только strong trend). См. BUILDLOG v0.18.9.
+      SCALP_HTF_ADX_MAX: ${SCALP_HTF_ADX_MAX:-30}
       # v0.18.4: асимметричный DMI-гейт направления ТОЛЬКО для лонгов (Wilder DMI
       # +DI/−DI 1978). Диагноз: live лонги 20% WR vs шорты 54% — EMA лагает на
       # даунтренд-альтах. A/B 3 окна (data/scalp_di_long_gate.txt): лонги avgR

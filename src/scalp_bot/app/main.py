@@ -289,8 +289,9 @@ def run() -> None:
                 # timeframe trending market» (Connors/Raschke; Dalton). Additive
                 # поверх EMA. Fail-open: нет ADX → не блокируем. ТОЛЬКО для MR
                 # (sig.strategy in adx_strats): для momentum density_break гейт
-                # backwards — пробой ХОЧЕТ сильного тренда (v0.18.1). Backtest 15д:
-                # ema+adx@25 gross +0.140R vs +0.122R EMA (валидирован на sweep_fade).
+                # backwards — пробой ХОЧЕТ сильного тренда (v0.18.1). Порог ≥30
+                # (v0.18.9, под SL ×2.0): корзина 25–30 фейдится в плюс OOS, режем
+                # только strong ≥30 (Connors/Raschke). Валидирован на sweep_fade.
                 if (cfg.htf_adx_gate and sig.strategy in adx_strats
                         and htf.is_strong_trend(sig.symbol, cfg.htf_adx_max)):
                     play.info("🚂 [%s] %s — сильный тренд (ADX=%.0f≥%.0f, трендовый "
