@@ -222,12 +222,15 @@ services:
       AI_FX_TRADER_ORDER_LABEL: ${AI_FX_TRADER_ORDER_LABEL:-ai-fx-trader}
       AI_FX_TRADER_POLL_INTERVAL_SEC: ${AI_FX_TRADER_POLL_INTERVAL_SEC:-900}
       AI_FX_TRADER_REVIEW_INTERVAL_SEC: ${AI_FX_TRADER_REVIEW_INTERVAL_SEC:-300}
-      AI_FX_TRADER_VIRTUAL_CAPITAL: ${AI_FX_TRADER_VIRTUAL_CAPITAL:-500}
+      # 2026-06-05: база $2000 (депозит увеличен; счёт делится со вторым
+      # FX-ботом). См. BUILDLOG_AI_FX_TRADER.md.
+      AI_FX_TRADER_VIRTUAL_CAPITAL: ${AI_FX_TRADER_VIRTUAL_CAPITAL:-2000}
       # KillSwitch v1.0 (broker-safety only): R:R/risk/correlation сняты —
       # LLM решает сам как discretionary trader. Остались catastrophic
-      # loss caps + broker margin safety.
-      AI_FX_TRADER_MAX_DAILY_LOSS: ${AI_FX_TRADER_MAX_DAILY_LOSS:-150}
-      AI_FX_TRADER_MAX_TOTAL_LOSS: ${AI_FX_TRADER_MAX_TOTAL_LOSS:-300}
+      # loss caps + broker margin safety. 2026-06-05 пересчитаны под $2000
+      # с пропорцией 30%/60% депозита (было 150/300 на $500).
+      AI_FX_TRADER_MAX_DAILY_LOSS: ${AI_FX_TRADER_MAX_DAILY_LOSS:-600}
+      AI_FX_TRADER_MAX_TOTAL_LOSS: ${AI_FX_TRADER_MAX_TOTAL_LOSS:-1200}
       AI_FX_TRADER_MAX_POSITIONS: ${AI_FX_TRADER_MAX_POSITIONS:-3}
       AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL: ${AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL:-3}
       AI_FX_TRADER_MAX_LOT_SIZE: ${AI_FX_TRADER_MAX_LOT_SIZE:-0.50}

@@ -56,8 +56,20 @@ success и что есть failure, как ориентир для агента.
 **n эксперимента:** добавление read-only приора (как `lessons` 2026-06-02)
 + смена базы капитала — НЕ сброс n=0 (не изменение entry/exit-порогов).
 
+**Деплой-находка (важно):** код-дефолты в `settings.py` НЕ применяются на
+проде — `docker-compose.yml` всегда передаёт `${VAR:-fallback}`, а VPS
+`.env` переопределяет fallback. На момент правки live-значения были:
+капитал НЕ задан в `.env` → compose fallback `:-500` (т.е. бот реально
+работал на **$500**, не $2000!); daily=$300, total=$1000 (явный prior
+override в `.env`, не код-дефолты 150/300). Поэтому помимо кода обновлены
+**реальные источники**: `docker-compose.yml` fallback'и (500→2000,
+150→600, 300→1200) + VPS `.env` (capital=2000 добавлен, daily 300→600,
+total 1000→1200, бэкап `.env.bak.20260605`). Селективный rebuild
+`docker compose up -d --no-deps --build fx-ai-trader` — momentum-bot и
+scalp-bot НЕ тронуты. Подтверждено в логе: `daily=$600 total=$1200`.
+
 **Файлы:** `src/fx_ai_trader/llm/prompts.py`,
-`src/fx_ai_trader/config/settings.py`
+`src/fx_ai_trader/config/settings.py`, `docker-compose.yml`
 
 **Тесты:** `pytest -k fx_ai_trader` → 351 passed.
 
