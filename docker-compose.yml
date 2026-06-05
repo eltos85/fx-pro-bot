@@ -110,7 +110,21 @@ services:
     volumes:
       - ./data:/data
 
+  # ai_trader (DeepSeek-V4 + Bybit demo) — LLM-крипто-трейдер.
+  #
+  # 2026-06-05: ОТКЛЮЧЁН по решению пользователя («полностью неправильный,
+  # не нужен»). Контейнер остановлен и выведен из авто-деплоя через
+  # profiles: [disabled] — ни ручной `docker compose up -d`, ни GH Actions
+  # деплой его больше не поднимут. Открытая на момент остановки позиция
+  # ATOMUSDT Sell (id=15, opened 2026-06-05 12:32 UTC) оставлена закрыться
+  # биржевым SL/TP (Bybit demo, риска нет).
+  #
+  # Данные сохранены в volume fx-pro-bot_ai_trader_data (БД с историей
+  # decisions/positions/PnL — НЕ удалять). Чтобы вернуть: убрать profiles
+  # или `docker compose --profile disabled up -d ai-trader`.
   ai-trader:
+    profiles:
+      - disabled
     build:
       context: .
       dockerfile: Dockerfile.ai-trader

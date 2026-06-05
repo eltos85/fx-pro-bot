@@ -1,5 +1,29 @@
 # BUILDLOG — AI-Trader (DeepSeek-V4)
 
+## 2026-06-05 — ОТКЛЮЧЕНИЕ бота по решению пользователя
+
+`<pending>`
+
+Бот `ai_trader` (DeepSeek-V4 + Bybit demo) остановлен и выведен из
+авто-деплоя по решению пользователя («полностью неправильный, не нужен»).
+
+**Что сделано:**
+- `docker compose stop ai-trader` на VPS — контейнер остановлен.
+- В `docker-compose.yml` сервису `ai-trader` добавлен `profiles: [disabled]`
+  (как у `advisor`) — ни ручной `docker compose up -d`, ни GH Actions деплой
+  его больше не поднимут. Код и образ не удалены.
+- Открытая на момент остановки позиция `ATOMUSDT Sell` (id=15, opened
+  2026-06-05 12:32 UTC) оставлена закрыться биржевым SL/TP по решению
+  пользователя (Bybit demo, реального риска нет).
+- Том `fx-pro-bot_ai_trader_data` (БД decisions/positions/PnL) сохранён —
+  НЕ удалять. Случайно созданный пустой том `ai_trader_data` (ошибка имени
+  при аудите, без префикса проекта) удалён.
+
+**Возврат:** убрать `profiles` у сервиса `ai-trader` либо
+`docker compose --profile disabled up -d ai-trader`.
+
+**Файлы:** `docker-compose.yml`
+
 ## 2026-05-29 — v0.40.1: фикс арифметики MFP rule 5 (баг, не tuning)
 
 `хеш коммита`
