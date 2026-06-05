@@ -134,7 +134,15 @@ class SweepFadeStrategy:
         if price is None:
             return None
         favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
-        risk = abs(tr.entry - getattr(tr, "sl", tr.entry))
+        # R-единица порогов = base_risk (MFE-якорь), а НЕ ширина SL. При sl_mult>1
+        # стоп шире, но flow_exit/scratch срабатывают на тех же АБСОЛЮТНЫХ уровнях
+        # хода-в-плюс, что при ×1.0 (синхронизация — иначе лок уезжал на 1.5×R и
+        # пропускал ~16% winners). base_risk восстанавливаем из TP: tp = tpr×base_risk
+        # → base_risk = tp_dist/tpr. Fallback на |entry−sl|, если tp пуст/битый.
+        tpr = getattr(cfg, "take_profit_r", 0.0)
+        tp_dist = abs(getattr(tr, "tp", tr.entry) - tr.entry)
+        risk = (tp_dist / tpr) if (tpr > 0 and tp_dist > 0) \
+            else abs(tr.entry - getattr(tr, "sl", tr.entry))
         flipped = flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
         if not flipped:
             return None  # лента ещё за нас — держим
@@ -541,9 +549,13 @@ class DensityBreakStrategy:
                           level, last)
                 continue
             reasons = ["wall_break", "persist", "round"]
-            # v0.18.3: пер-стратегийный TP (2.5R forward-test) — недобор на 3.5R
+            # v0.18.3: пер-стратегийный TP (2.5R forward-test) — недобор на 3.5R.
+            # sl_mult=1.0 ЯВНО: стоп density_break СТРУКТУРНЫЙ (за пробитой стеной =
+            # инвалидация ложного пробоя, Данилов/Bookmap/Brooks). MAE-расширение
+            # (как у sweep_fade) ломает её канон — держали бы провалившиеся пробои.
+            # Явный 1.0 иммунизирует от глобального SCALP_SL_RISK_MULT≠1.0.
             sig = build_signal(snap, side, level, cfg, len(reasons), reasons,
-                               tp_r=cfg.density_break_take_profit_r)
+                               tp_r=cfg.density_break_take_profit_r, sl_mult=1.0)
             if sig is None:
                 play.info("⛔ [%s] пробой %s стены %.6f, но fee-guard — ход мал, "
                           "комиссия не покрыта", sym, _SIDE_RU.get(side, side), level)

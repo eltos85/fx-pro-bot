@@ -223,17 +223,26 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
     min_risk = getattr(cfg, "min_risk_fee_mult", 0.0) * cfg.round_trip_fee_frac * entry
     if min_risk > 0 and risk < min_risk:
         risk = min_risk
-    # Research-множитель ширины SL (default 1.0 = no-op; A/B гипотезы шире-стоп).
-    # sl_mult — пер-стратегийный override (sweep_fade); None → глобальный
-    # sl_risk_mult (он же используется харнесом через --sl-mult).
+    # base_risk — R-ЕДИНИЦА (структура + мин-R пол). От неё считаем TP, fee-guard
+    # и (в should_exit sweep_fade) пороги flow_exit/scratch — «всё про цель/выход».
+    # Канон MFE (Sweeney 1988 «Maximum Favorable Excursion»; NexusFi/traders-
+    # secondbrain MFE-distribution): цель и профит-лок меряются ходом В ПЛЮС,
+    # который от ширины стопа не зависит. Анализ 734 sweep_fade-сделок (30.05–05.06):
+    # медиана winner-MFE 2.33R, уровень 1.5R ловит 68% winners — «плечо».
+    base_risk = risk
+    # Множитель РАСШИРЯЕТ ТОЛЬКО SL (буфер от шума, канон MAE/Sweeney 1988). TP и
+    # пороги выхода остаются на base_risk → синхронны с ×1.0 (иначе цель уезжала бы
+    # вместе со стопом — это была подгонка v0.18.x). sl_mult — пер-стратегийный
+    # override (sweep_fade ×1.5); None → глобальный sl_risk_mult (харнес --sl-mult).
+    # density_break ПЕРЕДАЁТ 1.0 явно: его стоп СТРУКТУРНЫЙ (за пробитой стеной =
+    # инвалидация тезиса), MAE-расширение ломает её канон «ложный пробой режет SL».
     mult = getattr(cfg, "sl_risk_mult", 1.0) if sl_mult is None else sl_mult
-    if mult and mult > 0:
-        risk *= mult
-    sl = entry - risk if side == "long" else entry + risk
+    sl_risk = base_risk * mult if (mult and mult > 0) else base_risk
+    sl = entry - sl_risk if side == "long" else entry + sl_risk
     tpr = cfg.take_profit_r if tp_r is None else tp_r
-    tp = entry + tpr * risk if side == "long" else entry - tpr * risk
-    # Fee-guard: ход до TP ≥ min_target_fee_mult × round-trip издержек.
-    tp_move_frac = (tpr * risk) / entry
+    tp = entry + tpr * base_risk if side == "long" else entry - tpr * base_risk
+    # Fee-guard: ход до TP ≥ min_target_fee_mult × round-trip издержек (на base_risk).
+    tp_move_frac = (tpr * base_risk) / entry
     if tp_move_frac < cfg.min_target_fee_mult * cfg.round_trip_fee_frac:
         return None
     return Signal(

@@ -1443,6 +1443,46 @@ def test_build_signal_tp_r_override():
     assert s35.tp_level == pytest.approx(103.5)  # дефолт = cfg.take_profit_r=3.5
 
 
+def test_build_signal_sl_mult_widens_only_sl_not_tp():
+    """Канон decoupling (v0.18.8): sl_mult РАСШИРЯЕТ ТОЛЬКО SL (MAE/Sweeney),
+    а TP остаётся на base_risk (MFE-якорь) — синхронен с ×1.0. Иначе цель
+    уезжала бы вместе со стопом (старая подгонка)."""
+    from scalp_bot.analysis.signals import build_signal
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = ScalpSettings().model_copy(update={
+        "min_risk_fee_mult": 0.0, "min_target_fee_mult": 0.0,
+        "sl_buffer_bps": 0.0, "take_profit_r": 3.5})
+    snap = SimpleNamespace(symbol="X", best_bid=100.0, best_ask=100.0,
+                           last_price=100.0)
+    # base_risk = entry-swept = 100-99 = 1.0
+    base = build_signal(snap, "long", 99.0, cfg, 3, ["r"])  # sl_mult=None → 1.0
+    wide = build_signal(snap, "long", 99.0, cfg, 3, ["r"], sl_mult=1.5)
+    assert base is not None and wide is not None
+    # SL расширился ×1.5: 100-1.5 = 98.5 (vs 99.0 при ×1.0)
+    assert base.sl_level == pytest.approx(99.0)
+    assert wide.sl_level == pytest.approx(98.5)
+    # TP НЕ изменился (на base_risk): обе = 100 + 3.5×1.0 = 103.5
+    assert base.tp_level == pytest.approx(103.5)
+    assert wide.tp_level == pytest.approx(103.5)
+
+
+def test_build_signal_density_break_sl_mult_one_is_noop():
+    """density_break (sl_mult=1.0 явно) не задевается глобальным sl_risk_mult:
+    структурный стоп неизменен даже при глобальном ×1.5."""
+    from scalp_bot.analysis.signals import build_signal
+    from scalp_bot.config.settings import ScalpSettings
+    g = ScalpSettings().model_copy(update={
+        "min_risk_fee_mult": 0.0, "min_target_fee_mult": 0.0,
+        "sl_buffer_bps": 0.0, "sl_risk_mult": 1.5})  # глобально ×1.5
+    snap = SimpleNamespace(symbol="X", best_bid=100.0, best_ask=100.0,
+                           last_price=100.0)
+    # density_break передаёт sl_mult=1.0 явно → иммунен к глобальному 1.5
+    dbreak = build_signal(snap, "long", 99.0, g, 3, ["r"], tp_r=2.5, sl_mult=1.0)
+    assert dbreak is not None
+    assert dbreak.sl_level == pytest.approx(99.0)   # SL структурный, не расширен
+    assert dbreak.tp_level == pytest.approx(102.5)  # 100 + 2.5×1.0
+
+
 def test_htf_has_data_false_on_thin_history():
     """Тонкая история (< ema_len свечей) → EMA=None → has_data остаётся False:
     fail-closed не пускает фейд на новом листинге без полной истории."""

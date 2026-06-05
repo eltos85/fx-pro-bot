@@ -6,6 +6,50 @@
 
 ## 2026-06-05
 
+### v0.18.8 — sweep_fade SL ×2.0 decoupled (C-01 закрыт: MAE-стоп + MFE-цель)
+`<hash>`
+
+**Запрос пользователя**: пересмотреть sweep_fade под ×1.5 «как при 1.0, чтобы
+остальные расчёты были синхронизированы» (не подгонка); затем — обосновать
+канонически роль flow_exit и влияние на density_break; затем — выбрать 1.5 vs 2.0.
+
+**Что сделано (decoupling — закрывает C-01)**: разведены ДВЕ независимые привязки.
+- **SL** = MAE/Sweeney (буфер от шума): `sl_risk = base_risk × sl_mult`.
+- **TP + flow_exit** = MFE (ход в плюс, от ширины стопа не зависит): считаются от
+  `base_risk` (структура + комиссионный пол). Раньше TP/flow_exit масштабировались
+  вместе с раздутым стопом (рассинхрон: лок уезжал на 1.5×mult, пропуск ~16%
+  винеров) — это и был открытый под-вопрос C-01.
+
+**Выбор ширины ×2.0 — НЕ «где netR выше» (это был бы curve-fit), а ДВА сошедшихся
+метода:**
+1. **MFE 734 сделок** (`data/scalp_sf_mfe_out.txt`): winner-MFE медиана 2.33R,
+   1.5R ловит 68% → flow_exit-уровень 1.5R валиден (60–70% хода, «плечо»).
+2. **MAE-винеров по Sweeney** (n=412, много режимов, `data/scalp_sf_mae_out.txt`):
+   p85=1.87R, p90=2.39R → канон-ширина ≈2.0 (×1.5 сохраняет лишь 78% винеров —
+   ниже полосы 85–90%; ×2.0 = p85, 85%; ×2.5=p92 щедро).
+3. **decoupled harness июнь 1–4** (`data/scalp_sl_decouple_ab.txt`, прод-фильтр
+   ema+adx): netR ×1.0 −73R → ×1.5 −7R → ×2.0 +15R. Сходится с MAE-перцентилем →
+   overfit снят (A/B мог быть на одно окно, MAE-перцентиль режимо-независим).
+
+**density_break НЕ ЗАДЕТ (по канону, не только по решению)**: его стоп
+**СТРУКТУРНЫЙ** (за пробитой стеной = инвалидация ложного пробоя; Данилов/Bookmap
+liquidity-void/Brooks failed-breakout), а НЕ шумовой. MAE-расширение к нему НЕ
+применимо (держали бы провалившиеся пробои, ломает канон). В коде `sl_mult=1.0`
+ПРИБИТ ЯВНО → иммунен к глобальному `SCALP_SL_RISK_MULT`. C-03 усилён каноном:
+разные природы стопа делают разные выходные механики правильными.
+
+**Изоляция доказана**: при глобальном mult=1.0 decoupling — алгебраический no-op
+(`base_risk==sl_risk==risk`); density_break/bounce не затронуты. Регресс-тесты:
+`test_build_signal_sl_mult_widens_only_sl_not_tp`,
+`test_build_signal_density_break_sl_mult_one_is_noop`.
+
+**Файлы**: `src/scalp_bot/analysis/signals.py` (`build_signal`: `base_risk` vs
+`sl_risk`, TP/fee-guard на base_risk), `src/scalp_bot/analysis/strategies.py`
+(`SweepFadeStrategy.should_exit` порог на base_risk; density_break `sl_mult=1.0`),
+`docker-compose.yml` (`SCALP_SWEEP_FADE_SL_RISK_MULT:-2.0`), `tests/test_scalp_bot.py`
+(+2 теста), `STRATEGY_RATIONALE_SCALP.md`/`STRATEGY_CONTRADICTIONS_SCALP.md`
+(C-01 → 🟢 решено), `scripts/scalp_sf_mfe.py`/`scalp_sf_mae.py`, `data/scalp_sf_*`.
+
 ### v0.18.7 — откат sweep_fade SL ×1.5 → 1.0 (тренд-день, шумная выборка)
 `<hash>`
 

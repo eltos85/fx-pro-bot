@@ -360,12 +360,20 @@ services:
       # на 3.5R по MFE n=25). Откат: SCALP_DENSITY_BREAK_TAKE_PROFIT_R=3.5.
       SCALP_DENSITY_BREAK_TAKE_PROFIT_R: ${SCALP_DENSITY_BREAK_TAKE_PROFIT_R:-2.5}
       # v0.18.6: пер-стратегийный множитель ширины SL ТОЛЬКО для sweep_fade.
-      # v0.18.7 (2026-06-05): ОТКАЧЕН на 1.0 по решению пользователя — деплой
-      # пришёлся на сильный тренд-день (ADX 29–42), sweep_fade-фейды массово
-      # блокировались HTF/ADX-гейтами, выборка n=10 (шум, <100). Чистая база до
-      # повторной валидации на нормальном режиме. Включить форвард-тест снова:
-      # SCALP_SWEEP_FADE_SL_RISK_MULT=1.5 (анализ см. BUILDLOG v0.18.6, C-01).
-      SCALP_SWEEP_FADE_SL_RISK_MULT: ${SCALP_SWEEP_FADE_SL_RISK_MULT:-1.0}
+      # v0.18.7: откат на 1.0 (тренд-день, n=10 шум) + открытый вопрос C-01:
+      #   при ×1.5 порог flow_exit уезжал на 1.5×раздутый_риск (рассинхрон).
+      # v0.18.8 (2026-06-05): ВКЛ ×2.0 — decoupled (C-01 закрыт): SL расширяется
+      #   по MAE/Sweeney, а TP и flow_exit стоят на base_risk (MFE, 734 сделки:
+      #   winner-MFE медиана 2.33R). Ширина выбрана НЕ по «где netR выше» (это был бы
+      #   curve-fit под одно окно), а двумя сошедшимися методами:
+      #   1) MAE/Sweeney перцентиль (412 винеров, много режимов, data/scalp_sf_mae_out
+      #      .txt): p85=1.87R, p90=2.39R → канон-ширина ≈2.0 (×1.5 сохраняет лишь 78%
+      #      винеров, ниже полосы 85–90%; ×2.0 = p85, сохраняет 85%).
+      #   2) A/B июнь 1–4 decoupled (data/scalp_sl_decouple_ab.txt): netR ×1.0 −73R →
+      #      ×1.5 −7R → ×2.0 +15R. Сходимость двух методов снимает overfit.
+      #   ×2.5=p92 (щедро, часть монет проседает). Откат: =1.0. density_break НЕ задет
+      #   (sl_mult=1.0 прибит в коде — стоп структурный, ≠ MAE).
+      SCALP_SWEEP_FADE_SL_RISK_MULT: ${SCALP_SWEEP_FADE_SL_RISK_MULT:-2.0}
       # flow_exit профит-лок. v0.13.0: 1.0→1.5 — sweep 15д (data/scalp_sweep.txt):
       # выше порог = крупнее средний зафиксированный винер, винеры бегут дальше к
       # TP=3.5R (Философия B «let winners run», Schwager/Brooks).
