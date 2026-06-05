@@ -972,7 +972,7 @@ def _density_cfg(**over):
         density_baseline_sec=900.0, density_baseline_min_samples=30,
         # для build_signal:
         entry_order_type="market", sl_buffer_bps=8.0, take_profit_r=2.0,
-        density_break_take_profit_r=2.5,  # v0.18.3 пер-стратегийный TP
+        density_break_take_profit_r=3.5,  # v0.18.10 = глобальный канон (Философия B)
         round_trip_fee_frac=0.0011, min_target_fee_mult=3.0,
         active_exit_min_age_sec=10.0,
     )
@@ -1417,13 +1417,13 @@ def test_htf_has_data_false_until_warmed():
     assert htf.has_data("XXXUSDT") is False         # другой символ — нет
 
 
-def test_density_break_tp_r_default_2_5():
-    """v0.18.3: density_break_take_profit_r=2.5 (forward-test недобора на 3.5R по
-    MFE n=25), глобальный take_profit_r=3.5 для sweep_fade/density_bounce не тронут.
-    Замок на решение."""
+def test_density_break_tp_r_default_canon_3_5():
+    """v0.18.10: density_break_take_profit_r=3.5 = глобальный канон (Философия B
+    «winners run»). Откат подгонки 2.5R на n=25 (no-data-fitting): низкий кап
+    противоречил философии и не имел канонического источника. Замок на канон."""
     from scalp_bot.config.settings import ScalpSettings
     s = ScalpSettings()
-    assert s.density_break_take_profit_r == 2.5
+    assert s.density_break_take_profit_r == 3.5
     assert s.take_profit_r == 3.5
 
 

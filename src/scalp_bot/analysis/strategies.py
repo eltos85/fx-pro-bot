@@ -549,7 +549,8 @@ class DensityBreakStrategy:
                           level, last)
                 continue
             reasons = ["wall_break", "persist", "round"]
-            # v0.18.3: пер-стратегийный TP (2.5R forward-test) — недобор на 3.5R.
+            # TP=density_break_take_profit_r (v0.18.10: = глобальный канон 3.5R,
+            # Философия B «winners run»; откат подгонки 2.5R на n=25, no-data-fitting).
             # sl_mult=1.0 ЯВНО: стоп density_break СТРУКТУРНЫЙ (за пробитой стеной =
             # инвалидация ложного пробоя, Данилов/Bookmap/Brooks). MAE-расширение
             # (как у sweep_fade) ломает её канон — держали бы провалившиеся пробои.

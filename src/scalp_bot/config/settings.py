@@ -335,15 +335,15 @@ class ScalpSettings(BaseSettings):
     take_profit_r: float = Field(default=3.5)
     # density_break: ПЕР-СТРАТЕГИЙНЫЙ TP (v0.18.3). Глобальный 3.5R (выше) остаётся
     # для sweep_fade/density_bounce. Для density_break ставим 2.5R как LIVE
-    # FORWARD-TEST (НЕ валидированный эдж!): контрфактуал по MFE 25 сделок
-    # (1m-клины, артефакт q_db_mfe) показал систематический недобор — пробои
-    # доходили до 2-3.4R и разворачивались до 3.5R (#973 MFE 3.43R→SL, #977 2.82,
-    # #661 2.55). При TP=2.5R gross +4.1→+11.0R, WR 28→44% НА ТОЙ ВЫБОРКЕ. n=25 —
-    # это ШУМ (sample-size <100), поэтому не правда, а ГИПОТЕЗА на forward-test от
-    # baseline 2026-06-04. 2.5R (а не sample-оптимум 2.0R) — намеренно мягче, чтобы
-    # не оверфитить под выборку и сохранить часть «winners run». Пересмотр на ≥100
-    # density_break сделок. Откат: SCALP_DENSITY_BREAK_TAKE_PROFIT_R=3.5.
-    density_break_take_profit_r: float = Field(default=2.5)
+    # КАНОН (v0.18.10): = глобальному take_profit_r=3.5 (Философия B «winners run»;
+    # асимметричный payoff, свип-разворот 2:1-4:1 CrossTrade, T1≈2-3R). density_break —
+    # ЧИСТЕЙШАЯ Философия B (единственная страта с should_exit=None ради бега
+    # победителей), поэтому канонический потолок для неё = 3.5R, как у глобального.
+    # ИСТОРИЯ: в v0.18.3 ставили 2.5R по контрфактуалу n=25 (q_db_mfe) — это была
+    # подгонка под ШУМ (no-data-fitting.mdc: n<100). Низкий кап 2.5R противоречит
+    # самой философии «winners run» и не имеет канонического источника → ОТКАЧЕНО
+    # к канону. Поле оставлено для конфиг-гибкости (env override).
+    density_break_take_profit_r: float = Field(default=3.5)
     sl_buffer_bps: float = Field(default=8.0)  # буфер за свип-уровнем, б.п.
     # Research-ручка: множитель ИТОГОВОГО риска (ширины SL) после мин-R пола.
     # default 1.0 = no-op (алгебраически тождественно). Для A/B гипотезы «шире
