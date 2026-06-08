@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-06-08
+
+### fix(momentum-bot): generic CTRADER_TOKEN_SERVICE_* для внутреннего refresh
+
+`коммит при deploy`
+
+**Симптом:** после включения `fx-momentum-bot` пошла reconnect-петля
+`cTrader: отключено (uptime 0s) — ConnectionDone: Connection was closed
+cleanly` каждые ~32с (видно в логах `fx_pro_bot.trading.client`).
+
+**Причина:** token-service шарит только OAuth-токены, не живую сессию —
+каждый бот держит свой TCP-коннект (2 коннекта < лимита 25/app cTrader,
+так что лимит ни при чём). Внутренний `CTraderClient` рефрешит токен через
+`_try_refresh_via_service` → `load_service_config`, который читает
+`CTRADER_TOKEN_SERVICE_URL` / `CTRADER_TOKEN_SERVICE_SECRET`. У momentum в
+compose заданы только `MOMENTUM_BOT_TOKEN_SERVICE_*`, generic-версии
+отсутствовали → внутренний клиент при silent-rotation делал ЛОКАЛЬНЫЙ
+`refresh_access_token`, прокручивая single-use refresh_token напрямую у
+Spotware. Сервисный refresh_token становился «потрачен» → fx-ai-trader
+получал Access denied при авторизации → сервер закрывал TCP cleanly →
+reconnect-петля. Это тот самый rotation-conflict, ради которого делался
+token-service.
+
+**Решение:** добавлены `CTRADER_TOKEN_SERVICE_URL` /
+`CTRADER_TOKEN_SERVICE_SECRET` в сервис `fx-momentum-bot` (как у advisor и
+fx-ai-trader) — теперь внутренний клиент рефрешит централизованно с
+server-side dedup, без прокрутки токена напрямую.
+
+Источник лимита соединений: cTrader Open API — 25 concurrent connections
+per application (community.ctrader.com/forum/connect-api-support/21640/).
+
+**Файлы:** `docker-compose.yml`
+
 ## 2026-06-05
 
 ### feat(momentum-bot): добавлен изолированный FX momentum-бот с token-service сессией

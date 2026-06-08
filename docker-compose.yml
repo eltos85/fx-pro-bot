@@ -484,6 +484,15 @@ services:
       MOMENTUM_BOT_TOKEN_SERVICE_URL: ${MOMENTUM_BOT_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
       MOMENTUM_BOT_TOKEN_SERVICE_SECRET: ${MOMENTUM_BOT_TOKEN_SERVICE_SECRET:-}
       MOMENTUM_BOT_TOKEN_SERVICE_LABEL: ${MOMENTUM_BOT_TOKEN_SERVICE_LABEL:-momentum_bot}
+      # Generic CTRADER_TOKEN_SERVICE_* нужны ВНУТРЕННЕМУ CTraderClient:
+      # его авто-refresh (_try_refresh_via_service → load_service_config)
+      # читает именно эти env, а не MOMENTUM_BOT_*. Без них клиент при
+      # silent token-rotation делает ЛОКАЛЬНЫЙ refresh, прокручивая
+      # single-use refresh_token напрямую у Spotware → конфликт ротации с
+      # fx-ai-trader (Access denied → TCP closed cleanly, reconnect-петля).
+      # advisor и fx-ai-trader задают эти же переменные по той же причине.
+      CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
+      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
       MOMENTUM_BOT_REQUIRE_TOKEN_SERVICE: ${MOMENTUM_BOT_REQUIRE_TOKEN_SERVICE:-true}
       MOMENTUM_BOT_DB_FILENAME: ${MOMENTUM_BOT_DB_FILENAME:-momentum_bot.sqlite}
       MOMENTUM_BOT_TOKEN_FILENAME: ${MOMENTUM_BOT_TOKEN_FILENAME:-momentum_bot_tokens.json}
