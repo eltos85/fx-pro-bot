@@ -32,15 +32,30 @@ def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
     log.info("Received signal %d, shutting down", signum)
 
 
-def _fetch_candles(symbol: str, interval: str, period: str):
-    data = yf.download(
-        tickers=symbol,
-        period=period,
-        interval=interval,
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
+def _fetch_candles(symbol: str, interval: str, period: str, retries: int = 3):
+    # yfinance периодически отдаёт пустой результат / "possibly delisted"
+    # по ОДНОМУ тикеру при транзиентном сбое Yahoo (остальные в том же
+    # цикле качаются нормально). Лёгкий retry с backoff сглаживает это,
+    # чтобы цикл не пропускал валидный сигнал из-за разовой флакоты.
+    data = None
+    for attempt in range(retries):
+        try:
+            data = yf.download(
+                tickers=symbol,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("yfinance download %s failed (attempt %d/%d): %s",
+                        symbol, attempt + 1, retries, exc)
+            data = None
+        if data is not None and not data.empty:
+            break
+        if attempt < retries - 1:
+            time.sleep(2 * (attempt + 1))
     if data is None or data.empty:
         return data
     # yfinance can return multi-index columns for single ticker.
