@@ -1131,6 +1131,22 @@ def test_last_sl_close_ts(tmp_path):
     db.close()
 
 
+def test_sl_cooldown_for_per_strategy():
+    """v0.18.14: sweep_fade имеет расширенное окно SL-cooldown (60м, канон MR +
+    sweep n=829), а density_break/bounce — базовый sl_cooldown_sec. Дефолты:
+    sweep_fade=3600с, прочие=300с."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.sl_cooldown_for("sweep_fade") == 3600.0
+    assert s.sl_cooldown_for("density_break") == s.sl_cooldown_sec == 300.0
+    assert s.sl_cooldown_for("density_bounce") == 300.0
+    # независимая конфигурация окон (sweep_fade не наследует базовый)
+    cfg = ScalpSettings().model_copy(update={
+        "sl_cooldown_sec": 120.0, "sweep_fade_sl_cooldown_sec": 1800.0})
+    assert cfg.sl_cooldown_for("sweep_fade") == 1800.0
+    assert cfg.sl_cooldown_for("density_break") == 120.0
+
+
 def test_db_migration_adds_strategy_column(tmp_path):
     import sqlite3
     # старая БД без колонки strategy

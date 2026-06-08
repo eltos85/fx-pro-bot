@@ -6,6 +6,53 @@
 
 ## 2026-06-08
 
+### v0.18.14 — sweep_fade SL-cooldown 300с→3600с (60м), пер-стратегийно
+`<hash>`
+
+**Запрос пользователя**: разобрать, почему sweep_fade в окне 5 июня 11:00 UTC →
+8 июня имеет «вины меньше лузов», и поднять винрейт без слома философии фейда.
+
+**Анализ (чистое окно, sweep_fade n=78–98, данные сверены с биржей)**:
+- flow_exit НЕ виновник: контрфактуал (`scripts/scalp_flow_exit_audit.py`, 39
+  сделок) — спасает от стопов больше, чем крадёт у винеров (+5.54R чисто). Канон
+  по выходам (traderssecondbrain/QuantStrategy): MR-фейду нужен ПОЛНЫЙ выход,
+  scale-out ухудшил бы на 10–25%. flow_exit (полный выход по флипу) канонен.
+- Асимметрия «вин<луз» врождённа для фейда (эдж в WR, не в размере винов).
+- Дискриминатор лузов (`scripts/scalp_sf_winrate.py`): score/сигналы/сторона НЕ
+  делят вины и лузы. Выстрелил один срез — **серийный перефейд**: свежий вход
+  WR 62% net +77.25 vs вход после SL по той же монете <90м WR 30% net −51.14.
+
+**Причина неэффективности текущей защиты** (`scripts/scalp_sf_serial.py`): все 14
+убыточных перефейдов шли через **8–82 мин** после SL — текущий кулдаун 300с (5м)
+не ловил НИ ОДНОГО (0/14). Фикс ярлыка v0.18.12 это НЕ лечит: окно просто
+слишком короткое. Исходная калибровка v0.15.0 тестировала только ≤600с; диапазон
+30–90м (канон по MR) не проверялся.
+
+**Решение по правилам** (НЕ подгонка под n=14): sweep кулдауна на реальной истории
+sweep_fade `scripts/scalp_cooldown_sweep.py`:
+- **вся история n=829**: Δnet vs выкл монотонно 5м +3.53 → 30м +68.59 →
+  **60м +103.77** → 90м +109.61 (после 60м прирост резко замедляется = колено).
+- **чистое окно n=93**: 60м — пик (+40.01), 90м падает.
+- Канон MR-фейда сходится на ≥60м: Fondeo (VWAP MR) «if stopped — done ≥60 min»;
+  quantfoundrylab kill-switch «2 SL → 45-min halt»; Connors/Raschke «Street Smarts».
+
+**Изменение**: `sweep_fade_sl_cooldown_sec=3600` (60м) ТОЛЬКО для sweep_fade;
+кулдаун стал пер-стратегийным (`ScalpSettings.sl_cooldown_for`). `density_break`
+(пробой — длинная пауза backwards) и `density_bounce` (fade, но на длинное окно
+НЕ валидирован, n мал) остаются на базовых 300с. По символу+стороне, как раньше.
+
+**Sample-size**: n=829 (вся история) и n=93 (чистое окно) — обе выше порога 100;
+решение data-grounded + канон, не интуиция. Наблюдение n=14 (серийные перефейды)
+лишь навело — параметр выбран по большой выборке и каноном.
+
+**Файлы:** `config/settings.py` (`sweep_fade_sl_cooldown_sec` + `sl_cooldown_for`),
+`app/main.py` (пер-стратегийный выбор окна), `docker-compose.yml`
+(`SCALP_SWEEP_FADE_SL_COOLDOWN_SEC`), `tests/test_scalp_bot.py`
+(`test_sl_cooldown_for_per_strategy`), `STRATEGY_RATIONALE_SCALP.md`. Новые
+скрипты-артефакты: `scalp_cooldown_sweep.py`, `scalp_sf_winrate.py`,
+`scalp_sf_serial.py`, `scalp_flow_exit_audit.py`, `scalp_sweep_analysis.py`,
+`scalp_daily_stats.py`, `scalp_ghost_audit.py`. Тесты зелёные.
+
 ### v0.18.13 — надёжный матчер reconcile по avgEntryPrice (restart-сироты)
 `<hash>`
 

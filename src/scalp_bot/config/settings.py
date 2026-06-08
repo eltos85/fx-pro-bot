@@ -139,7 +139,28 @@ class ScalpSettings(BaseSettings):
     # как 600с). Канон: не перефейдить провалившийся уровень сразу
     # (Connors/Raschke 1995 «Street Smarts»). Противоположную сторону не трогаем
     # (реальный разворот ловим). 0 = выключить паузу.
+    # Базовый дефолт для НЕ-fade страт (density_break/bounce). sweep_fade имеет
+    # отдельное окно (см. sweep_fade_sl_cooldown_sec ниже).
     sl_cooldown_sec: float = Field(default=300.0)
+    # v0.18.14: для sweep_fade окно расширено 300с→3600с (60м). Исходная калибровка
+    # v0.15.0 тестировала только ≤600с; диапазон 30–90м (канон по MR-фейду) не
+    # проверялся. Sweep по реальной истории sweep_fade (n=829,
+    # scripts/scalp_cooldown_sweep.py): Δnet vs выкл монотонно 5м +3.53 → 30м
+    # +68.59 → 60м +103.77 → 90м +109.61 (после 60м прирост резко замедляется —
+    # колено). Чистое окно n=93: 60м — пик (+40.01), 90м падает. Канон по
+    # mean-reversion фейду: Fondeo (VWAP MR) «if stopped — done ≥60 min»;
+    # quantfoundrylab kill-switch «2 SL → 45-min halt»; Connors/Raschke «Street
+    # Smarts». По символу+стороне (как базовый кулдаун). Только sweep_fade:
+    # density_break — пробой (момент), длинная пауза backwards.
+    sweep_fade_sl_cooldown_sec: float = Field(default=3600.0)
+
+    def sl_cooldown_for(self, strategy: str) -> float:
+        """Пауза после SL по стратегии. sweep_fade (fade) — расширенное окно 60м
+        (канон MR + sweep n=829); остальные (density_break пробой, density_bounce
+        — не валидировались на длинное окно) — базовый sl_cooldown_sec."""
+        if strategy == "sweep_fade":
+            return self.sweep_fade_sl_cooldown_sec
+        return self.sl_cooldown_sec
 
     # ─── Подтверждение разворота (sweep-and-reclaim, CAP-протокол) ────────
     # «Не входи во время свипа — жди возврата за уровень + разворота ленты».

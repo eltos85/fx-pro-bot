@@ -369,6 +369,11 @@ services:
       # +0.087→+0.103R). Connors/Raschke «не перефейдить провалившийся уровень».
       # 0 = выключить.
       SCALP_SL_COOLDOWN_SEC: ${SCALP_SL_COOLDOWN_SEC:-300}
+      # v0.18.14: для sweep_fade окно 60м (300с слишком мало — старая калибровка
+      # тестировала ≤600с). Sweep n=829: колено 60м (Δnet +103.77 vs выкл); канон
+      # MR-фейда Fondeo «done ≥60 min», quantfoundrylab «2 SL→45m halt». Только
+      # sweep_fade; density_break/bounce — базовый SCALP_SL_COOLDOWN_SEC.
+      SCALP_SWEEP_FADE_SL_COOLDOWN_SEC: ${SCALP_SWEEP_FADE_SL_COOLDOWN_SEC:-3600}
       # Философия B: дай победителю бежать. TP 3.5R (асимметричный payoff).
       # v0.9.5: time_stop УДАЛЁН (противоречил «дай бежать» — резал по таймеру);
       # выход только flow_exit/flow_scratch/биржевой TP/SL.
