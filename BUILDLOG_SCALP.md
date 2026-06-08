@@ -6,6 +6,40 @@
 
 ## 2026-06-08
 
+### v0.18.12 — фикс залипшего close_reason (tp_hit при реальном минусе)
+`<hash>`
+
+**Симптом** (всплыл при разборе #1328): NEARUSDT long, `close_reason=tp_hit`, но
+реальный net −17.47. Сверка: exit=1.9936 < entry=2.0026 (для лонга = убыток),
+gross=(1.9936−2.0026)×1664.5=−14.98 − комиссии ≈ −17.47 ✓. Цена за ~12с прошла
+СКВОЗЬ свой SL (1.99659) → реально это `sl_hit`, а ярлык врал «tp_hit».
+
+**Причина**: при закрытии позиции, если WS-филлы выхода ещё не дошли
+(`is_real=False`), `_realized_or_estimate` отдаёт `exitp≈entry` (провизорно).
+`bracket_exit_reason(side, entry, exit≈entry)`: `favorable=0`, `0>=0` → **всегда
+`tp_hit`**. Реконсиляция (v0.18.11) чинила pnl+exit, но НЕ `close_reason` →
+ярлык залипал. Бьёт по: (а) тексту уведомления «цель достигнута (биржевой TP)»
+при минусе; (б) `last_sl_exit_ts` (пост-SL кулдаун ищет `close_reason='sl_hit'`)
+— реальный стоп под ярлыком tp_hit кулдаун НЕ активировал → риск раннего
+перезахода.
+
+**Фикс** ([Bybit close-pnl](https://bybit-exchange.github.io/docs/v5/position/close-pnl)):
+в офдоке get_closed_pnl НЕТ TP/SL-дискриминатора (поля closedPnl, avgExitPrice,
+side; stopOrderType отсутствует) → документированный признак = ЗНАК `closedPnl`
+(net): ≥0 ⇒ tp_hit, <0 ⇒ sl_hit. `reconciled_bracket_reason(old, net)`
+пересчитывает ТОЛЬКО bracket-плейсхолдеры (`tp_hit`/`sl_hit`/`tp_sl`), не трогая
+дискреционные выходы (flow_exit/time_stop). `finalize_pnl` получил опц.
+`close_reason`. Применяется в обоих путях reconcile (WS и REST). Так «tp_hit при
+минусе» стал структурно невозможен (ярлык ⟺ знак net).
+
+**Влияние на стату**: WR/net по стратегиям были корректны и до фикса (считаются
+по знаку pnl_usd). Фикс чинит close_reason-аналитику (tp/sl-разбивку, MFE/MAE-
+атрибуцию) и пост-SL кулдаун. Стратегии/сайзинг/входы НЕ затронуты.
+
+**Файлы:** `trading/executor.py` (`reconciled_bracket_reason` + применение в
+reconcile), `state/db.py` (`finalize_pnl` +close_reason), `tests/test_scalp_bot.py`
+(+3 теста). 151/151 зелёные.
+
 ### v0.18.11 — REST-фолбэк реконсиляции provisional-PnL (фикс порчи статы)
 `<hash>`
 

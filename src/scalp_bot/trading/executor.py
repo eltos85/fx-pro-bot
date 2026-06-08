@@ -56,6 +56,27 @@ def bracket_exit_reason(side: str, entry: float, exit_price: float | None) -> st
     return "tp_hit" if favorable >= 0 else "sl_hit"
 
 
+# Ярлыки bracket-выхода, проставленные ПРОВИЗОРНО (exit≈entry → bracket_exit_reason
+# даёт tp_hit при favorable=0). При реконсиляции пересчитываем их по реальному
+# знаку closedPnl. Дискреционные выходы (flow_exit/time_stop/…) не трогаем.
+_BRACKET_REASONS = frozenset({"tp_hit", "sl_hit", "tp_sl"})
+
+
+def reconciled_bracket_reason(old_reason: str | None, net: float) -> str | None:
+    """Пересчитать tp_hit/sl_hit по знаку реального net closedPnl (Bybit).
+
+    get_closed_pnl НЕ возвращает TP/SL-дискриминатор (проверено по офдоку:
+    https://bybit-exchange.github.io/docs/v5/position/close-pnl — поля closedPnl,
+    avgExitPrice, side; явного stopOrderType нет). Документированный признак —
+    знак ``closedPnl`` (net): ≥0 ⇒ цель (tp_hit), <0 ⇒ стоп (sl_hit). Так
+    устраняется залипший «tp_hit при минусе». Возвращает None, если ярлык не
+    bracket-плейсхолдер (не трогаем) или уже совпадает со знаком."""
+    if old_reason not in _BRACKET_REASONS:
+        return None
+    corrected = "tp_hit" if net >= 0 else "sl_hit"
+    return corrected if corrected != old_reason else None
+
+
 def qty_decimals(step: float) -> int:
     """Число знаков после запятой в шаге лота (для квантизации без float-мусора)."""
     if step <= 0:
@@ -374,9 +395,13 @@ class Executor:
             if ts_close >= ws_horizon:
                 net, exit_px, complete = self._realized_from_fills(tr)
                 if complete:
-                    self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px)
-                    log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)",
-                             tr.id, tr.symbol, tr.pnl_usd or 0.0, net)
+                    reason = reconciled_bracket_reason(
+                        getattr(tr, "close_reason", None), net)
+                    self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px,
+                                          close_reason=reason)
+                    log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)"
+                             "%s", tr.id, tr.symbol, tr.pnl_usd or 0.0, net,
+                             f" reason→{reason}" if reason else "")
                     pend = self._close_pending.pop(tr.id, None)
                     if pend is not None:
                         self._send_close_msg(tr.id, pend["symbol"], net,
@@ -428,9 +453,13 @@ class Executor:
             return False
         if not d or d.get("pnl") is None:
             return False
-        self._db.finalize_pnl(tr.id, pnl_usd=d["pnl"], exit_price=d.get("exit"))
-        log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (REST)",
-                 tr.id, tr.symbol, tr.pnl_usd or 0.0, d["pnl"])
+        reason = reconciled_bracket_reason(getattr(tr, "close_reason", None),
+                                           d["pnl"])
+        self._db.finalize_pnl(tr.id, pnl_usd=d["pnl"], exit_price=d.get("exit"),
+                              close_reason=reason)
+        log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (REST)%s",
+                 tr.id, tr.symbol, tr.pnl_usd or 0.0, d["pnl"],
+                 f" reason→{reason}" if reason else "")
         pend = self._close_pending.pop(tr.id, None)
         if pend is not None:
             self._send_close_msg(tr.id, pend["symbol"], d["pnl"], pend["label"])

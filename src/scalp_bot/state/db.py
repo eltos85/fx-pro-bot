@@ -144,17 +144,27 @@ class ScalpDB:
         self._conn.commit()
 
     def finalize_pnl(self, trade_id: int, *, pnl_usd: float,
-                     exit_price: float | None = None) -> None:
+                     exit_price: float | None = None,
+                     close_reason: str | None = None) -> None:
         """Заменить предварительный (оценочный) PnL реальным closedPnl с биржи
-        и снять флаг pnl_provisional (после сверки в reconcile)."""
+        и снять флаг pnl_provisional (после сверки в reconcile).
+
+        ``close_reason`` (опц.): пересчитанный ярлык bracket-выхода. При
+        провизорном закрытии exit≈entry → ``bracket_exit_reason`` всегда выдаёт
+        ``tp_hit`` (favorable=0). Реальный знак closedPnl это исправляет, иначе
+        залипает «tp_hit при минусе» (см. BUILDLOG v0.18.12).
+        """
+        sets = ["pnl_usd=?", "pnl_provisional=0"]
+        args: list = [pnl_usd]
         if exit_price is not None:
-            self._conn.execute(
-                "UPDATE trades SET pnl_usd=?, exit=?, pnl_provisional=0 WHERE id=?",
-                (pnl_usd, exit_price, trade_id))
-        else:
-            self._conn.execute(
-                "UPDATE trades SET pnl_usd=?, pnl_provisional=0 WHERE id=?",
-                (pnl_usd, trade_id))
+            sets.insert(1, "exit=?")
+            args.append(exit_price)
+        if close_reason is not None:
+            sets.append("close_reason=?")
+            args.append(close_reason)
+        args.append(trade_id)
+        self._conn.execute(
+            f"UPDATE trades SET {', '.join(sets)} WHERE id=?", tuple(args))
         self._conn.commit()
 
     def provisional_closed_since(self, ts: float) -> list[TradeRow]:

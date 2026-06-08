@@ -23,7 +23,7 @@ from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot, Symbo
 from scalp_bot.safety import killswitch
 from scalp_bot.trading.executor import (
     Executor, bracket_exit_reason, paper_pnl, position_size,
-    position_size_by_risk, taker_pnl,
+    position_size_by_risk, reconciled_bracket_reason, taker_pnl,
 )
 
 
@@ -710,6 +710,53 @@ def test_reconcile_rest_grace_protects_fresh(tmp_path):
     ex.reconcile()
     assert client.calls == 0                               # REST не трогали
     assert len(db.provisional_closed_since(0.0)) == 1
+    db.close()
+
+
+def test_reconciled_bracket_reason_unit():
+    """Пересчёт ярлыка по знаку net closedPnl (Bybit close-pnl)."""
+    # bracket-плейсхолдер tp_hit + реальный минус → исправляем на sl_hit
+    assert reconciled_bracket_reason("tp_hit", -17.47) == "sl_hit"
+    # tp_hit + плюс → уже верно, не трогаем
+    assert reconciled_bracket_reason("tp_hit", 31.2) is None
+    # sl_hit + плюс → исправляем на tp_hit
+    assert reconciled_bracket_reason("sl_hit", 5.0) == "tp_hit"
+    # legacy tp_sl → конкретизируем по знаку
+    assert reconciled_bracket_reason("tp_sl", -1.0) == "sl_hit"
+    assert reconciled_bracket_reason("tp_sl", 1.0) == "tp_hit"
+    # дискреционные выходы НЕ трогаем (их ярлык не зависит от знака)
+    assert reconciled_bracket_reason("flow_exit", -3.0) is None
+    assert reconciled_bracket_reason("time_stop", 2.0) is None
+    assert reconciled_bracket_reason(None, -1.0) is None
+
+
+def _close_reason(db, tid):
+    return db._conn.execute(
+        "SELECT close_reason FROM trades WHERE id=?", (tid,)).fetchone()[0]
+
+
+def test_reconcile_rest_corrects_stale_tp_hit_label(tmp_path):
+    """#1328: provisional-плейсхолдер залип как tp_hit (exit≈entry → favorable=0),
+    реальный net минусовой → reconcile исправляет ярлык на sl_hit."""
+    db = ScalpDB(str(tmp_path))
+    tid = _mk_provisional(db, qty=1664.5, ts_close=2000.0, pnl=-3.67)
+    client = _FakeClosedPnlClient({1664.5: {"pnl": -17.47, "exit": 1.9936}})
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    assert _close_reason(db, tid) == "sl_hit"              # tp_hit → sl_hit
+    db.close()
+
+
+def test_reconcile_rest_keeps_tp_hit_when_positive(tmp_path):
+    """Реальный net плюсовой → ярлык tp_hit остаётся (не дёргаем зря)."""
+    db = ScalpDB(str(tmp_path))
+    tid = _mk_provisional(db, qty=1664.5, ts_close=2000.0, pnl=-3.67)
+    client = _FakeClosedPnlClient({1664.5: {"pnl": 31.2, "exit": 2.0236}})
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    assert _close_reason(db, tid) == "tp_hit"
     db.close()
 
 
