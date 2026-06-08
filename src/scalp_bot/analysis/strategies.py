@@ -29,6 +29,8 @@ from scalp_bot.analysis.signals import (
     SweepReclaimDetector,
     build_signal,
     flow_invalidated,
+    ob_supportive,
+    reversal_momentum,
 )
 from scalp_bot.data.aggregates import SymbolSnapshot
 
@@ -602,6 +604,33 @@ class DensityBreakStrategy:
                           "— пропускаю (возможно спуфинг-пулл)", sym, book_side,
                           level, last)
                 continue
+            # v0.18.16 (C-06): confirmation ложного пробоя по FOLLOW-THROUGH потоку.
+            # Канон (eplanetbrokers/fntradinglab/GrandAlgo): настоящий пробой держит
+            # объём/CVD в свою сторону; liquidity-grab = спайк с затуханием и возврат.
+            # reversal_momentum(side) = CVD растёт(long)/падает(short) за окно. Это та
+            # же функция и то же окно (momentum_window_sec), что sweep_fade использует
+            # для tape-shift — НЕ новое число, а существующий канон-параметр «лента
+            # качнулась в сторону сделки». Фильтрует grab'ы НА ВСЕХ монетах.
+            if getattr(cfg, "density_break_confirm_cvd", False):
+                win = getattr(cfg, "momentum_window_sec", 30.0)
+                if not reversal_momentum(snap.cvd_samples, side, win):
+                    play.info("🧱 [%s] пробой %s стены %.6f БЕЗ follow-through CVD "
+                              "(вероятно liquidity-grab) — пропускаю", sym,
+                              _SIDE_RU.get(side, side), level)
+                    continue
+            # v0.18.16 (C-06 #3): КАНОН-гейт абсорбции. Пробой на глубокой/слоистой
+            # книге = grab (resting-ликвидность поглощает движение; Tradeify ES-deep→
+            # fade, Bookmap absorption). Структурный сигнал — resting ob_imbalance: не
+            # входим, если книга застакана ПРОТИВ пробоя (на круглом уровне глубокого
+            # мейджора там жирная resting-ликвидность). Едино для ВСЕХ монет (≠ скип BTC).
+            if getattr(cfg, "density_break_require_ob", False):
+                ob_min = getattr(cfg, "ob_imbalance_min", 0.58)
+                if not ob_supportive(snap.ob_imbalance, side, ob_min):
+                    play.info("🧱 [%s] пробой %s стены %.6f, но resting-стакан "
+                              "застакан против (ob_imb=%s, абсорбция/deep-book grab) "
+                              "— пропускаю", sym, _SIDE_RU.get(side, side), level,
+                              snap.ob_imbalance)
+                    continue
             reasons = ["wall_break", "persist", "round"]
             # TP=density_break_take_profit_r (v0.18.10: = глобальный канон 3.5R,
             # Философия B «winners run»; откат подгонки 2.5R на n=25, no-data-fitting).
@@ -609,8 +638,13 @@ class DensityBreakStrategy:
             # инвалидация ложного пробоя, Данилов/Bookmap/Brooks). MAE-расширение
             # (как у sweep_fade) ломает её канон — держали бы провалившиеся пробои.
             # Явный 1.0 иммунизирует от глобального SCALP_SL_RISK_MULT≠1.0.
+            # v0.18.16: пер-стратегийный тип входа (taker для пробоя). getattr-
+            # резолв: density_break_entry_order_type → fallback на глобальный.
+            otype = (getattr(cfg, "density_break_entry_order_type", None)
+                     or getattr(cfg, "entry_order_type", "market"))
             sig = build_signal(snap, side, level, cfg, len(reasons), reasons,
-                               tp_r=cfg.density_break_take_profit_r, sl_mult=1.0)
+                               tp_r=cfg.density_break_take_profit_r, sl_mult=1.0,
+                               order_type=otype)
             if sig is None:
                 play.info("⛔ [%s] пробой %s стены %.6f, но fee-guard — ход мал, "
                           "комиссия не покрыта", sym, _SIDE_RU.get(side, side), level)

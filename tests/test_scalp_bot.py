@@ -1148,6 +1148,18 @@ def test_sl_cooldown_for_per_strategy():
     assert cfg.sl_cooldown_for("density_break") == 120.0
 
 
+def test_density_break_prod_defaults():
+    """v0.18.16 (C-06): прод-дефолты density_break. taker-вход (пробой не наливается
+    maker-лимиткой), CVD-confirmation ВКЛ (фильтр grab'ов). Фейды — глобальный maker."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.density_break_entry_order_type == "market"   # taker
+    assert s.entry_order_type == "post_only_limit"        # фейды — maker
+    assert s.density_break_confirm_cvd is True
+    assert s.momentum_window_sec == 30.0                  # follow-through = канон-окно
+    assert s.density_break_require_ob is True              # канон-гейт абсорбции
+
+
 def test_db_migration_adds_strategy_column(tmp_path):
     import sqlite3
     # старая БД без колонки strategy
@@ -1513,6 +1525,150 @@ def test_density_break_ignores_bounce_persist_window():
                  bids=flat_bids, asks=flat_asks)
     sig = st.update(snap, now=16.0)
     assert sig is not None and sig.side == "long"
+
+
+# ─── v0.18.16 (C-06): density_break taker-вход + CVD-confirmation ложного пробоя ─
+
+def test_build_signal_order_type_override_taker_vs_maker():
+    """v0.18.16: order_type override в build_signal. taker (market) → long на
+    best_ask; maker (post_only_limit) → long на best_bid. Signal несёт тип."""
+    snap = _snap(_long_samples(), best_bid=96.9, best_ask=97.1)
+    sig_t = build_signal(snap, "long", 96.5, _cfg(entry_order_type="post_only_limit"),
+                         4, ["x"], order_type="market")
+    assert sig_t is not None
+    assert sig_t.entry_order_type == "market" and sig_t.entry_ref == 97.1
+    sig_m = build_signal(snap, "long", 96.5, _cfg(entry_order_type="market"),
+                         4, ["x"], order_type="post_only_limit")
+    assert sig_m is not None
+    assert sig_m.entry_order_type == "post_only_limit" and sig_m.entry_ref == 96.9
+
+
+def test_density_break_entry_is_taker_even_if_global_maker():
+    """v0.18.16 (C-06): density_break входит TAKER даже при глобальном maker —
+    пробой не наливается лимиткой на своей стороне (fill-rate 42.6%)."""
+    cfg = _density_cfg(entry_order_type="post_only_limit",
+                       density_break_entry_order_type="market")
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "long"
+    assert sig.entry_order_type == "market"
+    assert sig.entry_ref == 100.31          # taker long → best_ask, не best_bid
+
+
+def test_density_break_confirm_cvd_blocks_grab():
+    """v0.18.16 (C-06): пробой БЕЗ follow-through CVD = вероятный liquidity-grab →
+    вход блокируется (канон «volume = truth serum»). Фильтр на ВСЕХ монетах."""
+    cfg = _density_cfg(density_break_confirm_cvd=True)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    grab_cvd = [CvdSample(14, 100, 10), CvdSample(15, 100, 5), CvdSample(16, 100, 0)]
+    snap = _snap(grab_cvd, last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    assert st.update(snap, now=16.0) is None
+
+
+def test_density_break_confirm_cvd_allows_followthrough():
+    """v0.18.16 (C-06): пробой С follow-through CVD (поток в сторону) → вход."""
+    cfg = _density_cfg(density_break_confirm_cvd=True)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    ft_cvd = [CvdSample(14, 100, 0), CvdSample(15, 100, 5), CvdSample(16, 100, 10)]
+    snap = _snap(ft_cvd, last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "long"
+
+
+def test_density_break_confirm_cvd_off_is_legacy():
+    """confirm_cvd=False → вход на пробое без CVD (legacy, обратная совместимость)."""
+    cfg = _density_cfg(density_break_confirm_cvd=False)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    assert st.update(snap, now=16.0) is not None
+
+
+def test_density_break_ob_gate_blocks_absorption():
+    """v0.18.16 (C-06 #3, КАНОН): пробой при resting-стакане ПРОТИВ (ob_imb<min) =
+    абсорбция глубокой книги / grab → вход блокируется. Едино для всех монет."""
+    cfg = _density_cfg(density_break_require_ob=True)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks, ob_imbalance=0.40)  # против long
+    assert st.update(snap, now=16.0) is None
+
+
+def test_density_break_ob_gate_allows_supportive_book():
+    """v0.18.16 (C-06 #3): resting-стакан поддерживает пробой (ob_imb≥min) → вход."""
+    cfg = _density_cfg(density_break_require_ob=True)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks, ob_imbalance=0.62)  # за long
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "long"
+
+
+def test_density_break_ob_gate_off_is_legacy():
+    """require_ob=False → вход без ob-гейта (legacy)."""
+    cfg = _density_cfg(density_break_require_ob=False)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks, ob_imbalance=0.40)
+    assert st.update(snap, now=16.0) is not None
+
+
+# ─── ИЗОЛЯЦИЯ v0.18.16: sweep_fade и density_bounce НЕ задеты ────────────────
+
+def test_sweep_fade_unaffected_by_v0_18_16():
+    """Изоляция: sweep_fade НЕ задет taker/CVD/ob-правками density_break — его сигнал
+    несёт entry_order_type=None (executor → глобальный maker), даже когда в cfg есть
+    density_break_* флаги."""
+    cfg = _cfg(require_ob_imbalance=True, density_break_entry_order_type="market",
+               density_break_confirm_cvd=True, density_break_require_ob=True)
+    det = SweepReclaimDetector("SOLUSDT", cfg)
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    sig = det.update(_snap(_fire_samples(), last_price=97.6, ob_imbalance=0.62),
+                     now=130.0)
+    assert sig is not None and sig.strategy == "sweep_fade"
+    assert sig.entry_order_type is None        # глобальный maker, НЕ taker
+
+
+def test_density_bounce_unaffected_by_v0_18_16():
+    """Изоляция: density_bounce НЕ задет — фейр НЕ гейтится CVD/ob-правками
+    density_break (пустой CVD + ob против НЕ блокируют), сигнал несёт
+    entry_order_type=None (глобальный maker)."""
+    cfg = _density_cfg(density_break_entry_order_type="market",
+                       density_break_confirm_cvd=True, density_break_require_ob=True)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _non_round_bid_wall()
+    # пустой CVD (CVD-гейт заблокировал бы) + ob=0.40 против long (ob-гейт заблокировал бы)
+    snap = _snap([], last_price=103.75, best_bid=103.70, best_ask=103.80,
+                 bids=bids, asks=asks, ob_imbalance=0.40)
+    st.update(snap, now=0.0)
+    sig = st.update(snap, now=11.0)
+    assert sig is not None and sig.side == "long" and sig.strategy == "density_bounce"
+    assert sig.entry_order_type is None        # глобальный maker, не задет
 
 
 def test_build_strategies_two():
@@ -2035,3 +2191,77 @@ def test_strategy_filter_applicability_v0181():
     # momentum: вне обоих MR-фильтров
     assert DensityBreakStrategy.htf_filtered is False
     assert DensityBreakStrategy.regime_gated is False
+
+
+# ─── write-ahead вход (анти-«призрак», v0.18.14) ───────────────────────────
+
+class _FakeLiveClient:
+    """Минимальный LIVE-клиент для on_signal. Фиксирует, существовала ли строка
+    в БД на момент place_entry — это и есть доказательство write-ahead."""
+
+    def __init__(self, db, *, ok=True):
+        self._db = db
+        self._ok = ok
+        self.row_existed_at_place = None
+        self.placed = []
+
+    def instrument(self, symbol):
+        return SimpleNamespace(qty_step=0.001, min_order_qty=0.001)
+
+    def set_leverage(self, symbol, lev):
+        return True
+
+    def round_price(self, symbol, price):
+        return round(price, 4)
+
+    def place_entry(self, *, symbol, side, qty, order_link_id, order_type,
+                    limit_price, sl_price, tp_price):
+        self.row_existed_at_place = bool(self._db.open_trades())
+        self.placed.append(order_link_id)
+        return {"ok": self._ok, "error": None if self._ok else "rejected"}
+
+
+def _live_cfg(**over):
+    base = dict(
+        trading_enabled=True, risk_based_sizing=True, risk_per_trade_usd=15.0,
+        min_position_usd=10.0, position_usd=300.0, max_leverage=10,
+        entry_order_type="market", entry_fill_timeout_sec=30.0,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _live_sig():
+    return Signal(symbol="SUIUSDT", side="long", entry_ref=0.7025,
+                  sl_level=0.6990, tp_level=0.7100, score=5,
+                  reasons=["wall_break"], strategy="density_break")
+
+
+def test_on_signal_write_ahead_row_before_place(tmp_path):
+    """v0.18.14: строка БД создаётся ДО place_entry (write-ahead). Позиция на
+    бирже без записи в БД («призрак», кейс SUI +$16.30) структурно невозможна."""
+    db = ScalpDB(str(tmp_path))
+    cl = _FakeLiveClient(db, ok=True)
+    ex = Executor(db, _live_cfg(), client=cl)
+    tid = ex.on_signal(_live_sig())
+    assert tid is not None
+    assert cl.row_existed_at_place is True          # строка была ДО постановки ордера
+    assert [t.id for t in db.open_trades()] == [tid]
+
+
+def test_on_signal_rejected_marks_entry_rejected(tmp_path):
+    """v0.18.14: ордер отклонён биржей → write-ahead строка помечается
+    entry_Rejected (исключена из статы db.recent_closed), трекинг очищается,
+    on_signal → None. Дубля-«призрака» нет — намерение зафиксировано и снято."""
+    db = ScalpDB(str(tmp_path))
+    cl = _FakeLiveClient(db, ok=False)
+    ex = Executor(db, _live_cfg(), client=cl)
+    tid = ex.on_signal(_live_sig())
+    assert tid is None
+    assert cl.row_existed_at_place is True          # write-ahead сработал и при reject
+    assert db.open_trades() == []                   # строка закрыта, не висит open
+    row = db._conn.execute(
+        "SELECT status, close_reason FROM trades ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] == "closed" and row[1] == "entry_Rejected"
+    assert ex._link2trade == {} and ex._fills == {}  # трекинг снят (_forget_trade)

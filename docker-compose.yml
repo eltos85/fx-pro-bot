@@ -344,6 +344,21 @@ services:
       # SCALP_BYBIT_API_KEY/SECRET. false = PAPER (симуляция, опционально).
       SCALP_TRADING_ENABLED: ${SCALP_TRADING_ENABLED:-true}
       SCALP_ENTRY_ORDER_TYPE: ${SCALP_ENTRY_ORDER_TYPE:-post_only_limit}
+      # v0.18.16 (C-06): density_break — TAKER. Пробой не наливается maker-лимиткой
+      # на своей стороне книги (long→best_bid НИЖЕ цены, растущий пробой не
+      # возвращается) → 56% сигналов entry_timeout/Cancelled (fill-rate 42.6%).
+      # Канон: «breakout strategies depend on speed» (QMMFX). Фейды остаются maker.
+      SCALP_DENSITY_BREAK_ENTRY_ORDER_TYPE: ${SCALP_DENSITY_BREAK_ENTRY_ORDER_TYPE:-market}
+      # v0.18.16 (C-06): confirmation ложного пробоя по CVD follow-through.
+      # grab = спайк объёма с затуханием/возврат; настоящий пробой держит CVD в свою
+      # сторону (eplanetbrokers/GrandAlgo «volume = truth serum»). Фильтрует grab'ы
+      # на всех монетах (вкл. BTC) без отключения инструментов. false = legacy.
+      SCALP_DENSITY_BREAK_CONFIRM_CVD: ${SCALP_DENSITY_BREAK_CONFIRM_CVD:-true}
+      # v0.18.16 (C-06 #3): КАНОН-гейт абсорбции. Пробой на глубокой книге = grab
+      # (resting-ликвидность поглощает; Tradeify ES-deep→fade, Bookmap absorption).
+      # Вход только если resting ob_imbalance НЕ застакан против пробоя. Едино для
+      # ВСЕХ монет (≠ скип BTC), порог = ob_imbalance_min. false = legacy.
+      SCALP_DENSITY_BREAK_REQUIRE_OB: ${SCALP_DENSITY_BREAK_REQUIRE_OB:-true}
       # Капитал/лот: депо $1000, лот $100 (минимум $10 — иначе комиссия
       # съедает прибыль скальпа).
       SCALP_VIRTUAL_CAPITAL: ${SCALP_VIRTUAL_CAPITAL:-1000}

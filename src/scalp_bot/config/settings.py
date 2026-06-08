@@ -105,6 +105,15 @@ class ScalpSettings(BaseSettings):
     # Bybit linear: maker 0.02% / taker 0.055% — round-trip taker ≈0.11%
     # съедает 10-20% цели скальпа (rononcrypto 2026). По умолчанию maker.
     entry_order_type: str = Field(default="post_only_limit")
+    # v0.18.16: пер-стратегийный тип входа. ФЕЙДЫ (sweep_fade/density_bounce) —
+    # maker (цена возвращается к лимитке, дёшево). ПРОБОЙ (density_break) — TAKER:
+    # maker-лимитка ставится на СВОЮ сторону книги (long→best_bid, НИЖЕ цены), а
+    # растущий пробой к ней не возвращается → 56% сигналов не наливались (audit C-06,
+    # fill-rate 42.6%). Канон: «breakout strategies depend on speed; limit orders
+    # often fail to fill during explosive breakouts» (QMMFX); momentum-вход требует
+    # агрессии (Tradeify, daytrading.com «order joins a queue» = наш entry_timeout).
+    # None → fallback на глобальный entry_order_type.
+    density_break_entry_order_type: str = Field(default="market")
     entry_fill_timeout_sec: float = Field(default=8.0)
     # Funding settlements Bybit — раз в 8ч (00:00/08:00/16:00 UTC) списание/
     # начисление по открытой позиции. Для 90-сек скальпа почти не задевает,
@@ -312,6 +321,32 @@ class ScalpSettings(BaseSettings):
     # research-окна. Пока не накоплено ≥min_samples — fallback на мгновенный.
     density_baseline_sec: float = Field(default=900.0)
     density_baseline_min_samples: int = Field(default=30)
+    # v0.18.16: confirmation ложного пробоя для density_break (audit C-06).
+    # Профи единогласно различают НАСТОЯЩИЙ пробой и liquidity-grab по
+    # FOLLOW-THROUGH потоку: реальный = устойчивый объём/CVD в сторону пробоя;
+    # grab = спайк объёма с затуханием и быстрый возврат (eplanetbrokers,
+    # fntradinglab, GrandAlgo «stacked imbalances = institutional, иначе fakeout»;
+    # «volume is the truth serum for breakouts»). Гейт: вход на пробое ТОЛЬКО если
+    # CVD подтверждает направление (reversal_momentum за momentum_window_sec). Это
+    # каноничный фильтр grab'ов, применимый КО ВСЕМ монетам (включая deep-мейджоры
+    # BTC, чьи круглые пробои = grab чаще follow-through, cryptos.live) — без
+    # отключения инструментов (≠ overfit под n=26 BTC). False = legacy (вход на
+    # первом пересечении). [forward-test] edge на n→100. ТОЛЬКО density_break.
+    # Окно follow-through = существующий momentum_window_sec (канон CVD-tape-shift,
+    # тот же reversal_momentum, что sweep_fade) — НЕ вводим новое число.
+    density_break_confirm_cvd: bool = Field(default=True)
+    # v0.18.16 (C-06 #3): канон-гейт абсорбции для density_break. КАНОН (не наша
+    # стата): пробой на ГЛУБОКОЙ/слоистой книге = liquidity-grab, т.к. resting-
+    # ликвидность поглощает движение (Tradeify ES-deep→fade vs NQ-thin→breakout;
+    # Bookmap «order-book imbalance precedes impulse / absorption fades breakouts»).
+    # Структурный сигнал глубины — resting `ob_imbalance` (bid/(bid+ask) top-N):
+    # вход разрешён ТОЛЬКО если книга НЕ застакана против пробоя (для long bids
+    # доминируют ≥ob_imbalance_min; для short зеркально). На круглом уровне глубокого
+    # мейджора (BTC) там жирная resting-ликвидность ПРОТИВ → гейт режет grab. Это
+    # per-symbol и ЕДИНО для всех монет (BTC=ETH=alt) — НЕ инструмент-скип, НЕ P&L.
+    # Порог = тот же research-grounded ob_imbalance_min (0.58), без нового числа.
+    # ТОЛЬКО density_break (фейды свой ob-гейт имеют). False = legacy (без гейта).
+    density_break_require_ob: bool = Field(default=True)
 
     # ─── HTF-bias: трендовый фильтр старшего ТФ (аудит v0.9.3) ────────────
     # Канон CAP «без контекста CVD-дивергенция — шум» (gates 1–3); Murphy 1999

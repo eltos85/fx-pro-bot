@@ -122,11 +122,40 @@ sweep_fade (×2.0) и (б) точку отсчёта слежения за вы�
 
 ### Исполнение — все стратегии
 
-- `entry_order_type = post_only_limit` (maker).
+- `entry_order_type = post_only_limit` (maker) — для ФЕЙДОВ (sweep_fade/density_bounce).
   - [наш A/B] market давал drag ~0.35R/сделку (402 сделки), обнулял edge.
   - [research] taker съедает 30–67% gross; «maker — главный рычаг профитности»
     (OneKey/StratBase/Echo Zero 2026). [ограничение] цена — непролив лимитки
     на волатильном reclaim = пропуск сделки.
+- `density_break_entry_order_type = market` (TAKER) — пер-стратегийно для ПРОБОЯ
+  (v0.18.16, C-06). Для фейда maker каноничен (цена возвращается к лимитке), но для
+  momentum-пробоя maker-лимитка ставится на СВОЮ сторону книги (long→best_bid НИЖЕ
+  цены) и растущий пробой к ней НЕ возвращается → fill-rate 42.6% (audit C-06, 56%
+  сигналов entry_timeout/Cancelled). [research] «breakout strategies depend on speed;
+  limit orders often fail to fill during explosive breakouts» (QMMFX); daytrading.com
+  «order joins a queue» = ровно наш баг. Слиппедж taker контролируется fee-guard'ом;
+  «не налился» (maker) строго хуже «налился с слиппеджем» (taker). Это исполнительный
+  фикс (sample-size.mdc: «технические улучшения — исполнение ордеров»), НЕ P&L-тюнинг.
+- `density_break_confirm_cvd = True` — confirmation ложного пробоя для density_break
+  (v0.18.16, C-06). Вход на пробое разрешён ТОЛЬКО при follow-through потоке
+  (`reversal_momentum(side)`: CVD растёт для long / падает для short, за существующим
+  `momentum_window_sec=30` — то же канон-окно tape-shift, что у sweep_fade, НЕ новое число). [research] профи единогласно различают пробой↔grab по
+  follow-through: настоящий держит объём/CVD в свою сторону, grab = спайк с угасанием +
+  возврат (eplanetbrokers/fntradinglab/GrandAlgo «stacked imbalances = институционал»;
+  «volume = truth serum for breakouts»). Фильтр grab'ов на ВСЕХ монетах (вкл. deep-
+  мейджоры BTC) без отключения инструментов — это и реализует цель «не торговать grab'и
+  глубоких книг» без overfit под n=26 BTC (ETH +62.87 vs BTC −165.75 = шум). [forward-
+  test] edge не валидирован на n=66 — канон-grounded форвард-тест до n≥100.
+- `density_break_require_ob = True` — КАНОН-гейт абсорбции для density_break (v0.18.16,
+  C-06 #3). Вход на пробое разрешён ТОЛЬКО если resting `ob_imbalance` НЕ застакан против
+  пробоя (long → bids доминируют ≥`ob_imbalance_min=0.58`; short зеркально). [research]
+  пробой на ГЛУБОКОЙ/слоистой книге = liquidity-grab, т.к. resting-ликвидность поглощает
+  движение (Tradeify «ES deep-book → fade/level-defense» vs «NQ thin → breakout»; Bookmap
+  «order-book imbalance precedes impulse / absorption fades breakouts»). На круглом уровне
+  глубокого мейджора (BTC) там жирная resting-ликвидность ПРОТИВ → гейт режет grab. Это
+  структурный фильтр ПО КАНОНУ, единый для ВСЕХ монет (BTC=ETH=alt) — НЕ инструмент-скип
+  и НЕ P&L-подгонка (скип BTC по списку был бы overfit; гейт же фильтрует по структуре
+  книги на лету). Порог = тот же research-grounded `ob_imbalance_min`, без нового числа.
 - `avoid_funding_window_sec = 120` — не открываемся в окне перед списанием.
   - [research] Bybit funding 00/08/16 UTC; для 90-сек скальпа почти не задевает,
     окно убирает funding-cost совсем.
@@ -428,6 +457,22 @@ SL ставится сразу за стеной (`build_signal swept = цена
 мин-R пол/сайзинг — ОБЩЕЕ. Множитель SL — **`sl_mult=1.0` ПРИБИТ ЯВНО в коде**
 (v0.18.8): density_break иммунен к глобальному `SCALP_SL_RISK_MULT` и к
 MAE-расширению sweep_fade.
+
+- [C-06, 2026-06-08 — подбор монет ПОДХОДИТ (канон)] vol-вселенная (range/RVOL/
+  turnover/spread) для пробоя **каноничеcки правильна**: momentum хочет ТОНКИХ/
+  волатильных книг (Tradeify «NQ → stop runs/breakout timing»), а не глубоких
+  (ES → фейд/level-defense). Это ЗЕРКАЛО density_bounce (C-05): один универсум не
+  кормит обе страты одинаково — by-design развилка. Аудит БД (n=66 filled, 05-31→
+  06-08): главный сток — НЕ монеты, а fill-rate 42.6% (maker-лимит vs убегающий
+  пробой, 56% сигналов не налились) и отсутствие confirmation ложного пробоя
+  (вход на первом пересечении). BTCUSDT доминирует в убытке (−165.75): глубокая
+  книга детектит стену, но круглые пробои BTC = liquidity-grab/false-breakout
+  (cryptos.live). **Реализовано v0.18.16 ПО КАНОНУ** (одобрено): #1 taker-вход (пробой
+  не наливается maker-лимиткой), #2 CVD-follow-through confirmation (grab = нет потока),
+  #3 ob-imbalance absorption-гейт (пробой на глубокой книге = grab, Tradeify/Bookmap).
+  Все три — структурные, едины для ВСЕХ монет, ноль зависимости от P&L монеты (инструмент-
+  скип BTC был бы overfit, гейт #3 фильтрует по структуре книги). retest-entry — кандидат
+  при n≥100. См. C-06.
 
 ### Канон-аудит по осям (v0.18.10) — все на каноне
 

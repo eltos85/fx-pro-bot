@@ -53,6 +53,10 @@ class Signal:
     score: int
     reasons: list[str]
     strategy: str = "sweep_fade"  # какая стратегия породила сигнал (атрибуция)
+    # v0.18.16: тип входа, выбранный стратегией (пер-стратегийно). None →
+    # executor берёт глобальный cfg.entry_order_type. density_break ставит "market"
+    # (taker): пробой не наливается maker-лимиткой (C-06, fill-rate 42.6%).
+    entry_order_type: str | None = None
 
 
 def _split_halves(samples: list[CvdSample]) -> tuple[list[CvdSample], list[CvdSample]]:
@@ -186,7 +190,8 @@ def flow_invalidated(snap: SymbolSnapshot, side: str, window_sec: float) -> bool
 def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
                  score: int, reasons: list[str],
                  tp_r: float | None = None,
-                 sl_mult: float | None = None) -> Signal | None:
+                 sl_mult: float | None = None,
+                 order_type: str | None = None) -> Signal | None:
     """Строит Signal: entry по книге, SL за свипнутым уровнем + буфер,
     TP = tp_r × R (или cfg.take_profit_r если tp_r=None), с fee-guard (цель ≥
     min_target_fee_mult × издержки). tp_r — пер-стратегийный override (density_break
@@ -198,7 +203,11 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
       post-only (баг до v0.3.2: вход брался с чужой стороны → entry_Cancelled).
     - market (taker): референс = цена, по которой реально исполнимся
       (long→best_ask, short→best_bid)."""
-    maker = getattr(cfg, "entry_order_type", "market") == "post_only_limit"
+    # order_type — пер-стратегийный override (v0.18.16, density_break=market);
+    # None → глобальный cfg.entry_order_type.
+    otype = order_type if order_type is not None else getattr(
+        cfg, "entry_order_type", "market")
+    maker = otype == "post_only_limit"
     if maker:
         entry = snap.best_bid if side == "long" else snap.best_ask
     else:
@@ -248,6 +257,7 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
     return Signal(
         symbol=snap.symbol, side=side, entry_ref=entry,
         sl_level=sl, tp_level=tp, score=score, reasons=reasons,
+        entry_order_type=order_type,
     )
 
 

@@ -6,6 +6,59 @@
 
 ## 2026-06-08
 
+### v0.18.16 — density_break: taker-вход + CVD-confirmation ложного пробоя
+`<hash>`
+
+**Запрос пользователя**: исследовать подбор монет для density_break (как для
+sweep_fade/density_bounce); найти у профи подтверждение 3 кандидатов — taker-вход
+(fill-rate), confirmation ложного пробоя, де-приоритет глубоких мейджоров; «делай все 3».
+
+**Аудит (C-06, `scripts/scalp_dbr_stats.py`)**: n=66 filled (05-31→06-08), net −190.51.
+Главный сток — НЕ подбор монет (vol-вселенная для пробоя канонична: momentum хочет
+тонких/волатильных книг, Tradeify), а:
+- **fill-rate 42.6%** — 56% сигналов не налились. Корень: глобальный maker-лимит
+  (`entry_order_type=post_only_limit`) ставит вход на СВОЮ сторону книги (long→best_bid
+  НИЖЕ цены), а растущий пробой к ней не возвращается → entry_timeout/Cancelled.
+- **отсутствие confirmation** ложного пробоя — вход на первом пересечении уровня.
+- BTCUSDT доминирует в убытке (−165.75), но ETH +62.87 — оба deep-мейджоры.
+
+**Research (профи)**: #1 «breakout strategies depend on speed; limit orders often fail
+to fill during explosive breakouts» (QMMFX); daytrading.com «order joins a queue» = наш
+баг. #2 grab↔пробой различаются по follow-through: настоящий держит объём/CVD в свою
+сторону, grab = спайк с угасанием (eplanetbrokers/fntradinglab/GrandAlgo «stacked
+imbalances = институционал»; «volume = truth serum»).
+
+**Изменения (ТОЛЬКО density_break, изоляция фейдов guard-тестами)**:
+1. **#1 taker-вход** — `density_break_entry_order_type=market` (пер-стратегийно;
+   фейды остаются maker). `Signal.entry_order_type` + `order_type`-override в
+   `build_signal`; executor берёт `sig.entry_order_type or cfg.entry_order_type`.
+   Это ИСПОЛНИТЕЛЬНЫЙ фикс (sample-size.mdc разрешает «исполнение ордеров» вне n).
+2. **#2 CVD-confirmation** — `density_break_confirm_cvd=True`: вход на пробое только
+   при follow-through (`reversal_momentum(side)` за существующим `momentum_window_sec` —
+   НЕ новое число, тот же канон-параметр, что у sweep_fade). Канон-фильтр grab'ов на
+   ВСЕХ монетах. [forward-test до n≥100].
+3. **#3 КАНОН-гейт абсорбции** — `density_break_require_ob=True`: вход на пробое только
+   если resting `ob_imbalance` НЕ застакан против (long→bids≥0.58). КАНОН (не наша стата):
+   пробой на глубокой/слоистой книге = grab, resting-ликвидность поглощает (Tradeify
+   ES-deep→fade, Bookmap absorption). На круглом уровне глубокого мейджора (BTC) там
+   жирная resting-ликвидность против → гейт режет grab. Едино для ВСЕХ монет (≠ скип BTC).
+   Порог = research-grounded `ob_imbalance_min`, без нового числа. ИНСТРУМЕНТ-скип BTC
+   был бы overfit (ETH +62.87 vs BTC −165.75 = шум n=66) — гейт же по СТРУКТУРЕ книги.
+
+**Также**: задеплоен write-ahead (строка БД до постановки ордера, анти-«призрак») —
+правка лежала в том же блоке `place_entry`, бандлим (одобрено пользователем).
+
+**Тесты**: +12 (order_type override, taker даже при глоб. maker, CVD блокирует grab /
+пропускает follow-through / off=legacy, ob-гейт блокирует абсорбцию / пропускает
+supportive / off=legacy, прод-дефолты; **изоляция**: sweep_fade и density_bounce НЕ
+задеты — их сигнал несёт entry_order_type=None и НЕ гейтится CVD/ob density_break;
+write-ahead восстановлены). 1148 passed.
+
+**Файлы:** `config/settings.py`, `analysis/signals.py`, `analysis/strategies.py`,
+`trading/executor.py`, `docker-compose.yml`, `tests/test_scalp_bot.py`,
+`STRATEGY_CONTRADICTIONS_SCALP.md` (C-06), `STRATEGY_RATIONALE_SCALP.md`,
+`scripts/scalp_dbr_stats.py`
+
 ### v0.18.15 — density_bounce: near_round гейт→бонус + persist 10с→20м
 `<hash>`
 

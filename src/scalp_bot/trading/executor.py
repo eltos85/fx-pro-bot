@@ -225,14 +225,14 @@ class Executor:
         cl.set_leverage(sig.symbol, cfg.max_leverage)
         link = f"scalp_{sig.symbol}_{int(self._now() * 1000)}"
         limit_price = cl.round_price(sig.symbol, sig.entry_ref)
-        res = cl.place_entry(
-            symbol=sig.symbol, side=side, qty=qty, order_link_id=link,
-            order_type=cfg.entry_order_type, limit_price=limit_price,
-            sl_price=cl.round_price(sig.symbol, sig.sl_level),
-            tp_price=cl.round_price(sig.symbol, sig.tp_level))
-        if not res.get("ok"):
-            log.warning("LIVE entry rejected %s %s: %s", sig.symbol, side, res.get("error"))
-            return None
+        # WRITE-AHEAD: строка БД ДО постановки ордера на биржу. Раньше было
+        # place_entry → insert_open: крах/рестарт в окне между ними (или исключение
+        # в insert) оставлял позицию на бирже БЕЗ строки в БД — «призрак»: бот её
+        # не видит (_adopt_on_start обходит только db.open_trades()), PnL теряется
+        # (реальный кейс: SUI +$16.30 не попал в стату). Запись-до-действия делает
+        # такой призрак невозможным: при сбое останется строка open без позиции —
+        # это ДЕТЕКТИРУЕМО (_adopt_on_start реконсилит её), в отличие от позиции
+        # без строки. Принцип write-ahead: фиксируем намерение до side-effect.
         tid = self._db.insert_open(
             symbol=sig.symbol, side=sig.side, qty=qty, entry=limit_price,
             sl=sig.sl_level, tp=sig.tp_level, score=sig.score, reasons=reasons,
@@ -242,7 +242,25 @@ class Executor:
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
                             "close_qty": 0.0}
-        is_market = cfg.entry_order_type == "market"
+        # v0.18.16: пер-стратегийный тип входа (density_break=taker). sig несёт
+        # выбранный стратегией order_type; None → глобальный cfg.entry_order_type.
+        otype = sig.entry_order_type or cfg.entry_order_type
+        res = cl.place_entry(
+            symbol=sig.symbol, side=side, qty=qty, order_link_id=link,
+            order_type=otype, limit_price=limit_price,
+            sl_price=cl.round_price(sig.symbol, sig.sl_level),
+            tp_price=cl.round_price(sig.symbol, sig.tp_level))
+        if not res.get("ok"):
+            # ордер отклонён биржей → позиции нет; закрываем write-ahead строку
+            # (entry_Rejected исключён из торговой статы, db.recent_closed).
+            self._db.mark_closed(tid, exit_price=limit_price, pnl_usd=0.0,
+                                 fees_usd=0.0, close_reason="entry_Rejected",
+                                 ts_close=self._now())
+            self._forget_trade(tid)
+            log.warning("LIVE entry rejected %s %s: %s — write-ahead #%d помечен "
+                        "entry_Rejected", sig.symbol, side, res.get("error"), tid)
+            return None
+        is_market = otype == "market"
         # Уведомление об открытии шлём ТОЛЬКО после реального филла (для maker
         # post-only ордер может быть отменён/не исполнен — тогда позиции нет).
         open_text = (f"🟢 open #{tid} {sig.symbol} {sig.side.upper()} "
