@@ -40,6 +40,12 @@ side; stopOrderType отсутствует) → документированны
 reconcile), `state/db.py` (`finalize_pnl` +close_reason), `tests/test_scalp_bot.py`
 (+3 теста). 151/151 зелёные.
 
+**Разовый бэкфилл БД (VPS, после деплоя)**: бэкап `scalp_bot.sqlite.bak_v0_18_12`,
+затем по тому же доко-правилу (знак net) для финализированных строк
+(`pnl_provisional=0`): `tp_hit&минус→sl_hit` = 1 (#1328), `tp_sl→tp_hit/sl_hit` =
+64. Провизорные (2× tp_hit-минус + 7× tp_sl) НЕ трогал — добьются reconcile-ом
+реальным net (плейсхолдер-знак врал бы). #1328 → sl_hit ✓.
+
 ### v0.18.11 — REST-фолбэк реконсиляции provisional-PnL (фикс порчи статы)
 `<hash>`
 
