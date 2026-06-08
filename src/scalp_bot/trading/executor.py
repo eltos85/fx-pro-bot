@@ -150,6 +150,10 @@ class Executor:
         # которая через ~1с правится по WS). Fallback по таймауту — чтобы
         # сообщение не потерялось, если филл по WS не дойдёт.
         self._close_pending: dict[int, dict] = {}
+        # троттлинг REST-фолбэка реконсиляции: tid -> ts последней попытки.
+        # WS-леджер обнуляется рестартом → осиротевшие provisional досвериваем
+        # через get_closed_pnl (REST), но под rate-limit (api-docs.mdc).
+        self._rest_recon_attempts: dict[int, float] = {}
 
     def _notify(self, text: str) -> None:
         if self._notifier is not None:
@@ -344,26 +348,52 @@ class Executor:
         self._notify(f"{emoji} close #{tid} {symbol} pnl={mark}${pnl:.2f} ({label})")
 
     def reconcile(self) -> None:
-        """Досверка предварительных (оценочных) PnL по WS-леджеру: когда филлы
-        выхода доедут (обычно ≤1с), переписываем БД реальным net, чтобы она
-        сходилась с выпиской 1:1 (stats-collection.mdc — БД = ground truth), и
-        дошлём отложенное close-уведомление с реальным net."""
+        """Досверка предварительных (оценочных) PnL до реального closedPnl.
+
+        Два пути:
+        • WS fast-path — когда филлы выхода доедут по приватному стриму (обычно
+          ≤1с), берём net из in-memory леджера. Дёшево, без REST.
+        • REST fallback — WS-леджер обнуляется РЕСТАРТОМ контейнера (деплой), и
+          осиротевшие provisional иначе зависают навсегда (был баг: горизонт 10
+          мин + только WS). Добиваем их через get_closed_pnl (closedPnl уже net).
+          Под rate-limit: троттлинг по сделке + бюджет запросов на цикл.
+
+        Цель — БД сходится с выпиской 1:1 (stats-collection.mdc), и отложенное
+        close-уведомление уходит с РЕАЛЬНЫМ net."""
         now = self._now()
-        horizon = now - 600.0  # сверяем закрытия за последние 10 мин
+        ws_horizon = now - 600.0                 # WS: свежие закрытия (10 мин)
         fallback = getattr(self._cfg, "close_notify_fallback_sec", 10.0)
-        for tr in self._db.provisional_closed_since(horizon):
-            net, exit_px, complete = self._realized_from_fills(tr)
-            if complete:
-                self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px)
-                log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)",
-                         tr.id, tr.symbol, tr.pnl_usd or 0.0, net)
-                pend = self._close_pending.pop(tr.id, None)
-                if pend is not None:  # отложенное уведомление → шлём реальный net
-                    self._send_close_msg(tr.id, pend["symbol"], net, pend["label"])
-                self._forget_trade(tr.id)
-                continue
-            # фолбэк: филлы по WS не дошли слишком долго → шлём оценку с пометкой,
-            # чтобы пользователь не остался без уведомления о закрытии
+        rest_horizon = getattr(self._cfg, "reconcile_rest_horizon_sec",
+                               7 * 24 * 3600 - 3600)   # < 7д (лимит Bybit-окна)
+        rest_grace = getattr(self._cfg, "reconcile_rest_grace_sec", 60.0)
+        rest_retry = getattr(self._cfg, "reconcile_rest_retry_sec", 300.0)
+        rest_budget = getattr(self._cfg, "reconcile_rest_max_per_cycle", 3)
+        for tr in self._db.provisional_closed_since(now - rest_horizon):
+            ts_close = getattr(tr, "ts_close", None) or now
+            # 1) WS fast-path для свежих
+            if ts_close >= ws_horizon:
+                net, exit_px, complete = self._realized_from_fills(tr)
+                if complete:
+                    self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px)
+                    log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)",
+                             tr.id, tr.symbol, tr.pnl_usd or 0.0, net)
+                    pend = self._close_pending.pop(tr.id, None)
+                    if pend is not None:
+                        self._send_close_msg(tr.id, pend["symbol"], net,
+                                             pend["label"])
+                    self._rest_recon_attempts.pop(tr.id, None)
+                    self._forget_trade(tr.id)
+                    continue
+            # 2) REST fallback (WS не закрыл): троттлинг + бюджет на цикл
+            age = now - ts_close
+            if (self._client is not None and rest_budget > 0
+                    and age >= rest_grace
+                    and now - self._rest_recon_attempts.get(tr.id, 0.0) >= rest_retry):
+                self._rest_recon_attempts[tr.id] = now
+                rest_budget -= 1
+                if self._rest_finalize(tr, ts_close):
+                    continue
+            # 3) фолбэк-уведомление: оценку шлём с пометкой, чтобы не потерять
             pend = self._close_pending.get(tr.id)
             if pend is not None and now - pend["ts"] > fallback:
                 self._send_close_msg(tr.id, pend["symbol"], tr.pnl_usd or 0.0,
@@ -372,6 +402,41 @@ class Executor:
                 log.warning("reconcile #%d %s: филлы по WS не дошли за %.0fс — "
                             "уведомление с оценкой ≈$%.2f", tr.id, tr.symbol,
                             fallback, tr.pnl_usd or 0.0)
+
+    def _rest_finalize(self, tr, ts_close: float) -> bool:
+        """REST-досверка одной provisional-сделки через get_closed_pnl.
+
+        Узкое СИММЕТРИЧНОЕ окно [ts_close−window, ts_close+window]: запись о
+        закрытии лежит у ts_close, поэтому узкое окно (а) надёжно ловит её на
+        1-й странице даже для старой сделки, (б) минимизирует число чужих
+        записей того же qty → меньше риск НЕВЕРНОГО матча (порча статы). Матч
+        внутри closed_pnl_detail: closedSize≈qty (tol 2%) + ближайший createdTime
+        к near_ms. Нет совпадения → None → НЕ финализируем (не выдумываем).
+        Возвращает True только если реально записали биржевой net."""
+        if self._client is None:
+            return False
+        window = getattr(self._cfg, "reconcile_rest_window_sec", 180.0)
+        near = int(ts_close * 1000)
+        try:
+            d = self._client.closed_pnl_detail(
+                tr.symbol, qty=tr.qty, near_ms=near,
+                since_ms=int((ts_close - window) * 1000),
+                until_ms=int((ts_close + window) * 1000))
+        except Exception:
+            log.exception("reconcile REST closed_pnl #%d %s failed",
+                          tr.id, tr.symbol)
+            return False
+        if not d or d.get("pnl") is None:
+            return False
+        self._db.finalize_pnl(tr.id, pnl_usd=d["pnl"], exit_price=d.get("exit"))
+        log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (REST)",
+                 tr.id, tr.symbol, tr.pnl_usd or 0.0, d["pnl"])
+        pend = self._close_pending.pop(tr.id, None)
+        if pend is not None:
+            self._send_close_msg(tr.id, pend["symbol"], d["pnl"], pend["label"])
+        self._rest_recon_attempts.pop(tr.id, None)
+        self._forget_trade(tr.id)
+        return True
 
     def _strategy_exit(self, tr, snap) -> tuple[str, float] | None:
         """Дискреционный выход СТРАТЕГИИ-владельца сделки (та же, что открыла).

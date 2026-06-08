@@ -290,7 +290,8 @@ class ScalpBybitClient:
 
     def closed_pnl_detail(self, symbol: str, *, order_id: str | None = None,
                           qty: float | None = None, since_ms: int | None = None,
-                          near_ms: int | None = None) -> dict | None:
+                          near_ms: int | None = None,
+                          until_ms: int | None = None) -> dict | None:
         """Запись о закрытии ИМЕННО нашей сделки: {pnl, exit, order_id, created}.
 
         Bybit ``closedPnl`` уже net (= cumExitValue − cumEntryValue − openFee
@@ -306,6 +307,14 @@ class ScalpBybitClient:
         if since_ms is not None:
             # небольшой запас назад: createdTime закрытия может чуть отставать
             params["startTime"] = int(since_ms - 5000)
+        if until_ms is not None:
+            # Тайтовое окно вокруг закрытия: get_closed_pnl отдаёт desc-страницы
+            # по ≤50 записей БЕЗ пагинации здесь. При forward-окне в 7 дней (только
+            # startTime) для СТАРОЙ сделки наша запись уезжает на 2-ю+ страницу и
+            # не находится. endTime фиксирует окно [since, until] → запись на стр.1.
+            # Bybit: endTime − startTime ≤ 7 дней.
+            # https://bybit-exchange.github.io/docs/v5/position/close-pnl
+            params["endTime"] = int(until_ms)
         try:
             resp = self._session.get_closed_pnl(**params)
         except Exception:
@@ -344,10 +353,12 @@ class ScalpBybitClient:
 
     def closed_pnl(self, symbol: str, *, order_id: str | None = None,
                    qty: float | None = None, since_ms: int | None = None,
-                   near_ms: int | None = None) -> float | None:
+                   near_ms: int | None = None,
+                   until_ms: int | None = None) -> float | None:
         """net closedPnl нашей сделки (тонкая обёртка над closed_pnl_detail)."""
         d = self.closed_pnl_detail(symbol, order_id=order_id, qty=qty,
-                                   since_ms=since_ms, near_ms=near_ms)
+                                   since_ms=since_ms, near_ms=near_ms,
+                                   until_ms=until_ms)
         return d["pnl"] if d else None
 
     def _submit(self, params: dict) -> dict:

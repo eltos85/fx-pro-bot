@@ -614,6 +614,105 @@ def test_close_notify_fallback_sends_estimate_after_timeout(tmp_path):
     db.close()
 
 
+# ─── REST-фолбэк реконсиляции provisional-PnL (v0.18.11) ───────────────────
+
+class _FakeClosedPnlClient:
+    """get_closed_pnl-заглушка: по qty отдаёт {pnl, exit} или None; считает вызовы."""
+
+    def __init__(self, by_qty=None):
+        self.by_qty = by_qty or {}
+        self.calls = 0
+
+    def closed_pnl_detail(self, symbol, *, order_id=None, qty=None,
+                          since_ms=None, near_ms=None, until_ms=None):
+        self.calls += 1
+        return self.by_qty.get(qty)
+
+
+def _mk_provisional(db, *, qty, ts_close, pnl=-3.67, sym="NEARUSDT",
+                    strat="density_bounce"):
+    tid = db.insert_open(symbol=sym, side="long", qty=qty, entry=2.0026,
+                         sl=1.9966, tp=2.0236, score=3, reasons="x", mode="live",
+                         strategy=strat, ts_open=ts_close - 100.0)
+    # плейсхолдер как #1328: exit=entry, pnl = −оценка комиссии
+    db.mark_closed(tid, exit_price=2.0026, pnl_usd=pnl, fees_usd=0.0,
+                   close_reason="tp_hit", ts_close=ts_close, provisional=True)
+    return tid
+
+
+def test_reconcile_rest_finalizes_orphaned_provisional(tmp_path):
+    """WS-леджер пуст (рестарт обнулил), старая provisional-сделка вне WS-окна →
+    добивается через REST closed_pnl до реального net (#1328-кейс)."""
+    db = ScalpDB(str(tmp_path))
+    tid = _mk_provisional(db, qty=1664.5, ts_close=2000.0, pnl=-3.67)
+    client = _FakeClosedPnlClient({1664.5: {"pnl": 31.2, "exit": 2.0236}})
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    assert db.provisional_closed_since(0.0) == []          # флаг снят
+    st = {s.strategy: s for s in db.stats_by_strategy(0.0)}["density_bounce"]
+    assert st.pnl_usd == pytest.approx(31.2)               # фейк-минус → реальный +
+    assert client.calls == 1
+    db.close()
+
+
+def test_reconcile_rest_no_match_keeps_provisional(tmp_path):
+    """REST не нашёл запись (нет совпадения) → НЕ финализируем (не выдумываем)."""
+    db = ScalpDB(str(tmp_path))
+    _mk_provisional(db, qty=1664.5, ts_close=2000.0)
+    client = _FakeClosedPnlClient({})                      # пусто
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    assert len(db.provisional_closed_since(0.0)) == 1
+    assert client.calls == 1
+    db.close()
+
+
+def test_reconcile_rest_throttles_retry_per_trade(tmp_path):
+    """Одну сделку не дёргаем чаще reconcile_rest_retry_sec (rate-limit)."""
+    db = ScalpDB(str(tmp_path))
+    _mk_provisional(db, qty=1664.5, ts_close=2000.0)
+    client = _FakeClosedPnlClient({})
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0,
+                          reconcile_rest_retry_sec=300.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    ex.reconcile()                       # тот же now → троттл, без нового запроса
+    assert client.calls == 1
+    ex._now = lambda: 5400.0             # +400с > 300 → ретрай разрешён
+    ex.reconcile()
+    assert client.calls == 2
+    db.close()
+
+
+def test_reconcile_rest_budget_per_cycle(tmp_path):
+    """Бюджет REST-запросов на цикл ограничен (под rate-limit): 5 сделок, бюджет 2."""
+    db = ScalpDB(str(tmp_path))
+    for i in range(5):
+        _mk_provisional(db, qty=100.0 + i, ts_close=2000.0)
+    client = _FakeClosedPnlClient({})
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0,
+                          reconcile_rest_max_per_cycle=2)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    assert client.calls == 2             # не больше бюджета за цикл
+    db.close()
+
+
+def test_reconcile_rest_grace_protects_fresh(tmp_path):
+    """Свежее закрытие (age < grace) НЕ идёт в REST — даём WS-пути шанс."""
+    db = ScalpDB(str(tmp_path))
+    _mk_provisional(db, qty=1664.5, ts_close=4990.0)       # age=10с
+    client = _FakeClosedPnlClient({1664.5: {"pnl": 31.2, "exit": 2.0236}})
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=60.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    assert client.calls == 0                               # REST не трогали
+    assert len(db.provisional_closed_since(0.0)) == 1
+    db.close()
+
+
 # ─── fee-aware дискреционный выход sweep_fade (через should_exit) ───────────
 
 def _sweep_strat(now_t=None):

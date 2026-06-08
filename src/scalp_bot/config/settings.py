@@ -184,6 +184,23 @@ class ScalpSettings(BaseSettings):
     # close-уведомление в Telegram с ОЦЕНКОЙ (пометка ≈). Обычно филлы
     # доезжают за ~1с и уведомление уходит с реальным net из reconcile.
     close_notify_fallback_sec: float = Field(default=10.0)
+    # ─── REST-фолбэк реконсиляции provisional-PnL (v0.18.11) ──────────────
+    # WS-леджер обнуляется рестартом контейнера → осиротевшие provisional-сделки
+    # иначе зависают навсегда. Добиваем их через get_closed_pnl (REST) под
+    # rate-limit (api-docs.mdc: historical 5/сек).
+    # Горизонт назад, в пределах которого пробуем REST-досверку (< 7 дней —
+    # лимит окна Bybit get_closed_pnl: endTime−startTime ≤ 7д).
+    reconcile_rest_horizon_sec: float = Field(default=7 * 24 * 3600 - 3600)
+    # Дать WS-пути шанс перед REST (свежие закрытия досверяются по стриму).
+    reconcile_rest_grace_sec: float = Field(default=60.0)
+    # Не ретраить одну и ту же сделку чаще, чем раз в N сек.
+    reconcile_rest_retry_sec: float = Field(default=300.0)
+    # Бюджет REST-запросов реконсиляции на цикл (под rate-limit).
+    reconcile_rest_max_per_cycle: int = Field(default=3)
+    # Полу-окно (сек) вокруг ts_close для запроса closed_pnl: матчим запись в
+    # [ts_close−w, ts_close+w]. Узко = надёжный матч на 1-й странице + меньше
+    # риск схватить чужую сделку того же qty (порча статы).
+    reconcile_rest_window_sec: float = Field(default=180.0)
     # Окно (сек) для оценки разворота CVD (лента качнулась в сторону сделки).
     momentum_window_sec: float = Field(default=30.0)
     # Минимум сделок в поздней половине окна для валидной CVD-дивергенции
