@@ -431,21 +431,23 @@ class Executor:
     def _rest_finalize(self, tr, ts_close: float) -> bool:
         """REST-досверка одной provisional-сделки через get_closed_pnl.
 
-        Узкое СИММЕТРИЧНОЕ окно [ts_close−window, ts_close+window]: запись о
-        закрытии лежит у ts_close, поэтому узкое окно (а) надёжно ловит её на
-        1-й странице даже для старой сделки, (б) минимизирует число чужих
-        записей того же qty → меньше риск НЕВЕРНОГО матча (порча статы). Матч
-        внутри closed_pnl_detail: closedSize≈qty (tol 2%) + ближайший createdTime
-        к near_ms. Нет совпадения → None → НЕ финализируем (не выдумываем).
-        Возвращает True только если реально записали биржевой net."""
+        Матч по ОТПЕЧАТКУ: ``avgEntryPrice == наш entry`` (+ closedSize≈qty).
+        ``ts_close`` у restart-сирот ВРЁТ (момент обнаружения после рестарта, а
+        реальное закрытие было раньше — видели до −274 мин), поэтому окно берём
+        широкое [ts_open, ts_close+window] с пагинацией, а нужную запись отбирает
+        entry_price независимо от времени. Неоднозначность/нет совпадения внутри
+        closed_pnl_detail → None → НЕ финализируем (не выдумываем — порча статы
+        хуже пропуска). Возвращает True только если записали биржевой net."""
         if self._client is None:
             return False
         window = getattr(self._cfg, "reconcile_rest_window_sec", 180.0)
+        ts_open = getattr(tr, "ts_open", None) or ts_close
         near = int(ts_close * 1000)
         try:
             d = self._client.closed_pnl_detail(
-                tr.symbol, qty=tr.qty, near_ms=near,
-                since_ms=int((ts_close - window) * 1000),
+                tr.symbol, qty=tr.qty, entry_price=getattr(tr, "entry", None),
+                near_ms=near,
+                since_ms=int((ts_open - 60.0) * 1000),
                 until_ms=int((ts_close + window) * 1000))
         except Exception:
             log.exception("reconcile REST closed_pnl #%d %s failed",

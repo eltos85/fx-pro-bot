@@ -291,36 +291,58 @@ class ScalpBybitClient:
     def closed_pnl_detail(self, symbol: str, *, order_id: str | None = None,
                           qty: float | None = None, since_ms: int | None = None,
                           near_ms: int | None = None,
-                          until_ms: int | None = None) -> dict | None:
+                          until_ms: int | None = None,
+                          entry_price: float | None = None,
+                          entry_tol: float = 1e-5,
+                          max_pages: int = 10) -> dict | None:
         """Запись о закрытии ИМЕННО нашей сделки: {pnl, exit, order_id, created}.
 
         Bybit ``closedPnl`` уже net (= cumExitValue − cumEntryValue − openFee
         − closeFee, проверено по офдоку). Ответ get_closed_pnl НЕ содержит
-        orderLinkId — матчим по ``orderId`` закрывающего ордера; для биржевых
-        TP/SL (наш orderId неизвестен) — по ``closedSize`` ≈ qty, выбирая запись
-        с ``createdTime`` ближайшим к near_ms (моменту нашего закрытия) — так
-        несколько сделок одного размера по символу не путаются.
-        items[0]-фолбэк УБРАН (рассинхрон БД↔выписка, BUILDLOG 2026-05-30).
+        orderLinkId и не фильтруется по нашему id; ``orderId`` в записи — это id
+        ЗАКРЫВАЮЩЕГО ордера (для биржевых TP/SL его генерит биржа, мы узнаём его
+        только из realtime-WS, которого при рестарте не было). Поэтому для
+        restart-сирот матчим по «отпечатку» сделки:
+
+        • **entry_price + qty (приоритет)** — ``avgEntryPrice`` уникален у каждой
+          сделки (проверено: наш entry == биржевой avgEntryPrice точь-в-точь).
+          Жёсткий допуск ``entry_tol`` отсекает чужие сделки того же размера
+          (видели коллизию на 0.004%). НЕОДНОЗНАЧНОСТЬ (>1 кандидата в допуске) →
+          возвращаем None (не выдумываем — порча статы хуже пропуска).
+        • orderId — если знаем (наш reduce-only close).
+        • qty + ближайший createdTime — legacy-фолбэк, когда entry_price не задан.
+
+        ``ts_close`` у сирот ВРЁТ (= момент обнаружения после рестарта, не реальное
+        закрытие), поэтому окно берём широкое [since=ts_open, until=ts_close+w] с
+        пагинацией; entry_price отбирает нужную запись независимо от времени.
+        Bybit: endTime − startTime ≤ 7 дней.
         Источник: https://bybit-exchange.github.io/docs/v5/position/close-pnl
         """
-        params: dict = {"category": self._category, "symbol": symbol, "limit": 50}
+        base: dict = {"category": self._category, "symbol": symbol, "limit": 100}
         if since_ms is not None:
-            # небольшой запас назад: createdTime закрытия может чуть отставать
-            params["startTime"] = int(since_ms - 5000)
+            base["startTime"] = int(since_ms - 5000)
         if until_ms is not None:
-            # Тайтовое окно вокруг закрытия: get_closed_pnl отдаёт desc-страницы
-            # по ≤50 записей БЕЗ пагинации здесь. При forward-окне в 7 дней (только
-            # startTime) для СТАРОЙ сделки наша запись уезжает на 2-ю+ страницу и
-            # не находится. endTime фиксирует окно [since, until] → запись на стр.1.
-            # Bybit: endTime − startTime ≤ 7 дней.
-            # https://bybit-exchange.github.io/docs/v5/position/close-pnl
-            params["endTime"] = int(until_ms)
-        try:
-            resp = self._session.get_closed_pnl(**params)
-        except Exception:
-            log.exception("get_closed_pnl %s failed", symbol)
-            return None
-        items = resp.get("result", {}).get("list", []) or []
+            base["endTime"] = int(until_ms)
+        # Bybit-лимит окна: endTime − startTime ≤ 7д. Подрезаем startTime.
+        if "startTime" in base and "endTime" in base:
+            min_start = base["endTime"] - (7 * 24 * 3600 - 3600) * 1000
+            base["startTime"] = max(base["startTime"], min_start)
+        items: list = []
+        cursor = None
+        for _ in range(max(1, max_pages)):
+            params = dict(base)
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                resp = self._session.get_closed_pnl(**params)
+            except Exception:
+                log.exception("get_closed_pnl %s failed", symbol)
+                return None
+            lst = resp.get("result", {}).get("list", []) or []
+            items += lst
+            cursor = resp.get("result", {}).get("nextPageCursor")
+            if not cursor or not lst:
+                break
         if not items:
             return None
         chosen = None
@@ -328,8 +350,26 @@ class ScalpBybitClient:
         if order_id:
             chosen = next((it for it in items
                            if str(it.get("orderId", "")) == order_id), None)
-        # 2) матч по размеру закрытия (closedSize ≈ qty), ближайший к near_ms
-        if chosen is None and qty and qty > 0:
+        # 2) отпечаток: avgEntryPrice == наш entry (+ closedSize ≈ qty)
+        if chosen is None and entry_price and entry_price > 0 and qty and qty > 0:
+            tol_q = max(qty * 0.02, 1e-9)
+            cands = []
+            for it in items:
+                cs = _as_float(it.get("closedSize"))
+                ep = _as_float(it.get("avgEntryPrice"))
+                if cs is None or ep is None or abs(cs - qty) > tol_q:
+                    continue
+                if abs(ep - entry_price) / entry_price <= entry_tol:
+                    cands.append(it)
+            if len(cands) == 1:
+                chosen = cands[0]
+            elif len(cands) > 1:
+                log.warning("closed_pnl %s: неоднозначность entry=%s qty=%s "
+                            "(%d кандидатов в допуске) — НЕ атрибутирую",
+                            symbol, entry_price, qty, len(cands))
+                return None
+        # 3) legacy-фолбэк (entry_price не задан): qty + ближайший createdTime
+        if chosen is None and entry_price is None and qty and qty > 0:
             tol = max(qty * 0.02, 1e-9)
             cands = [it for it in items
                      if (cs := _as_float(it.get("closedSize"))) is not None
@@ -339,10 +379,11 @@ class ScalpBybitClient:
                     chosen = min(cands, key=lambda it: abs(
                         (_as_float(it.get("createdTime")) or 0) - near_ms))
                 else:
-                    chosen = cands[0]  # самая свежая (list desc по времени)
+                    chosen = cands[0]
         if chosen is None:
-            log.warning("closed_pnl %s: нет совпадения (order_id=%s qty=%s) — "
-                        "не атрибутирую", symbol, order_id, qty)
+            log.warning("closed_pnl %s: нет совпадения (order_id=%s qty=%s "
+                        "entry=%s) — не атрибутирую", symbol, order_id, qty,
+                        entry_price)
             return None
         return {
             "pnl": _as_float(chosen.get("closedPnl")),
@@ -353,12 +394,12 @@ class ScalpBybitClient:
 
     def closed_pnl(self, symbol: str, *, order_id: str | None = None,
                    qty: float | None = None, since_ms: int | None = None,
-                   near_ms: int | None = None,
-                   until_ms: int | None = None) -> float | None:
+                   near_ms: int | None = None, until_ms: int | None = None,
+                   entry_price: float | None = None) -> float | None:
         """net closedPnl нашей сделки (тонкая обёртка над closed_pnl_detail)."""
         d = self.closed_pnl_detail(symbol, order_id=order_id, qty=qty,
                                    since_ms=since_ms, near_ms=near_ms,
-                                   until_ms=until_ms)
+                                   until_ms=until_ms, entry_price=entry_price)
         return d["pnl"] if d else None
 
     def _submit(self, params: dict) -> dict:

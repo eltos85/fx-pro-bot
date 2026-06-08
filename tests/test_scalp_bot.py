@@ -624,7 +624,8 @@ class _FakeClosedPnlClient:
         self.calls = 0
 
     def closed_pnl_detail(self, symbol, *, order_id=None, qty=None,
-                          since_ms=None, near_ms=None, until_ms=None):
+                          since_ms=None, near_ms=None, until_ms=None,
+                          entry_price=None, entry_tol=1e-5, max_pages=10):
         self.calls += 1
         return self.by_qty.get(qty)
 
@@ -758,6 +759,79 @@ def test_reconcile_rest_keeps_tp_hit_when_positive(tmp_path):
     ex.reconcile()
     assert _close_reason(db, tid) == "tp_hit"
     db.close()
+
+
+# ─── матчер closed_pnl_detail по avgEntryPrice (v0.18.13) ──────────────────
+class _FakeSession:
+    """Заглушка pybit HTTP: get_closed_pnl отдаёт заранее заданные страницы."""
+
+    def __init__(self, pages):
+        self.pages = pages          # list[list[dict]]
+        self.calls = 0
+
+    def get_closed_pnl(self, **params):
+        cur = int(params.get("cursor", "0") or "0")
+        page = self.pages[cur] if cur < len(self.pages) else []
+        self.calls += 1
+        nxt = str(cur + 1) if cur + 1 < len(self.pages) else ""
+        return {"result": {"list": page, "nextPageCursor": nxt}}
+
+
+def _mk_client(pages):
+    from scalp_bot.trading.client import ScalpBybitClient
+    cl = ScalpBybitClient.__new__(ScalpBybitClient)
+    cl._session = _FakeSession(pages)
+    cl._category = "linear"
+    cl._instr = {}
+    return cl
+
+
+def _rec(entry, size, pnl, exit_px, created=0):
+    return {"avgEntryPrice": str(entry), "closedSize": str(size),
+            "closedPnl": str(pnl), "avgExitPrice": str(exit_px),
+            "orderId": "oid", "createdTime": str(created)}
+
+
+def test_closed_pnl_detail_entry_fingerprint_picks_exact():
+    """Среди same-qty кандидатов берём ТОЧНОЕ совпадение avgEntryPrice (кейс
+    #1194: чужая сделка в 0.004% не должна перебить нашу)."""
+    pages = [[
+        _rec(60836.90, 0.054, -12.47, 60790.0, 100),   # наш отпечаток
+        _rec(60839.40, 0.054, -12.73, 60792.0, 200),   # чужая, Δ0.004%
+    ]]
+    cl = _mk_client(pages)
+    d = cl.closed_pnl_detail("BTCUSDT", qty=0.054, entry_price=60836.90)
+    assert d is not None and d["pnl"] == pytest.approx(-12.47)
+
+
+def test_closed_pnl_detail_ambiguous_refuses():
+    """Два кандидата с одинаковой ценой входа (истинная неоднозначность) →
+    None (не выдумываем, порча статы хуже пропуска)."""
+    pages = [[
+        _rec(2000.0, 1.0, 5.0, 2010.0, 100),
+        _rec(2000.0, 1.0, -7.0, 1990.0, 200),
+    ]]
+    cl = _mk_client(pages)
+    assert cl.closed_pnl_detail("ETHUSDT", qty=1.0, entry_price=2000.0) is None
+
+
+def test_closed_pnl_detail_paginates_to_find_record():
+    """Нужная запись на 2-й странице — пагинация её достаёт."""
+    pages = [
+        [_rec(99.0, 10.0, 1.0, 100.0, 100)],            # чужая на стр.1
+        [_rec(50.0, 10.0, -3.5, 49.0, 50)],             # наш на стр.2
+    ]
+    cl = _mk_client(pages)
+    d = cl.closed_pnl_detail("XRPUSDT", qty=10.0, entry_price=50.0)
+    assert d is not None and d["pnl"] == pytest.approx(-3.5)
+    assert cl._session.calls == 2
+
+
+def test_closed_pnl_detail_no_entry_match_returns_none():
+    """entry_price задан, но точного совпадения нет → None (а не чужая запись)."""
+    pages = [[_rec(70.0, 10.0, 1.0, 71.0, 100)]]
+    cl = _mk_client(pages)
+    assert cl.closed_pnl_detail("SOLUSDT", qty=10.0, entry_price=66.0) is None
 
 
 # ─── fee-aware дискреционный выход sweep_fade (через should_exit) ───────────

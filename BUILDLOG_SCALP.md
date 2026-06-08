@@ -6,6 +6,42 @@
 
 ## 2026-06-08
 
+### v0.18.13 — надёжный матчер reconcile по avgEntryPrice (restart-сироты)
+`<hash>`
+
+**Проблема**: 6 provisional-сделок (restart-сироты) не сводились REST-ом. Биржа
+закрыла их по bracket TP/SL пока бот лежал; `ts_close` записан позже (момент
+обнаружения после рестарта) — реальное закрытие было раньше на 7…274 мин.
+Узкое окно ±180с вокруг `ts_close` (v0.18.11) их не находило.
+
+**Почему не «по id»** (проверено по доке Bybit): закрывающий ордер генерит
+БИРЖА, его id приходит только в realtime-WS (который при рестарте пропущен).
+`get_closed_pnl` не фильтруется по нашему id; `execution/list` фильтруется, но
+[НЕ содержит execPnl](https://bybit-exchange.github.io/docs/v5/order/execution)
+(realized PnL только в WS-потоке) и по нашему orderLinkId находит лишь ВХОД
+(у закрывающего филла orderLinkId="", подтверждено примером в офдоке WS). WS не
+переигрывает пропущенное при реконнекте ([ws/connect](https://bybit-exchange.github.io/docs/v5/ws/connect):
+только «reconnect ASAP»). Значит для пропущенных закрытий единственный путь —
+REST `closed-pnl`, а ключ матча — отпечаток сделки.
+
+**Решение**: матч по `avgEntryPrice == наш entry` (+ closedSize≈qty). Проверено
+на реальных данных: наш `entry` == биржевой `avgEntryPrice` точь-в-точь (Δ0.0000%),
+а чужие сделки того же qty отстоят на 0.06–1.1% (была и коллизия 0.004% —
+отдельная сделка). Жёсткий допуск `entry_tol=1e-5` отсекает чужих; >1 кандидата
+в допуске → None (НЕ выдумываем). Окно расширено до [ts_open, ts_close+w] с
+пагинацией (`max_pages`), т.к. `ts_close` у сирот врёт — entry_price отбирает
+запись независимо от времени.
+
+**Аудит сегодняшних правок (по запросу)**: трейд-по-трейд сверка БД↔Bybit за
+05-08–08-06 (`avgEntryPrice+qty`): `db_pnl == closedPnl` до цента у всех
+finalized (Δ=0.00), кроме 2 ещё-provisional и 2 на <$1 (комиссия/округление).
+**v0.18.11 НЕ приписал неверный PnL** — чужие записи не хватал. Разрыв БД−Bybit
+$16 = разница охвата (фильтр restart_flat/entry_*) + provisional-оценки, не порча.
+
+**Файлы:** `trading/client.py` (`closed_pnl_detail`: +entry_price/пагинация/
+ambiguity-refuse), `trading/executor.py` (`_rest_finalize`: окно от ts_open +
+entry_price), `tests/test_scalp_bot.py` (+4 теста). 155/155 зелёные.
+
 ### v0.18.12 — фикс залипшего close_reason (tp_hit при реальном минусе)
 `<hash>`
 
