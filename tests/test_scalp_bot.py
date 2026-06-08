@@ -1013,6 +1013,7 @@ from scalp_bot.analysis.strategies import (  # noqa: E402
     build_strategies,
     detect_wall,
     near_round,
+    near_round_hier,
     resolve,
 )
 from scalp_bot.data.universe import rank_universe  # noqa: E402
@@ -1201,6 +1202,8 @@ def test_executor_exit_dispatch_unknown_strategy_returns_none():
 def _density_cfg(**over):
     base = dict(
         density_wall_mult=8.0, density_round_frac=0.001, density_persist_sec=10.0,
+        # v0.18.15: bounce persist == base в тестах (быстро); прод 1200с
+        density_bounce_persist_sec=10.0,
         density_absorb_frac=0.30, density_absorb_window_sec=10.0,
         density_near_bps=8.0, density_min_wall_usd=0.0,
         # rolling-baseline (v0.9.0): high min_samples → тесты на fallback
@@ -1342,6 +1345,71 @@ def test_density_should_exit_respects_min_age():
     assert st.should_exit(tr, snap_gone, now=5.0) is None
 
 
+# ─── v0.18.15: near_round-демоция + пер-стратегийный persist (density_bounce) ──
+
+def _non_round_bid_wall():
+    """bid-стена у НЕ-круглой цены 103.7 (near_round_hier → None)."""
+    bids = [(103.7, 50.0), (103.69, 1), (103.68, 1), (103.67, 1), (103.66, 1)]
+    asks = [(103.80, 1), (103.81, 1), (103.82, 1), (103.83, 1), (103.84, 1)]
+    return bids, asks
+
+
+def test_near_round_hier_recognizes_half_levels():
+    """v0.18.15: иерархический детектор — 00 и 50 уровни (Bloomfield-Chin-Craig/
+    Osler), в отличие от строгого near_round (только 00). Не ¼ (дискриминативность)."""
+    assert near_round_hier(100.0, 0.001) == "round00"     # шаг 10 → 100 = 00
+    assert near_round_hier(105.0, 0.001) == "round50"     # ½-шаг 5 → 105, не 00
+    assert near_round_hier(103.7, 0.001) is None          # ни 00, ни 50
+    # дорогая монета: ½-уровень $63 500 ловится (старый near_round видел лишь $1000)
+    assert near_round(63500.0, 0.001) is False            # шаг 1000 → ближ. 64000
+    assert near_round_hier(63500.0, 0.001) == "round50"   # ½-шаг 500 → 63500
+
+
+def test_density_bounce_fires_on_non_round_wall():
+    """v0.18.15: near_round БОЛЬШЕ НЕ ГЕЙТ — стена у НЕ-круглой цены всё равно
+    даёт вход (density+persist обязательны, round — опц. бонус). reasons без round,
+    score=2. Практики гейтят размером+persist, не круглым уровнем."""
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _non_round_bid_wall()
+    snap = _snap([], last_price=103.75, best_bid=103.70, best_ask=103.80,
+                 bids=bids, asks=asks)
+    assert st.update(snap, now=0.0) is None        # ещё не выстояла
+    sig = st.update(snap, now=11.0)                # выстояла ≥10с
+    assert sig is not None and sig.side == "long"
+    assert sig.reasons == ["density", "persist"]   # round НЕТ (не круглая)
+    assert sig.score == 2
+
+
+def test_density_bounce_round_adds_bonus_reason():
+    """v0.18.15: круглый уровень — confluence-бонус (+reason, score 2→3),
+    а не обязательное условие."""
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()             # стена у 100.0 (круглая)
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    sig = st.update(snap, now=11.0)
+    assert sig is not None
+    assert "round00" in sig.reasons and "density" in sig.reasons
+    assert sig.score == 3
+
+
+def test_density_bounce_uses_own_persist_window():
+    """v0.18.15: bounce уважает density_bounce_persist_sec, а НЕ базовый
+    density_persist_sec (изоляция от density_break). Окно 30с: при t=11 (>10 базы,
+    <30 bounce) входа нет; при t=31 — есть."""
+    cfg = _density_cfg(density_bounce_persist_sec=30.0, density_persist_sec=10.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    assert st.update(snap, now=11.0) is None       # базовое окно прошло, bounce нет
+    assert st.update(snap, now=31.0) is not None   # bounce-окно (30с) выстояно
+
+
 # ─── density_break (Фаза 3): выстоявшая стена пробита → прострел (momentum) ──
 
 def _ask_wall_book(wall_size=50.0):
@@ -1414,6 +1482,37 @@ def test_density_break_no_fire_when_price_not_broken():
     snap = _snap([], last_price=99.96, best_bid=99.95, best_ask=99.97,
                  bids=bids, asks=flat_asks)              # стены нет, но цена < 100.0
     assert st.update(snap, now=16.0) is None
+
+
+def test_density_break_still_gates_on_near_round():
+    """Guard v0.18.15: демоция near_round коснулась ТОЛЬКО density_bounce.
+    density_break по-прежнему ГЕЙТит стену строгим near_round — НЕ-круглая стена
+    не отслеживается, пробой не торгуется (изоляция страт)."""
+    cfg = _density_cfg()
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    asks = [(103.7, 50.0), (103.71, 1), (103.72, 1), (103.73, 1), (103.74, 1)]
+    bids = [(103.65, 1), (103.64, 1), (103.63, 1), (103.62, 1), (103.61, 1)]
+    _persist_then(st, bids, asks, last=103.66)           # не-круглая → не трекается
+    flat_bids = [(103.99, 1), (103.98, 1), (103.97, 1), (103.96, 1), (103.95, 1)]
+    flat_asks = [(104.01, 1), (104.02, 1), (104.03, 1), (104.04, 1), (104.05, 1)]
+    snap = _snap([], last_price=104.0, best_bid=103.99, best_ask=104.01,
+                 bids=flat_bids, asks=flat_asks)
+    assert st.update(snap, now=16.0) is None
+
+
+def test_density_break_ignores_bounce_persist_window():
+    """Guard v0.18.15: density_break использует density_persist_sec, а НЕ
+    density_bounce_persist_sec. С огромным bounce-окном пробой всё равно срабатывает
+    по базовому окну (10с) — окна изолированы."""
+    cfg = _density_cfg(density_bounce_persist_sec=99999.0, density_persist_sec=10.0)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "long"
 
 
 def test_build_strategies_two():

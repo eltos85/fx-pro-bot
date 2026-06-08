@@ -6,6 +6,54 @@
 
 ## 2026-06-08
 
+### v0.18.15 — density_bounce: near_round гейт→бонус + persist 10с→20м
+`<hash>`
+
+**Запрос пользователя**: проверить синхронизацию density_bounce с подбором монет и
+сайзингом (как делали для sweep_fade); затем — полный пакет фиксов для density_bounce,
+с жёсткой изоляцией sweep_fade и density_break.
+
+**Аудит (C-05)**: density_bounce хронически голодает (n≈12 за всю историю). Две
+гипотезы проверены замерами:
+- `scripts/scalp_density_universe_audit.py` (`data/scalp_density_universe_audit.txt`):
+  гипотеза «вселенная под волатильность не даёт wall-rich монет» НЕ подтвердилась —
+  стены (высокий concentr: BTC 51×, ETH 10×) есть и на текущей вселенной, и на
+  мейджорах. wall-rich по `wall_rate` только памп-альты (range 47–54%, режет cap 20%).
+- `scripts/scalp_density_nearround_audit.py` (`data/scalp_density_nearround_audit.txt`):
+  **боттлнек = near_round, НЕ подбор монет**. Сырых стен (≥5×base) 267; через
+  `near_round ≤0.3%` проходит лишь 16.5% (≤1.0% — 77.5%); медиана дистанции стены до
+  круглого 0.48% ≫0.3%. Корень — слишком ГРУБЫЙ шаг круглости `10^(порядок−1)` (~1%):
+  BTC 100.6× стена на $63,752 → step=$1000 видит круглым лишь $64k; ETH 69× на $1682
+  → step=$100. Тонкие round-кластеры формула теряет.
+
+**Research (практики + канон)**: круглый уровень — **confluence-бонус, не гейт**
+(Bookmap order-flow, Secret Terminal density-scalping, QuantStrategy.io, DNS Research:
+гейт = размер+persist+absorption; стены работают и у prev-day H/L, VWAP, key-levels).
+Round-clustering **иерархичен**: Osler 2003 (NY Fed, TP/SL кластеры на round, 00
+сильнее); Bloomfield-Chin-Craig 2024 (integer ×3.73, «$100/$50/$1», 00>50>25). persist
+density-фейда у практиков 20–30+ мин (стена должна выстоять) — у нас был 10с.
+
+**Изменение (ТОЛЬКО density_bounce)**:
+1. `near_round` → `near_round_hier()` (00/50 иерархия): confluence-бонус (+reason,
+   score 2→3), НЕ гейт. Вход гейтится размером+persist+absorption, как у практиков.
+   ¼-уровень намеренно НЕ берём (на дорогих монетах теряет дискриминативность).
+2. `density_bounce_persist_sec=1200` (20м) вместо 10с — канон density-фейда.
+3. **Изоляция**: `density_break` остался на строгом `near_round` (гейт) + базовом
+   `density_persist_sec=10с` (пробой — момент, длинная пауза backwards вредит);
+   `sweep_fade` стен/round не использует. Guard-тесты фиксируют изоляцию.
+
+**Sample-size / no-data-fitting**: n=12 ≪ 100 — фикс СНИМАЕТ структурную блокировку
+(83.5% стен резалось), значения из КАНОНА, не из P&L-подгонки. Edge форвард-валидируется
+(WR/EXP на n→100). НЕ дизейбл/тюнинг под результат — UNBLOCK по research.
+
+**Файлы:** `config/settings.py` (`density_bounce_persist_sec`),
+`analysis/strategies.py` (`near_round_hier` + `DensityBounceStrategy`: демоция гейта,
+пер-стратегийный persist), `docker-compose.yml` (`SCALP_DENSITY_BOUNCE_PERSIST_SEC`),
+`tests/test_scalp_bot.py` (6 тестов: hier, non-round fires, round-бонус, own-persist,
+2 guard на изоляцию break), `STRATEGY_CONTRADICTIONS_SCALP.md` (C-05 → решено),
+`STRATEGY_RATIONALE_SCALP.md`. Артефакты: `scalp_density_universe_audit.py`,
+`scalp_density_nearround_audit.py`. Тесты зелёные (1137).
+
 ### v0.18.14 — sweep_fade SL-cooldown 300с→3600с (60м), пер-стратегийно
 `<hash>`
 

@@ -181,6 +181,42 @@ def near_round(price: float, frac: float) -> bool:
     return abs(price - nearest) <= frac * price
 
 
+def near_round_hier(price: float, frac: float) -> str | None:
+    """Иерархический round-детектор (v0.18.15) — БОНУС-фактор density_bounce.
+
+    Канон: лимитные ордера кластеризуются на круглых уровнях ИЕРАРХИЧНО — 00
+    сильнее 50 (Bloomfield-Chin-Craig 2024: integer-цены ×3.73 чаще случайного,
+    кластеры на «$100, $50 и $1 increments»; Osler 2003 NY Fed: TP-ордера сильно
+    кластеризуются на round). Базовый ``near_round`` распознаёт только 00-уровни
+    (шаг ≈1% цены) — для дорогих монет слишком груб (BTC видит лишь $1000-кратные,
+    пропуская реальные кластеры $63 500 = ½-уровень). Здесь добавлен ½-уровень.
+
+    Возвращает 'round00' (у полного шага), 'round50' (у половинного) или None.
+    ¼-уровень НЕ берём намеренно: на дорогих монетах его сетка делает «round»
+    почти всегда истинным (теряет дискриминативность) — это не подгонка, а
+    сохранение смысла «сильный round-кластер».
+
+    ВАЖНО: используется ТОЛЬКО density_bounce как confluence-бонус (не гейт).
+    density_break/sweep_fade продолжают использовать строгий ``near_round`` (или
+    не используют вовсе) — их логика не затронута.
+    """
+    if price <= 0:
+        return None
+    step = 10.0 ** (math.floor(math.log10(price)) - 1)
+    if step <= 0:
+        return None
+
+    def _near(s: float) -> bool:
+        nearest = round(price / s) * s
+        return abs(price - nearest) <= frac * price
+
+    if _near(step):
+        return "round00"
+    if _near(step / 2.0):
+        return "round50"
+    return None
+
+
 def _baseline_avg(sizes: list[float]) -> float:
     """Средний размер «обычного» уровня = mean без единственного максимума
     (Kalena: стена выражается как кратное СРЕДНЕГО, аномалию в базу не берём,
@@ -341,16 +377,25 @@ class DensityBounceStrategy:
         wall = detect_wall(levels, cfg.density_wall_mult, cfg.density_min_wall_usd,
                            baseline=base)
         cur = t[book_side]
-        if wall is None or not near_round(wall[0], cfg.density_round_frac):
+        if wall is None:
             t[book_side] = None
             return
         price, size = wall
+        # v0.18.15: near_round БОЛЬШЕ НЕ ГЕЙТ → демоция в score-бонус. Практики
+        # (Bookmap, Secret Terminal density-scalping, QuantStrategy.io) гейтят
+        # стену по РАЗМЕРУ + persist + absorption; круглый уровень — confluence,
+        # НЕ обязателен (стены бьют и у prev day H/L, и у key levels). Прежний
+        # AND-гейт near_round(0.3%) резал 83.5% реальных стен (замер C-05,
+        # data/scalp_density_nearround_audit.txt). round_tier — иерархический
+        # бонус (00>50, Bloomfield-Chin-Craig/Osler). ТОЛЬКО bounce; break не задет.
+        round_tier = near_round_hier(price, cfg.density_round_frac)
         if cur is None or abs(cur["price"] - price) > 1e-12:
             t[book_side] = {"price": price, "size0": size, "last_size": size,
-                            "first_seen": now}
+                            "first_seen": now, "round": round_tier}
             return
-        # та же стена: обновляем размер + проверяем поглощение (анти-спуфинг)
+        # та же стена: обновляем размер + round-бонус + проверяем поглощение
         cur["last_size"] = size
+        cur["round"] = round_tier
         eaten = (cur["size0"] - size) / cur["size0"] if cur["size0"] > 0 else 0.0
         if (eaten >= cfg.density_absorb_frac
                 and now - cur["first_seen"] <= cfg.density_absorb_window_sec):
@@ -370,16 +415,25 @@ class DensityBounceStrategy:
         self._update_track(sym, "ask", snap.asks, now)
         last = snap.last_price
         near = cfg.density_near_bps / 1e4
+        # v0.18.15: пер-стратегийный persist (канон density-фейда 20–30+ мин).
+        # fallback на базовый density_persist_sec для конфигов/тестов без поля.
+        persist = getattr(cfg, "density_bounce_persist_sec", None)
+        if persist is None:
+            persist = cfg.density_persist_sec
         # bid-стена → отскок ВВЕРХ (long); ask-стена → отскок ВНИЗ (short)
         for book_side, side in (("bid", "long"), ("ask", "short")):
             w = self._track[sym][book_side]
             if w is None:
                 continue
-            if now - w["first_seen"] < cfg.density_persist_sec:
-                continue  # ещё не выстояла (анти-спуфинг)
+            if now - w["first_seen"] < persist:
+                continue  # ещё не выстояла (анти-спуфинг, канон ≥20–30м)
             if abs(last - w["price"]) > near * w["price"]:
                 continue  # цена ещё не подошла к стене
-            reasons = ["density", "round", "persist"]
+            # density + persist — обязательные; round — confluence-бонус (v0.18.15,
+            # не гейт). score = число факторов: 2 (без round) / 3 (round00/50).
+            reasons = ["density", "persist"]
+            if w.get("round"):
+                reasons.append(w["round"])
             sig = build_signal(snap, side, w["price"], cfg, len(reasons), reasons)
             if sig is None:
                 continue  # fee-guard / risk не прошли
