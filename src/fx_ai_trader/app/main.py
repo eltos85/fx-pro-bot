@@ -604,6 +604,9 @@ def _run_full_cycle(
         ),
         lessons=format_lessons(lessons),
         event_trigger=format_event_trigger(event_triggers),
+        ng_mode_v2_enabled=settings.ng_mode_v2_enabled,
+        ng_mode_v2_event_hours=settings.ng_mode_v2_event_hours,
+        ng_mode_v2_max_uncertainty=settings.ng_mode_v2_max_uncertainty,
     )
 
     log.info(

@@ -234,6 +234,11 @@ services:
       AI_FX_TRADER_MAX_POSITIONS: ${AI_FX_TRADER_MAX_POSITIONS:-3}
       AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL: ${AI_FX_TRADER_MAX_POSITIONS_PER_SYMBOL:-3}
       AI_FX_TRADER_MAX_LOT_SIZE: ${AI_FX_TRADER_MAX_LOT_SIZE:-0.50}
+      # Optional NG-specific mode (off by default): loosen under-trading
+      # for NAT.GAS without changing XAUUSD/BRENT rules.
+      AI_FX_TRADER_NG_MODE_V2_ENABLED: ${AI_FX_TRADER_NG_MODE_V2_ENABLED:-false}
+      AI_FX_TRADER_NG_MODE_V2_EVENT_HOURS: ${AI_FX_TRADER_NG_MODE_V2_EVENT_HOURS:-36}
+      AI_FX_TRADER_NG_MODE_V2_MAX_UNCERTAINTY: ${AI_FX_TRADER_NG_MODE_V2_MAX_UNCERTAINTY:-0.55}
       # cTrader OAuth: те же creds что у Advisor (один demo-аккаунт).
       # Single source of truth — ctrader-token-service (см. сервис выше).
       # AI_FX_TRADER_CTRADER_TOKEN_PATH остаётся только как **fallback**

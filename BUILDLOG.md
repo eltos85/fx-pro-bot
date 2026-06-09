@@ -6,6 +6,31 @@
 
 ## 2026-06-09
 
+### feat(fx-ai-trader): NG_MODE_V2 флаг и NG-specific guard-профиль в full prompt
+
+`коммит при deploy`
+
+После аудита `fx_ai_trader` выявлено under-trading на волатильных окнах NG:
+HOLD часто срабатывал из-за комбинации event-risk + mixed-macro + pullback-only
+правил. Добавлен опциональный режим `NG_MODE_V2` (по умолчанию OFF), который
+включает отдельные правила только для `NG=F`:
+
+- Event-mode: в окне high-impact событий допускается минимальный размер
+  (`0.01 lot`) вместо жёсткого binary HOLD при качественном setup.
+- Trend-mode: continuation разрешён только после `break -> retest -> hold`
+  (анти-chase first spike).
+- Driver-priority для NG (storage surprise → weather anomaly → structure) и
+  отдельный uncertainty cap для continuation.
+
+Режим параметризован через env:
+`AI_FX_TRADER_NG_MODE_V2_ENABLED`,
+`AI_FX_TRADER_NG_MODE_V2_EVENT_HOURS`,
+`AI_FX_TRADER_NG_MODE_V2_MAX_UNCERTAINTY`.
+Изменения внесены в `settings`, `build_user_prompt`, `app/main`,
+`docker-compose.yml` и `.env.example`.
+
+**Файлы:** `src/fx_ai_trader/config/settings.py`, `src/fx_ai_trader/llm/prompts.py`, `src/fx_ai_trader/app/main.py`, `docker-compose.yml`, `.env.example`
+
 ### feat(momentum-bot): активное сопровождение позиции (BE + partial + ATR trailing)
 
 `коммит при deploy`

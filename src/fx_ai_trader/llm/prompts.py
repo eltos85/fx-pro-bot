@@ -1319,6 +1319,9 @@ def build_user_prompt(
     recent_trades: str | None = None,
     lessons: str | None = None,
     event_trigger: str = "",
+    ng_mode_v2_enabled: bool = False,
+    ng_mode_v2_event_hours: int = 36,
+    ng_mode_v2_max_uncertainty: float = 0.55,
 ) -> str:
     """Full-cycle USER_PROMPT.
 
@@ -1366,6 +1369,26 @@ def build_user_prompt(
     # рынком. Плановый цикл → "" (блока нет). Нейтральная рамка задана
     # в format_event_trigger + EVENT TRIGGER секции SYSTEM_PROMPT.
     event_block = (f"{event_trigger}\n\n") if event_trigger else ""
+    ng_mode_block = ""
+    if ng_mode_v2_enabled:
+        ng_mode_block = (
+            "=== NG MODE V2 (targeted, NAT.GAS only) ===\n"
+            "Apply these rules ONLY to NG=F decisions:\n"
+            "1) Event-mode (next "
+            f"{max(1, int(ng_mode_v2_event_hours))}h to high-impact releases):\n"
+            "   do not force full-size hold/open binary. If setup quality is\n"
+            "   high, you may open MIN size (0.01 lot) instead of HOLD.\n"
+            "2) Trend-mode (outside event window): continuation entry is allowed\n"
+            "   only after break -> retest -> hold structure; avoid first-spike\n"
+            "   chasing.\n"
+            "3) Driver-priority for NG:\n"
+            "   a) fresh storage surprise, b) weather anomaly magnitude,\n"
+            "   c) price structure. If (a)+(b) align and sentiment is clean,\n"
+            "   continuation is permitted.\n"
+            "4) Uncertainty cap for NG continuation: aggregate_uncertainty <= "
+            f"{ng_mode_v2_max_uncertainty:.2f}.\n"
+            "These rules DO NOT modify XAUUSD/BRENT behavior.\n\n"
+        )
     # Task-sandwich (deepseekai.guide Practitioner's Guide, 2026-05-26
     # research artifact в BUILDLOG): повторяем task ПОСЛЕ длинного
     # context'а (история + market_context могут быть 2-4k tokens),
@@ -1374,6 +1397,7 @@ def build_user_prompt(
     return (
         f"{event_block}"
         f"{history_block}"
+        f"{ng_mode_block}"
         "Current market state, news, and your open positions:\n\n"
         f"{market_context}\n\n"
         "=== TASK RESTATEMENT ===\n"

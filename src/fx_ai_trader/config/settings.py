@@ -181,6 +181,20 @@ class AiFxTraderSettings(BaseSettings):
     max_lot_size: float = Field(
         default=0.50, validation_alias="AI_FX_TRADER_MAX_LOT_SIZE"
     )
+    # NG mode v2 (optional, off by default): targeted rules for NAT.GAS
+    # to reduce under-trading in high-volatility regimes without touching
+    # XAUUSD/BRENT behavior.
+    ng_mode_v2_enabled: bool = Field(
+        default=False, validation_alias="AI_FX_TRADER_NG_MODE_V2_ENABLED"
+    )
+    # Event window around EIA/major releases for NG-specific caution.
+    ng_mode_v2_event_hours: int = Field(
+        default=36, validation_alias="AI_FX_TRADER_NG_MODE_V2_EVENT_HOURS"
+    )
+    # Max aggregate uncertainty for NG continuation entries in mode v2.
+    ng_mode_v2_max_uncertainty: float = Field(
+        default=0.55, validation_alias="AI_FX_TRADER_NG_MODE_V2_MAX_UNCERTAINTY"
+    )
     # Per-symbol overrides ниже общих ограничений. JSON-словарь через ENV.
     # Цель — снизить экспозицию по конкретному инструменту без отключения.
     # Применение (NG=F): по правилу sample-size.mdc после 11 NG-трейдов
