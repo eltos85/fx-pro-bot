@@ -3,16 +3,17 @@ from __future__ import annotations
 import logging
 import signal
 import time
+from dataclasses import dataclass
 
 import yfinance as yf
 
 from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_momentum_bot.state.store import MomentumStore
-from fx_momentum_bot.strategy.momentum import build_signal
+from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
 from fx_pro_bot.trading.auth import TokenData
 from fx_pro_bot.trading.client import CTraderClient
 from fx_pro_bot.trading.executor import TradeExecutor
-from fx_pro_bot.trading.symbols import SymbolCache
+from fx_pro_bot.trading.symbols import SymbolCache, lots_to_volume
 from shared_oauth.token_client import (
     ServiceConfig,
     TokenServiceRejected,
@@ -24,6 +25,17 @@ from shared_oauth.token_client import (
 log = logging.getLogger("fx_momentum_bot")
 
 _shutdown = False
+
+
+@dataclass(slots=True)
+class ManagedPosition:
+    position_id: int
+    symbol: str
+    side: str  # "long" | "short"
+    volume: int
+    entry_price: float
+    stop_loss: float | None
+    digits: int
 
 
 def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
@@ -149,6 +161,232 @@ def _count_open_positions_for_symbols(executor: TradeExecutor, symbols: tuple[st
     return count
 
 
+def _r_multiple(side: str, *, entry_price: float, current_price: float, risk_price: float) -> float:
+    if risk_price <= 0:
+        return 0.0
+    if side == "long":
+        return (current_price - entry_price) / risk_price
+    return (entry_price - current_price) / risk_price
+
+
+def _calc_partial_close_volume(
+    *,
+    current_volume: int,
+    fraction: float,
+    step_volume: int,
+    min_volume: int,
+) -> int:
+    if current_volume <= 0 or fraction <= 0:
+        return 0
+    step = max(1, step_volume)
+    # Оставляем хотя бы min_volume, иначе частичное закрытие превращается в полный выход.
+    max_close = current_volume - max(min_volume, step)
+    if max_close < min_volume:
+        return 0
+    requested = int(round(current_volume * fraction))
+    close_volume = (requested // step) * step
+    if close_volume <= 0:
+        return 0
+    close_volume = min(close_volume, max_close)
+    close_volume = (close_volume // step) * step
+    if close_volume < min_volume:
+        return 0
+    return close_volume
+
+
+def _optional_float(obj: object, field: str) -> float | None:
+    try:
+        if hasattr(obj, "HasField") and obj.HasField(field):
+            raw = getattr(obj, field)
+            return float(raw) if raw else None
+    except Exception:
+        pass
+    raw = getattr(obj, field, 0)
+    return float(raw) if raw else None
+
+
+def _collect_managed_positions(
+    executor: TradeExecutor, symbols: tuple[str, ...]
+) -> dict[str, list[ManagedPosition]]:
+    sid_to_symbol: dict[int, str] = {}
+    symbol_meta: dict[str, tuple[int, int]] = {}  # symbol -> (digits, symbol_id)
+    for symbol in symbols:
+        info = executor.symbols.resolve_yfinance(symbol)
+        if info is None:
+            continue
+        sid_to_symbol[info.symbol_id] = symbol
+        symbol_meta[symbol] = (info.digits, info.symbol_id)
+
+    grouped: dict[str, list[ManagedPosition]] = {s: [] for s in symbols}
+    for pos in executor.get_open_positions():
+        td = getattr(pos, "tradeData", None)
+        if td is None:
+            continue
+        sid = getattr(td, "symbolId", None)
+        if sid is None:
+            continue
+        symbol = sid_to_symbol.get(int(sid))
+        if symbol is None:
+            continue
+        side_val = int(getattr(td, "tradeSide", 0) or 0)
+        side = "long" if side_val == 1 else "short"
+        volume = int(getattr(td, "volume", 0) or 0)
+        if volume <= 0:
+            continue
+        entry_price = float(getattr(pos, "price", 0) or 0)
+        if entry_price <= 0:
+            continue
+        stop_loss = _optional_float(pos, "stopLoss")
+        digits = symbol_meta.get(symbol, (5, 0))[0]
+        grouped[symbol].append(
+            ManagedPosition(
+                position_id=int(getattr(pos, "positionId", 0) or 0),
+                symbol=symbol,
+                side=side,
+                volume=volume,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                digits=digits,
+            )
+        )
+    return grouped
+
+
+def _manage_positions(
+    *,
+    executor: TradeExecutor,
+    store: MomentumStore,
+    settings: MomentumBotSettings,
+    signal_by_symbol: dict[str, MomentumSignal],
+    positions_by_symbol: dict[str, list[ManagedPosition]],
+) -> None:
+    # Trader-backed policy:
+    # - Van Tharp: transfer risk to break-even at +1R.
+    # - Linda Raschke discretionary pattern: partial take + runner.
+    # - Turtle/LeBeau ATR-family trailing to hold trend legs.
+    active_ids: set[int] = set()
+    for symbol, positions in positions_by_symbol.items():
+        signal_data = signal_by_symbol.get(symbol)
+        if signal_data is None:
+            continue
+        current_price = signal_data.last_close
+        atr = signal_data.atr
+        info = executor.symbols.resolve_yfinance(symbol)
+        if info is None:
+            continue
+
+        for pos in positions:
+            if pos.position_id <= 0:
+                continue
+            active_ids.add(pos.position_id)
+            state = store.get_position_state(pos.position_id)
+            risk_price = 0.0
+            if state and float(state.get("risk_price", 0) or 0) > 0:
+                risk_price = float(state["risk_price"])
+            elif pos.stop_loss is not None and pos.stop_loss > 0:
+                risk_price = abs(pos.entry_price - pos.stop_loss)
+            else:
+                risk_price = max(atr * settings.atr_stop_mult, 0.0)
+            if risk_price <= 0:
+                continue
+
+            if state is None:
+                store.upsert_position_state(
+                    broker_position_id=pos.position_id,
+                    symbol=symbol,
+                    entry_price=pos.entry_price,
+                    initial_volume=pos.volume,
+                    risk_price=risk_price,
+                )
+                state = store.get_position_state(pos.position_id)
+            r_now = _r_multiple(
+                pos.side,
+                entry_price=pos.entry_price,
+                current_price=current_price,
+                risk_price=risk_price,
+            )
+            break_even_done = bool((state or {}).get("break_even_done", 0))
+            partial_done = bool((state or {}).get("partial_done", 0))
+
+            if not break_even_done and r_now >= settings.break_even_r:
+                be_sl = round(pos.entry_price, pos.digits)
+                ok = executor.amend_sl_tp(
+                    pos.position_id,
+                    sl_price=be_sl,
+                    tp_price=None,
+                    yf_symbol=symbol,
+                    current_price=current_price,
+                )
+                if ok:
+                    store.set_break_even_done(pos.position_id)
+                    pos.stop_loss = be_sl
+                    log.info(
+                        "MANAGE %s #%d: BE set @ %.5f (R=%.2f)",
+                        symbol,
+                        pos.position_id,
+                        be_sl,
+                        r_now,
+                    )
+
+            if not partial_done and r_now >= settings.partial_take_r:
+                close_volume = _calc_partial_close_volume(
+                    current_volume=pos.volume,
+                    fraction=settings.partial_take_fraction,
+                    step_volume=info.step_volume,
+                    min_volume=info.min_volume,
+                )
+                if close_volume > 0:
+                    close_res = executor.close_position(pos.position_id, close_volume)
+                    if close_res.success:
+                        store.set_partial_done(pos.position_id)
+                        pos.volume = max(0, pos.volume - close_volume)
+                        log.info(
+                            "MANAGE %s #%d: partial close %d/%d @ R=%.2f",
+                            symbol,
+                            pos.position_id,
+                            close_volume,
+                            close_volume + pos.volume,
+                            r_now,
+                        )
+
+            if r_now >= settings.trailing_activate_r and atr > 0:
+                if pos.side == "long":
+                    candidate_sl = current_price - settings.trailing_atr_mult * atr
+                    if pos.stop_loss is not None:
+                        candidate_sl = max(candidate_sl, pos.stop_loss)
+                    candidate_sl = max(candidate_sl, pos.entry_price)
+                else:
+                    candidate_sl = current_price + settings.trailing_atr_mult * atr
+                    if pos.stop_loss is not None:
+                        candidate_sl = min(candidate_sl, pos.stop_loss)
+                    candidate_sl = min(candidate_sl, pos.entry_price)
+                candidate_sl = round(candidate_sl, pos.digits)
+                prev_sl = round(pos.stop_loss, pos.digits) if pos.stop_loss is not None else None
+                if prev_sl is not None and candidate_sl == prev_sl:
+                    continue
+                trail_ok = executor.amend_sl_tp(
+                    pos.position_id,
+                    sl_price=candidate_sl,
+                    tp_price=None,
+                    yf_symbol=symbol,
+                    current_price=current_price,
+                )
+                if trail_ok:
+                    pos.stop_loss = candidate_sl
+                    log.info(
+                        "MANAGE %s #%d: trail SL -> %.5f (R=%.2f, ATR=%.6f)",
+                        symbol,
+                        pos.position_id,
+                        candidate_sl,
+                        r_now,
+                        atr,
+                    )
+
+    cleaned = store.cleanup_position_state(active_ids)
+    if cleaned > 0:
+        log.info("Momentum state cleanup: removed %d stale positions", cleaned)
+
+
 def run() -> None:
     settings = MomentumBotSettings()
     logging.basicConfig(
@@ -174,11 +412,10 @@ def run() -> None:
 
     while not _shutdown:
         try:
-            if executor is not None:
-                open_count = _count_open_positions_for_symbols(executor, settings.symbols)
-            else:
-                open_count = 0
-
+            signal_by_symbol: dict[str, MomentumSignal] = {}
+            positions_by_symbol: dict[str, list[ManagedPosition]] = {}
+            if executor is not None and settings.position_management_enabled:
+                positions_by_symbol = _collect_managed_positions(executor, settings.symbols)
             for symbol in settings.symbols:
                 candles = _fetch_candles(symbol, settings.yfinance_interval, settings.yfinance_period)
                 signal_data = build_signal(
@@ -197,6 +434,25 @@ def run() -> None:
                         executed=False,
                         note="not_enough_data",
                     )
+                    continue
+                signal_by_symbol[symbol] = signal_data
+
+            if executor is not None and settings.position_management_enabled:
+                _manage_positions(
+                    executor=executor,
+                    store=store,
+                    settings=settings,
+                    signal_by_symbol=signal_by_symbol,
+                    positions_by_symbol=positions_by_symbol,
+                )
+            if executor is not None:
+                open_count = _count_open_positions_for_symbols(executor, settings.symbols)
+            else:
+                open_count = 0
+
+            for symbol in settings.symbols:
+                signal_data = signal_by_symbol.get(symbol)
+                if signal_data is None:
                     continue
 
                 last_direction = store.get_last_direction(symbol)
@@ -227,6 +483,19 @@ def run() -> None:
                         f"live_open:{'ok' if result.success else result.error}"
                     )
                     if result.success:
+                        risk_price = max(sl_distance, 0.0)
+                        if result.broker_position_id > 0 and risk_price > 0:
+                            store.upsert_position_state(
+                                broker_position_id=result.broker_position_id,
+                                symbol=symbol,
+                                entry_price=(
+                                    result.fill_price if result.fill_price > 0 else signal_data.last_close
+                                ),
+                                initial_volume=(
+                                    result.volume if result.volume > 0 else lots_to_volume(settings.lot_size)
+                                ),
+                                risk_price=risk_price,
+                            )
                         open_count += 1
                         log.info(
                             "OPEN %s %s lot=%.2f sl=%.6f tp=%.6f",

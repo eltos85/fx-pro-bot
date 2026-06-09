@@ -40,6 +40,20 @@ class MomentumStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS momentum_position_state (
+                    broker_position_id INTEGER PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    initial_volume INTEGER NOT NULL,
+                    risk_price REAL NOT NULL,
+                    break_even_done INTEGER NOT NULL DEFAULT 0,
+                    partial_done INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
             conn.commit()
 
     def get_last_direction(self, symbol: str) -> str | None:
@@ -116,4 +130,110 @@ class MomentumStore:
             "note",
         ]
         return [dict(zip(keys, row, strict=False)) for row in rows]
+
+    def upsert_position_state(
+        self,
+        *,
+        broker_position_id: int,
+        symbol: str,
+        entry_price: float,
+        initial_volume: int,
+        risk_price: float,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO momentum_position_state(
+                    broker_position_id, symbol, entry_price, initial_volume, risk_price,
+                    break_even_done, partial_done, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 0, 0, datetime('now'))
+                ON CONFLICT(broker_position_id) DO UPDATE SET
+                    symbol = excluded.symbol,
+                    entry_price = excluded.entry_price,
+                    initial_volume = CASE
+                        WHEN momentum_position_state.initial_volume > 0
+                        THEN momentum_position_state.initial_volume
+                        ELSE excluded.initial_volume
+                    END,
+                    risk_price = CASE
+                        WHEN momentum_position_state.risk_price > 0
+                        THEN momentum_position_state.risk_price
+                        ELSE excluded.risk_price
+                    END,
+                    updated_at = datetime('now')
+                """,
+                (
+                    broker_position_id,
+                    symbol,
+                    entry_price,
+                    initial_volume,
+                    risk_price,
+                ),
+            )
+            conn.commit()
+
+    def get_position_state(self, broker_position_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT broker_position_id, symbol, entry_price, initial_volume, risk_price,
+                       break_even_done, partial_done, updated_at
+                FROM momentum_position_state
+                WHERE broker_position_id = ?
+                """,
+                (broker_position_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        keys = [
+            "broker_position_id",
+            "symbol",
+            "entry_price",
+            "initial_volume",
+            "risk_price",
+            "break_even_done",
+            "partial_done",
+            "updated_at",
+        ]
+        return dict(zip(keys, row, strict=False))
+
+    def set_break_even_done(self, broker_position_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE momentum_position_state
+                SET break_even_done = 1, updated_at = datetime('now')
+                WHERE broker_position_id = ?
+                """,
+                (broker_position_id,),
+            )
+            conn.commit()
+
+    def set_partial_done(self, broker_position_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE momentum_position_state
+                SET partial_done = 1, updated_at = datetime('now')
+                WHERE broker_position_id = ?
+                """,
+                (broker_position_id,),
+            )
+            conn.commit()
+
+    def cleanup_position_state(self, active_position_ids: set[int]) -> int:
+        with self._connect() as conn:
+            if active_position_ids:
+                placeholders = ",".join("?" for _ in active_position_ids)
+                cur = conn.execute(
+                    f"""
+                    DELETE FROM momentum_position_state
+                    WHERE broker_position_id NOT IN ({placeholders})
+                    """,
+                    tuple(active_position_ids),
+                )
+            else:
+                cur = conn.execute("DELETE FROM momentum_position_state")
+            conn.commit()
+            return int(cur.rowcount or 0)
 

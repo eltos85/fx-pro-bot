@@ -57,6 +57,28 @@ class MomentumBotSettings(BaseSettings):
     order_label: str = Field(
         default="momentum-bot", validation_alias="MOMENTUM_BOT_ORDER_LABEL"
     )
+    # Position management (trader-backed):
+    # - Van Tharp: R-multiple discipline + break-even transfer.
+    # - Linda Raschke discretionary practice: partial profit + runner.
+    # - Turtle/LeBeau family: ATR-style trailing for trend persistence.
+    position_management_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_POSITION_MANAGEMENT_ENABLED"
+    )
+    break_even_r: float = Field(
+        default=1.0, validation_alias="MOMENTUM_BOT_BREAK_EVEN_R"
+    )
+    partial_take_r: float = Field(
+        default=1.5, validation_alias="MOMENTUM_BOT_PARTIAL_TAKE_R"
+    )
+    partial_take_fraction: float = Field(
+        default=0.5, validation_alias="MOMENTUM_BOT_PARTIAL_TAKE_FRACTION"
+    )
+    trailing_activate_r: float = Field(
+        default=1.5, validation_alias="MOMENTUM_BOT_TRAILING_ACTIVATE_R"
+    )
+    trailing_atr_mult: float = Field(
+        default=1.5, validation_alias="MOMENTUM_BOT_TRAILING_ATR_MULT"
+    )
 
     # Dedicated cTrader credentials for this bot only.
     ctrader_host_type: str = Field(

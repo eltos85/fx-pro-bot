@@ -4,6 +4,40 @@
 
 ---
 
+## 2026-06-09
+
+### feat(momentum-bot): активное сопровождение позиции (BE + partial + ATR trailing)
+
+`коммит при deploy`
+
+Добавлено позиционное сопровождение для `fx_momentum_bot`: после входа бот
+больше не «бросает» сделку только на broker SL/TP, а управляет риском и
+фиксацией прибыли по R-мультипликаторам и ATR-трейлингу.
+
+Трейдерская база (не интуиция):
+- Van K. Tharp — break-even/управление через R-multiple.
+- Linda Bradford Raschke — частичная фиксация + runner.
+- Turtle/LeBeau ATR-family — trailing по волатильности для трендовых хвостов.
+
+Реализация:
+- `+1R` → перенос SL в break-even;
+- `+1.5R` → частичное закрытие объёма (fraction, с учётом step/min volume);
+- `+1.5R+` → ATR trailing stop без ослабления уже установленного SL;
+- состояние сопровождения хранится в новой таблице
+  `momentum_position_state` (переживает рестарт, чистится при закрытии позиции).
+
+Параметры вынесены в env (`MOMENTUM_BOT_POSITION_MANAGEMENT_ENABLED`,
+`MOMENTUM_BOT_BREAK_EVEN_R`, `MOMENTUM_BOT_PARTIAL_TAKE_R`,
+`MOMENTUM_BOT_PARTIAL_TAKE_FRACTION`, `MOMENTUM_BOT_TRAILING_ACTIVATE_R`,
+`MOMENTUM_BOT_TRAILING_ATR_MULT`), добавлены в `docker-compose.yml` и
+`.env.example`.
+
+Тесты: добавлен `tests/test_fx_momentum_bot.py` (R-multiple и расчёт
+частичного объёма), прогон `python3 -m pytest tests/test_fx_momentum_bot.py -v`
+— pass.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`, `src/fx_momentum_bot/state/store.py`, `src/fx_momentum_bot/config/settings.py`, `docker-compose.yml`, `.env.example`, `tests/test_fx_momentum_bot.py`
+
 ## 2026-06-08
 
 ### fix(momentum-bot): retry на транзиентные сбои yfinance
