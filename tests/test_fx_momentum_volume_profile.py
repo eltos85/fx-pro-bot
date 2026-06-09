@@ -235,12 +235,14 @@ class _FakeSymbols:
 
 
 def _fake_pos(label: str, pos_id: int):
+    # label/comment живут в ProtoOATradeData, НЕ на самой ProtoOAPosition.
     return SimpleNamespace(
-        label=label,
         positionId=pos_id,
         price=4360.0,
         stopLoss=0.0,
-        tradeData=SimpleNamespace(symbolId=41, tradeSide=1, volume=10000),
+        tradeData=SimpleNamespace(
+            symbolId=41, tradeSide=1, volume=10000, label=label
+        ),
     )
 
 

@@ -2,6 +2,37 @@
 
 ## 2026-06-09
 
+### fix(client_adapter): читать label/symbolId/tradeSide/volume из ProtoOATradeData
+
+`<pending>`
+
+**Симптом:** `get_open_positions()` и `get_active_broker_position_ids()`
+всегда возвращали пусто. Маскировалось двумя бронями (grace-period +
+`get_closing_deal_for_position`), поэтому фантомных закрытий НЕ было, но:
+лог-шум «закрыта broker'ом сам — ищу closing deal» каждый цикл по каждой
+открытой позиции + лишние `get_deal_list` вызовы (нагрузка на historical
+rate-limit 5/sec, api-docs cTrader).
+
+**Причина:** адаптер читал `p.label`, `p.symbolId`, `p.tradeSide`,
+`p.volume` напрямую с `ProtoOAPosition`, а эти поля живут в
+`ProtoOAPosition.tradeData` (proto: `ProtoOAPosition.DESCRIPTOR.fields` =
+positionId, tradeData, price, stopLoss, takeProfit…; symbolId/volume/
+tradeSide/label — в `ProtoOATradeData`). `getattr(p,"label","")` → `""` →
+фильтр `"" != "ai-fx-trader"` отсекал всё. Это же объясняет «Spotware
+per-session reconcile caching bug» 2026-05-18 (commit 6b3665e) — был
+мисдиагноз, реальная причина = чтение не из tradeData.
+
+**Решение:** оба метода читают `p.tradeData.{label,symbolId,tradeSide,
+volume}`. Добавлен `TestAdapterReconcileParsing` (регрессия: фильтрация
+по `tradeData.label`, чужие momentum/advisor позиции не наши). Существующие
+broker_reconcile-тесты не затронуты (мокают `_FakeAdapter`). Сьют 1179 passed.
+
+**Связь:** найдено при разборе fx_momentum_bot (тот же баг — label читался
+с позиции, а не tradeData; см. BUILDLOG.md 2026-06-09).
+
+**Файлы:** `src/fx_ai_trader/trading/client_adapter.py`,
+`tests/test_fx_ai_trader.py`
+
 ### feat(prompt): BZ MOMENTUM MODE (flag-gated, OFF) — paper-эксперимент по breakout-входу на нефти
 
 `<pending>`

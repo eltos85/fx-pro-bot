@@ -6,6 +6,30 @@
 
 ## 2026-06-09
 
+### fix(momentum-bot): читать label из ProtoOATradeData (управление позициями не работало)
+
+`<pending>`
+
+**Симптом:** бот открыл позиции (USDJPY long, AUDUSD short и т.д.), но НЕ
+защищал прибыль — `momentum_position_state` пуст, ни одного `MANAGE`-лога
+(BE/трейлинг/частичное). Пользователь заметил: «бот должен следить за
+позициями, так ли это?» — оказалось, нет.
+
+**Причина (регрессия моего же label-фикса часом ранее):** изоляция читала
+`getattr(pos, "label", "")` с самой `ProtoOAPosition`, а в cTrader proto поля
+`label` там НЕТ — оно в `ProtoOAPosition.tradeData.label` (проверено:
+`ProtoOAPosition.DESCRIPTOR.fields` не содержит label; `ProtoOATradeData` —
+содержит). Итог: `getattr` всегда возвращал `""`, фильтр `"" != "momentum-bot"`
+отсекал ВСЕ позиции → `_collect_managed_positions`/`_count_...` пустые →
+управление не запускалось вообще.
+
+**Решение:** `_collect_managed_positions` и `_count_open_positions_for_symbols`
+читают label из `pos.tradeData.label`. Тесты-фейки исправлены (label в
+tradeData). Весь сьют 1179 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`,
+`tests/test_fx_momentum_volume_profile.py`
+
 ### fix(momentum-bot): broker-side label-изоляция позиций на общем счёте с fx_ai_trader
 
 `<pending>`

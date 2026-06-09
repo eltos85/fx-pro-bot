@@ -160,11 +160,12 @@ def _count_open_positions_for_symbols(
 
     count = 0
     for pos in open_positions:
+        trade_data = getattr(pos, "tradeData", None)
         # Изоляция по label: считаем ТОЛЬКО свои позиции, не чужих ботов
         # на общем счёте (напр. XAUUSD у fx_ai_trader label="ai-fx-trader").
-        if getattr(pos, "label", "") != label:
+        # label живёт в ProtoOATradeData, НЕ на самой ProtoOAPosition.
+        if getattr(trade_data, "label", "") != label:
             continue
-        trade_data = getattr(pos, "tradeData", None)
         sid = getattr(trade_data, "symbolId", None) if trade_data else None
         if sid in symbol_ids:
             count += 1
@@ -229,12 +230,13 @@ def _collect_managed_positions(
 
     grouped: dict[str, list[ManagedPosition]] = {s: [] for s in symbols}
     for pos in executor.get_open_positions():
-        # Изоляция по label: управляем ТОЛЬКО своими позициями (BE/трейлинг/
-        # partial), не трогаем чужих ботов на общем счёте (fx_ai_trader и т.п.).
-        if getattr(pos, "label", "") != label:
-            continue
         td = getattr(pos, "tradeData", None)
         if td is None:
+            continue
+        # Изоляция по label: управляем ТОЛЬКО своими позициями (BE/трейлинг/
+        # partial), не трогаем чужих ботов на общем счёте (fx_ai_trader и т.п.).
+        # label живёт в ProtoOATradeData, НЕ на самой ProtoOAPosition.
+        if getattr(td, "label", "") != label:
             continue
         sid = getattr(td, "symbolId", None)
         if sid is None:

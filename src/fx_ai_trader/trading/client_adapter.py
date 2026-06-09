@@ -358,14 +358,19 @@ class CTraderFxAdapter:
             return None
         out: list[BrokerPosition] = []
         for p in resp.position:
-            label = getattr(p, "label", "") or ""
+            # symbolId/tradeSide/volume/label живут в ProtoOATradeData,
+            # НЕ на самой ProtoOAPosition (proto: ProtoOAPosition.tradeData).
+            td = getattr(p, "tradeData", None)
+            label = (getattr(td, "label", "") or "") if td is not None else ""
             if label != self._settings.order_label:
                 continue
-            ct_name = self._symbols.get_by_id(p.symbolId)
-            ct_name_str = ct_name.name if ct_name else f"id={p.symbolId}"
+            sym_id = int(getattr(td, "symbolId", 0) or 0) if td is not None else 0
+            ct_name = self._symbols.get_by_id(sym_id)
+            ct_name_str = ct_name.name if ct_name else f"id={sym_id}"
             internal = _ctrader_to_internal(ct_name_str)
-            side_str = "BUY" if p.tradeSide == 1 else "SELL"  # ProtoOATradeSide
-            volume = int(getattr(p, "volume", 0) or 0)
+            trade_side = getattr(td, "tradeSide", 0) if td is not None else 0
+            side_str = "BUY" if trade_side == 1 else "SELL"  # ProtoOATradeSide
+            volume = int(getattr(td, "volume", 0) or 0) if td is not None else 0
             contract_size = ct_name.contract_size if ct_name else 100_000
             entry_price = float(getattr(p, "price", 0) or 0)
             sl = getattr(p, "stopLoss", 0)
@@ -515,7 +520,9 @@ class CTraderFxAdapter:
             return None
         out: set[int] = set()
         for p in resp.position:
-            label = getattr(p, "label", "") or ""
+            # label живёт в ProtoOATradeData, НЕ на самой ProtoOAPosition.
+            td = getattr(p, "tradeData", None)
+            label = (getattr(td, "label", "") or "") if td is not None else ""
             if label != self._settings.order_label:
                 continue
             out.add(int(p.positionId))

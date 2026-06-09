@@ -1519,3 +1519,75 @@ class TestPerSymbolLimits:
             )
         res = ks.check_can_open_position(symbol="XAUUSD", side="BUY")
         assert res.allowed
+
+
+# ─── adapter reconcile parsing (bug-fix 2026-06-09) ──────────────────────
+
+
+class TestAdapterReconcileParsing:
+    """label/symbolId/volume/tradeSide читаются из ProtoOATradeData, НЕ с
+    ProtoOAPosition. Баг 2026-06-09: getattr(p, "label") всегда "" →
+    get_open_positions()/get_active_broker_position_ids() возвращали пусто,
+    броня (closing-deal lookup) маскировала, но был лог-шум + лишние API.
+    """
+
+    def _adapter(self, positions):
+        from types import SimpleNamespace
+
+        from fx_ai_trader.trading.client_adapter import CTraderFxAdapter
+
+        a = object.__new__(CTraderFxAdapter)
+        a._settings = SimpleNamespace(order_label="ai-fx-trader")
+        a._client = SimpleNamespace(
+            reconcile=lambda: SimpleNamespace(position=positions)
+        )
+        a._symbols = SimpleNamespace(get_by_id=lambda sid: None)
+        return a
+
+    def test_active_ids_filters_by_tradedata_label(self):
+        from types import SimpleNamespace
+
+        positions = [
+            SimpleNamespace(
+                positionId=1,
+                tradeData=SimpleNamespace(
+                    label="ai-fx-trader", symbolId=41, tradeSide=1, volume=100
+                ),
+            ),
+            SimpleNamespace(  # чужой бот momentum — не наш
+                positionId=2,
+                tradeData=SimpleNamespace(
+                    label="momentum-bot", symbolId=41, tradeSide=1, volume=100
+                ),
+            ),
+            SimpleNamespace(  # advisor — не наш
+                positionId=3,
+                tradeData=SimpleNamespace(
+                    label="fx-pro-bot", symbolId=1, tradeSide=2, volume=100
+                ),
+            ),
+        ]
+        a = self._adapter(positions)
+        assert a.get_active_broker_position_ids() == {1}
+
+    def test_open_positions_reads_tradedata(self):
+        from types import SimpleNamespace
+
+        positions = [
+            SimpleNamespace(
+                positionId=7, price=2300.0, stopLoss=0, takeProfit=0,
+                tradeData=SimpleNamespace(
+                    label="ai-fx-trader", symbolId=41, tradeSide=1, volume=100
+                ),
+            ),
+            SimpleNamespace(
+                positionId=8, price=80.0, stopLoss=0, takeProfit=0,
+                tradeData=SimpleNamespace(
+                    label="momentum-bot", symbolId=99, tradeSide=2, volume=100
+                ),
+            ),
+        ]
+        a = self._adapter(positions)
+        res = a.get_open_positions()
+        assert [p.position_id for p in res] == [7]
+        assert res[0].side == "BUY"
