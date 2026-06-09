@@ -214,6 +214,65 @@ def test_vp_disabled_by_default() -> None:
     assert s.vp_max_trades_per_dir_per_day == 2
 
 
+def test_position_label_default() -> None:
+    s = MomentumBotSettings(_env_file=None)  # type: ignore[call-arg]
+    assert s.position_label == "momentum-bot"
+
+
+# ─── label isolation (общий счёт с fx_ai_trader) ────────────────────────
+
+from types import SimpleNamespace  # noqa: E402
+
+from fx_momentum_bot.app.main import (  # noqa: E402
+    _collect_managed_positions,
+    _count_open_positions_for_symbols,
+)
+
+
+class _FakeSymbols:
+    def resolve_yfinance(self, sym: str):  # noqa: ANN001
+        return SimpleNamespace(symbol_id=41, digits=2)  # GC=F → XAUUSD id=41
+
+
+def _fake_pos(label: str, pos_id: int):
+    return SimpleNamespace(
+        label=label,
+        positionId=pos_id,
+        price=4360.0,
+        stopLoss=0.0,
+        tradeData=SimpleNamespace(symbolId=41, tradeSide=1, volume=10000),
+    )
+
+
+class _FakeExecutor:
+    def __init__(self, positions: list) -> None:
+        self.symbols = _FakeSymbols()
+        self._positions = positions
+
+    def get_open_positions(self) -> list:
+        return self._positions
+
+
+def test_momentum_ignores_foreign_label_positions_in_management() -> None:
+    # На общем счёте: своя (momentum-bot) и чужая XAUUSD от AI (ai-fx-trader).
+    ex = _FakeExecutor([
+        _fake_pos("momentum-bot", 111),
+        _fake_pos("ai-fx-trader", 222),  # позиция fx_ai_trader — не трогать!
+    ])
+    grouped = _collect_managed_positions(ex, ("GC=F",), label="momentum-bot")  # type: ignore[arg-type]
+    ids = [p.position_id for p in grouped["GC=F"]]
+    assert ids == [111]  # позиция AI НЕ попала в управление
+
+
+def test_momentum_counts_only_own_label() -> None:
+    ex = _FakeExecutor([
+        _fake_pos("momentum-bot", 111),
+        _fake_pos("ai-fx-trader", 222),
+        _fake_pos("ai-fx-trader", 333),
+    ])
+    assert _count_open_positions_for_symbols(ex, ("GC=F",), label="momentum-bot") == 1  # type: ignore[arg-type]
+
+
 def test_all_symbols_unions_momentum_and_vp() -> None:
     s = MomentumBotSettings(
         _env_file=None,  # type: ignore[call-arg]

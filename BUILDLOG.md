@@ -6,6 +6,37 @@
 
 ## 2026-06-09
 
+### fix(momentum-bot): broker-side label-изоляция позиций на общем счёте с fx_ai_trader
+
+`<pending>`
+
+**Симптом/риск:** после включения VP-стратегии по золоту `fx_momentum_bot`
+торгует `GC=F → cTrader XAUUSD (id=41)` — тот же инструмент, что spot-золото
+`XAUUSD` у `fx_ai_trader`, и оба бота сидят на ОДНОМ демо-счёте
+(`ctid=46883073`). 
+
+**Причина:** `fx_ai_trader` фильтрует свои позиции по `label="ai-fx-trader"`
+(изолирован), а `fx_momentum_bot` через общий `TradeExecutor` фильтровал
+открытые позиции **только по symbolId**, без label, и его ордера получали
+дефолтный `label="fx-pro-bot"` (executor не пробрасывал label в
+`send_new_order`). Итог: momentum **подхватил бы XAUUSD-позиции AI** и
+применил к ним BE/трейлинг/partial-close. (Ущерба не было — на момент фикса
+у AI 0 открытых позиций, у momentum `momentum_position_state` пуст.)
+
+**Решение:**
+- `fx_pro_bot/trading/executor.py`: `open_position(..., label="fx-pro-bot")`
+  пробрасывается в `send_new_order` (дефолт сохраняет поведение advisor).
+- `fx_momentum_bot`: новый `position_label="momentum-bot"`, проставляется на
+  все ордера (momentum + VP); `_collect_managed_positions` и
+  `_count_open_positions_for_symbols` теперь фильтруют `pos.label ==
+  position_label` — управляем/считаем ТОЛЬКО свои позиции.
+- Тесты: foreign-label (ai-fx-trader) позиция не попадает в управление/счёт.
+  Весь сьют: 1177 passed.
+
+**Файлы:** `src/fx_pro_bot/trading/executor.py`,
+`src/fx_momentum_bot/config/settings.py`, `src/fx_momentum_bot/app/main.py`,
+`tests/test_fx_momentum_volume_profile.py`
+
 ### feat(momentum-bot): Volume Profile стратегия (gold-only, механическая, OFF by default)
 
 `<pending>`

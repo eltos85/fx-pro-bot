@@ -57,6 +57,15 @@ class MomentumBotSettings(BaseSettings):
     order_label: str = Field(
         default="momentum-bot", validation_alias="MOMENTUM_BOT_ORDER_LABEL"
     )
+    # Broker-side label (cTrader ProtoOAPosition.label) для ИЗОЛЯЦИИ позиций
+    # на общем счёте: и fx_momentum_bot, и fx_ai_trader сидят на одном
+    # cTrader-аккаунте. fx_ai_trader фильтрует свои позиции по label
+    # "ai-fx-trader"; momentum обязан помечать свои отдельным label и
+    # управлять/считать ТОЛЬКО их (иначе подхватит XAUUSD-сделки AI после
+    # включения VP-стратегии по золоту). См. BUILDLOG.md 2026-06-09.
+    position_label: str = Field(
+        default="momentum-bot", validation_alias="MOMENTUM_BOT_POSITION_LABEL"
+    )
     # Position management (trader-backed):
     # - Van Tharp: R-multiple discipline + break-even transfer.
     # - Linda Raschke discretionary practice: partial profit + runner.

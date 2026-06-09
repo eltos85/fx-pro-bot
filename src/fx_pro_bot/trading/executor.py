@@ -126,8 +126,14 @@ class TradeExecutor:
         lot_size: float | None = None,
         comment: str = "",
         entry_price_hint: float = 0.0,
+        label: str = "fx-pro-bot",
     ) -> OrderResult:
         """Открыть рыночную позицию с SL/TP.
+
+        ``label`` — broker-side метка позиции (cTrader ProtoOAPosition.label),
+        используется для изоляции позиций между ботами на ОДНОМ счёте. По
+        умолчанию "fx-pro-bot" (advisor). fx_momentum_bot передаёт свой
+        ("momentum-bot"), fx_ai_trader — "ai-fx-trader" (свой адаптер).
 
         cTrader API: relativeTakeProfit на MARKET ордерах ненадёжен
         (известная проблема, подтверждена на форуме cTrader).
@@ -164,6 +170,7 @@ class TradeExecutor:
                 relative_stop_loss=rel_sl,
                 relative_take_profit=None,
                 comment=comment or f"fx-pro-bot {yf_symbol} {direction}",
+                label=label,
             )
 
             pos = result.position if hasattr(result, "position") else None

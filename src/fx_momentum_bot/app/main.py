@@ -144,7 +144,9 @@ def _build_executor(settings: MomentumBotSettings) -> TradeExecutor | None:
     return executor
 
 
-def _count_open_positions_for_symbols(executor: TradeExecutor, symbols: tuple[str, ...]) -> int:
+def _count_open_positions_for_symbols(
+    executor: TradeExecutor, symbols: tuple[str, ...], *, label: str
+) -> int:
     try:
         open_positions = executor.get_open_positions()
     except Exception:
@@ -158,6 +160,10 @@ def _count_open_positions_for_symbols(executor: TradeExecutor, symbols: tuple[st
 
     count = 0
     for pos in open_positions:
+        # Изоляция по label: считаем ТОЛЬКО свои позиции, не чужих ботов
+        # на общем счёте (напр. XAUUSD у fx_ai_trader label="ai-fx-trader").
+        if getattr(pos, "label", "") != label:
+            continue
         trade_data = getattr(pos, "tradeData", None)
         sid = getattr(trade_data, "symbolId", None) if trade_data else None
         if sid in symbol_ids:
@@ -210,7 +216,7 @@ def _optional_float(obj: object, field: str) -> float | None:
 
 
 def _collect_managed_positions(
-    executor: TradeExecutor, symbols: tuple[str, ...]
+    executor: TradeExecutor, symbols: tuple[str, ...], *, label: str
 ) -> dict[str, list[ManagedPosition]]:
     sid_to_symbol: dict[int, str] = {}
     symbol_meta: dict[str, tuple[int, int]] = {}  # symbol -> (digits, symbol_id)
@@ -223,6 +229,10 @@ def _collect_managed_positions(
 
     grouped: dict[str, list[ManagedPosition]] = {s: [] for s in symbols}
     for pos in executor.get_open_positions():
+        # Изоляция по label: управляем ТОЛЬКО своими позициями (BE/трейлинг/
+        # partial), не трогаем чужих ботов на общем счёте (fx_ai_trader и т.п.).
+        if getattr(pos, "label", "") != label:
+            continue
         td = getattr(pos, "tradeData", None)
         if td is None:
             continue
@@ -412,6 +422,7 @@ def _open_vp_position(
         lot_size=settings.vp_lot_size,
         comment=settings.vp_order_label,
         entry_price_hint=sig.entry,
+        label=settings.position_label,
     )
     if not result.success:
         return False, f"vp_open:{result.error}"
@@ -525,7 +536,7 @@ def run() -> None:
             positions_by_symbol: dict[str, list[ManagedPosition]] = {}
             if executor is not None and settings.position_management_enabled:
                 positions_by_symbol = _collect_managed_positions(
-                    executor, settings.all_symbols
+                    executor, settings.all_symbols, label=settings.position_label
                 )
             for symbol in settings.all_symbols:
                 is_vp = symbol in vp_symbols
@@ -578,7 +589,7 @@ def run() -> None:
                 )
             if executor is not None:
                 open_count = _count_open_positions_for_symbols(
-                    executor, settings.all_symbols
+                    executor, settings.all_symbols, label=settings.position_label
                 )
             else:
                 open_count = 0
@@ -624,6 +635,7 @@ def run() -> None:
                         lot_size=settings.lot_size,
                         comment=settings.order_label,
                         entry_price_hint=signal_data.last_close,
+                        label=settings.position_label,
                     )
                     executed = bool(result.success)
                     note = (
