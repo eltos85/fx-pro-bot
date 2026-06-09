@@ -4,6 +4,44 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-09
+
+### v0.18.17 — per-symbol LONG-блок (ZEC longs off) — exposure-management
+`<hash>`
+
+**Запрос пользователя**: разбор «вины меньше лузов / низкий WR» по sweep_fade →
+выяснилось, что вся просадка = ZECUSDT; пользователь: «уберём ставки на лонг с ZEC».
+
+**Анализ (C-07, `scripts/scalp_wr_decomp.py` + `scalp_vol_wr.py`, filled n=108 с 06-05
+11:00)**: вся просадка sweep_fade = ZEC (−91.54); БЕЗ ZEC net +43.71 / WR 58.7% —
+канонический фейд. ZEC: **лонги −84.67 / WR 16.7%** (sl_hit 75%), шорты −6.87/WR50%.
+density_break зеркально: ZEC-лонги тоже катастрофа (общий long −107 vs short +30.62).
+Vol-ceiling гипотеза ОТВЕРГНУТА данными (vol↔WR r=−0.04; WLD высшая vol = высший WR 80%)
+— структурного дискриминатора у ZEC НЕТ. Направленная асимметрия (лонги ≫ хуже шортов)
+согласуется с research нашего DMI long-gate (контртренд-лонги на альт-перпах опаснее —
+ликвидационные каскады, Kalena).
+
+**Канон по «проблемной» монете**: блэклист по P&L = exposure-management, НЕ оптимизатор
+(tradequantix «excluding worst usually slightly worse — miss recovery»); порог n_min=50
+(GT-Score/Bailey&LdP), наше правило 100. ZEC long n≈25 < порога. → жёсткий блэклист
+инструмента не делаем; пользователь выбрал точечнее — резать ТОЛЬКО лонги ZEC (шорты ок).
+
+**Изменения**:
+- `no_long_symbols` (CSV, env `SCALP_NO_LONG_SYMBOLS`, прод-дефолт `ZECUSDT`) — на этих
+  символах ЛОНГ запрещён ВСЕМ стратегиям (включая density_break, у которого нет HTF/DMI-
+  гейтов), шорты разрешены. Гейт в `main.py` СРАЗУ после `resolve(candidates)`, до HTF/DMI
+  (ловит все страты). Property `ScalpSettings.no_long_list`.
+- **Природа**: reversible exposure-lever, НЕ валидированный эдж. [ОГРАНИЧЕНИЕ] фильтр
+  инструмент×сторона по P&L на малой выборке (sample-size.mdc) — сделано по явному запросу
+  пользователя (правило «не отключать без обсуждения» соблюдено); пересмотр при n≥100 по
+  ZEC или смене макрорежима.
+
+**Тесты**: +1 (`test_no_long_symbols_gate`: лонг по символу блок / шорт ок / не из списка
+не задет / CSV+upper-case; дефолт класса пуст). 177 passed.
+
+**Файлы**: `config/settings.py`, `app/main.py`, `docker-compose.yml`, `tests/test_scalp_bot.py`,
+`STRATEGY_CONTRADICTIONS_SCALP.md` (C-07), `STRATEGY_RATIONALE_SCALP.md`.
+
 ## 2026-06-08
 
 ### v0.18.16 — density_break: taker-вход + CVD-confirmation ложного пробоя

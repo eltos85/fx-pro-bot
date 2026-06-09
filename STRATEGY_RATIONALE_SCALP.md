@@ -295,6 +295,26 @@ sweep_fade (×2.0) и (б) точку отсчёта слежения за вы�
   - [research] Wilder 1978; современный крипто-стек использует ту же формулу
     (IBKR Campus; arxiv 2511.00665 2025).
 
+### Per-symbol LONG-блок (`no_long_symbols`) — ВСЕ стратегии (v0.18.17, C-07)
+
+- `no_long_symbols = ""` (прод-дефолт env `SCALP_NO_LONG_SYMBOLS=ZECUSDT`); property
+  `no_long_list`. На символах списка ЛОНГ запрещён ВСЕМ стратегиям (вкл. density_break,
+  у которого нет HTF/DMI-гейтов), шорты разрешены. Гейт в `main.py` сразу после
+  `resolve(candidates)`, до HTF/DMI.
+  - [замер — C-07, `scripts/scalp_wr_decomp.py`] вся просадка sweep_fade = ZEC (−91.54;
+    ex-ZEC +43.71/WR 58.7%); ZEC-лонги −84.67/WR 16.7% (sl_hit 75%), шорты −6.87/WR50%.
+    density_break ZEC/общий long −107 vs short +30.62. Vol-ceiling отвергнут (vol↔WR
+    r=−0.04, `scalp_vol_wr.py`) — структурного дискриминатора нет.
+  - [research — почему лонги, а не весь символ] асимметрия (лонги ≫ хуже шортов)
+    совпадает с DMI long-gate: контртренд-лонги на альт-перпах опаснее (ликвидационные
+    каскады жёстче на лонг-стороне, Kalena 2026). Блэклист по P&L = exposure-management,
+    НЕ оптимизатор (tradequantix); порог n_min=50/100 (GT-Score/Bailey&LdP).
+  - [ОГРАНИЧЕНИЕ / прагматика] это фильтр инструмент×сторона по P&L на МАЛОЙ выборке
+    (ZEC long n≈25 < 100) — reversible exposure-lever по ЯВНОМУ запросу пользователя
+    (sample-size.mdc: «не отключать без обсуждения» — обсуждение есть), НЕ валидированный
+    эдж. Пересмотр при n≥100 по ZEC или смене макрорежима (ZEC уже инвертировался
+    июнь-лонг→май-шорт — side-bias time-varying).
+
 ### Базовый SL/TP и выходы — где общее, помечено
 
 - Формула SL: `base_risk = (swept ∓ sl_buffer_bps), затем мин-R пол`; затем

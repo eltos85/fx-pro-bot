@@ -316,6 +316,11 @@ services:
       # Пины: v0.12.0 (канон-ревизия) — пусто. Убран ALLO: канон «избегать pump/
       # dump» (Volity/stoic.ai/dev.to). Пин был ручной override в обход фильтра.
       SCALP_UNIVERSE_PIN_SYMBOLS: ${SCALP_UNIVERSE_PIN_SYMBOLS:-}
+      # Per-symbol LONG-блок (v0.18.17, C-07): лонги на этих символах запрещены ВСЕМ
+      # стратегиям, шорты разрешены. ZEC: лонги тянут весь минус (sweep_fade −84.67/
+      # WR16.7%, density_break −107), шорты ок — согласуется с research DMI long-gate.
+      # exposure-management по запросу пользователя; reversible; пересмотр при n≥100.
+      SCALP_NO_LONG_SYMBOLS: ${SCALP_NO_LONG_SYMBOLS:-ZECUSDT}
       # density (v0.8.3): wall 8×→5× (8× недостижим на top-25 Bybit, density не
       # срабатывала — 0 сделок) + round-band 0.1%→0.3% (был слишком жёсткий гейт).
       SCALP_DENSITY_WALL_MULT: ${SCALP_DENSITY_WALL_MULT:-5.0}

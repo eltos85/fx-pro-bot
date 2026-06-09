@@ -248,6 +248,17 @@ def run() -> None:
                 sig = resolve(candidates)
                 if sig is None:
                     continue
+                # Per-symbol LONG-блок (v0.18.17, C-07): на символах из no_long_list
+                # запрещаем ЛОНГ ВСЕМ стратегиям (включая density_break, у которого
+                # нет HTF/DMI-гейтов), шорты разрешены. Exposure-management по запросу
+                # пользователя — ZEC-лонги тянут весь минус, шорты ок; согласуется с
+                # research DMI long-gate. Reversible (env SCALP_NO_LONG_SYMBOLS),
+                # пересмотр при n≥100 по символу (sample-size.mdc).
+                if sig.side == "long" and sig.symbol in cfg.no_long_list:
+                    play.info("🚫 [%s] long заблокирован (no_long_symbols) — "
+                              "лонги по символу отключены, шорты разрешены",
+                              sig.symbol)
+                    continue
                 # v0.18.2: fail-CLOSED для непрогретого символа. Канон QuantConnect:
                 # «refuse to trade until indicator ready» — не фейдим символ, у
                 # которого HTF-фильтр ещё ни разу не посчитан (свежая ротация). Без

@@ -1148,6 +1148,26 @@ def test_sl_cooldown_for_per_strategy():
     assert cfg.sl_cooldown_for("density_break") == 120.0
 
 
+def test_no_long_symbols_gate():
+    """v0.18.17 (C-07): per-symbol LONG-блок. Лонг на символе из no_long_list
+    запрещён ВСЕМ стратегиям, шорт разрешён; символы не из списка не задеты.
+    Дефолт прод = ZECUSDT (env SCALP_NO_LONG_SYMBOLS), парсинг CSV + upper-case."""
+    from scalp_bot.config.settings import ScalpSettings
+    # дефолт класса — пусто (прод-значение приходит из env/compose)
+    assert ScalpSettings().no_long_list == []
+    cfg = ScalpSettings().model_copy(update={"no_long_symbols": "zecusdt, ENAUSDT"})
+    assert cfg.no_long_list == ["ZECUSDT", "ENAUSDT"]
+
+    def blocked(side: str, sym: str) -> bool:
+        # та же предикат-логика, что в main.py (гейт перед HTF/DMI)
+        return side == "long" and sym in cfg.no_long_list
+
+    assert blocked("long", "ZECUSDT") is True       # лонг по символу — блок
+    assert blocked("short", "ZECUSDT") is False      # шорт разрешён
+    assert blocked("long", "BTCUSDT") is False       # не из списка — не задет
+    assert blocked("long", "ENAUSDT") is True        # второй символ списка
+
+
 def test_density_break_prod_defaults():
     """v0.18.16 (C-06): прод-дефолты density_break. taker-вход (пробой не наливается
     maker-лимиткой), CVD-confirmation ВКЛ (фильтр grab'ов). Фейды — глобальный maker."""

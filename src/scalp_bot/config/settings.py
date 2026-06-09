@@ -34,6 +34,17 @@ class ScalpSettings(BaseSettings):
     # sweep_fade + density_bounce (fade) + density_break (momentum-пробой, v0.8.0).
     enabled_strategies: str = Field(default="sweep_fade,density_bounce,density_break")
 
+    # Per-symbol LONG-блок (CSV): на этих символах входы в ЛОНГ запрещены ВСЕМ
+    # стратегиям, шорты разрешены. v0.18.17 (C-07): exposure-management по запросу
+    # пользователя — ZEC-лонги тянут весь минус (sweep_fade −84.67/WR 16.7%,
+    # density_break −107), ZEC-шорты около нуля/плюс; асимметрия согласуется с
+    # research DMI long-gate (контртренд-лонги на альт-перпах опаснее — ликвидационные
+    # каскады). [ОГРАНИЧЕНИЕ] это фильтр инструмент×сторона по P&L на малой выборке
+    # (ZEC long n≈25 < 100, sample-size.mdc) — reversible exposure-lever, НЕ
+    # валидированный эдж; пересмотр при n≥100 по ZEC или смене макрорежима. Пусто =
+    # выкл. env SCALP_NO_LONG_SYMBOLS.
+    no_long_symbols: str = Field(default="")
+
     # ─── Авто-селектор вселенной (data/universe.py) ──────────────────────────
     # Если включён — бот сам выбирает монеты под стратегию из get_tickers, а
     # ``symbols`` используется лишь как fallback при сбое API. Пороги привязаны
@@ -519,6 +530,11 @@ class ScalpSettings(BaseSettings):
     @property
     def universe_pin_list(self) -> list[str]:
         return [s.strip().upper() for s in self.universe_pin_symbols.split(",")
+                if s.strip()]
+
+    @property
+    def no_long_list(self) -> list[str]:
+        return [s.strip().upper() for s in self.no_long_symbols.split(",")
                 if s.strip()]
 
     @property
