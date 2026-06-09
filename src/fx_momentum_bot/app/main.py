@@ -10,6 +10,10 @@ import yfinance as yf
 from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_momentum_bot.state.store import MomentumStore
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
+from fx_momentum_bot.strategy.volume_profile import (
+    VolumeProfileSignal,
+    build_signal as build_vp_signal,
+)
 from fx_pro_bot.trading.auth import TokenData
 from fx_pro_bot.trading.client import CTraderClient
 from fx_pro_bot.trading.executor import TradeExecutor
@@ -257,7 +261,7 @@ def _manage_positions(
     executor: TradeExecutor,
     store: MomentumStore,
     settings: MomentumBotSettings,
-    signal_by_symbol: dict[str, MomentumSignal],
+    signal_by_symbol: dict[str, MomentumSignal | VolumeProfileSignal],
     positions_by_symbol: dict[str, list[ManagedPosition]],
 ) -> None:
     # Trader-backed policy:
@@ -387,6 +391,109 @@ def _manage_positions(
         log.info("Momentum state cleanup: removed %d stale positions", cleaned)
 
 
+def _open_vp_position(
+    *,
+    executor: TradeExecutor,
+    store: MomentumStore,
+    settings: MomentumBotSettings,
+    symbol: str,
+    sig: VolumeProfileSignal,
+) -> tuple[bool, str]:
+    """Открыть VP-позицию с явными SL/TP (дистанции из цен сетапа)."""
+    sl_distance = abs(sig.entry - sig.sl_price)
+    tp_distance = abs(sig.tp_price - sig.entry)
+    if sl_distance <= 0 or tp_distance <= 0:
+        return False, "vp_bad_sl_tp"
+    result = executor.open_position(
+        yf_symbol=symbol,
+        direction=sig.direction,
+        sl_distance=sl_distance,
+        tp_distance=tp_distance,
+        lot_size=settings.vp_lot_size,
+        comment=settings.vp_order_label,
+        entry_price_hint=sig.entry,
+    )
+    if not result.success:
+        return False, f"vp_open:{result.error}"
+    if result.broker_position_id > 0 and sl_distance > 0:
+        store.upsert_position_state(
+            broker_position_id=result.broker_position_id,
+            symbol=symbol,
+            entry_price=result.fill_price if result.fill_price > 0 else sig.entry,
+            initial_volume=(
+                result.volume if result.volume > 0 else lots_to_volume(settings.vp_lot_size)
+            ),
+            risk_price=sl_distance,
+        )
+    log.info(
+        "VP OPEN %s %s %s lot=%.2f entry=%.5f sl=%.5f tp=%.5f | %s",
+        symbol,
+        sig.setup,
+        sig.direction,
+        settings.vp_lot_size,
+        sig.entry,
+        sig.sl_price,
+        sig.tp_price,
+        sig.reason,
+    )
+    return True, "vp_open:ok"
+
+
+def _process_vp_symbol(
+    *,
+    symbol: str,
+    sig: VolumeProfileSignal,
+    executor: TradeExecutor | None,
+    store: MomentumStore,
+    settings: MomentumBotSettings,
+    positions_by_symbol: dict[str, list[ManagedPosition]],
+    open_count: int,
+) -> bool:
+    """Гейтинг + открытие VP-сделки. Возврат True если позиция открыта."""
+    executed = False
+    note = "no_setup"
+    already_open = len(positions_by_symbol.get(symbol, [])) > 0
+    day_count = store.count_executed_today(symbol, sig.direction) if sig.direction in {"long", "short"} else 0
+
+    can_open = (
+        sig.direction in {"long", "short"}
+        and sig.setup != "none"
+        and executor is not None
+        and not already_open
+        and open_count < settings.max_open_positions
+        and day_count < settings.vp_max_trades_per_dir_per_day
+    )
+    if can_open and executor is not None:
+        executed, note = _open_vp_position(
+            executor=executor, store=store, settings=settings, symbol=symbol, sig=sig
+        )
+    elif sig.direction in {"long", "short"} and sig.setup != "none":
+        # сетап есть, но не открываем — зафиксируем причину
+        if already_open:
+            note = "vp_skip:position_open"
+        elif day_count >= settings.vp_max_trades_per_dir_per_day:
+            note = "vp_skip:daily_limit"
+        elif open_count >= settings.max_open_positions:
+            note = "vp_skip:max_positions"
+        elif executor is None:
+            note = "paper_mode"
+
+    store.add_decision(
+        symbol=symbol,
+        direction=sig.direction,
+        momentum_value=0.0,
+        atr=sig.atr,
+        close_price=sig.last_close,
+        executed=executed,
+        note=note,
+    )
+    log.info(
+        "%s VP setup=%s dir=%s close=%.5f atr=%.6f executed=%s note=%s",
+        symbol, sig.setup, sig.direction, sig.last_close, sig.atr, executed, note,
+    )
+    return executed
+
+
 def run() -> None:
     settings = MomentumBotSettings()
     logging.basicConfig(
@@ -401,10 +508,12 @@ def run() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    vp_symbols = set(settings.vp_symbols)
     log.info(
-        "Momentum bot started | mode=%s | symbols=%s | interval=%s/%s | db=%s",
+        "Momentum bot started | mode=%s | momentum=%s | vp=%s | interval=%s/%s | db=%s",
         "LIVE" if (settings.trading_enabled and executor is not None) else "PAPER",
-        ",".join(settings.symbols),
+        ",".join(s for s in settings.symbols if s not in vp_symbols) or "-",
+        ",".join(settings.vp_symbols) or "-",
         settings.yfinance_interval,
         settings.yfinance_period,
         settings.db_path,
@@ -412,18 +521,40 @@ def run() -> None:
 
     while not _shutdown:
         try:
-            signal_by_symbol: dict[str, MomentumSignal] = {}
+            signal_by_symbol: dict[str, MomentumSignal | VolumeProfileSignal] = {}
             positions_by_symbol: dict[str, list[ManagedPosition]] = {}
             if executor is not None and settings.position_management_enabled:
-                positions_by_symbol = _collect_managed_positions(executor, settings.symbols)
-            for symbol in settings.symbols:
-                candles = _fetch_candles(symbol, settings.yfinance_interval, settings.yfinance_period)
-                signal_data = build_signal(
-                    candles,
-                    lookback_bars=settings.momentum_lookback_bars,
-                    atr_period=settings.atr_period,
-                    threshold=settings.signal_threshold,
+                positions_by_symbol = _collect_managed_positions(
+                    executor, settings.all_symbols
                 )
+            for symbol in settings.all_symbols:
+                is_vp = symbol in vp_symbols
+                if is_vp:
+                    candles = _fetch_candles(
+                        symbol, settings.vp_yfinance_interval, settings.vp_yfinance_period
+                    )
+                    signal_data: MomentumSignal | VolumeProfileSignal | None = build_vp_signal(
+                        candles,
+                        tz=settings.vp_session_tz,
+                        session_start=settings.vp_session_start,
+                        session_end=settings.vp_session_end,
+                        value_area_pct=settings.vp_value_area_pct,
+                        num_bins=settings.vp_num_bins,
+                        atr_period=settings.vp_atr_period,
+                        min_rr=settings.vp_min_rr,
+                        breach_lookback=settings.vp_breach_lookback,
+                        consolidation_bars=settings.vp_consolidation_bars,
+                    )
+                else:
+                    candles = _fetch_candles(
+                        symbol, settings.yfinance_interval, settings.yfinance_period
+                    )
+                    signal_data = build_signal(
+                        candles,
+                        lookback_bars=settings.momentum_lookback_bars,
+                        atr_period=settings.atr_period,
+                        threshold=settings.signal_threshold,
+                    )
                 if signal_data is None:
                     store.add_decision(
                         symbol=symbol,
@@ -446,13 +577,29 @@ def run() -> None:
                     positions_by_symbol=positions_by_symbol,
                 )
             if executor is not None:
-                open_count = _count_open_positions_for_symbols(executor, settings.symbols)
+                open_count = _count_open_positions_for_symbols(
+                    executor, settings.all_symbols
+                )
             else:
                 open_count = 0
 
-            for symbol in settings.symbols:
+            for symbol in settings.all_symbols:
                 signal_data = signal_by_symbol.get(symbol)
                 if signal_data is None:
+                    continue
+
+                if symbol in vp_symbols and isinstance(signal_data, VolumeProfileSignal):
+                    opened = _process_vp_symbol(
+                        symbol=symbol,
+                        sig=signal_data,
+                        executor=executor,
+                        store=store,
+                        settings=settings,
+                        positions_by_symbol=positions_by_symbol,
+                        open_count=open_count,
+                    )
+                    if opened:
+                        open_count += 1
                     continue
 
                 last_direction = store.get_last_direction(symbol)

@@ -108,6 +108,23 @@ class MomentumStore:
             )
             conn.commit()
 
+    def count_executed_today(self, symbol: str, direction: str) -> int:
+        """Сколько РЕАЛЬНО открытых сделок по (symbol, direction) за сегодня (UTC).
+
+        Используется VP-стратегией для лимита «макс N сделок в сторону в день»
+        (Faiz SMC / Dalton: не перебивать одну зону многократно).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM momentum_decisions
+                WHERE symbol = ? AND direction = ? AND executed = 1
+                  AND date(created_at) = date('now')
+                """,
+                (symbol, direction),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def recent_decisions(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(

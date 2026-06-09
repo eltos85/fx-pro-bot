@@ -6,6 +6,47 @@
 
 ## 2026-06-09
 
+### feat(momentum-bot): Volume Profile стратегия (gold-only, механическая, OFF by default)
+
+`<pending>`
+
+**Контекст:** пользователь принёс ролик Faiz SMC «The Easiest Gold Volume
+Profile Trading Strategy» (5-min, окно 03:00–07:00 NY). Решили НЕ совать в
+`fx_ai_trader` (LLM мешал бы чёткому механическому сетапу + у AI-бота нет
+volume-at-price данных), а добавить второй стратегией в `fx_momentum_bot`.
+
+**Что добавлено:**
+- `strategy/volume_profile.py` — чистый (без I/O) модуль: построение
+  volume profile из 5m-баров сессии (POC, value area 70%, P/B/D shape),
+  детекторы **failed auction** (свип за VAL/VAH → reclaim внутрь → fade к
+  POC/краю) и **breakout** (acceptance за краем VA → пробой консолидации →
+  continuation), расчёт TP по краю VA / measured-move с RR ≥ min.
+- `config/settings.py` — VP-настройки (`vp_symbols` пусто = OFF, окно
+  сессии, value_area_pct=0.70, num_bins, min_rr=1.5, лимит 2 сделки/сторону/
+  день, отдельный lot_size и label `momentum-bot-vp`) + `all_symbols`.
+- `state/store.py` — `count_executed_today(symbol, direction)` для лимита.
+- `app/main.py` — per-symbol роутинг: VP-символы качают 5m и идут на VP
+  (вход с явными SL/TP из цен сетапа), остальные — на momentum как раньше.
+- `tests/test_fx_momentum_volume_profile.py` — 15 тестов на корректность
+  алгоритма (профиль/VA/детекторы/окно/target). Весь сьют: 1174 passed.
+
+**Данные (важно):** профиль строится по yfinance `GC=F` (COMEX gold
+futures — реальный объём; у spot `XAUUSD=X` объём в yfinance нулевой →
+профиль был бы бессмысленным), исполнение маппится на cTrader `XAUUSD`
+(`YFINANCE_TO_CTRADER["GC=F"]="XAUUSD"`).
+
+**Research basis:** Steidlmayer «Steidlmayer on Markets» (2003), Dalton
+«Mind Over Markets» (2007); value area 70% ≈ 1σ — канон, не подгонка
+(`.cursor/rules/no-data-fitting.mdc`).
+
+**Статус:** OFF by default (как BZ-режим у fx_ai_trader). Включение =
+выставить `MOMENTUM_BOT_VP_SYMBOLS=GC=F` в `.env` на VPS, по согласованию.
+
+**Файлы:** `src/fx_momentum_bot/strategy/volume_profile.py`,
+`src/fx_momentum_bot/config/settings.py`, `src/fx_momentum_bot/state/store.py`,
+`src/fx_momentum_bot/app/main.py`, `.env.example`,
+`tests/test_fx_momentum_volume_profile.py`
+
 ### feat(fx-ai-trader): NG_MODE_V2 флаг и NG-specific guard-профиль в full prompt
 
 `коммит при deploy`

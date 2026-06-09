@@ -80,6 +80,54 @@ class MomentumBotSettings(BaseSettings):
         default=1.5, validation_alias="MOMENTUM_BOT_TRAILING_ATR_MULT"
     )
 
+    # ─── Volume Profile strategy (optional, OFF by default) ───
+    # Механический Market/Volume Profile сетап (Steidlmayer 2003 / Dalton
+    # 2007), gold-only. Символы из vp_symbols идут на эту стратегию вместо
+    # momentum; данные качаются на vp_yfinance_interval (5m, реальный объём
+    # у фьючерса GC=F). Пусто = выключено.
+    vp_symbols_raw: str = Field(
+        default="", validation_alias="MOMENTUM_BOT_VP_SYMBOLS"
+    )
+    vp_yfinance_interval: str = Field(
+        default="5m", validation_alias="MOMENTUM_BOT_VP_YFINANCE_INTERVAL"
+    )
+    vp_yfinance_period: str = Field(
+        default="5d", validation_alias="MOMENTUM_BOT_VP_YFINANCE_PERIOD"
+    )
+    # Сессионное окно профиля (London pre-NY), таймзона по NY.
+    vp_session_start: str = Field(
+        default="03:00", validation_alias="MOMENTUM_BOT_VP_SESSION_START"
+    )
+    vp_session_end: str = Field(
+        default="07:00", validation_alias="MOMENTUM_BOT_VP_SESSION_END"
+    )
+    vp_session_tz: str = Field(
+        default="America/New_York", validation_alias="MOMENTUM_BOT_VP_SESSION_TZ"
+    )
+    # Value area = 70% объёма (канон Dalton, ≈1σ) — не подгонять без источника.
+    vp_value_area_pct: float = Field(
+        default=0.70, validation_alias="MOMENTUM_BOT_VP_VALUE_AREA_PCT"
+    )
+    vp_num_bins: int = Field(default=50, validation_alias="MOMENTUM_BOT_VP_NUM_BINS")
+    vp_atr_period: int = Field(default=14, validation_alias="MOMENTUM_BOT_VP_ATR_PERIOD")
+    # Минимальный risk:reward (видео: «at least 1:2»; берём 1.5 как мягкий пол).
+    vp_min_rr: float = Field(default=1.5, validation_alias="MOMENTUM_BOT_VP_MIN_RR")
+    # Сколько 5m-баров назад искать свип (failed auction) / держать консолидацию.
+    vp_breach_lookback: int = Field(
+        default=6, validation_alias="MOMENTUM_BOT_VP_BREACH_LOOKBACK"
+    )
+    vp_consolidation_bars: int = Field(
+        default=6, validation_alias="MOMENTUM_BOT_VP_CONSOLIDATION_BARS"
+    )
+    # Лимит сделок в одну сторону за день (видео: max 2 per direction).
+    vp_max_trades_per_dir_per_day: int = Field(
+        default=2, validation_alias="MOMENTUM_BOT_VP_MAX_TRADES_PER_DIR_PER_DAY"
+    )
+    vp_lot_size: float = Field(default=0.01, validation_alias="MOMENTUM_BOT_VP_LOT_SIZE")
+    vp_order_label: str = Field(
+        default="momentum-bot-vp", validation_alias="MOMENTUM_BOT_VP_ORDER_LABEL"
+    )
+
     # Dedicated cTrader credentials for this bot only.
     ctrader_host_type: str = Field(
         default="demo", validation_alias="MOMENTUM_BOT_CTRADER_HOST_TYPE"
@@ -122,6 +170,18 @@ class MomentumBotSettings(BaseSettings):
     @property
     def symbols(self) -> tuple[str, ...]:
         return tuple(s.strip() for s in self.symbols_raw.split(",") if s.strip())
+
+    @property
+    def vp_symbols(self) -> tuple[str, ...]:
+        return tuple(s.strip() for s in self.vp_symbols_raw.split(",") if s.strip())
+
+    @property
+    def all_symbols(self) -> tuple[str, ...]:
+        """Momentum-символы + VP-символы (для fetch/позиций), без дублей."""
+        seen: dict[str, None] = {}
+        for s in (*self.symbols, *self.vp_symbols):
+            seen.setdefault(s, None)
+        return tuple(seen)
 
     @property
     def db_path(self) -> Path:
