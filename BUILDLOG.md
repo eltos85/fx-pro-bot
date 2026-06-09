@@ -6,6 +6,26 @@
 
 ## 2026-06-09
 
+### feat(momentum-bot): вести и legacy-позиции (label fx-pro-bot), открытые до миграции
+
+`<pending>`
+
+**Контекст:** на счёте были 2 открытые позиции (USDJPY, AUDUSD). USDJPY открыта
+после миграции на `label="momentum-bot"` → ведётся. AUDUSD открыта ДО первого
+деплоя (11:31), несёт старый дефолтный `label="fx-pro-bot"` (общий executor)
+→ под управление не попадала. Пользователь: «пусть бот следит за обеими».
+
+**Решение:** новый `manage_legacy_label="fx-pro-bot"` + property `managed_labels`
+= {position_label, manage_legacy_label}. `_collect_managed_positions` и
+`_count_open_positions_for_symbols` фильтруют `tradeData.label in managed_labels`.
+Бот усыновляет свои legacy-позиции (risk_price берётся из брокерского SL при
+первом сборе → дальше BE/partial/трейлинг). **Изоляция от fx_ai_trader цела**
+(его label `ai-fx-trader` не входит в набор). Advisor тоже `fx-pro-bot`, но
+profile=disabled. Тесты: legacy усыновляется, AI исключён. Сьют 1181 passed.
+
+**Файлы:** `src/fx_momentum_bot/config/settings.py`,
+`src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_volume_profile.py`
+
 ### fix(momentum-bot): читать label из ProtoOATradeData (управление позициями не работало)
 
 `<pending>`

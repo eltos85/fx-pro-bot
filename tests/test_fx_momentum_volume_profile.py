@@ -255,24 +255,45 @@ class _FakeExecutor:
         return self._positions
 
 
+_OWN = frozenset({"momentum-bot", "fx-pro-bot"})
+
+
 def test_momentum_ignores_foreign_label_positions_in_management() -> None:
     # На общем счёте: своя (momentum-bot) и чужая XAUUSD от AI (ai-fx-trader).
     ex = _FakeExecutor([
         _fake_pos("momentum-bot", 111),
         _fake_pos("ai-fx-trader", 222),  # позиция fx_ai_trader — не трогать!
     ])
-    grouped = _collect_managed_positions(ex, ("GC=F",), label="momentum-bot")  # type: ignore[arg-type]
+    grouped = _collect_managed_positions(ex, ("GC=F",), labels=_OWN)  # type: ignore[arg-type]
     ids = [p.position_id for p in grouped["GC=F"]]
     assert ids == [111]  # позиция AI НЕ попала в управление
 
 
-def test_momentum_counts_only_own_label() -> None:
+def test_momentum_adopts_legacy_label_but_not_ai() -> None:
+    # legacy позиция бота (fx-pro-bot, открыта до миграции) берётся в
+    # управление; позиция AI (ai-fx-trader) — нет.
     ex = _FakeExecutor([
         _fake_pos("momentum-bot", 111),
+        _fake_pos("fx-pro-bot", 999),     # legacy своя — вести
+        _fake_pos("ai-fx-trader", 222),   # чужая — игнор
+    ])
+    grouped = _collect_managed_positions(ex, ("GC=F",), labels=_OWN)  # type: ignore[arg-type]
+    assert sorted(p.position_id for p in grouped["GC=F"]) == [111, 999]
+
+
+def test_momentum_counts_only_own_labels() -> None:
+    ex = _FakeExecutor([
+        _fake_pos("momentum-bot", 111),
+        _fake_pos("fx-pro-bot", 999),
         _fake_pos("ai-fx-trader", 222),
         _fake_pos("ai-fx-trader", 333),
     ])
-    assert _count_open_positions_for_symbols(ex, ("GC=F",), label="momentum-bot") == 1  # type: ignore[arg-type]
+    assert _count_open_positions_for_symbols(ex, ("GC=F",), labels=_OWN) == 2  # type: ignore[arg-type]
+
+
+def test_managed_labels_property() -> None:
+    s = MomentumBotSettings(_env_file=None)  # type: ignore[call-arg]
+    assert s.managed_labels == frozenset({"momentum-bot", "fx-pro-bot"})
 
 
 def test_all_symbols_unions_momentum_and_vp() -> None:

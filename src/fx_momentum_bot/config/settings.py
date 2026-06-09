@@ -66,6 +66,22 @@ class MomentumBotSettings(BaseSettings):
     position_label: str = Field(
         default="momentum-bot", validation_alias="MOMENTUM_BOT_POSITION_LABEL"
     )
+    # Legacy-label: до введения position_label momentum открывал ордера через
+    # общий executor с дефолтным label="fx-pro-bot". Чтобы бот продолжал вести
+    # СВОИ позиции, открытые до миграции (BE/трейлинг), управляем и этим label.
+    # Изоляция от fx_ai_trader сохраняется (у него label="ai-fx-trader").
+    # Advisor тоже "fx-pro-bot", но по deploy-правилу profile=disabled (не
+    # торгует). Пусто = вести только position_label.
+    manage_legacy_label: str = Field(
+        default="fx-pro-bot", validation_alias="MOMENTUM_BOT_MANAGE_LEGACY_LABEL"
+    )
+
+    @property
+    def managed_labels(self) -> frozenset[str]:
+        """Набор broker-label, которые бот считает своими (управление + счёт)."""
+        return frozenset(
+            lbl for lbl in (self.position_label, self.manage_legacy_label) if lbl
+        )
     # Position management (trader-backed):
     # - Van Tharp: R-multiple discipline + break-even transfer.
     # - Linda Raschke discretionary practice: partial profit + runner.

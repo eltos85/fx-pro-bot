@@ -145,7 +145,10 @@ def _build_executor(settings: MomentumBotSettings) -> TradeExecutor | None:
 
 
 def _count_open_positions_for_symbols(
-    executor: TradeExecutor, symbols: tuple[str, ...], *, label: str
+    executor: TradeExecutor,
+    symbols: tuple[str, ...],
+    *,
+    labels: frozenset[str],
 ) -> int:
     try:
         open_positions = executor.get_open_positions()
@@ -164,7 +167,7 @@ def _count_open_positions_for_symbols(
         # Изоляция по label: считаем ТОЛЬКО свои позиции, не чужих ботов
         # на общем счёте (напр. XAUUSD у fx_ai_trader label="ai-fx-trader").
         # label живёт в ProtoOATradeData, НЕ на самой ProtoOAPosition.
-        if getattr(trade_data, "label", "") != label:
+        if getattr(trade_data, "label", "") not in labels:
             continue
         sid = getattr(trade_data, "symbolId", None) if trade_data else None
         if sid in symbol_ids:
@@ -217,7 +220,10 @@ def _optional_float(obj: object, field: str) -> float | None:
 
 
 def _collect_managed_positions(
-    executor: TradeExecutor, symbols: tuple[str, ...], *, label: str
+    executor: TradeExecutor,
+    symbols: tuple[str, ...],
+    *,
+    labels: frozenset[str],
 ) -> dict[str, list[ManagedPosition]]:
     sid_to_symbol: dict[int, str] = {}
     symbol_meta: dict[str, tuple[int, int]] = {}  # symbol -> (digits, symbol_id)
@@ -236,7 +242,7 @@ def _collect_managed_positions(
         # Изоляция по label: управляем ТОЛЬКО своими позициями (BE/трейлинг/
         # partial), не трогаем чужих ботов на общем счёте (fx_ai_trader и т.п.).
         # label живёт в ProtoOATradeData, НЕ на самой ProtoOAPosition.
-        if getattr(td, "label", "") != label:
+        if getattr(td, "label", "") not in labels:
             continue
         sid = getattr(td, "symbolId", None)
         if sid is None:
@@ -538,7 +544,7 @@ def run() -> None:
             positions_by_symbol: dict[str, list[ManagedPosition]] = {}
             if executor is not None and settings.position_management_enabled:
                 positions_by_symbol = _collect_managed_positions(
-                    executor, settings.all_symbols, label=settings.position_label
+                    executor, settings.all_symbols, labels=settings.managed_labels
                 )
             for symbol in settings.all_symbols:
                 is_vp = symbol in vp_symbols
@@ -591,7 +597,7 @@ def run() -> None:
                 )
             if executor is not None:
                 open_count = _count_open_positions_for_symbols(
-                    executor, settings.all_symbols, label=settings.position_label
+                    executor, settings.all_symbols, labels=settings.managed_labels
                 )
             else:
                 open_count = 0
