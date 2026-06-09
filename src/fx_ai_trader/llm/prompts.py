@@ -1322,6 +1322,10 @@ def build_user_prompt(
     ng_mode_v2_enabled: bool = False,
     ng_mode_v2_event_hours: int = 36,
     ng_mode_v2_max_uncertainty: float = 0.55,
+    bz_breakout_mode_enabled: bool = False,
+    bz_breakout_min_atr_pct: float = 0.6,
+    bz_breakout_min_sl_atr: float = 2.0,
+    bz_breakout_max_uncertainty: float = 0.55,
 ) -> str:
     """Full-cycle USER_PROMPT.
 
@@ -1389,6 +1393,30 @@ def build_user_prompt(
             f"{ng_mode_v2_max_uncertainty:.2f}.\n"
             "These rules DO NOT modify XAUUSD/BRENT behavior.\n\n"
         )
+    bz_mode_block = ""
+    if bz_breakout_mode_enabled:
+        bz_mode_block = (
+            "=== BZ MOMENTUM MODE (targeted, BRENT/BZ=F only) ===\n"
+            "Apply these rules ONLY to BZ=F. This is an EXPERIMENT for an\n"
+            "ELEVATED-VOLATILITY oil regime; XAUUSD and NG=F are UNCHANGED.\n"
+            "1) Regime gate: enable ONLY when BRENT 1H ATR is >= "
+            f"{bz_breakout_min_atr_pct:.2f}% of price (elevated vol). Below\n"
+            "   that, revert to standard MFP pullback-only — do NOT chase.\n"
+            "2) Continuation entry is PERMITTED (this overrides SETUP rule 3\n"
+            "   for BZ=F only) but ONLY as break -> retest -> hold: price\n"
+            "   breaks the 24h/Donchian extreme, pulls back to the broken\n"
+            "   level, and HOLDS it. NEVER first-spike chase into the high/low.\n"
+            "3) Direction MUST align with the 4H trend AND a dominant oil\n"
+            "   channel (supply / demand / geopolitical). No macro confluence\n"
+            "   -> HOLD, even on a clean breakout.\n"
+            "4) Wider stop: SL distance >= "
+            f"{bz_breakout_min_sl_atr:.1f}x the 1H ATR (momentum needs room; a\n"
+            "   1x-ATR stop gets whipsawed). Size DOWN to keep $ risk normal.\n"
+            "5) Uncertainty cap for continuation: aggregate_uncertainty <= "
+            f"{bz_breakout_max_uncertainty:.2f}.\n"
+            "6) Into a HIGH-impact event (CPI/EIA) still scale to min size.\n"
+            "These rules DO NOT modify XAUUSD/NG=F behavior.\n\n"
+        )
     # Task-sandwich (deepseekai.guide Practitioner's Guide, 2026-05-26
     # research artifact в BUILDLOG): повторяем task ПОСЛЕ длинного
     # context'а (история + market_context могут быть 2-4k tokens),
@@ -1398,6 +1426,7 @@ def build_user_prompt(
         f"{event_block}"
         f"{history_block}"
         f"{ng_mode_block}"
+        f"{bz_mode_block}"
         "Current market state, news, and your open positions:\n\n"
         f"{market_context}\n\n"
         "=== TASK RESTATEMENT ===\n"

@@ -607,6 +607,10 @@ def _run_full_cycle(
         ng_mode_v2_enabled=settings.ng_mode_v2_enabled,
         ng_mode_v2_event_hours=settings.ng_mode_v2_event_hours,
         ng_mode_v2_max_uncertainty=settings.ng_mode_v2_max_uncertainty,
+        bz_breakout_mode_enabled=settings.bz_breakout_mode_enabled,
+        bz_breakout_min_atr_pct=settings.bz_breakout_min_atr_pct,
+        bz_breakout_min_sl_atr=settings.bz_breakout_min_sl_atr,
+        bz_breakout_max_uncertainty=settings.bz_breakout_max_uncertainty,
     )
 
     log.info(

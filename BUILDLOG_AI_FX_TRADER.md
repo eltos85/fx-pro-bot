@@ -1,5 +1,64 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-06-09
+
+### feat(prompt): BZ MOMENTUM MODE (flag-gated, OFF) — paper-эксперимент по breakout-входу на нефти
+
+`<pending>`
+
+**Контекст / задача пользователя:** «при таком живом рынке (нефть, золото)
+так мало сделок» — бот ставит HOLD в ~98% циклов, объясняя «down-break is
+momentum, not pullback» / «first-spike chase», т.е. СОЗНАТЕЛЬНО отказывается
+от пробойных входов (MFP rule 3 = вход только на структурном откате).
+
+**Counterfactual-аудит** (артефакт `scripts/ai_fx_hold_momentum_counterfactual.py`,
+источник цен — снапшоты price/24h-range/ATR из самих `decisions.prompt_user`,
+период 2026-05-29..06-09):
+
+| Инструмент | держать +4h | держать +12h | bracket 2:1 (TP2ATR/SL1ATR) |
+|---|---|---|---|
+| BZ=F | +0.25R, 71% | +0.22R, 62% | **netR +4.0, meanR +0.29** (обе стороны) |
+| XAUUSD | +0.17R, 43% | +1.67R, 79% | −2.0R (1×ATR стоп чопает, win 29%) |
+| NG=F | +0.05R, 52% | −0.38R, 37% | 0.0R |
+| ВСЕГО | +0.15R, 55% | +0.42R, 57% | +0.04R, 35% |
+
+Вывод: моментум-вход ≈ безубыток в среднем (НЕ «огромные деньги»), НО на
+**нефти** он стабильно плюсовой в обе стороны (Ормуз-волатильность), на
+золоте edge есть но требует широкого стопа, на газе моментум не платит.
+
+**Что добавлено (всё OFF by default, обратимо, зеркалит NG MODE V2):**
+- `settings.py`: `bz_breakout_mode_enabled=False`, `bz_breakout_min_atr_pct=0.6`,
+  `bz_breakout_min_sl_atr=2.0`, `bz_breakout_max_uncertainty=0.55`.
+- `prompts.py::build_user_prompt`: блок **BZ MOMENTUM MODE (BRENT/BZ=F only)** —
+  разрешает continuation-вход ТОЛЬКО как break→retest→hold (не first-spike),
+  только при 1H ATR% ≥ порога (elevated-vol gate), направление по 4H-тренду +
+  oil-channel, стоп ≥2×ATR, uncertainty ≤ 0.55. XAUUSD/NG=F не меняются.
+- `main.py`: проброс флагов в full-cycle prompt.
+- `.env.example`: документация 4 переменных.
+- `tests/test_fx_ai_trader_bz_breakout_mode.py`: 5 тестов (off by default,
+  инъекция при enabled, параметризация порогов, defaults OFF, сосуществование
+  с NG mode). Весь fx_ai_trader-сьют: 356 passed.
+
+**Обоснование порога 0.6% (reading reality, не подгонка):** наблюдённое BZ=F
+1H ATR% за период — min 0.63 / median 0.92 / max 1.31, тогда как calm-Brent
+1H ATR% ~0.2–0.4. 0.6 = пол текущего high-vol режима (~2-3× нормы) → режим
+сам отключается, когда волатильность нефти нормализуется.
+
+**Pre-registered эксперимент (sample-size.mdc / no-data-fitting.mdc):**
+- H1: на BZ=F break→retest→hold continuation в elevated-vol даёт netR>0 и
+  meanR≥+0.2 на forward-выборке; H0: meanR≤0 → откатываем флаг.
+- Заморозка параметров на время теста (no auto-tuning).
+- Выборка counterfactual n=25 (<100) = suggestive, НЕ conclusive: флаг —
+  способ СОБРАТЬ live-выборку под чистую гипотезу, а не «доказанное» правило.
+- OOS: forward-test на свежих циклах после включения; решение по итогам N
+  закрытых BZ-сделок + ≥2 недели разных режимов.
+- Включение на VPS = старт эксперимента (отдельным env, по согласованию).
+
+**Файлы:** `src/fx_ai_trader/config/settings.py`,
+`src/fx_ai_trader/llm/prompts.py`, `src/fx_ai_trader/app/main.py`,
+`.env.example`, `tests/test_fx_ai_trader_bz_breakout_mode.py`,
+`scripts/ai_fx_hold_momentum_counterfactual.py`
+
 ## 2026-06-05
 
 ### feat(prompt): блок STRATEGY GOAL (success/failure compass) + база $2000, общий счёт

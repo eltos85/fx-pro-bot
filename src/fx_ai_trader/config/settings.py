@@ -195,6 +195,37 @@ class AiFxTraderSettings(BaseSettings):
     ng_mode_v2_max_uncertainty: float = Field(
         default=0.55, validation_alias="AI_FX_TRADER_NG_MODE_V2_MAX_UNCERTAINTY"
     )
+    # BZ momentum/breakout mode (optional, OFF by default): targeted rule for
+    # BRENT to allow break->retest->hold continuation entries in an ELEVATED-
+    # VOLATILITY regime, where the default pullback-only (MFP rule 3)
+    # systematically misses momentum/breakdown moves. Scope BZ=F ONLY —
+    # XAUUSD / NG=F behavior unchanged.
+    # Basis (artifact): scripts/ai_fx_hold_momentum_counterfactual.py over
+    # 2026-05-29..06-09 — breakout bracket 2:1 netR BZ=F +4.0 (meanR +0.29,
+    # works both directions) vs XAUUSD −2.0 / NG=F 0.0. Sample n=25 (<100,
+    # sample-size.mdc) → paper-EXPERIMENT with frozen params + OOS, NOT a
+    # validated rule. See BUILDLOG_AI_FX_TRADER.md.
+    bz_breakout_mode_enabled: bool = Field(
+        default=False, validation_alias="AI_FX_TRADER_BZ_BREAKOUT_MODE_ENABLED"
+    )
+    # Regime gate: minimum BRENT 1H ATR% (atr14/price*100) to treat oil as
+    # elevated-vol. Grounded in observed regime (2026-05-29..06-09: BZ 1H
+    # ATR% min 0.63 / median 0.92 vs calm-Brent ~0.2-0.4) — 0.6 is the FLOOR
+    # of the current high-vol regime (~2-3x calm), so the mode auto-disables
+    # when oil volatility normalizes. Reading reality, not fitting outcome
+    # (no-data-fitting.mdc).
+    bz_breakout_min_atr_pct: float = Field(
+        default=0.6, validation_alias="AI_FX_TRADER_BZ_BREAKOUT_MIN_ATR_PCT"
+    )
+    # Wider stop floor (× 1H ATR) for momentum entries: counterfactual showed
+    # a 1×ATR stop got whipsawed (XAUUSD bracket 29% win), 2×ATR captured the
+    # move. Size DOWN to keep $ risk constant.
+    bz_breakout_min_sl_atr: float = Field(
+        default=2.0, validation_alias="AI_FX_TRADER_BZ_BREAKOUT_MIN_SL_ATR"
+    )
+    bz_breakout_max_uncertainty: float = Field(
+        default=0.55, validation_alias="AI_FX_TRADER_BZ_BREAKOUT_MAX_UNCERTAINTY"
+    )
     # Per-symbol overrides ниже общих ограничений. JSON-словарь через ENV.
     # Цель — снизить экспозицию по конкретному инструменту без отключения.
     # Применение (NG=F): по правилу sample-size.mdc после 11 NG-трейдов
