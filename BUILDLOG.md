@@ -4,7 +4,37 @@
 
 ---
 
-## 2026-06-09
+## 2026-06-10
+
+### audit(momentum-bot): broker-truth P&L 06-05→06-10 (observation only, выборка мала)
+
+`<pending>`
+
+**Источник:** cTrader deal history (`get_deal_list`, net=gross+swap+comm —
+ground truth, ctrader-pnl.mdc), артефакт `scripts/momentum_pnl_audit.py`.
+Атрибуция: исключены 3 ранних сделки fx_ai_trader (broker_pid 151424687/
+151439117/151452020 — NG/NG/XAUUSD от 06-05), сверено с `fx_ai_trader.sqlite`.
+
+**Momentum, закрытые (n=17, +3 открытых USDJPY/GBPUSD×2 не учтены):**
+
+| Инструмент | n | W/L | WR | net $ | PF |
+|---|---|---|---|---|---|
+| XAUUSD (VP) | 9 | 1/7 (+1 BE) | 11% | **+44.87** | 13.8 |
+| AUDUSD | 4 | 2/2 | 50% | +3.18 | 1.99 |
+| EURUSD | 1 | 0/1 | 0% | −0.68 | 0 |
+| USDJPY | 3 | 0/3 | 0% | −6.30 | 0 |
+| **TOTAL** | **17** | **3/13 (+1BE)** | **18%** | **+41.07** | **3.89** |
+
+**Вывод (observation only):** подтверждает тезис «один лот перекрывает минусы»:
+весь плюс держится на ОДНОЙ VP-сделке по золоту (+$48.88, pid 151544140,
+06-09 16:29→23:45). Без неё: gross wins $6.38 vs losses $14.19 = **−$7.81**.
+То есть это пока НЕ established edge, а один outlier на 17 сделках (высокая
+дисперсия). Плюс 7 из 9 XAUUSD — мелкие commission-losses от slippage-guard
+(open+close в ту же минуту): VP по золоту часто режется гардом, редкие
+крупные победы. Решений по стратегии НЕ принимаем (`sample-size.mdc`: n<100,
+<2 недель) — продолжаем собирать выборку.
+
+**Файлы:** `scripts/momentum_pnl_audit.py`
 
 ### feat(momentum-bot): вести и legacy-позиции (label fx-pro-bot), открытые до миграции
 
