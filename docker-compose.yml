@@ -344,6 +344,11 @@ services:
       # часовых за сутки): гейтим затихшие в последний час, ранжируем по «в игре
       # сейчас». 1.0 = не тише обычного для себя (канон RVOL). 0 = только 24h-фильтр.
       SCALP_UNIVERSE_MIN_RVOL: ${SCALP_UNIVERSE_MIN_RVOL:-1.0}
+      # v0.18.19 (аудит A-4): floor «минимум N монет» — на остывшем рынке
+      # range≥6%+RVOL≥1.0 вырождали вселенную в 1 монету (NEAR 44/76 сделок/
+      # сутки, концентрация + sl_cooldown запирает бота). Добор из liquidity-
+      # pool (turnover/spread/range-cap НЕ ослабляются) по range24h. 0 = выкл.
+      SCALP_UNIVERSE_MIN_SYMBOLS: ${SCALP_UNIVERSE_MIN_SYMBOLS:-3}
       # Bybit — ОТДЕЛЬНЫЕ ключи (или те же что ai-trader/bybit-bot, но
       # рекомендуется отдельный subaccount для аудита PnL).
       SCALP_BYBIT_API_KEY: ${SCALP_BYBIT_API_KEY:-}
@@ -415,20 +420,19 @@ services:
       # на n=25 (no-data-fitting). Поле оставлено для конфиг-гибкости.
       SCALP_DENSITY_BREAK_TAKE_PROFIT_R: ${SCALP_DENSITY_BREAK_TAKE_PROFIT_R:-3.5}
       # v0.18.6: пер-стратегийный множитель ширины SL ТОЛЬКО для sweep_fade.
-      # v0.18.7: откат на 1.0 (тренд-день, n=10 шум) + открытый вопрос C-01:
-      #   при ×1.5 порог flow_exit уезжал на 1.5×раздутый_риск (рассинхрон).
-      # v0.18.8 (2026-06-05): ВКЛ ×2.0 — decoupled (C-01 закрыт): SL расширяется
-      #   по MAE/Sweeney, а TP и flow_exit стоят на base_risk (MFE, 734 сделки:
-      #   winner-MFE медиана 2.33R). Ширина выбрана НЕ по «где netR выше» (это был бы
-      #   curve-fit под одно окно), а двумя сошедшимися методами:
-      #   1) MAE/Sweeney перцентиль (412 винеров, много режимов, data/scalp_sf_mae_out
-      #      .txt): p85=1.87R, p90=2.39R → канон-ширина ≈2.0 (×1.5 сохраняет лишь 78%
-      #      винеров, ниже полосы 85–90%; ×2.0 = p85, сохраняет 85%).
-      #   2) A/B июнь 1–4 decoupled (data/scalp_sl_decouple_ab.txt): netR ×1.0 −73R →
-      #      ×1.5 −7R → ×2.0 +15R. Сходимость двух методов снимает overfit.
-      #   ×2.5=p92 (щедро, часть монет проседает). Откат: =1.0. density_break НЕ задет
-      #   (sl_mult=1.0 прибит в коде — стоп структурный, ≠ MAE).
-      SCALP_SWEEP_FADE_SL_RISK_MULT: ${SCALP_SWEEP_FADE_SL_RISK_MULT:-2.0}
+      # v0.18.7: откат на 1.0 (тренд-день, n=10 шум); v0.18.8: ВКЛ ×2.0 decoupled
+      #   (MAE/Sweeney p85 + A/B июнь 1–4: netR ×1.0 −73R → ×2.0 +15R).
+      # v0.18.19 (2026-06-10, аудит A-1): ОТКАТ ×2.0 → 1.0 по live-форварду.
+      #   Форвард n=134 (06-05→06-10, > порога 100 sample-size.mdc) ОПРОВЕРГ
+      #   харнес: net −$106.53, −0.155 R_base/сделку. Причина — ИНВЕРСИЯ payoff:
+      #   сайзинг идёт от ПОЛНОГО SL (qty=$10/(2×base)) → base_risk в $ = $5;
+      #   med по БД: риск до SL $10.00 vs ход до TP $17.50 (R:R 1.75:1 вместо
+      #   3.5R), flow_exit (90% винов) avg +$7.84 < sl_hit −$11.17 — avgW<avgL,
+      #   «Философия B winners run» инвертирована; break-even WR 56% > live 52%.
+      #   При ×1.0 R-единицы совпадают: flow_exit ≥+$15 > SL −$10 (break-even
+      #   WR ≈42%). Харнес v0.18.8 мерил netR в base_risk-единицах и не видел
+      #   $-сжатия win-стороны. density_break не задет (sl_mult=1.0 в коде).
+      SCALP_SWEEP_FADE_SL_RISK_MULT: ${SCALP_SWEEP_FADE_SL_RISK_MULT:-1.0}
       # flow_exit профит-лок. v0.13.0: 1.0→1.5 — sweep 15д (data/scalp_sweep.txt):
       # выше порог = крупнее средний зафиксированный винер, винеры бегут дальше к
       # TP=3.5R (Философия B «let winners run», Schwager/Brooks).

@@ -191,6 +191,32 @@ def rank_universe(tickers: list[dict], *, top_n: int, min_turnover: float,
     return rank_rows(rows, top_n=top_n)
 
 
+def pad_universe(ranked: list[str], pool: list[dict],
+                 min_symbols: int) -> list[str]:
+    """Floor «минимум N монет» (P-4, audit 2026-06-10, A-4).
+
+    Гейты range-floor + RVOL на остывшем рынке вырождали вселенную в 1 монету
+    (NEARUSDT — 44/76 сделок за сутки): концентрационный риск, а sl_cooldown
+    по единственному символу запирает бота целиком. Если прошедших < N —
+    добираем из ``pool`` (кандидаты, прошедшие СТРАЖЕЙ ЛИКВИДНОСТИ: turnover,
+    spread cap, range-cap анти-памп; ослабляется ТОЛЬКО волатильностный
+    range-floor/RVOL) самых волатильных по range24h. Стражи ликвидности не
+    трогаем — это та же логика, что у apply_pins, но рыночно-нейтральная:
+    добор выбирает лучших из доступных, а не конкретную монету.
+    ``min_symbols`` ≤0 = выключено (прежнее поведение)."""
+    if min_symbols <= 0 or len(ranked) >= min_symbols:
+        return ranked
+    have = set(ranked)
+    extras = sorted((m for m in pool or [] if m["symbol"] not in have),
+                    key=lambda m: m["range_pct"], reverse=True)
+    out = list(ranked)
+    for m in extras:
+        if len(out) >= min_symbols:
+            break
+        out.append(m["symbol"])
+    return out
+
+
 def apply_pins(ranked: list[str], pinned: list[str], top_n: int) -> list[str]:
     """Force-include «пиннутых» монет В ОБХОД фильтра (запрос пользователя:
     вернуть монету, которую отсекает range-cap/turnover как памп). Пины всегда в

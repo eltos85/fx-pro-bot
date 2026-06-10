@@ -26,7 +26,8 @@ from scalp_bot.data.funding import FundingSchedule
 from scalp_bot.data.htf import HtfTrend
 from scalp_bot.data.market_stream import BybitMarketStream
 from scalp_bot.data.universe import (apply_pins, filter_tickers,
-                                     hourly_range_rvol, rank_rows)
+                                     hourly_range_rvol, pad_universe,
+                                     rank_rows)
 from scalp_bot.safety import killswitch
 from scalp_bot.state.db import ScalpDB
 from scalp_bot.telegram.notifier import TelegramNotifier
@@ -550,23 +551,41 @@ def _fresh_rvol(client, cfg, rows: list[dict]) -> dict[str, float]:
 def _select_universe(client, cfg) -> list[str]:
     """Монеты под стратегию: 24h hard-фильтр (ликвидность/спред/анти-памп) →
     свежий intraday RVOL-гейт+ранжирование (что «в игре сейчас», v0.14.0) →
-    пины. См. data/universe.py."""
+    floor «минимум N монет» (P-4, v0.18.19) → пины. См. data/universe.py."""
+    tickers = client.get_tickers()
     rows = filter_tickers(
-        client.get_tickers(),
+        tickers,
         min_turnover=cfg.universe_min_turnover_usd,
         min_range_pct=cfg.universe_min_range_pct,
         max_range_pct=cfg.universe_max_range_pct,
         max_spread_bps=cfg.universe_max_spread_bps)
-    if not rows:
-        return apply_pins([], cfg.universe_pin_list, cfg.universe_top_n)
-    rvol = _fresh_rvol(client, cfg, rows) if cfg.universe_min_rvol > 0 else {}
-    if cfg.universe_min_rvol > 0:
-        # гейт по свежести: затихшие в последний час режем (RVOL < порога).
-        # fail-open: символ без klines (нет в rvol) — keep (REST-хиккап не пустошит).
-        kept = [m for m in rows
-                if rvol.get(m["symbol"], cfg.universe_min_rvol) >= cfg.universe_min_rvol]
-        rows = kept or rows  # если гейт всё срезал — не оставлять пусто
-    ranked = rank_rows(rows, top_n=cfg.universe_top_n, vol_metric=rvol)
+    ranked: list[str] = []
+    if rows:
+        rvol = _fresh_rvol(client, cfg, rows) if cfg.universe_min_rvol > 0 else {}
+        if cfg.universe_min_rvol > 0:
+            # гейт по свежести: затихшие в последний час режем (RVOL < порога).
+            # fail-open: символ без klines (нет в rvol) — keep (REST-хиккап не пустошит).
+            kept = [m for m in rows
+                    if rvol.get(m["symbol"], cfg.universe_min_rvol) >= cfg.universe_min_rvol]
+            rows = kept or rows  # если гейт всё срезал — не оставлять пусто
+        ranked = rank_rows(rows, top_n=cfg.universe_top_n, vol_metric=rvol)
+    if cfg.universe_min_symbols > 0 and len(ranked) < cfg.universe_min_symbols:
+        # P-4 (audit A-4): вселенная выродилась (range/RVOL-гейты на остывшем
+        # рынке) — добор из liquidity-pool (только волатильностный floor
+        # ослаблен, стражи ликвидности/анти-памп — нет).
+        pool = filter_tickers(
+            tickers,
+            min_turnover=cfg.universe_min_turnover_usd,
+            min_range_pct=0.0,
+            max_range_pct=cfg.universe_max_range_pct,
+            max_spread_bps=cfg.universe_max_spread_bps)
+        padded = pad_universe(ranked, pool, cfg.universe_min_symbols)
+        if len(padded) > len(ranked):
+            log.info("вселенная ниже floor (%d < %d) — добор по range24h из "
+                     "liquidity-pool: +%s", len(ranked),
+                     cfg.universe_min_symbols,
+                     ",".join(padded[len(ranked):]))
+        ranked = padded
     return apply_pins(ranked, cfg.universe_pin_list, cfg.universe_top_n)
 
 

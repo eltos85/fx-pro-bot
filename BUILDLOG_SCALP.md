@@ -6,6 +6,97 @@
 
 ## 2026-06-10
 
+### v0.18.19 — полный аудит бота + фиксы P-1/P-2/P-3/P-4 (все одобрены пользователем)
+`<hash>`
+
+**Запрос пользователя**: полный аудит scalp_bot («подозрение на кучу ошибок,
+ведущих к плохому показателю»), сверка кода с философией стратегий, стата с VPS.
+Рекомендации P-1/P-3/P-4 представлены пользователю и **одобрены** («все 3
+одобряю», P-1 — вариант A: откат через env); P-2 (баг A-3) — техфикс.
+
+**Сверка с биржей (stats-collection.mdc)**: окно 06-05 11:00 → 06-10 06:45 UTC,
+Bybit get_closed_pnl full pagination: **n=184, net −$287.25** (БД −$275 —
+сходится). All-time БД −$599.97 (буфер до killswitch −$800 ≈ 18 SL).
+
+**Главные находки аудита** (полный реестр — канвас scalp-bot-audit):
+- **A-1 (CRITICAL, не баг кода — математика)**: инверсия payoff sweep_fade.
+  SL ×2.0 (v0.18.8) + риск-сайзинг от ПОЛНОГО SL → base_risk в долларах = $5
+  (не $10). Med по БД: риск до SL $10.00, ход до TP $17.50 → фактический
+  биржевой R:R **1.75:1** вместо декларируемых «3.5R»; flow_exit фиксирует
+  avg +$7.84 при   sl_hit −$11.17, 90% винов = flow_exit. avgW < avgL —
+  «Философия B winners run» инвертирована. Live n=134: WR 52.2% при
+  break-even ≈56% → утечка ≈ −$0.79/сделку (−0.155 R_base/сделку при любом
+  сайзинге). Харнес-A/B v0.18.8 (+15R) live-форвардом ОПРОВЕРГНУТ.
+  **Фикс P-1 (одобрен, strategy-guard.mdc)**: см. ниже.
+- **A-2 (HIGH)**: density_break market-вход — слиппедж не учтён: qty/SL/TP от
+  пре-филл best_ask, факт. убыток по SL med −$12.69 при расчётном риске $9.99
+  (n=34, +27% drag). **Фикс P-3 (одобрен)**: см. ниже.
+- **A-3 (HIGH, БАГ — исправлен этим коммитом)**: см. ниже.
+- **A-4 (HIGH)**: вселенная выродилась в 1 монету (NEARUSDT) — range≥6% +
+  RVOL≥1.0 на остывшем рынке режут всё; 44/76 сделок за сутки — NEAR.
+  **Фикс P-4 (одобрен)**: см. ниже.
+- A-5: fill-rate sweep_fade 40% (60% сигналов entry_Cancelled/timeout —
+  adverse selection maker-входа, зеркало C-06). A-7: до TP 3.5R доходит 5%
+  сделок. A-8: rate-limit 5/час считает и неналитые вставки.
+- Работает: вход sweep_fade (ex-ZEC WR ~59%), density_break-шорты (+$11.77),
+  ZEC-блок и DMI-гейт действуют как задумано.
+
+**Фикс A-3 (баг учёта, разрешён no-data-fitting.mdc «технические улучшения»)**:
+REST-реконсиляция restart-сирот матчит по отпечатку `avgEntryPrice == entry`
+(допуск 0.001%), но для MARKET-входа (density_break, v0.18.16) entry в БД —
+референс ДО филла, реальный avgEntryPrice со слиппеджем не совпадает →
+«closed_pnl: нет совпадения — не атрибутирую» каждый цикл, 23 provisional
+зависли навсегда, ярлыки врут (#1429 «tp_hit» с pnl −$3.59). Симптом → причина
+→ решение: входные филлы приватного WS (closedSize=0, execPnl=0) теперь копят
+VWAP реальной цены входа и пишут его в БД (`db.update_entry`) — отпечаток для
+REST-матчера совпадает, провизионные финализируются, ярлыки tp/sl
+пересчитываются по реальному знаку closedPnl. Для maker-входа — no-op (филл
+по своей лимит-цене). Бонус: bracket_exit_reason и killswitch-оценки считаются
+от реального входа.
+
+**Фикс P-1 (A-1, откат стратегического параметра — одобрен пользователем)**:
+`SCALP_SWEEP_FADE_SL_RISK_MULT` 2.0 → **1.0** (docker-compose default; .env на
+VPS его не переопределяет — проверено). Live-форвард n=134 (> порога 100
+sample-size.mdc, сверен с Bybit get_closed_pnl full pagination) опроверг
+харнес v0.18.8: тот мерил netR в base_risk-ЕДИНИЦАХ и не видел $-сжатия
+win-стороны (сайзинг от полного SL → base_risk=$5). При ×1.0 R-единицы и
+доллары совпадают: flow_exit ≥+$15 > SL −$10, break-even WR ≈42% < live 52%.
+Архитектура decoupling (v0.18.8) сохранена; возврат ×2.0 допустим только
+вместе с переводом сайзинга на base_risk (зафиксировано в RATIONALE).
+
+**Фикс P-3 (A-2, исполнительный — одобрен)**: после market-входа входные филлы
+WS дают реальный VWAP → `executor._rebracket` сдвигает биржевые SL/TP на дельту
+слиппеджа (`client.set_trading_stop`, Full mode, офдок
+https://bybit-exchange.github.io/docs/v5/position/trading-stop) и пишет новые
+уровни в БД (`db.update_levels`). Дистанции сохраняются → реальный $-риск =
+qty×dist = расчётному ($10), R:R/fee-guard не меняются. Maker — no-op (delta=0).
+Порог сдвига 1 бп — технический анти-шум (rate-limit). Биржа отклонила аменд →
+БД не трогаем (уровни в БД = реальные биржевые).
+
+**Фикс P-4 (A-4, операционный — одобрен)**: floor «минимум N монет» во
+вселенной: `universe_min_symbols=3` (env `SCALP_UNIVERSE_MIN_SYMBOLS`, 0=выкл).
+Если после range/RVOL-гейтов монет <3 — `pad_universe` добирает из
+liquidity-pool (turnover/spread/range-cap анти-памп НЕ ослабляются; ослабляется
+только волатильностный floor) самые волатильные по range24h. Минимальная
+диверсификация: idiosyncratic-движение одной монеты не доминирует, sl_cooldown
+по одному символу не запирает бота. Reversible operational-lever, не эдж.
+
+**Тесты**: +9 (A-3: VWAP двух частичных market-филлов → entry обновлён; maker
+no-op + закрывающий филл не в open-аккумуляторе; db=None не падает. P-3:
+брекеты сдвинуты на дельту + set_trading_stop вызван; слиппедж <1 бп → без
+аменда; reject биржи → БД не тронута. P-4: добор до floor по range24h; стражи
+ликвидности не ослабляются; min_symbols=0/достаточно → no-op; дефолт=3).
+1191 passed.
+
+**Файлы:** `trading/executor.py` (ingest_executions: open_val/open_qty +
+update_entry + `_rebracket`), `trading/client.py` (`set_trading_stop`),
+`state/db.py` (`update_entry`, `update_levels`), `data/universe.py`
+(`pad_universe`), `app/main.py` (`_select_universe` floor), `config/settings.py`
+(`universe_min_symbols`, docstring sl_mult), `docker-compose.yml` (SL_RISK_MULT
+1.0, SCALP_UNIVERSE_MIN_SYMBOLS), `STRATEGY_RATIONALE_SCALP.md`,
+`tests/test_scalp_bot.py`. Артефакты аудита: канвас scalp-bot-audit,
+`scripts/scalp_full_audit.py` (прогон на VPS 06-10), Bybit full-pagination fetch.
+
 ### v0.18.18 — density_break: асимметричный DMI long-gate (контртренд-лонг-пробои = bull traps)
 `<hash>`
 

@@ -241,7 +241,7 @@ class Executor:
         # регистрируем тег входа → атрибуция филлов из приватного WS execution
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
-                            "close_qty": 0.0}
+                            "close_qty": 0.0, "open_val": 0.0, "open_qty": 0.0}
         # v0.18.16: пер-стратегийный тип входа (density_break=taker). sig несёт
         # выбранный стратегией order_type; None → глобальный cfg.entry_order_type.
         otype = sig.entry_order_type or cfg.entry_order_type
@@ -308,7 +308,18 @@ class Executor:
         """Атрибуция филлов из приватного WS execution к сделкам (вызывается из
         главного треда). Матч по нашему orderLinkId (вход/выход тегаются), для
         биржевых TP/SL (пустой/чужой linkId) — по символу к открытой сделке.
-        Накапливаем точные execFee/execPnl/execPrice → net = ΣexecPnl − ΣexecFee."""
+        Накапливаем точные execFee/execPnl/execPrice → net = ΣexecPnl − ΣexecFee.
+
+        Входные филлы (closedSize=0, execPnl=0) дополнительно пишут в БД
+        реальный entry (VWAP) — для MARKET-входа (density_break) референсная
+        цена отличается от avgEntryPrice слиппеджем, и без обновления
+        REST-реконсиляция не матчит сделку по отпечатку (audit 2026-06-10, A-3:
+        provisional зависали навсегда, «closed_pnl: нет совпадения»).
+
+        Заодно сдвигаем брекеты (P-3, A-2): SL/TP были выставлены в
+        place_entry от пре-филл референса — _rebracket переставляет их от
+        реального VWAP, сохраняя дистанции (реальный $-риск = расчётному)."""
+        entry_dirty: set[int] = set()
         for r in rows or []:
             tid = self._link2trade.get(r.get("orderLinkId", ""))
             if tid is None:
@@ -316,13 +327,74 @@ class Executor:
             if tid is None:
                 continue  # филл не наш / сделка уже финализирована
             acc = self._fills.setdefault(
-                tid, {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0})
+                tid, {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0,
+                      "open_val": 0.0, "open_qty": 0.0})
             acc["fee"] += r.get("execFee", 0.0)
             acc["pnl"] += r.get("execPnl", 0.0)
             # закрывающий филл: closedSize>0 или есть realized P&L
             if r.get("closedSize", 0.0) > 0 or r.get("execPnl", 0.0) != 0.0:
                 acc["close_val"] += r.get("execPrice", 0.0) * r.get("execQty", 0.0)
                 acc["close_qty"] += r.get("execQty", 0.0)
+            else:
+                # входной филл → копим VWAP реальной цены входа
+                acc["open_val"] = acc.get("open_val", 0.0) \
+                    + r.get("execPrice", 0.0) * r.get("execQty", 0.0)
+                acc["open_qty"] = acc.get("open_qty", 0.0) + r.get("execQty", 0.0)
+                entry_dirty.add(tid)
+        if self._db is None:
+            return
+        for tid in entry_dirty:
+            acc = self._fills.get(tid)
+            if not acc or acc.get("open_qty", 0.0) <= 0:
+                continue
+            avg_entry = acc["open_val"] / acc["open_qty"]
+            try:
+                # _rebracket ДО update_entry — нужен старый entry из БД
+                self._rebracket(tid, avg_entry)
+            except Exception:
+                log.exception("rebracket #%d failed", tid)
+            try:
+                self._db.update_entry(tid, avg_entry)
+            except Exception:
+                log.exception("update_entry #%d failed", tid)
+
+    # Порог сдвига брекетов: слиппедж < 1 бп цены даёт погрешность $-риска
+    # ~0.1% (на notional ~$230 это центы против риска $10) — аменд не нужен,
+    # бережём rate-limit. Технический анти-шум порог, не параметр стратегии.
+    _REBRACKET_MIN_REL = 1e-4
+
+    def _rebracket(self, tid: int, avg_entry: float) -> None:
+        """P-3 (audit 2026-06-10, A-2): сдвиг биржевых SL/TP на дельту
+        реального VWAP-входа.
+
+        MARKET-вход (density_break) наливается со слиппеджем, а брекеты в
+        place_entry считались от пре-филл best_ask/bid: med факт. убытка по SL
+        −$12.69 при расчётном риске $9.99 (n=34, +27% drag). Сдвигаем SL и TP
+        на (avg_entry − entry_ref), сохраняя ДИСТАНЦИИ → реальный $-риск =
+        qty×dist = расчётному. Maker-вход филлится по своей лимитке (delta=0)
+        → no-op. Геометрия сделки (R:R, fee-guard) не меняется."""
+        if self._client is None or avg_entry <= 0:
+            return
+        tr = next((t for t in self._db.open_trades() if t.id == tid), None)
+        if tr is None or tr.mode != "live" or tr.entry <= 0:
+            return
+        delta = avg_entry - tr.entry
+        if abs(delta) / tr.entry < self._REBRACKET_MIN_REL:
+            return
+        new_sl = self._client.round_price(tr.symbol, tr.sl + delta)
+        new_tp = self._client.round_price(tr.symbol, tr.tp + delta)
+        res = self._client.set_trading_stop(tr.symbol, sl_price=new_sl,
+                                            tp_price=new_tp)
+        if not res.get("ok"):
+            log.warning("rebracket #%d %s: set_trading_stop отклонён (%s) — "
+                        "оставляю старые SL/TP", tid, tr.symbol,
+                        res.get("error"))
+            return
+        self._db.update_levels(tid, sl=new_sl, tp=new_tp)
+        play.info("🎯 [%s] #%d вход со слиппеджем %+.4f (%.4f→%.4f) — сдвинул "
+                  "SL %.4f→%.4f / TP %.4f→%.4f (дистанции и $-риск сохранены)",
+                  tr.symbol, tid, delta, tr.entry, avg_entry, tr.sl, new_sl,
+                  tr.tp, new_tp)
 
     def _open_trade_for_symbol(self, symbol: str) -> int | None:
         if not symbol:

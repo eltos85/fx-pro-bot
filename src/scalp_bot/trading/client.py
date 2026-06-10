@@ -274,6 +274,43 @@ class ScalpBybitClient:
             log.exception("order_status %s failed", symbol)
         return None
 
+    def set_trading_stop(self, symbol: str, *, sl_price: float | None = None,
+                         tp_price: float | None = None) -> dict:
+        """Переставить биржевые SL/TP открытой позиции (Full-mode: на весь
+        размер; обе цены строками, positionIdx=0 — one-way mode).
+
+        Нужен для P-3 (audit 2026-06-10, A-2): MARKET-вход наливается со
+        слиппеджем, и брекеты, выставленные в place_entry от пре-филл
+        референса, дают реальный $-риск ≠ расчётному. После реального VWAP
+        входа executor сдвигает SL/TP на дельту слиппеджа этим вызовом.
+        Офдок: https://bybit-exchange.github.io/docs/v5/position/trading-stop
+        (POST /v5/position/trading-stop, tpslMode=Full модифицирует
+        существующие TP/SL-ордера позиции)."""
+        params: dict = {
+            "category": self._category,
+            "symbol": symbol,
+            "tpslMode": "Full",
+            "positionIdx": 0,
+        }
+        if sl_price is not None:
+            params["stopLoss"] = str(sl_price)
+        if tp_price is not None:
+            params["takeProfit"] = str(tp_price)
+        try:
+            resp = self._session.set_trading_stop(**params)
+        except Exception as e:
+            log.exception("set_trading_stop %s failed: %s", symbol, params)
+            return {"ok": False, "error": f"exception: {e}", "params": params}
+        ret_code = resp.get("retCode")
+        # 34040 "not modified" — цены уже такие; считаем успехом (идемпотентно)
+        if ret_code not in (0, None, 34040):
+            log.warning("set_trading_stop retCode=%s msg=%s params=%s",
+                        ret_code, resp.get("retMsg"), params)
+            return {"ok": False,
+                    "error": f"retCode={ret_code} {resp.get('retMsg')}",
+                    "params": params, "raw": resp}
+        return {"ok": True, "raw": resp}
+
     def close_market(self, symbol: str, side: str, qty: float,
                      order_link_id: str) -> dict:
         opposite = "Sell" if side == "Buy" else "Buy"

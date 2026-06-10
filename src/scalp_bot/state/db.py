@@ -143,6 +143,32 @@ class ScalpDB:
         )
         self._conn.commit()
 
+    def update_entry(self, trade_id: int, entry: float) -> None:
+        """Обновить entry реальной ценой исполнения (VWAP входных филлов из
+        приватного WS execution).
+
+        Для maker-входа это no-op (филл по своей лимит-цене), для MARKET-входа
+        (density_break, v0.18.16) реальный avgEntryPrice отличается от
+        референса слиппеджем — без обновления REST-реконсиляция restart-сирот
+        не матчит сделку по отпечатку avgEntryPrice (допуск 0.001%) и
+        provisional-PnL зависает навсегда (audit 2026-06-10, A-3)."""
+        if entry <= 0:
+            return
+        self._conn.execute(
+            "UPDATE trades SET entry=? WHERE id=?", (entry, trade_id))
+        self._conn.commit()
+
+    def update_levels(self, trade_id: int, *, sl: float, tp: float) -> None:
+        """Обновить SL/TP сделки (P-3, audit 2026-06-10, A-2): после
+        MARKET-входа со слиппеджем executor сдвигает брекеты на дельту
+        реального VWAP-входа и амендит их на бирже — БД должна отражать
+        фактические уровни (от них считаются hold-логи и трассировка)."""
+        if sl <= 0 or tp <= 0:
+            return
+        self._conn.execute(
+            "UPDATE trades SET sl=?, tp=? WHERE id=?", (sl, tp, trade_id))
+        self._conn.commit()
+
     def finalize_pnl(self, trade_id: int, *, pnl_usd: float,
                      exit_price: float | None = None,
                      close_reason: str | None = None) -> None:

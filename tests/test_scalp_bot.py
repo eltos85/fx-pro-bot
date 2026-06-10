@@ -522,6 +522,121 @@ def test_ingest_matches_exchange_tp_sl_by_symbol(tmp_path):
     db.close()
 
 
+class _FakeRebracketClient:
+    """round_price + set_trading_stop для тестов P-3 (сдвиг брекетов после
+    слиппеджа market-входа). Фиксирует вызовы аменда."""
+
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls: list[tuple] = []
+
+    def round_price(self, symbol, price):
+        return round(price, 2)
+
+    def set_trading_stop(self, symbol, *, sl_price=None, tp_price=None):
+        self.calls.append((symbol, sl_price, tp_price))
+        return {"ok": self.ok,
+                "error": None if self.ok else "retCode=10001 test"}
+
+
+def test_ingest_entry_fill_updates_db_entry_to_real_vwap(tmp_path):
+    # A-3 (audit 2026-06-10): MARKET-вход (density_break) наливается со
+    # слиппеджем — реальный avgEntryPrice ≠ референс в БД, и REST-реконсиляция
+    # не матчила сделку по отпечатку (допуск 0.001%) → provisional зависал.
+    # Фикс: входной филл из приватного WS обновляет entry реальным VWAP.
+    # P-3 (A-2): заодно SL/TP сдвигаются на дельту слиппеджа (дистанции и
+    # $-риск сохраняются) — и в БД, и на бирже (set_trading_stop).
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="BTCUSDT", side="long", qty=0.02, entry=63500.0,
+                         sl=63300.0, tp=64200.0, score=3, reasons="x",
+                         mode="live", strategy="density_break", ts_open=0.0)
+    cl = _FakeRebracketClient()
+    ex = Executor(db=db, settings=SimpleNamespace(), client=cl)
+    ex._link2trade["scalp_BTCUSDT_1"] = tid
+    # два частичных входных филла хуже референса (слиппедж) → VWAP 63512.5
+    ex.ingest_executions([
+        _exec("BTCUSDT", "scalp_BTCUSDT_1", fee=0.3, price=63510.0, qty=0.01),
+        _exec("BTCUSDT", "scalp_BTCUSDT_1", fee=0.3, price=63515.0, qty=0.01),
+    ])
+    tr = next(t for t in db.open_trades() if t.id == tid)
+    assert tr.entry == pytest.approx(63512.5)
+    # брекеты сдвинуты на delta=+12.5: дистанции до SL/TP не изменились
+    assert tr.sl == pytest.approx(63312.5)
+    assert tr.tp == pytest.approx(64212.5)
+    assert cl.calls == [("BTCUSDT", 63312.5, 64212.5)]
+    db.close()
+
+
+def test_rebracket_skips_below_threshold(tmp_path):
+    # слиппедж < 1 бп (анти-шум порог) — брекеты не трогаем (экономия API),
+    # но entry в БД всё равно обновляется (точный отпечаток для реконсиляции).
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="BTCUSDT", side="long", qty=0.02, entry=63500.0,
+                         sl=63300.0, tp=64200.0, score=3, reasons="x",
+                         mode="live", strategy="density_break", ts_open=0.0)
+    cl = _FakeRebracketClient()
+    ex = Executor(db=db, settings=SimpleNamespace(), client=cl)
+    ex._link2trade["lnk"] = tid
+    ex.ingest_executions([_exec("BTCUSDT", "lnk", fee=0.3,
+                                price=63500.5, qty=0.02)])  # +0.8 бп
+    tr = next(t for t in db.open_trades() if t.id == tid)
+    assert tr.entry == pytest.approx(63500.5)
+    assert tr.sl == pytest.approx(63300.0) and tr.tp == pytest.approx(64200.0)
+    assert cl.calls == []
+    db.close()
+
+
+def test_rebracket_keeps_old_levels_when_exchange_rejects(tmp_path):
+    # биржа отклонила set_trading_stop → БД НЕ обновляем (уровни в БД должны
+    # отражать реальные биржевые брекеты, а не желаемые).
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="BTCUSDT", side="long", qty=0.02, entry=63500.0,
+                         sl=63300.0, tp=64200.0, score=3, reasons="x",
+                         mode="live", strategy="density_break", ts_open=0.0)
+    cl = _FakeRebracketClient(ok=False)
+    ex = Executor(db=db, settings=SimpleNamespace(), client=cl)
+    ex._link2trade["lnk"] = tid
+    ex.ingest_executions([_exec("BTCUSDT", "lnk", fee=0.3,
+                                price=63512.5, qty=0.02)])
+    tr = next(t for t in db.open_trades() if t.id == tid)
+    assert tr.entry == pytest.approx(63512.5)  # A-3 фикс работает независимо
+    assert tr.sl == pytest.approx(63300.0) and tr.tp == pytest.approx(64200.0)
+    assert len(cl.calls) == 1  # попытка была
+    db.close()
+
+
+def test_ingest_entry_fill_maker_noop_and_close_untouched(tmp_path):
+    # maker-вход филлится ровно по лимит-цене → entry не меняется; закрывающий
+    # филл (closedSize>0) в open-аккумулятор не попадает и entry не трогает.
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ZECUSDT", side="long", qty=0.19, entry=518.14,
+                         sl=517.0, tp=520.0, score=5, reasons="x",
+                         mode="live", strategy="sweep_fade", ts_open=0.0)
+    ex = Executor(db=db, settings=SimpleNamespace(), client=SimpleNamespace())
+    ex._link2trade["entry"] = tid
+    ex._link2trade["close"] = tid
+    ex.ingest_executions([
+        _exec("ZECUSDT", "entry", fee=0.05, price=518.14, qty=0.19),
+        _exec("ZECUSDT", "close", fee=0.05, pnl=0.15, price=518.92, qty=0.19,
+              closed=0.19),
+    ])
+    tr = next(t for t in db.open_trades() if t.id == tid)
+    assert tr.entry == pytest.approx(518.14)  # VWAP входа = лимитка
+    acc = ex._fills[tid]
+    assert acc["open_qty"] == pytest.approx(0.19)   # только входной филл
+    assert acc["close_qty"] == pytest.approx(0.19)  # выход учтён отдельно
+    db.close()
+
+
+def test_ingest_entry_fill_without_db_does_not_crash():
+    # db=None (юнит-контекст) — входной филл не должен ронять ingest
+    ex = Executor(db=None, settings=SimpleNamespace(), client=SimpleNamespace())
+    ex._link2trade["entry"] = 1
+    ex.ingest_executions([_exec("ETHUSDT", "entry", fee=0.01,
+                                price=2000.0, qty=0.04)])
+    assert ex._fills[1]["open_qty"] == pytest.approx(0.04)
+
+
 def test_reconcile_finalizes_from_ws_ledger(tmp_path):
     db = ScalpDB(str(tmp_path))
     tid = db.insert_open(symbol="ZECUSDT", side="long", qty=0.19, entry=518.14,
@@ -1856,6 +1971,52 @@ def test_apply_pins_keeps_pin_under_top_n_cap():
 def test_apply_pins_empty_is_noop():
     from scalp_bot.data.universe import apply_pins
     assert apply_pins(["XLMUSDT"], [], top_n=15) == ["XLMUSDT"]
+
+
+def test_pad_universe_fills_to_min_by_range():
+    # P-4 (audit A-4): вселенная выродилась в 1 монету → добор из liquidity-pool
+    # самых волатильных по range24h, без дублей
+    from scalp_bot.data.universe import filter_tickers, pad_universe
+    pool = filter_tickers(
+        [_ticker("AUSDT", 100, 104, 100, 300e6),    # range 4%
+         _ticker("BUSDT", 100, 105, 100, 200e6),    # range 5% — волатильнее
+         _ticker("NEARUSDT", 100, 109, 100, 250e6)],  # уже в ranked
+        min_turnover=150e6, min_range_pct=0.0, max_range_pct=20.0,
+        max_spread_bps=5.0)
+    out = pad_universe(["NEARUSDT"], pool, min_symbols=3)
+    assert out == ["NEARUSDT", "BUSDT", "AUSDT"]
+
+
+def test_pad_universe_liquidity_guards_stay_hard():
+    # добор ослабляет ТОЛЬКО range-floor: low-turnover и широкий спред в pool
+    # не попадают (filter_tickers с min_range_pct=0 — как в _select_universe)
+    from scalp_bot.data.universe import filter_tickers, pad_universe
+    wide = _ticker("WIDEUSDT", 100, 105, 100, 300e6)
+    wide["bid1Price"], wide["ask1Price"] = "99.9", "100.1"  # спред 20bps > cap
+    pool = filter_tickers(
+        [_ticker("THINUSDT", 100, 105, 100, 50e6),  # turnover ниже floor
+         wide,
+         _ticker("OKUSDT", 100, 104, 100, 300e6)],
+        min_turnover=150e6, min_range_pct=0.0, max_range_pct=20.0,
+        max_spread_bps=5.0)
+    out = pad_universe(["NEARUSDT"], pool, min_symbols=3)
+    assert out == ["NEARUSDT", "OKUSDT"]  # добрали что есть, стражи не ослабли
+
+
+def test_pad_universe_noop_when_disabled_or_enough():
+    from scalp_bot.data.universe import pad_universe
+    pool = [{"symbol": "AUSDT", "range_pct": 5.0}]
+    # min_symbols=0 → выключено (прежнее поведение «качество, не количество»)
+    assert pad_universe(["X"], pool, min_symbols=0) == ["X"]
+    # уже достаточно монет → добора нет
+    assert pad_universe(["X", "Y", "Z"], pool, min_symbols=3) == ["X", "Y", "Z"]
+
+
+def test_universe_min_symbols_default():
+    """v0.18.19 (P-4): floor 3 монеты — минимальная диверсификация против
+    вырождения вселенной в 1 символ (концентрация + sl_cooldown-запирание)."""
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().universe_min_symbols == 3
 
 
 # ─── HTF-bias (трендовый фильтр старшего ТФ, v0.9.3) ───────────────────────
