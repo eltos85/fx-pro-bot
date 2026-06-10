@@ -5,6 +5,7 @@ import signal
 import time
 from dataclasses import dataclass
 
+import pandas as pd
 import yfinance as yf
 
 from fx_momentum_bot.config.settings import MomentumBotSettings
@@ -46,6 +47,81 @@ def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
     global _shutdown
     _shutdown = True
     log.info("Received signal %d, shutting down", signum)
+
+
+_INTERVAL_SEC = {
+    "1m": 60,
+    "2m": 120,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "60m": 3600,
+    "1h": 3600,
+    "90m": 5400,
+    "1d": 86400,
+}
+
+
+def _drop_forming_bar(df: pd.DataFrame | None, interval: str) -> pd.DataFrame | None:
+    """Отбросить последний НЕЗАКРЫТЫЙ бар: сигналы только по закрытым барам.
+
+    yfinance включает текущий формирующийся бар (timestamp = начало бара).
+    Сигнал по нему «репейнтит»: momentum/reclaim может появиться в середине
+    бара и исчезнуть к закрытию — отсюда дребезг входов вокруг порога
+    (3×USDJPY long за один день 06-05). Канон — подтверждение на close бара
+    (Al Brooks 2012 ch.5, тот же принцип что confirm bar у SessionOrb).
+    """
+    if df is None or df.empty:
+        return df
+    sec = _INTERVAL_SEC.get(interval)
+    if sec is None or not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    last_open = df.index[-1]
+    if last_open.tzinfo is None:
+        last_open = last_open.tz_localize("UTC")
+    now = pd.Timestamp.now(tz="UTC")
+    if last_open.tz_convert("UTC") + pd.Timedelta(seconds=sec) > now:
+        return df.iloc[:-1]
+    return df
+
+
+def _broker_price(
+    executor: TradeExecutor, symbol: str, max_age_sec: float = 900.0
+) -> float | None:
+    """Текущая цена ИНСТРУМЕНТА ИСПОЛНЕНИЯ (cTrader spot mid) для yf-символа.
+
+    Критично для GC=F→XAUUSD: данные стратегии — фьючерс COMEX, исполнение —
+    спот-металл, базис между ними десятки долларов. Все цены, сравниваемые с
+    брокерскими (entry hint для slippage-guard, current_price для R-multiple/
+    BE/trailing), обязаны быть в координатах брокера, не yfinance.
+    Возвращает None если нет подписки/свежей цены (вызывающий код делает
+    fallback на yfinance close — для FX-пар расхождение пренебрежимо).
+    """
+    info = executor.symbols.resolve_yfinance(symbol)
+    if info is None:
+        return None
+    try:
+        px = executor.client.get_spot_price(info.symbol_id, max_age_sec=max_age_sec)
+    except Exception:  # noqa: BLE001
+        return None
+    if not px or not px.get("mid"):
+        return None
+    return float(px["mid"])
+
+
+def _subscribe_spots(executor: TradeExecutor, symbols: tuple[str, ...]) -> None:
+    """Подписаться на spot-стрим всех торгуемых символов (для _broker_price)."""
+    sids = []
+    for symbol in symbols:
+        info = executor.symbols.resolve_yfinance(symbol)
+        if info is not None:
+            sids.append(info.symbol_id)
+    if not sids:
+        return
+    try:
+        executor.client.subscribe_spots(sids)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("subscribe_spots failed (fallback на yfinance close): %s", exc)
 
 
 def _fetch_candles(symbol: str, interval: str, period: str, retries: int = 3):
@@ -175,6 +251,16 @@ def _count_open_positions_for_symbols(
     return count
 
 
+def _should_record_direction(*, live: bool, wants_open: bool, executed: bool) -> bool:
+    """Обновлять ли last_direction после цикла (edge-trigger памяти сигнала).
+
+    paper-режим — всегда (поведение не меняется); live — только если вход
+    не требовался ЛИБО состоялся. Заблокированный/неудавшийся вход не
+    фиксируем, чтобы повторить попытку, пока сигнал актуален.
+    """
+    return (not live) or (not wants_open) or executed
+
+
 def _r_multiple(side: str, *, entry_price: float, current_price: float, risk_price: float) -> float:
     if risk_price <= 0:
         return 0.0
@@ -291,7 +377,10 @@ def _manage_positions(
         signal_data = signal_by_symbol.get(symbol)
         if signal_data is None:
             continue
-        current_price = signal_data.last_close
+        # Цена для R-multiple/BE/trailing — В КООРДИНАТАХ БРОКЕРА.
+        # yfinance last_close — только fallback: для GC=F→XAUUSD базис
+        # фьючерс-спот ~$15-40 искажал R на единицы (см. BUILDLOG 2026-06-10).
+        current_price = _broker_price(executor, symbol) or signal_data.last_close
         atr = signal_data.atr
         info = executor.symbols.resolve_yfinance(symbol)
         if info is None:
@@ -422,6 +511,12 @@ def _open_vp_position(
     tp_distance = abs(sig.tp_price - sig.entry)
     if sl_distance <= 0 or tp_distance <= 0:
         return False, "vp_bad_sl_tp"
+    # entry_price_hint — в координатах БРОКЕРА (spot XAUUSD), не фьючерса.
+    # Со sig.entry (GC=F) slippage-guard видел базис фьючерс-спот ($15-40 ≈
+    # 150-400 pip) как «slippage» и резал 8/9 валидных входов с уплатой
+    # spread+commission (BUILDLOG 2026-06-10). Дистанции SL/TP — относительные,
+    # базис на них не влияет.
+    entry_hint = _broker_price(executor, symbol) or sig.entry
     result = executor.open_position(
         yf_symbol=symbol,
         direction=sig.direction,
@@ -429,7 +524,7 @@ def _open_vp_position(
         tp_distance=tp_distance,
         lot_size=settings.vp_lot_size,
         comment=settings.vp_order_label,
-        entry_price_hint=sig.entry,
+        entry_price_hint=entry_hint,
         label=settings.position_label,
     )
     if not result.success:
@@ -438,7 +533,7 @@ def _open_vp_position(
         store.upsert_position_state(
             broker_position_id=result.broker_position_id,
             symbol=symbol,
-            entry_price=result.fill_price if result.fill_price > 0 else sig.entry,
+            entry_price=result.fill_price if result.fill_price > 0 else entry_hint,
             initial_volume=(
                 result.volume if result.volume > 0 else lots_to_volume(settings.vp_lot_size)
             ),
@@ -523,6 +618,8 @@ def run() -> None:
 
     store = MomentumStore(settings.db_path)
     executor = _build_executor(settings)
+    if executor is not None:
+        _subscribe_spots(executor, settings.all_symbols)
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -549,8 +646,11 @@ def run() -> None:
             for symbol in settings.all_symbols:
                 is_vp = symbol in vp_symbols
                 if is_vp:
-                    candles = _fetch_candles(
-                        symbol, settings.vp_yfinance_interval, settings.vp_yfinance_period
+                    candles = _drop_forming_bar(
+                        _fetch_candles(
+                            symbol, settings.vp_yfinance_interval, settings.vp_yfinance_period
+                        ),
+                        settings.vp_yfinance_interval,
                     )
                     signal_data: MomentumSignal | VolumeProfileSignal | None = build_vp_signal(
                         candles,
@@ -565,8 +665,11 @@ def run() -> None:
                         consolidation_bars=settings.vp_consolidation_bars,
                     )
                 else:
-                    candles = _fetch_candles(
-                        symbol, settings.yfinance_interval, settings.yfinance_period
+                    candles = _drop_forming_bar(
+                        _fetch_candles(
+                            symbol, settings.yfinance_interval, settings.yfinance_period
+                        ),
+                        settings.yfinance_interval,
                     )
                     signal_data = build_signal(
                         candles,
@@ -622,27 +725,47 @@ def run() -> None:
                     continue
 
                 last_direction = store.get_last_direction(symbol)
-                should_open = (
+                # Edge-trigger: входим только на СМЕНЕ направления сигнала.
+                wants_open = (
                     signal_data.direction in {"long", "short"}
                     and signal_data.direction != last_direction
                     and executor is not None
-                    and open_count < settings.max_open_positions
                 )
+                should_open = wants_open and open_count < settings.max_open_positions
 
                 executed = False
-                note = "paper_mode"
+                if executor is None:
+                    note = "paper_mode"
+                elif signal_data.direction not in {"long", "short"}:
+                    note = "flat"
+                elif signal_data.direction == last_direction:
+                    note = "same_direction"
+                elif not should_open:
+                    note = "skip:max_positions"
+                else:
+                    note = "live_open:pending"
 
                 if should_open:
                     sl_distance = signal_data.atr * settings.atr_stop_mult
-                    tp_distance = signal_data.atr * settings.atr_take_mult
+                    # БЕЗ брокерского TP: выход ведёт сопровождение — BE@1R,
+                    # partial@1.5R, ATR-trailing (Raschke partial+runner,
+                    # LeBeau Chandelier). Старый TP=3.5 ATR стоял на 1.4R и
+                    # закрывал позицию ДО активации partial/trailing (1.5R) —
+                    # весь runner-механизм был мёртвым кодом. Согласовано
+                    # 2026-06-10. Slippage-guard при tp=None использует
+                    # static-лимит (max_slippage_pips).
                     result = executor.open_position(
                         yf_symbol=symbol,
                         direction=signal_data.direction,
                         sl_distance=sl_distance,
-                        tp_distance=tp_distance,
+                        tp_distance=None,
                         lot_size=settings.lot_size,
                         comment=settings.order_label,
-                        entry_price_hint=signal_data.last_close,
+                        # hint в координатах брокера (для slippage-guard);
+                        # fallback на yfinance close для FX безопасен.
+                        entry_price_hint=(
+                            _broker_price(executor, symbol) or signal_data.last_close
+                        ),
                         label=settings.position_label,
                     )
                     executed = bool(result.success)
@@ -665,12 +788,11 @@ def run() -> None:
                             )
                         open_count += 1
                         log.info(
-                            "OPEN %s %s lot=%.2f sl=%.6f tp=%.6f",
+                            "OPEN %s %s lot=%.2f sl=%.6f tp=runner(BE/partial/trail)",
                             symbol,
                             signal_data.direction,
                             settings.lot_size,
                             sl_distance,
-                            tp_distance,
                         )
 
                 store.add_decision(
@@ -682,7 +804,14 @@ def run() -> None:
                     executed=executed,
                     note=note,
                 )
-                store.set_last_direction(symbol, signal_data.direction)
+                # НЕ фиксируем direction, если live-вход хотели, но он был
+                # заблокирован (max_positions) или не удался: иначе edge-trigger
+                # считает сигнал «отработанным» и сделка теряется навсегда.
+                # Без фиксации попытка повторится в следующем цикле.
+                if _should_record_direction(
+                    live=executor is not None, wants_open=wants_open, executed=executed
+                ):
+                    store.set_last_direction(symbol, signal_data.direction)
                 log.info(
                     "%s signal=%s momentum=%.5f atr=%.6f close=%.6f executed=%s",
                     symbol,

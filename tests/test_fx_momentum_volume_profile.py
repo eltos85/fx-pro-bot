@@ -144,17 +144,30 @@ def test_breakout_short_on_acceptance_then_break() -> None:
 # ─── target / RR ────────────────────────────────────────────────────────
 
 
-def test_target_long_uses_va_edge_and_respects_rr() -> None:
+def test_target_long_is_poc_when_rr_sufficient() -> None:
+    # Канон Dalton: цель fade — POC. risk=0.05, до POC 0.15 → RR=3 ≥ 1.5.
+    tp = _target("long", entry=104.85, sl=104.80, profile=_PROF, min_rr=1.5)
+    assert tp == pytest.approx(_PROF.poc)
+
+
+def test_target_skips_trade_when_rr_to_poc_too_low() -> None:
+    # risk=0.55, до POC 0.05 → RR=0.09 < 1.5 → скип (НЕ дорисовываем цель
+    # дальше структуры — запрет подгонки).
     tp = _target("long", entry=104.95, sl=104.40, profile=_PROF, min_rr=1.5)
-    assert tp is not None and tp > 104.95
+    assert tp is None
+
+
+def test_target_short_is_poc_when_rr_sufficient() -> None:
+    tp = _target("short", entry=105.15, sl=105.20, profile=_PROF, min_rr=1.5)
+    assert tp == pytest.approx(_PROF.poc)
 
 
 def test_target_measured_move_fallback_meets_min_rr() -> None:
-    # вход выше VAH (breakout): VA-цели нет → measured-move = entry + min_rr*risk
+    # вход выше VAH (breakout): POC позади → measured-move = entry + min_rr*risk
     entry, sl, min_rr = 105.15, 104.40, 1.5
     tp = _target("long", entry=entry, sl=sl, profile=_PROF, min_rr=min_rr)
     assert tp is not None
-    assert (tp - entry) / (entry - sl) >= min_rr - 1e-9
+    assert (tp - entry) / (entry - sl) == pytest.approx(min_rr)
 
 
 # ─── session window split ───────────────────────────────────────────────

@@ -1,6 +1,67 @@
+import pandas as pd
 import pytest
 
-from fx_momentum_bot.app.main import _calc_partial_close_volume, _r_multiple
+from fx_momentum_bot.app.main import (
+    _calc_partial_close_volume,
+    _drop_forming_bar,
+    _r_multiple,
+    _should_record_direction,
+)
+
+
+def _make_ohlcv(index: pd.DatetimeIndex) -> pd.DataFrame:
+    n = len(index)
+    return pd.DataFrame(
+        {
+            "Open": [1.0] * n,
+            "High": [1.1] * n,
+            "Low": [0.9] * n,
+            "Close": [1.0] * n,
+            "Volume": [100] * n,
+        },
+        index=index,
+    )
+
+
+def test_drop_forming_bar_removes_incomplete_last_bar() -> None:
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    idx = pd.date_range(end=now, periods=5, freq="1h", tz="UTC")
+    df = _make_ohlcv(idx)
+    # Последний бар открыт в текущем часе → ещё формируется → отброшен.
+    out = _drop_forming_bar(df, "1h")
+    assert len(out) == 4
+    assert out.index[-1] == idx[-2]
+
+
+def test_drop_forming_bar_keeps_closed_bars() -> None:
+    end = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=2)
+    idx = pd.date_range(end=end, periods=5, freq="1h", tz="UTC")
+    df = _make_ohlcv(idx)
+    out = _drop_forming_bar(df, "1h")
+    assert len(out) == 5
+
+
+def test_drop_forming_bar_handles_none_and_unknown_interval() -> None:
+    assert _drop_forming_bar(None, "1h") is None
+    now = pd.Timestamp.now(tz="UTC")
+    df = _make_ohlcv(pd.date_range(end=now, periods=3, freq="1h", tz="UTC"))
+    # Неизвестный интервал — без изменений (не рискуем отбрасывать валидное).
+    assert len(_drop_forming_bar(df, "4h")) == 3
+
+
+def test_should_record_direction_paper_mode_always_records() -> None:
+    assert _should_record_direction(live=False, wants_open=True, executed=False)
+
+
+def test_should_record_direction_keeps_signal_when_blocked() -> None:
+    # Live: вход хотели, но не состоялся (max_positions/ошибка) → НЕ фиксируем,
+    # сигнал должен повториться в следующем цикле.
+    assert not _should_record_direction(live=True, wants_open=True, executed=False)
+
+
+def test_should_record_direction_records_on_execute_or_no_intent() -> None:
+    assert _should_record_direction(live=True, wants_open=True, executed=True)
+    assert _should_record_direction(live=True, wants_open=False, executed=False)
 
 
 def test_r_multiple_for_long_and_short() -> None:

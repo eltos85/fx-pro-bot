@@ -43,6 +43,11 @@ class MomentumBotSettings(BaseSettings):
     atr_stop_mult: float = Field(
         default=2.5, validation_alias="MOMENTUM_BOT_ATR_STOP_MULT"
     )
+    # НЕ используется с 2026-06-10: брокерский TP у momentum-входов убран
+    # (стоял на 1.4R и закрывал позицию до активации partial/trailing@1.5R —
+    # runner был мёртвым кодом). Выход ведёт сопровождение: BE@1R +
+    # partial@1.5R + ATR-trailing (Raschke partial+runner, LeBeau Chandelier).
+    # Поле оставлено для совместимости env, согласовано с пользователем.
     atr_take_mult: float = Field(
         default=3.5, validation_alias="MOMENTUM_BOT_ATR_TAKE_MULT"
     )

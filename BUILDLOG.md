@@ -6,6 +6,81 @@
 
 ## 2026-06-10
 
+### feat(momentum-bot): runner-выход у momentum (TP убран) + VP-цель по канону POC (согласовано)
+
+`<pending>`
+
+Два стратегических изменения, **согласованы с пользователем 2026-06-10**
+(strategy-guard.mdc) по итогам аудита логики:
+
+**1. Momentum: убран брокерский TP (3.5 ATR).** При SL=2.5 ATR старый TP
+стоял на 1.4R, а partial take и trailing активируются на 1.5R — runner-
+механизм (Raschke partial+runner, LeBeau Chandelier ATR-trailing, Van Tharp
+R-discipline) был мёртвым кодом: TP всегда закрывал позицию раньше. Теперь
+выход полностью ведёт сопровождение: BE@1R → partial 50%@1.5R → trailing
+1.5×ATR. `atr_take_mult` оставлен в settings для совместимости env, помечен
+неиспользуемым. Slippage-guard при tp=None переходит на static-лимит
+(задокументированный fallback executor'а).
+
+**2. VP-target: цель fade — POC, скип при RR<1.5.** Старый `_target` брал
+дальний край VA с принудительным полом 1.5R: ветка «rr_too_low → скип» была
+недостижима, а пол дорисовывал цель за пределами структуры (скрытая подгонка).
+Канон (Dalton 2007: rotation тянется к POC; видео-первоисточник: «target the
+POC, at least 1:2») — цель POC; если RR до POC < vp_min_rr, сетап не
+оплачивает риск → пропуск сделки. Для breakout (POC позади входа) сохранён
+measured-move = min_rr×risk.
+
+Тесты: VP-target переписаны под канон (+2), сьют 1199 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`,
+`src/fx_momentum_bot/config/settings.py`,
+`src/fx_momentum_bot/strategy/volume_profile.py`,
+`tests/test_fx_momentum_volume_profile.py`
+
+### fix(momentum-bot): 3 бага из аудита логики — координаты фьючерс/спот, потеря сигнала, repaint по формирующемуся бару
+
+`<pending>`
+
+Полный аудит логики после P&L-аудита (см. запись ниже). Три бага, все
+подтверждены данными VPS (логи + `momentum_bot.sqlite`), все — класс
+«исправление явной логики» (sample-size.mdc), параметры стратегий не тронуты.
+
+**1. Смешение координат GC=F (фьючерс) / XAUUSD (спот) — главный убыточный баг.**
+Симптом: 8 из 9 VP-попыток входа по золоту срезаны slippage-guard'ом
+«open+close в ту же минуту» с уплатой spread+commission (7 commission-losses
+из P&L-аудита). Причина: `entry_price_hint=sig.entry` — цена фьючерса GC=F,
+а fill — спот XAUUSD; базис $17–39 (лог: strat=4304.20 fill=4264.78 →
+«slip 394.2pip > max 105»). Guard видел базис как slippage и закрывал
+валидные входы. Тот же баг искажал R-multiple в `_manage_positions`
+(current_price=фьючерс vs entry=спот → BE/partial/trailing срабатывали
+не там) и trailing-SL (уровень от фьючерсной цены на спот-позиции).
+Решение: `_subscribe_spots` (ProtoOASubscribeSpotsReq) + `_broker_price`
+(spot mid из cTrader) — все цены, сравниваемые с брокерскими (entry hint,
+current_price для R/BE/trailing), теперь в координатах брокера; yfinance
+close — только fallback (для FX-пар расхождение пренебрежимо). Дистанции
+SL/TP остались относительными (базис на них не влияет).
+
+**2. Edge-trigger терял сигнал при заблокированном входе.**
+`set_last_direction` вызывался безусловно: если вход заблокирован
+(max_positions) или open не удался, направление всё равно фиксировалось →
+следующий цикл «same direction» → сделка терялась навсегда (до флипа).
+Решение: `_should_record_direction` — в live не фиксируем direction при
+неудавшемся/заблокированном входе, попытка повторяется пока сигнал жив.
+Заодно notes стали точными (`skip:max_positions`, `same_direction`, `flat`
+вместо вездесущего `paper_mode`).
+
+**3. Сигналы по формирующемуся (незакрытому) бару — repaint.**
+Momentum и VP считали сигнал от `close.iloc[-1]` текущего незакрытого бара
+yfinance → дребезг вокруг порога: 3×USDJPY long за один день 06-05 (все
+в минус, −$6.30). Решение: `_drop_forming_bar` — сигналы только по закрытым
+барам (канон confirm-on-close, Al Brooks 2012 ch.5 — тот же принцип, что
+confirm bar у SessionOrb advisor'а).
+
+Тесты: +6 (`_drop_forming_bar`, `_should_record_direction`), сьют 1197 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`,
+`src/fx_momentum_bot/strategy/momentum.py`, `tests/test_fx_momentum_bot.py`
+
 ### audit(momentum-bot): broker-truth P&L 06-05→06-10 (observation only, выборка мала)
 
 `<pending>`

@@ -32,7 +32,7 @@ def _compute_atr(df: pd.DataFrame, period: int) -> pd.Series:
 def build_signal(
     candles: pd.DataFrame, *, lookback_bars: int, atr_period: int, threshold: float
 ) -> MomentumSignal | None:
-    if candles.empty or len(candles) < max(lookback_bars + 1, atr_period + 1):
+    if candles is None or candles.empty or len(candles) < max(lookback_bars + 1, atr_period + 1):
         return None
 
     close = candles["Close"]

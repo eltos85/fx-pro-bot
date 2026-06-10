@@ -16,7 +16,8 @@ Trading Strategy» (5-min, окно 03:00–07:00 NY) — здесь механ�
 Два сетапа на 5-минутках, профиль строится по сессионному окну:
 1. FAILED AUCTION (fade-to-value): 5m close за VAL/VAH, затем 5m close
    обратно внутрь value area (reclaim) → вход в сторону возврата, цель —
-   POC / противоположный край VA. Инвалид если POC уже задет.
+   POC (Dalton: rotation тянется к POC); если RR до POC < vp_min_rr —
+   сделка пропускается. Инвалид если POC уже задет.
 2. BREAKOUT (acceptance outside): цена закрепилась (consolidation) за
    краем VA несколько баров, затем пробивает экстремум консолидации →
    вход по направлению пробоя, SL за консолидацией.
@@ -249,25 +250,30 @@ def _detect_breakout(
 def _target(
     direction: str, entry: float, sl: float, profile: Profile, *, min_rr: float
 ) -> float | None:
-    """TP: POC/противоположный край VA, но не ближе min_rr. Иначе 2*min_rr нет → None."""
+    """TP по канону: цель fade — POC; RR до цели < min_rr → сделку пропускаем.
+
+    Dalton «Mind Over Markets» (2007): rotation внутри value тянется к POC —
+    это структурная цель failed auction. Если POC слишком близко (RR < min_rr)
+    — сетап не оплачивает риск, скип (None), а НЕ дорисовываем цель дальше
+    структуры (запрет подгонки, no-data-fitting.mdc).
+    Для breakout (acceptance outside VA) POC позади входа — структурной цели
+    впереди нет, берём measured-move = min_rr × risk (мягкий пол из видео
+    «at least 1:2», у нас 1.5).
+    """
     risk = abs(entry - sl)
     if risk <= 0:
         return None
-    floor_tp = min_rr * risk
     if direction == "long":
-        # fade-цель: противоположный край VA / POC выше входа (Dalton).
-        candidates = [p for p in (profile.poc, profile.vah) if p > entry]
-        far = max(candidates) if candidates else entry + floor_tp
-        tp = max(far, entry + floor_tp)  # breakout: нет VA-цели → measured 1.5R
-        if (tp - entry) / risk < min_rr:
+        if profile.poc > entry:  # failed auction: POC впереди
+            if (profile.poc - entry) / risk < min_rr:
+                return None
+            return profile.poc
+        return entry + min_rr * risk  # breakout выше VA: measured-move
+    if profile.poc < entry:
+        if (entry - profile.poc) / risk < min_rr:
             return None
-        return tp
-    candidates = [p for p in (profile.poc, profile.val) if p < entry]
-    far = min(candidates) if candidates else entry - floor_tp
-    tp = min(far, entry - floor_tp)
-    if (entry - tp) / risk < min_rr:
-        return None
-    return tp
+        return profile.poc
+    return entry - min_rr * risk
 
 
 def build_signal(
