@@ -56,6 +56,11 @@ class MomentumBotSettings(BaseSettings):
     )
 
     lot_size: float = Field(default=0.01, validation_alias="MOMENTUM_BOT_LOT_SIZE")
+    # Лимит ТОЛЬКО для momentum-стратегии (позиции по momentum-символам).
+    # VP-стратегия (золото) гейтится отдельно: 1 позиция на символ
+    # (already_open) + дневной лимит 2/сторону — momentum-позиции её слот
+    # не занимают (раздельные лимиты с 2026-06-10, по просьбе пользователя:
+    # «3 позиции одной страты не должны блокировать другую»).
     max_open_positions: int = Field(
         default=3, validation_alias="MOMENTUM_BOT_MAX_OPEN_POSITIONS"
     )

@@ -593,9 +593,13 @@ def _process_vp_symbol(
     store: MomentumStore,
     settings: MomentumBotSettings,
     positions_by_symbol: dict[str, list[ManagedPosition]],
-    open_count: int,
 ) -> bool:
-    """Гейтинг + открытие VP-сделки. Возврат True если позиция открыта."""
+    """Гейтинг + открытие VP-сделки. Возврат True если позиция открыта.
+
+    Лимиты VP НЕЗАВИСИМЫ от momentum (раздельные с 2026-06-10): 1 позиция
+    на VP-символ (already_open) + дневной лимит 2/сторону. Глобальный
+    max_open_positions сюда не входит — momentum-позиции не блокируют VP.
+    """
     executed = False
     note = "no_setup"
     already_open = len(positions_by_symbol.get(symbol, [])) > 0
@@ -606,7 +610,6 @@ def _process_vp_symbol(
         and sig.setup != "none"
         and executor is not None
         and not already_open
-        and open_count < settings.max_open_positions
         and day_count < settings.vp_max_trades_per_dir_per_day
     )
     if can_open and executor is not None:
@@ -619,8 +622,6 @@ def _process_vp_symbol(
             note = "vp_skip:position_open"
         elif day_count >= settings.vp_max_trades_per_dir_per_day:
             note = "vp_skip:daily_limit"
-        elif open_count >= settings.max_open_positions:
-            note = "vp_skip:max_positions"
         elif executor is None:
             note = "paper_mode"
 
@@ -733,9 +734,15 @@ def run() -> None:
                     signal_by_symbol=signal_by_symbol,
                     positions_by_symbol=positions_by_symbol,
                 )
+            # Лимит max_open_positions — только для momentum-стратегии:
+            # считаем позиции по momentum-символам, VP-позиции (золото) в
+            # счёт не входят и наоборот (раздельные лимиты стратегий).
+            momentum_symbols = tuple(
+                s for s in settings.all_symbols if s not in vp_symbols
+            )
             if executor is not None:
                 open_count = _count_open_positions_for_symbols(
-                    executor, settings.all_symbols, labels=settings.managed_labels
+                    executor, momentum_symbols, labels=settings.managed_labels
                 )
             else:
                 open_count = 0
@@ -746,17 +753,16 @@ def run() -> None:
                     continue
 
                 if symbol in vp_symbols and isinstance(signal_data, VolumeProfileSignal):
-                    opened = _process_vp_symbol(
+                    # VP-позиция momentum-лимит не занимает (open_count
+                    # считает только momentum-символы).
+                    _process_vp_symbol(
                         symbol=symbol,
                         sig=signal_data,
                         executor=executor,
                         store=store,
                         settings=settings,
                         positions_by_symbol=positions_by_symbol,
-                        open_count=open_count,
                     )
-                    if opened:
-                        open_count += 1
                     continue
 
                 last_direction = store.get_last_direction(symbol)
