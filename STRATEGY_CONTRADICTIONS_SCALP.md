@@ -499,6 +499,59 @@ n≈25 < 100) — reversible, НЕ валидированный эдж; прав
 
 ---
 
+## C-08: density_break без трендового фильтра — контртренд-ЛОНГ-пробои = bull traps
+
+**Статус**: 🟡 решено-частично (v0.18.18: асимметричный DMI long-gate включён,
+эдж форвард-валидируется).
+**Где**: класс-флаги `DensityBreakStrategy` (`htf_filtered=False`,
+`regime_gated=False` — v0.18.1) ↔ live-результат лонг-пробоев.
+**Суть (запрос пользователя 2026-06-10)**: «4 суток в минус, правки не помогли —
+найти причину и ответ у профи». Полный аудит `scripts/scalp_full_audit.py`
+(filled с 06-05 11:00 UTC, после последней страт-правки v0.18.10).
+
+**Главный вывод**: главная течь бота — НЕ sweep_fade (его движок исправен:
+ex-ZEC WR 59.3% / net +51.72, long/short симметричны ~53%), а **лонг-пробои
+density_break**, которые торгуются против старшего тренда без какого-либо
+направленного фильтра.
+
+**Данные (БД live, filled n=44 density_break)**:
+- [2026-06-10] long **WR 5.9% (1/17) / net −158.07** — при H0 WR=30% биномиальный
+  p<0.02 → статистически значимая поломка, НЕ шум (в отличие от ZEC C-07 n=16).
+  short WR 29.6% (8/27) / net **+11.77** — работает (R:R 2.49 покрывает WR).
+  Концентрация лонг-минуса: BTC −105.41 (WR 8.3%), ZEC −60.71, NEAR −52.02.
+- [2026-06-10] эффект прошлых правок: v0.18.16 (taker+CVD+ob) чинил ИСПОЛНЕНИЕ
+  (fill-rate 43.9%→100%) и single-bar фейк, но WR застрял 20.8%→20% — правка
+  била не по причине. Причина — НАПРАВЛЕНИЕ: пробой в контртренд.
+
+**Исследования (канон)**:
+- [2026-06-10] [research] «Breakouts against the dominant trend carry a
+  significantly higher probability of bull/bear traps; counter-trend breakouts
+  have much higher failure rate — take only with extra confirmation/smaller
+  size» — 5 независимых источников: NYC Servers breakout guide, ToS Indicators
+  false-breakout checklist, PhotonTrading MTF, FMZQuant breakout-retest (200
+  EMA trend-align), Kaufman «Smarter Trading» 1995 (ER: choppy → fakeouts).
+- [2026-06-10] [research-КОНФЛИКТ и примирение] docstring v0.18.1 цитирует Quant
+  Signals (175 backtests): СИММЕТРИЧНЫЙ трендовый фильтр на пробое = «universal
+  failure» (режет и profitable counter-trend). Оба правы о разном: запрет — на
+  симметричный фильтр; наша поломка — односторонняя (лонги ≫ хуже шортов, тот же
+  механизм, что C-07/DMI: ликвидационные каскады на альт-перпах жёстче на
+  лонг-стороне, Kalena 2026).
+
+**Решение (v0.18.18, одобрено пользователем)**: асимметричный **DMI long-gate**
+на density_break — ровно тот, что валидирован на sweep_fade (v0.18.4, A/B 3 окна):
+лонг-пробой разрешён только при +DI>−DI; шорты свободны. Симметричный
+EMA/ADX-фильтр НЕ ставим (`htf_filtered`/`regime_gated` остаются False) →
+запрет Quant Signals не нарушен, profitable контртренд-шорты сохранены.
+Реализация: класс-флаг `di_long_gated=True`; селектор `di_long_strats` в
+`main.py` (`di_long_gated` с фолбэком на `htf_filtered` — MR-страты наследуют);
+тест `test_di_long_gate_covers_density_break`. Реверсивно (`htf_di_long_gate`).
+[ОГРАНИЧЕНИЕ] live-выборка одного макрорежима (даунтренд альтов); гейт
+динамический — в аптренде DMI сам разрешит лонги. Пересмотр при n≥50 лонг-
+сигналов в аптренд-режиме. Связь: C-06 (universe для density_break ок),
+C-07 (та же асимметрия лонгов, инструментный уровень).
+
+---
+
 ## Кандидаты на проверку (ещё не оформлены как противоречия)
 
 - TP 3.5R (sweep_fade) при flow_exit-локе на 1.5R: статичный TP — лишь потолок

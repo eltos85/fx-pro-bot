@@ -2115,6 +2115,39 @@ def test_htf_di_long_gate_default():
     assert ScalpSettings().htf_di_long_gate is True
 
 
+def test_di_long_gate_covers_density_break():
+    """v0.18.18 (C-08): density_break под асимметричным DMI long-gate, при этом
+    БЕЗ симметричных MR-фильтров (htf_filtered/regime_gated=False — сохраняем
+    profitable контртренд-ШОРТЫ, Quant Signals). Live: long WR 5.9% / net −158
+    (p<0.02) = bull traps. Селектор di_long_strats: di_long_gated с фолбэком на
+    htf_filtered (MR-страты наследуют, как раньше)."""
+    from scalp_bot.analysis.strategies import (DensityBreakStrategy,
+                                               DensityBounceStrategy,
+                                               SweepFadeStrategy)
+    # density_break: явный opt-in в long-gate, симметричные фильтры выключены
+    assert DensityBreakStrategy.di_long_gated is True
+    assert DensityBreakStrategy.htf_filtered is False
+    assert DensityBreakStrategy.regime_gated is False
+    # селектор из main.py: di_long_gated с фолбэком на htf_filtered
+    def in_gate(s) -> bool:
+        return bool(getattr(s, "di_long_gated", getattr(s, "htf_filtered", True)))
+    assert in_gate(DensityBreakStrategy) is True       # momentum: явный opt-in
+    assert in_gate(SweepFadeStrategy) is True          # MR: наследует htf_filtered
+    assert in_gate(DensityBounceStrategy) is True      # MR: наследует htf_filtered
+    # поведение гейта: блокируется ТОЛЬКО лонг при DMI вниз, шорт свободен
+    n = 60
+    rows = [(100.0 - i, 100 - i + 0.5, 100 - i - 0.5, 100.0 - i) for i in range(n)]
+    htf = HtfTrend(ema_len=200, adx_len=14)
+    htf.refresh(_FakeOHLCClient({"ZECUSDT": rows}), ["ZECUSDT"])
+    assert htf.di_blocks_long("ZECUSDT") is True
+    # предикат гейта из main.py (для density_break)
+    def blocked(side: str) -> bool:
+        return ("density_break" in {"density_break"} and side == "long"
+                and htf.di_blocks_long("ZECUSDT"))
+    assert blocked("long") is True     # контртренд-лонг-пробой = bull trap → блок
+    assert blocked("short") is False   # шорт-пробой свободен (по тренду)
+
+
 # ─── adopt-старт без флэта (v0.18.0) ───────────────────────────────────────
 
 class _FakeAdoptClient:

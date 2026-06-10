@@ -4,6 +4,46 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-10
+
+### v0.18.18 — density_break: асимметричный DMI long-gate (контртренд-лонг-пробои = bull traps)
+`<hash>`
+
+**Запрос пользователя**: «4 суток в минус, правки не помогли — найти причину и
+ответ у профи». Полный аудит `scripts/scalp_full_audit.py` (filled с 06-05 11:00
+UTC, n=132 sweep_fade + n=44 density_break — ≥ академического порога 50).
+
+**Анализ (C-08)**: главная течь = **лонг-пробои density_break: WR 5.9% (1/17) /
+net −158.07, p<0.02** (значимо, не шум); шорты +11.77 / WR 29.6% — работают.
+sweep_fade движок исправен (ex-ZEC WR 59.3% / +51.72, long/short симметричны) —
+его НЕ трогаем (правка была бы «ради правки»). Прошлые правки (v0.18.16 taker+CVD)
+чинили исполнение, но не причину: причина — пробой торгуется ПРОТИВ старшего
+тренда без направленного фильтра (`htf_filtered=False` by design v0.18.1).
+
+**Канон**: «breakouts against the dominant trend = bull/bear traps, much higher
+failure rate» (NYC Servers, ToS Indicators, PhotonTrading, FMZQuant 200-EMA
+align, Kaufman ER 1995). Конфликт с Quant Signals («симметричный трендовый фильтр
+на пробое = universal failure») примирён: симметричный фильтр НЕ ставим — режем
+ТОЛЬКО сломанную лонг-сторону (асимметрия = тот же механизм, что C-07/Kalena:
+ликвидационные каскады на альт-перпах жёстче на лонг-стороне).
+
+**Изменения**:
+- `DensityBreakStrategy.di_long_gated = True` — density_break включён в
+  существующий асимметричный DMI long-gate (v0.18.4, валидирован A/B на
+  sweep_fade): лонг-пробой только при +DI>−DI, шорты свободны.
+- `main.py`: селектор `di_long_strats` (`di_long_gated` с фолбэком на
+  `htf_filtered` — MR-страты наследуют поведение без изменений); лог гейта
+  включает имя страты. `htf_filtered`/`regime_gated` density_break НЕ тронуты.
+- Реверсивно: `cfg.htf_di_long_gate=False` выключает гейт целиком; гейт
+  динамический — в аптренде DMI сам разрешит лонги (не выключатель стороны).
+
+**Тесты**: +1 (`test_di_long_gate_covers_density_break`: класс-флаги, селектор,
+блок лонга при DMI-вниз / шорт свободен). 177 passed.
+
+**Файлы**: `analysis/strategies.py`, `app/main.py`, `tests/test_scalp_bot.py`,
+`scripts/scalp_full_audit.py` (новый), `STRATEGY_CONTRADICTIONS_SCALP.md` (C-08),
+`STRATEGY_RATIONALE_SCALP.md`.
+
 ## 2026-06-09
 
 ### v0.18.17 — per-symbol LONG-блок (ZEC longs off) — exposure-management

@@ -120,6 +120,13 @@ def run() -> None:
     # backwards для пробоя). Атрибут на классе стратегии (getattr default True).
     htf_strats = {s.name for s in strategies if getattr(s, "htf_filtered", True)}
     adx_strats = {s.name for s in strategies if getattr(s, "regime_gated", True)}
+    # Асимметричный DMI long-gate (v0.18.4 sweep_fade → v0.18.18 density_break, C-08):
+    # лонг разрешён только если DMI вверх; шорты свободно. MR-страты наследуют от
+    # htf_filtered; momentum density_break включает явно (di_long_gated=True) — у
+    # него СИММЕТРИЧНОГО EMA-фильтра НЕТ (htf_filtered=False), но контртренд-ЛОНГ-
+    # пробои = bull traps (live long WR 5.9% / net −158, p<0.02).
+    di_long_strats = {s.name for s in strategies
+                      if getattr(s, "di_long_gated", getattr(s, "htf_filtered", True))}
     executor = Executor(db, cfg, client, notifier=notifier, strategies=strategies)
 
     # HTF-bias: трендовый фильтр старшего ТФ (EMA200 1H). Первичный прогрев на
@@ -285,14 +292,17 @@ def run() -> None:
                 # шорты 54% (EMA на шортах хорош). EMA200-кросс плохо ловит
                 # направление на даунтрендовых альтах → пропускает контртренд-
                 # лонги. Wilder DMI (+DI/−DI, 1978) быстрее ловит доминирующую
-                # сторону. Лонг разрешён только если И EMA, И +DI>−DI вверх;
-                # шорты на чистом EMA (не трогаем). ТОЛЬКО MR (htf_strats),
-                # density_break не зависит. A/B 3 окна (data/scalp_di_long_gate
+                # сторону. Лонг разрешён только если +DI>−DI вверх; шорты не трогаем.
+                # MR-страты (sweep_fade/density_bounce) + momentum density_break
+                # (v0.18.18, C-08: long-пробои против тренда = bull traps, WR 5.9%/
+                # net −158, p<0.02; симметричный EMA-фильтр НЕ ставим — сохраняем
+                # profitable контртренд-ШОРТЫ). A/B 3 окна (data/scalp_di_long_gate
                 # .txt): лонги avgR −0.092/−0.100/−0.098 → +0.004/+0.023/−0.006.
-                if (cfg.htf_di_long_gate and sig.strategy in htf_strats
+                if (cfg.htf_di_long_gate and sig.strategy in di_long_strats
                         and sig.side == "long" and htf.di_blocks_long(sig.symbol)):
-                    play.info("🧭 [%s] long но DMI вниз (−DI≥+DI) — пропускаю "
-                              "(контртренд-лонг в дип, EMA лагает)", sig.symbol)
+                    play.info("🧭 [%s] %s long но DMI вниз (−DI≥+DI) — пропускаю "
+                              "(контртренд-лонг-пробой в дип = bull trap)",
+                              sig.symbol, sig.strategy)
                     continue
                 # ADX режим-гейт (v0.17.0): EMA дала направление, но если тренд
                 # СЛИШКОМ сильный (ADX≥adx_max, «трендовый день») — фейд запрещён

@@ -506,17 +506,30 @@ class DensityBreakStrategy:
     """
 
     name = "density_break"
-    # momentum/breakout в ОБЕ стороны (снос стены вверх ИЛИ вниз). НЕ под MR-
-    # фильтрами (v0.18.1):
-    #  • htf_filtered=False — направленный EMA-фильтр режет прибыльные контртренд-
-    #    пробои (Quant Signals, 175 backtests: «London Breakout — universal failure
-    #    с трендовым фильтром, убирает ~½ сигналов вкл. profitable counter-trend»);
+    # momentum/breakout в ОБЕ стороны (снос стены вверх ИЛИ вниз). НЕ под полными
+    # MR-фильтрами (v0.18.1):
+    #  • htf_filtered=False — СИММЕТРИЧНЫЙ EMA-фильтр направления НЕ ставим: режет
+    #    прибыльные контртренд-пробои (Quant Signals, 175 backtests: «London
+    #    Breakout — universal failure с трендовым фильтром, убирает ~½ сигналов вкл.
+    #    profitable counter-trend»). Шорт-пробои здесь прибыльны (live: +11.77 net)
+    #    — их сохраняем.
     #  • regime_gated=False — пробой ХОЧЕТ сильного тренда (ADX≥25), MR-гейт «не
     #    торговать в тренд» здесь backwards (резал бы лучшие условия для momentum).
+    #  • di_long_gated=True (v0.18.18, C-08) — АСИММЕТРИЧНЫЙ DMI-гейт ТОЛЬКО для
+    #    ЛОНГОВ (та же логика, что валидирована на sweep_fade v0.18.4). Контртренд-
+    #    ЛОНГ-пробои = bull traps: live n=17 лонгов WR 5.9% / net −158 (p<0.02 при
+    #    H0 WR=30%), концентрация BTC/ZEC. Канон: «breakouts against the dominant
+    #    trend carry significantly higher probability of bull traps» (NYC Servers,
+    #    ToS Indicators, PhotonTrading — 5 источников); асимметрия (лонги ≫ хуже
+    #    шортов) совпадает с Kalena 2026 — контртренд-лонги на альт-перпах опаснее
+    #    (ликвидационные каскады жёстче на лонг-стороне). Примирение с Quant-Signals:
+    #    режем ТОЛЬКО сломанную лонг-сторону, симметричный фильтр НЕ ставим →
+    #    profitable counter-trend ШОРТЫ сохранены. Реверсивно (cfg.htf_di_long_gate).
     # Риск-контроль свой: wall_break+persist+round + hard SL за уровнем (ложный
     # пробой = SL) + биржевые TP/SL. Философия B (winners run, без дискреции).
     htf_filtered = False
     regime_gated = False
+    di_long_gated = True
 
     def __init__(self, cfg, symbols: list[str]) -> None:
         self.cfg = cfg
