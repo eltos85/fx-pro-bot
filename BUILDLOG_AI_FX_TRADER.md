@@ -1,5 +1,99 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-06-10
+
+### fix+feat: пакет аудита fx_ai_trader — данные в LLM, промпт, server-side верификация, анти-churn
+
+`<pending>`
+
+**Аудит** (живая БД VPS `/data/fx_ai_trader.sqlite` + raw `prompt_user`
+последних full-циклов, период 2026-06-03..06-10): 530 HOLD vs 7 OPEN за
+7 дней (98.6% hold); 15 закрытых сделок с cutoff = net −$22.42; 38/45
+сделок минимальные 0.01 лота. Все правки одобрены пользователем
+(strategy-guard): пакеты 1–6.
+
+**1. Баг EIA refinery (bug-fix):** в промпт шло «Refinery utilization:
+17199.0%» — серия `PET.WGIRIUS2.W` это Gross Inputs (тыс. барр/день),
+не процент. Заменена на `PET.WPULEUS3.W` (Percent Utilization). Сверка
+с eia.gov Weekly Inputs & Utilization (release 2026-06-03): gross
+inputs 17 199 kb/d ↔ utilization 94.7%.
+
+**2. NG storage vs 5y average (data-fix):** SYSTEM_PROMPT называет
+surplus/deficit vs 5y avg «the headline number», но значение не
+подавалось — LLM рассуждал об «overhang» без базы. `EiaProvider` теперь
+тянет 262 недельные точки и считает среднее той же недели за 5 лет
+(методология headline-таблицы ir.eia.gov/ngs); в NG-блоке строка
+`vs 5y average: … surplus/deficit`.
+
+**3. Промпт-противоречия (bug-fix):** «WHAT YOU DO NOT SEE» заявлял
+отсутствие real-yield и COT фидов, которые давно подаются (macro_rates,
+CotProvider); «1H × 24 candles + 4H × 30 candles» — фактически 12
+последних 1H-closes + 4H-индикаторы без сырых баров; «paper-mode, real
+money is not at risk» — бот в LIVE. Секции переписаны под фактический
+context, paper-фрейминг заменён на LIVE (реальные спред/комиссия/своп).
+
+**4. Server-side верификация intact-закрытий (r-guard):** review-LLM
+галлюцинировал триггеры: id=45 закрыт с «locked-profit 25.8R» при факте
++0.26R; id=32 — «Position age >24h» через 47 минут. Executor теперь при
+`thesis_status="intact"` сверяет заявленный locked-profit с фактическим
+R (`compute_unrealised_r`, порог 1.5R − допуск 0.1R) и age-триггер с
+`opened_at` из БД (порог 24h); несоответствие → close отклонён с
+объясняющей ошибкой. broken/partial не трогаем (макро-инвалидацию
+сервер проверить не может). News-триггер не верифицируем — пропускаем.
+
+**5. Анти-churn (датчики + промпт):** id=43/44 закрыты через 2–5 минут
+после входа — EntryBreakoutSensor будил full-цикл по той же структуре,
+что видел входной цикл. Новый `event_min_position_age_sec` (default
+1800): позиции <30 мин не участвуют в adverse/locked-profit датчиках,
+entry-breakout по символу свежей позиции глушится. В THESIS DISCIPLINE
+добавлено FRESH-POSITION RULE: закрывать позицию <1h можно только по
+информации, появившейся ПОСЛЕ входа.
+
+**6. Календарь — явные окна вместо бессрочного avoid:** «avoid fresh
+entries into HIGH-impact events» при 7-дневном горизонте календаря
+блокировал торговлю за 8–10 часов («CPI in 9.5h» как hold-причина).
+Теперь EVENT-PROXIMITY OVERLAY задаёт окна: HIGH <2h — без новых
+входов; 2–6h — half-size; >6h — торговля нормальная; MED (EIA) <1h —
+min size только на своём символе. Заголовок ECONOMIC CALENDAR блока
+зеркалит окна.
+
+**7. Сайзинг — риск-таблица в $ и floor:** 38/45 сделок 0.01 лота;
+примеры в промпте якорили risk $25. Теперь tiers в долларах от $2000
+(LOW ≈ $10 / MEDIUM $20–40 / HIGH $40–60), floor $15 (~0.75%) для
+non-discovery входов (ниже floor спред+комиссия съедают структурную
+долю выигрыша), примеры пересчитаны, отдельно проговорён анти-паттерн
+«0.01 лот по умолчанию». Цены в примерах приближены к актуальным
+(XAU 4200, BZ 90).
+
+**8. NOAA ужат (~6000 → ≤2000 знаков):** `_summarize_for_llm` оставляет
+только температурные предложения по CONUS (above/below normal, HDD/CDD),
+выкидывает precipitation/Alaska/Hawaii/model-talk; заголовки разделов
+сохраняются; при пустом результате фильтра — fallback на исходный текст.
+
+**9. RSS title-exclude:** «Gold stays under pressure…» попадал в BZ=F
+bucket через keyword-match в summary. Добавлен title-level exclude для
+энергетических bucket'ов (gold/xau/bullion/silver/precious metal в
+заголовке → не BZ=F/NG=F); для XAUUSD title-exclude не вводился
+(«Gold rises as oil slides» легитимен). Word-boundary сохранён
+(«Goldman» не дисквалифицирует).
+
+**stats_window_start** сдвинут на `2026-06-10T12:00:00+00:00`:
+промпт-окна + сайзинг + верификация закрытий = structural break режима
+принятия решений (Lopez de Prado ch.7); старая статистика не
+показательна для нового поведения.
+
+**Тесты:** новый `tests/test_fx_ai_trader_audit_fixes.py` (29 тестов:
+верификация intact-закрытий вкл. кейсы id=45/id=32 и word-boundary
+«manage»≠«age», возраст позиций, EIA 5y avg + формат surplus/deficit,
+NOAA summary, RSS title-exclude). Полный сьют: **1233 passed**.
+
+**Файлы:** `src/fx_ai_trader/news/eia.py`, `src/fx_ai_trader/news/rss.py`,
+`src/fx_ai_trader/news/weather.py`, `src/fx_ai_trader/llm/prompts.py`,
+`src/fx_ai_trader/trading/executor.py`, `src/fx_ai_trader/app/main.py`,
+`src/fx_ai_trader/config/settings.py`,
+`src/fx_ai_trader/data/econ_calendar.py`,
+`tests/test_fx_ai_trader_audit_fixes.py`
+
 ## 2026-06-09
 
 ### fix(client_adapter): читать label/symbolId/tradeSide/volume из ProtoOATradeData

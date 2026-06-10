@@ -176,9 +176,15 @@ def format_econ_events(
     """Text-блок календаря для LLM. None если в окне ничего нет."""
     if not events:
         return None
+    # 2026-06-10: заголовок переписан с «avoid fresh entries into
+    # HIGH-impact events» (бессрочная формулировка → LLM блокировал
+    # торговлю за 8–10 часов до событий, 98.6% HOLD) на явные окна,
+    # зеркалящие EVENT-PROXIMITY OVERLAY в SYSTEM_PROMPT: <2h no new
+    # entries, 2–6h half-size, >6h trade normally.
     lines = [
-        "=== ECONOMIC CALENDAR (upcoming high-impact releases; scale size / "
-        "avoid fresh entries into HIGH-impact events) ==="
+        "=== ECONOMIC CALENDAR (sizing windows: HIGH-impact <2h: no new "
+        "entries; 2-6h: half size; >6h: trade normally. MED <1h: min size "
+        "on that symbol) ==="
     ]
     for e in events:
         h = e.hours_until(now_utc)

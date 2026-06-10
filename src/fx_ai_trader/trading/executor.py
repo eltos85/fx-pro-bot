@@ -28,6 +28,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, BeforeValidator, Field, ValidationError
@@ -36,6 +37,7 @@ from fx_ai_trader.config.settings import AiFxTraderSettings
 from fx_ai_trader.safety.killswitch import KillSwitch
 from fx_ai_trader.state.db import AiFxTraderStore
 from fx_ai_trader.trading.client_adapter import CTraderFxAdapter
+from fx_ai_trader.trading.price_sensor import compute_unrealised_r
 
 log = logging.getLogger(__name__)
 
@@ -395,6 +397,76 @@ def _log_thesis_audit(model: "CloseAction") -> None:
         )
 
 
+# ─── Server-side verification intact-закрытий (2026-06-10) ───────────────
+#
+# Промпт разрешает закрывать позицию при thesis_status="intact" только по
+# трём альтернативным триггерам: locked-profit ≥1.5R, age >24h, adverse
+# high-severity news. Первые два — объективно проверяемые числа, и аудит
+# показал что LLM их галлюцинирует (id=45: «25.8R» при факте +0.26R;
+# id=32: «>24h» через 47 минут). News-триггер сервер проверить не может —
+# пропускаем без верификации.
+
+# Порог locked-profit guard из SYSTEM_PROMPT («≥1.5R unrealised»), минус
+# допуск 0.1R на спред/лаг котировки между решением LLM и исполнением.
+_INTACT_LOCKED_PROFIT_MIN_R = 1.5
+_INTACT_R_TOLERANCE = 0.1
+# Порог age-триггера из SYSTEM_PROMPT («older than 24h»).
+_INTACT_AGE_MIN_HOURS = 24.0
+
+
+def _position_age_hours(opened_at_iso: str) -> float | None:
+    """Возраст позиции в часах. opened_at в БД — ISO 8601 UTC."""
+    try:
+        opened = datetime.fromisoformat(opened_at_iso)
+    except (TypeError, ValueError):
+        return None
+    if opened.tzinfo is None:
+        opened = opened.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+
+
+def _verify_intact_close_claims(
+    *, claim_text: str, pos: Any, current_price: float
+) -> str | None:
+    """Возвращает текст ошибки если intact-триггер не подтверждается данными.
+
+    None — закрытие разрешено (триггер подтверждён, либо это news-триггер,
+    либо проверить нечем: нет SL для расчёта R / битый opened_at).
+    """
+    # Word-boundary regex: подстрока «age» ловила бы «manage»/«average».
+    cites_profit = re.search(r"locked[- ]?profit", claim_text, re.I) is not None
+    cites_age = (
+        re.search(r"\bage\b|time[- ]?decay|\b24\s*h", claim_text, re.I)
+        is not None
+    )
+
+    if cites_profit:
+        actual_r = compute_unrealised_r(
+            pos.side, pos.entry_price, pos.sl_price, current_price
+        )
+        if (
+            actual_r is not None
+            and actual_r < _INTACT_LOCKED_PROFIT_MIN_R - _INTACT_R_TOLERANCE
+        ):
+            return (
+                f"intact-close rejected: claimed locked-profit but actual "
+                f"unrealised R={actual_r:+.2f} < {_INTACT_LOCKED_PROFIT_MIN_R}R "
+                f"(entry={pos.entry_price:.6g} SL={pos.sl_price:.6g} "
+                f"price={current_price:.6g}). Re-check your R math or HOLD."
+            )
+
+    if cites_age:
+        age_h = _position_age_hours(pos.opened_at)
+        if age_h is not None and age_h < _INTACT_AGE_MIN_HOURS:
+            return (
+                f"intact-close rejected: claimed age/time-decay trigger but "
+                f"position is only {age_h:.1f}h old (< "
+                f"{_INTACT_AGE_MIN_HOURS:.0f}h). Opened at {pos.opened_at}."
+            )
+
+    return None
+
+
 # ─── Apply ───────────────────────────────────────────────────────────────
 
 
@@ -461,6 +533,26 @@ def _apply_close(
             executed=False, summary="",
             error=f"current price unavailable for {pos.symbol}",
         )
+
+    # ─── Серверная верификация intact-закрытий (2026-06-10) ────────────
+    # LLM галлюцинировал альтернативные триггеры: pos id=45 закрыт с
+    # «locked-profit 25.8R» при фактических +0.26R; id=32 — «Position age
+    # >24h» через 47 минут после входа. Оба триггера проверяемы сервером
+    # (R через compute_unrealised_r, возраст через opened_at) — проверяем,
+    # а не верим на слово. broken/partial не трогаем: макро-инвалидацию
+    # сервер проверить не может.
+    if cm.thesis_status == "intact":
+        verify_err = _verify_intact_close_claims(
+            claim_text=f"{cm.thesis_invalidator or ''} {cm.reason or ''}",
+            pos=pos,
+            current_price=current_price,
+        )
+        if verify_err:
+            log.warning(
+                "intact-close rejected (server verify) pos_id=%d: %s",
+                pos_id, verify_err,
+            )
+            return ApplyResult(executed=False, summary="", error=verify_err)
 
     def _persist_lesson(pnl: float) -> None:
         """Persistent lessons (2026-06-02): сохранить вывод LLM из исхода

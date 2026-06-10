@@ -113,6 +113,21 @@ SYMBOL_EXCLUDE_KEYWORDS: dict[str, tuple[str, ...]] = {
     "NG=F": GAS_EXCLUDE,
 }
 
+# Title-level excludes (2026-06-10): заголовок, ведущий с другого
+# инструмента, — почти наверняка новость про другой инструмент, даже если
+# в summary встречаются общие слова («inventories», «dollar»). Аудит
+# 2026-06-10: «Gold stays under pressure…» попал в BZ=F bucket через
+# keyword-match в summary. Проверяем ТОЛЬКО title (не summary): нефтяная
+# статья может упоминать золото в теле — это нормально; а вот gold-слово
+# в заголовке энергетического bucket'а — признак чужой новости.
+# Не симметрично: для XAUUSD title-exclude НЕ вводим — заголовки вида
+# «Gold rises as oil slides» легитимны для gold bucket.
+ENERGY_TITLE_EXCLUDE = ("gold", "xau", "bullion", "silver", "precious metal")
+SYMBOL_TITLE_EXCLUDE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "BZ=F": ENERGY_TITLE_EXCLUDE,
+    "NG=F": ENERGY_TITLE_EXCLUDE,
+}
+
 # Газ-keywords подобраны по research-источникам (см. prompts.py): EIA
 # Weekly NatGas Storage Report, NOAA HDD/CDD outlooks, LNG export news,
 # Henry Hub vs TTF spread, Baker Hughes rig count.
@@ -234,7 +249,9 @@ def _matches_keyword(keyword: str, text_lower: str) -> bool:
     return bool(pattern.search(text_lower))
 
 
-def _classify_symbols(text: str, allowed: Sequence[str]) -> list[str]:
+def _classify_symbols(
+    text: str, allowed: Sequence[str], *, title: str | None = None
+) -> list[str]:
     """Возвращает список символов из allowed, упомянутых в тексте.
 
     С 2026-05-22 (BUILDLOG): применяется двухэтапная фильтрация:
@@ -242,6 +259,9 @@ def _classify_symbols(text: str, allowed: Sequence[str]) -> list[str]:
        (через ``_matches_keyword`` — word-boundary для single-word).
     2. EXCLUDE: text НЕ содержит ни одного keyword из
        ``SYMBOL_EXCLUDE_KEYWORDS[sym]`` (если он определён).
+    3. TITLE-EXCLUDE (2026-06-10): ``title`` (если передан) не содержит
+       keyword из ``SYMBOL_TITLE_EXCLUDE_KEYWORDS[sym]`` — заголовок про
+       другой инструмент дисквалифицирует bucket целиком.
 
     Цель: исключить cross-contamination между oil/gas/gold buckets.
     Пример: «EIA Natural Gas Storage Report» больше не попадёт в OIL
@@ -250,6 +270,7 @@ def _classify_symbols(text: str, allowed: Sequence[str]) -> list[str]:
     GAS_EXCLUDE); «Goldman Sachs» не матчит "gold" (word-boundary).
     """
     t = text.lower()
+    title_l = (title or "").lower()
     out: list[str] = []
     for sym in allowed:
         keywords = SYMBOL_KEYWORDS.get(sym, ())
@@ -257,6 +278,11 @@ def _classify_symbols(text: str, allowed: Sequence[str]) -> list[str]:
             continue
         excludes = SYMBOL_EXCLUDE_KEYWORDS.get(sym, ())
         if excludes and any(_matches_keyword(k, t) for k in excludes):
+            continue
+        title_excludes = SYMBOL_TITLE_EXCLUDE_KEYWORDS.get(sym, ())
+        if title_l and title_excludes and any(
+            _matches_keyword(k, title_l) for k in title_excludes
+        ):
             continue
         out.append(sym)
     return out
@@ -365,7 +391,9 @@ class CommodityRssNewsProvider:
                         continue
                 except ValueError:
                     pass
-            matched = _classify_symbols(f"{it.title}\n{it.summary}", symbols)
+            matched = _classify_symbols(
+                f"{it.title}\n{it.summary}", symbols, title=it.title
+            )
             if not matched:
                 continue
             it.symbols = matched

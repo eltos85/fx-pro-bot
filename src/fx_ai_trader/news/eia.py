@@ -39,14 +39,21 @@ log = logging.getLogger(__name__)
 
 # Series IDs EIA v2 API:
 # - PET.WCESTUS1.W: weekly U.S. ending stocks of crude oil, thousand barrels
-# - PET.WGIRIUS2.W: weekly refinery operable capacity utilization rate, percent
+# - PET.WPULEUS3.W: weekly U.S. Percent Utilization of Refinery Operable
+#   Capacity, percent (typical 80–95%). Официальный источник:
+#   https://www.eia.gov/dnav/pet/hist/LeafHandler.ashx?f=w&n=pet&s=wpuleus3
+#   Bug-fix 2026-06-10: ранее стояла PET.WGIRIUS2.W — это «Gross Inputs
+#   into Refineries» в ТЫС. БАРР/ДЕНЬ (~17 199), а не процент; LLM получал
+#   «Refinery utilization: 17199.0%». Сверка: eia.gov Weekly Inputs &
+#   Utilization, release 2026-06-03 — gross inputs 17 199 kb/d,
+#   percent utilization 94.7%.
 # - PET.WCSSTUS1.W: weekly SPR ending stocks, thousand barrels
 # - NG.NW2_EPG0_SWO_R48_BCF.W: Weekly Working Underground Storage, Lower 48
 #   States, Bcf. Headline series EIA Weekly Natural Gas Storage Report
 #   (Thursday 10:30 ET / 14:30 UTC).
 #   Source: https://www.eia.gov/dnav/ng/ng_stor_wkly_s1_w.htm
 _SERIES_CRUDE_STOCKS = "PET.WCESTUS1.W"
-_SERIES_REFINERY_UTIL = "PET.WGIRIUS2.W"
+_SERIES_REFINERY_UTIL = "PET.WPULEUS3.W"
 _SERIES_SPR = "PET.WCSSTUS1.W"
 _SERIES_NG_STORAGE = "NG.NW2_EPG0_SWO_R48_BCF.W"
 
@@ -88,6 +95,13 @@ class EiaSnapshot:
     ng_storage_bcf: float | None = None
     ng_storage_change_bcf: float | None = None
     ng_storage_date: str | None = None
+    # 5-летнее среднее storage на ту же календарную неделю (Bcf).
+    # SYSTEM_PROMPT называет surplus/deficit vs 5y avg «the headline
+    # number» (EIA WNGSR headline), но до 2026-06-10 значение не
+    # подавалось — LLM рассуждал об «overhang» без базы сравнения.
+    # Источник методологии: https://ir.eia.gov/ngs/ngs.html (headline
+    # таблица «5-year average»).
+    ng_storage_5y_avg_bcf: float | None = None
     # STEO forecast (monthly, 18-month forward). У нас тянем по 6 точек
     # для каждого ряда. None если не получили.
     steo_hh_price: SteoForecast | None = None
@@ -140,6 +154,12 @@ class EiaProvider:
         except Exception:
             log.exception("EIA NG storage fetch failed (продолжаю без газ-блока)")
             ng_data = []
+        # 5y average той же календарной недели — best-effort.
+        try:
+            ng_5y_avg = self._fetch_ng_storage_5y_avg()
+        except Exception:
+            log.exception("EIA NG 5y-avg fetch failed (продолжаю без 5y avg)")
+            ng_5y_avg = None
 
         # STEO forecast (3 ряда). Best-effort: каждый ряд независимо
         # ловит исключения, не валит весь snapshot.
@@ -182,6 +202,7 @@ class EiaProvider:
             ng_storage_bcf=ng_value,
             ng_storage_change_bcf=ng_change,
             ng_storage_date=ng_date,
+            ng_storage_5y_avg_bcf=ng_5y_avg,
             steo_hh_price=hh_forecast,
             steo_ng_production=prod_forecast,
             steo_ng_exports=exp_forecast,
@@ -248,19 +269,29 @@ class EiaProvider:
 
         EIA v2 API endpoint: /v2/seriesid/{series_id}/data/?api_key=...&sort[]=...&length=2
         """
+        return self._fetch_series_desc(series_id, length=2)
+
+    def _fetch_series_desc(
+        self, series_id: str, length: int
+    ) -> list[tuple[str, float]]:
+        """Последние ``length`` точек [(period, value), ...] sorted desc.
+
+        EIA v2: /v2/seriesid/{id}?sort[0][column]=period&...&length=N
+        (https://www.eia.gov/opendata/documentation.php).
+        """
         url = f"{_BASE_URL}/seriesid/{series_id}"
         params = {
             "api_key": self._api_key,
             "sort[0][column]": "period",
             "sort[0][direction]": "desc",
-            "length": 2,
+            "length": length,
         }
         resp = requests.get(url, params=params, timeout=self._timeout)
         resp.raise_for_status()
         payload = resp.json()
         data = payload.get("response", {}).get("data") or []
         out: list[tuple[str, float]] = []
-        for row in data[:2]:
+        for row in data[:length]:
             period = row.get("period", "")
             value_raw = row.get("value")
             if value_raw is None:
@@ -271,6 +302,21 @@ class EiaProvider:
                 continue
             out.append((period, value))
         return out
+
+    def _fetch_ng_storage_5y_avg(self) -> float | None:
+        """5-летнее среднее working gas storage той же календарной недели.
+
+        Методология headline-таблицы EIA WNGSR (https://ir.eia.gov/ngs/
+        ngs.html): среднее значений той же недели за 5 предыдущих лет.
+        Реализация: тянем 5×52+2 недельных точек и усредняем точки со
+        смещением 52/104/156/208/260 от последней (дрейф дат ±неделя
+        несущественен для 5y-базы).
+        """
+        pts = self._fetch_series_desc(_SERIES_NG_STORAGE, length=262)
+        if len(pts) < 261:
+            return None
+        vals = [pts[off][1] for off in (52, 104, 156, 208, 260)]
+        return sum(vals) / len(vals)
 
 
 def format_eia_by_symbol(snap: EiaSnapshot | None) -> dict[str, str]:
@@ -329,6 +375,17 @@ def format_eia_by_symbol(snap: EiaSnapshot | None) -> dict[str, str]:
             f"{snap.ng_storage_bcf:.0f} Bcf"
             f"{change_note} as of {snap.ng_storage_date or '?'}"
         )
+        # Headline number WNGSR: surplus/deficit vs 5y average — именно
+        # на него ссылается SYSTEM_PROMPT (структурный bear/bull гейт
+        # ±5%). До 2026-06-10 не подавался.
+        if snap.ng_storage_5y_avg_bcf:
+            diff = snap.ng_storage_bcf - snap.ng_storage_5y_avg_bcf
+            pct = diff / snap.ng_storage_5y_avg_bcf * 100.0
+            gas_lines.append(
+                f"vs 5y average: {snap.ng_storage_5y_avg_bcf:.0f} Bcf -> "
+                f"{diff:+.0f} Bcf ({pct:+.1f}%) "
+                f"{'surplus' if diff >= 0 else 'deficit'}"
+            )
     if snap.steo_hh_price and snap.steo_hh_price.points:
         forecasts = ", ".join(
             f"{p}={v:.2f}" for p, v in snap.steo_hh_price.points

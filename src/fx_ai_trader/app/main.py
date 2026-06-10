@@ -393,6 +393,17 @@ def run() -> None:
     log.info("FX AI Trader остановлен")
 
 
+def _position_age_sec(opened_at_iso: str) -> float | None:
+    """Возраст позиции в секундах. ``opened_at`` в БД — ISO 8601 UTC."""
+    try:
+        opened = datetime.fromisoformat(opened_at_iso)
+    except (TypeError, ValueError):
+        return None
+    if opened.tzinfo is None:
+        opened = opened.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - opened).total_seconds()
+
+
 def _check_event_sensors(
     settings: AiFxTraderSettings,
     store: AiFxTraderStore,
@@ -411,10 +422,22 @@ def _check_event_sensors(
 
     Все цены берутся из in-memory spot-кэша (``get_live_spot_mid`` —
     БЕЗ фолбэка на trendbars), поэтому опрос бесплатен по API.
+
+    Анти-churn (2026-06-10): позиции моложе ``event_min_position_age_sec``
+    НЕ участвуют в датчиках — внеплановый цикл сразу после входа повторно
+    оценивал ту же структуру, что видел входной цикл, и закрывал свежую
+    позицию через 2–5 минут (аудит: id=43/44). Entry-breakout по символу
+    свежей позиции тоже глушится: его пробой был виден входному циклу.
     """
     positions = store.get_open_positions()
+    min_age = float(settings.event_min_position_age_sec)
+    fresh_symbols: set[str] = set()
     pos_r: list[tuple[int, float | None]] = []
     for p in positions:
+        age_sec = _position_age_sec(p.opened_at)
+        if age_sec is not None and age_sec < min_age:
+            fresh_symbols.add(p.symbol)
+            continue
         price = adapter.get_live_spot_mid(p.symbol)
         r = compute_unrealised_r(p.side, p.entry_price, p.sl_price, price)
         pos_r.append((p.id, r))
@@ -427,7 +450,9 @@ def _check_event_sensors(
             full_triggers.extend(adv.triggers)
     if entry_sensor is not None:
         live_prices = {
-            sym: adapter.get_live_spot_mid(sym) for sym in settings.symbols
+            sym: adapter.get_live_spot_mid(sym)
+            for sym in settings.symbols
+            if sym not in fresh_symbols
         }
         slots_free = len(positions) < settings.max_open_positions
         ent = entry_sensor.evaluate(live_prices, slots_free)

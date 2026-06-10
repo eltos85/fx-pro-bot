@@ -54,6 +54,20 @@ _DISCUSSION_END_PATTERNS = (
     "End of",
 )
 
+# Temperature-summary фильтр (2026-06-10): полный discussion ~6000 знаков,
+# из них NG-релевантны только температурные предложения по CONUS (HDD/CDD
+# demand). Остальное (precipitation, Alaska/Hawaii, model-talk про ENSO/MJO
+# teleconnections) хоронило ключевые аномалии в середине промпта.
+_TEMP_SENTENCE_RE = re.compile(
+    r"temperature|above[- ]normal|below[- ]normal|warm|cool|cold|heat"
+    r"|HDD|CDD|degree day",
+    re.IGNORECASE,
+)
+_SKIP_SENTENCE_RE = re.compile(r"\bAlaska\b|\bHawaii\b|precipitation", re.IGNORECASE)
+_SECTION_HEADER_RE = re.compile(
+    r"^(6-10 DAY OUTLOOK|8-14 DAY OUTLOOK|FORECAST CONFIDENCE)", re.IGNORECASE
+)
+
 
 @dataclass
 class NoaaOutlookSnapshot:
@@ -71,7 +85,10 @@ class NoaaOutlookProvider:
         self,
         cache_ttl_sec: int = 21600,
         request_timeout_sec: int = 15,
-        max_chars: int = 6000,
+        # 2026-06-10: было 6000 — сырой discussion раздувал промпт, ключевые
+        # температурные аномалии тонули в региональных деталях. Теперь
+        # сначала temperature-summary (см. _summarize_for_llm), потом cap.
+        max_chars: int = 2000,
     ) -> None:
         self._cache_ttl = cache_ttl_sec
         self._timeout = request_timeout_sec
@@ -111,6 +128,7 @@ class NoaaOutlookProvider:
         if not discussion:
             log.warning("NOAA CPC: discussion section not found in fetched HTML")
             return None
+        discussion = self._summarize_for_llm(discussion)
         # Усечь до max_chars (защита от gigantic context).
         if len(discussion) > self._max_chars:
             discussion = discussion[: self._max_chars] + "\n[... truncated ...]"
@@ -157,6 +175,38 @@ class NoaaOutlookProvider:
             snippet,
         )
         return snippet
+
+    @staticmethod
+    def _summarize_for_llm(discussion: str) -> str:
+        """Оставить из discussion только NG-релевантные предложения.
+
+        Держим: заголовки разделов (6-10/8-14 DAY OUTLOOK) и предложения
+        про температуру (above/below normal, warm/cool, HDD/CDD) по CONUS.
+        Выкидываем: precipitation, Alaska/Hawaii (не влияют на Lower-48
+        gas demand). Если фильтр съел всё (формат CPC сменился) —
+        возвращаем исходный текст, cap по max_chars подстрахует.
+        """
+        lines = discussion.split("\n")
+        kept: list[str] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Заголовок раздела стоит в начале строки, контент — дальше в
+            # той же строке (см. _extract_discussion): отделяем и фильтруем.
+            m = _SECTION_HEADER_RE.match(line)
+            if m:
+                kept.append("\n" + m.group(0).upper() + ":")
+                line = line[m.end():].strip()
+            sentences = re.split(r"(?<=[.!?])\s+", line)
+            for s in sentences:
+                if not _TEMP_SENTENCE_RE.search(s):
+                    continue
+                if _SKIP_SENTENCE_RE.search(s):
+                    continue
+                kept.append(s.strip())
+        summary = " ".join(kept).strip()
+        return summary if summary else discussion
 
 
 def format_noaa_snapshot(snap: NoaaOutlookSnapshot | None) -> str | None:

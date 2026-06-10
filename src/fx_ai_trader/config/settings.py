@@ -445,6 +445,17 @@ class AiFxTraderSettings(BaseSettings):
     adverse_move_max_per_hour: int = Field(
         default=4, validation_alias="AI_FX_TRADER_ADVERSE_MOVE_MAX_PER_HOUR"
     )
+    # Анти-churn (2026-06-10): минимальный возраст позиции, при котором
+    # event-датчики (adverse-move, entry-breakout по символу позиции,
+    # locked-profit) могут будить внеплановые циклы по этой позиции.
+    # Аудит: id=43/44 закрыты через 2–5 минут после входа — датчик
+    # триггерил full-цикл по той же структуре, которую вход уже видел,
+    # LLM закрывал «по фактам, известным на входе» → двойной спред за
+    # нулевой edge. 30 мин = половина 1H-бара: новой ИНФОРМАЦИИ (новый
+    # закрытый бар, новость, EIA-принт) раньше почти не появляется.
+    event_min_position_age_sec: int = Field(
+        default=1800, validation_alias="AI_FX_TRADER_EVENT_MIN_POSITION_AGE_SEC"
+    )
 
     # ─── Self-reflection regime change cutoff (2026-05-28; advanced 2026-05-29) ─
     # Фильтрует closed trades в SELF-REFLECTION блоках USER_PROMPT
@@ -481,8 +492,12 @@ class AiFxTraderSettings(BaseSettings):
     #
     # Format: ISO 8601 с timezone. Empty string ("") = фильтр отключён,
     # бот видит всю историю (legacy v1.X behavior).
+    # Сдвиг 2026-06-10: пакет аудита (промпт-окна календаря, риск-таблица
+    # сайзинга, server-side verify intact-закрытий, анти-churn датчиков,
+    # EIA refinery/5y-avg fixes) — structural break режима принятия
+    # решений; статистика до него не показательна для нового поведения.
     stats_window_start: str = Field(
-        default="2026-05-29T08:26:00+00:00",
+        default="2026-06-10T12:00:00+00:00",
         validation_alias="AI_FX_TRADER_STATS_WINDOW_START",
     )
 
