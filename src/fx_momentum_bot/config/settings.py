@@ -92,6 +92,23 @@ class MomentumBotSettings(BaseSettings):
         return frozenset(
             lbl for lbl in (self.position_label, self.manage_legacy_label) if lbl
         )
+    # ─── Event-guard: блок входов вокруг HIGH-impact релизов ───
+    # 2026-06-10: VP-шорт золота за 8 мин до US CPI → −$24.70, ре-вход
+    # после релиза → −$32.61 (90% дневного убытка). Окно ±60 мин по
+    # Andersen et al. 2003 (пик реакции и волатильности); Dalton 2007 —
+    # релиз сбрасывает аукцион, профиль до релиза невалиден. Блокируются
+    # ТОЛЬКО входы (momentum + VP); сопровождение и выходы работают.
+    # См. src/fx_momentum_bot/strategy/event_guard.py.
+    news_block_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_NEWS_BLOCK_ENABLED"
+    )
+    news_block_before_min: int = Field(
+        default=60, validation_alias="MOMENTUM_BOT_NEWS_BLOCK_BEFORE_MIN"
+    )
+    news_block_after_min: int = Field(
+        default=60, validation_alias="MOMENTUM_BOT_NEWS_BLOCK_AFTER_MIN"
+    )
+
     # Position management (trader-backed):
     # - Van Tharp: R-multiple discipline + break-even transfer.
     # - Linda Raschke discretionary practice: partial profit + runner.

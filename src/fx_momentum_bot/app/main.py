@@ -10,6 +10,7 @@ import yfinance as yf
 
 from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_momentum_bot.state.store import MomentumStore
+from fx_momentum_bot.strategy.event_guard import high_impact_event_near
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
 from fx_momentum_bot.strategy.volume_profile import (
     VolumeProfileSignal,
@@ -593,12 +594,16 @@ def _process_vp_symbol(
     store: MomentumStore,
     settings: MomentumBotSettings,
     positions_by_symbol: dict[str, list[ManagedPosition]],
+    news_block: str | None = None,
 ) -> bool:
     """Гейтинг + открытие VP-сделки. Возврат True если позиция открыта.
 
     Лимиты VP НЕЗАВИСИМЫ от momentum (раздельные с 2026-06-10): 1 позиция
     на VP-символ (already_open) + дневной лимит 2/сторону. Глобальный
     max_open_positions сюда не входит — momentum-позиции не блокируют VP.
+
+    news_block — event-guard (2026-06-10): релиз сбрасывает аукцион
+    (Dalton 2007), профиль до релиза невалиден → входы в окне блокируем.
     """
     executed = False
     note = "no_setup"
@@ -610,6 +615,7 @@ def _process_vp_symbol(
         and sig.setup != "none"
         and executor is not None
         and not already_open
+        and news_block is None
         and day_count < settings.vp_max_trades_per_dir_per_day
     )
     if can_open and executor is not None:
@@ -620,6 +626,8 @@ def _process_vp_symbol(
         # сетап есть, но не открываем — зафиксируем причину
         if already_open:
             note = "vp_skip:position_open"
+        elif news_block is not None:
+            note = f"vp_skip:news_window({news_block})"
         elif day_count >= settings.vp_max_trades_per_dir_per_day:
             note = "vp_skip:daily_limit"
         elif executor is None:
@@ -747,6 +755,19 @@ def run() -> None:
             else:
                 open_count = 0
 
+            # Event-guard: HIGH-impact релиз в окне ±N минут → новые входы
+            # (momentum + VP) блокируются; сопровождение и выходы работают.
+            # Кейс 2026-06-10: VP-шорт золота за 8 мин до CPI (−$24.70) +
+            # ре-вход после релиза (−$32.61). Andersen et al. 2003; Dalton.
+            news_block: str | None = None
+            if settings.news_block_enabled:
+                news_block = high_impact_event_near(
+                    before_min=settings.news_block_before_min,
+                    after_min=settings.news_block_after_min,
+                )
+                if news_block:
+                    log.info("EVENT-GUARD: входы заблокированы — %s", news_block)
+
             for symbol in settings.all_symbols:
                 signal_data = signal_by_symbol.get(symbol)
                 if signal_data is None:
@@ -762,6 +783,7 @@ def run() -> None:
                         store=store,
                         settings=settings,
                         positions_by_symbol=positions_by_symbol,
+                        news_block=news_block,
                     )
                     continue
 
@@ -812,7 +834,11 @@ def run() -> None:
                             if p.side == sign_dir
                         ]
 
-                should_open = wants_open and open_count < settings.max_open_positions
+                should_open = (
+                    wants_open
+                    and open_count < settings.max_open_positions
+                    and news_block is None
+                )
 
                 executed = False
                 if executor is None:
@@ -821,6 +847,11 @@ def run() -> None:
                     note = "flat"
                 elif signal_data.direction == last_direction:
                     note = "same_direction"
+                elif news_block is not None:
+                    # Event-guard: вход отложен, direction НЕ фиксируется
+                    # (_should_record_direction) → попытка повторится после
+                    # окна, пока сигнал актуален. Сигнал не теряется.
+                    note = f"skip:news_window({news_block})"
                 elif not should_open:
                     note = "skip:max_positions"
                 else:

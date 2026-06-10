@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pandas as pd
 import pytest
 
@@ -10,6 +12,7 @@ from fx_momentum_bot.app.main import (
     _r_multiple,
     _should_record_direction,
 )
+from fx_momentum_bot.strategy.event_guard import high_impact_event_near
 
 
 def _pos(pid: int, side: str) -> ManagedPosition:
@@ -152,3 +155,55 @@ def test_partial_close_disabled_when_position_too_small() -> None:
         step_volume=1000,
         min_volume=1000,
     ) == 0
+
+
+# ─── Event-guard: блок входов вокруг HIGH-impact релизов ─────────────────
+# Кейс 2026-06-10: VP-шорт золота за 8 мин до US CPI (12:30 UTC) → −$24.70,
+# ре-вход в 13:28 после релиза → −$32.61. US CPI 2026-06-10 08:30 ET =
+# 12:30 UTC (EDT) — реальная дата из static-календаря (bls.gov).
+
+_CPI_UTC = datetime(2026, 6, 10, 12, 30, tzinfo=timezone.utc)
+
+
+def _at(hh: int, mm: int) -> datetime:
+    return datetime(2026, 6, 10, hh, mm, tzinfo=timezone.utc)
+
+
+def test_event_guard_blocks_before_release() -> None:
+    # 12:22 — реальное время входа VP-шорта (за 8 минут до CPI).
+    blocked = high_impact_event_near(_at(12, 22), before_min=60, after_min=60)
+    assert blocked is not None
+    assert "CPI" in blocked
+
+
+def test_event_guard_blocks_after_release() -> None:
+    # 13:28 — реальное время ре-входа (58 минут после CPI).
+    blocked = high_impact_event_near(_at(13, 28), before_min=60, after_min=60)
+    assert blocked is not None
+    assert "CPI" in blocked
+
+
+def test_event_guard_open_outside_window() -> None:
+    # За 2 часа до релиза и через 2 часа после — торговля разрешена.
+    assert high_impact_event_near(_at(10, 30), before_min=60, after_min=60) is None
+    assert high_impact_event_near(_at(14, 31), before_min=60, after_min=60) is None
+
+
+def test_event_guard_window_edges() -> None:
+    # Ровно на границах окна ±60 мин — ещё заблокировано.
+    assert high_impact_event_near(_at(11, 30), before_min=60, after_min=60) is not None
+    assert high_impact_event_near(_at(13, 30), before_min=60, after_min=60) is not None
+
+
+def test_event_guard_fomc_blocked() -> None:
+    # FOMC decision 2026-06-17 14:00 ET = 18:00 UTC (EDT).
+    fomc = datetime(2026, 6, 17, 17, 30, tzinfo=timezone.utc)
+    blocked = high_impact_event_near(fomc, before_min=60, after_min=60)
+    assert blocked is not None
+    assert "FOMC" in blocked
+
+
+def test_event_guard_quiet_day_not_blocked() -> None:
+    # Обычный день без HIGH-impact релизов поблизости.
+    quiet = datetime(2026, 6, 16, 9, 0, tzinfo=timezone.utc)
+    assert high_impact_event_near(quiet, before_min=60, after_min=60) is None
