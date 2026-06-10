@@ -251,6 +251,21 @@ def _count_open_positions_for_symbols(
     return count
 
 
+def _flip_close_targets(
+    positions: list[ManagedPosition], new_direction: str
+) -> list[ManagedPosition]:
+    """Позиции, которые надо закрыть при флипе сигнала на new_direction.
+
+    Канон trend-following reversal (Donchian; Faith «Way of the Turtle» 2007:
+    выход по противоположному сигналу): противоположный сигнал закрывает
+    текущую позицию, а не открывает встречную рядом с ней — иначе экспозиция
+    нулевая, а спред/комиссия платятся дважды.
+    """
+    if new_direction not in {"long", "short"}:
+        return []
+    return [p for p in positions if p.side != new_direction]
+
+
 def _should_record_direction(*, live: bool, wants_open: bool, executed: bool) -> bool:
     """Обновлять ли last_direction после цикла (edge-trigger памяти сигнала).
 
@@ -639,7 +654,10 @@ def run() -> None:
         try:
             signal_by_symbol: dict[str, MomentumSignal | VolumeProfileSignal] = {}
             positions_by_symbol: dict[str, list[ManagedPosition]] = {}
-            if executor is not None and settings.position_management_enabled:
+            if executor is not None:
+                # Позиции нужны не только management'у: exit-on-flip у momentum
+                # и гейт already_open у VP читают их независимо от флага
+                # position_management_enabled.
                 positions_by_symbol = _collect_managed_positions(
                     executor, settings.all_symbols, labels=settings.managed_labels
                 )
@@ -731,6 +749,42 @@ def run() -> None:
                     and signal_data.direction != last_direction
                     and executor is not None
                 )
+
+                # Exit-on-flip (Turtle/Donchian reversal): противоположный
+                # сигнал сначала ЗАКРЫВАЕТ встречные позиции по символу,
+                # потом открывается новая. Закрытие выполняем независимо от
+                # max_positions — выход важнее входа (и освобождает слот).
+                flip_closed = 0
+                if wants_open and executor is not None:
+                    targets = _flip_close_targets(
+                        positions_by_symbol.get(symbol, []), signal_data.direction
+                    )
+                    for pos in targets:
+                        close_res = executor.close_position(pos.position_id, pos.volume)
+                        if close_res.success:
+                            flip_closed += 1
+                            open_count = max(0, open_count - 1)
+                            log.info(
+                                "FLIP CLOSE %s #%d %s vol=%d (signal -> %s)",
+                                symbol,
+                                pos.position_id,
+                                pos.side,
+                                pos.volume,
+                                signal_data.direction,
+                            )
+                        else:
+                            log.error(
+                                "FLIP CLOSE failed %s #%d: %s",
+                                symbol,
+                                pos.position_id,
+                                close_res.error,
+                            )
+                    if flip_closed:
+                        positions_by_symbol[symbol] = [
+                            p for p in positions_by_symbol.get(symbol, [])
+                            if p.side == signal_data.direction
+                        ]
+
                 should_open = wants_open and open_count < settings.max_open_positions
 
                 executed = False
@@ -744,6 +798,8 @@ def run() -> None:
                     note = "skip:max_positions"
                 else:
                     note = "live_open:pending"
+                if flip_closed:
+                    note = f"{note}+flip_closed:{flip_closed}"
 
                 if should_open:
                     sl_distance = signal_data.atr * settings.atr_stop_mult

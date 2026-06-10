@@ -2,11 +2,25 @@ import pandas as pd
 import pytest
 
 from fx_momentum_bot.app.main import (
+    ManagedPosition,
     _calc_partial_close_volume,
     _drop_forming_bar,
+    _flip_close_targets,
     _r_multiple,
     _should_record_direction,
 )
+
+
+def _pos(pid: int, side: str) -> ManagedPosition:
+    return ManagedPosition(
+        position_id=pid,
+        symbol="EURUSD=X",
+        side=side,
+        volume=1000,
+        entry_price=1.1,
+        stop_loss=None,
+        digits=5,
+    )
 
 
 def _make_ohlcv(index: pd.DatetimeIndex) -> pd.DataFrame:
@@ -62,6 +76,22 @@ def test_should_record_direction_keeps_signal_when_blocked() -> None:
 def test_should_record_direction_records_on_execute_or_no_intent() -> None:
     assert _should_record_direction(live=True, wants_open=True, executed=True)
     assert _should_record_direction(live=True, wants_open=False, executed=False)
+
+
+def test_flip_close_targets_selects_only_opposite_side() -> None:
+    positions = [_pos(1, "long"), _pos(2, "short"), _pos(3, "long")]
+    # Флип на short → закрываем лонги, шорт не трогаем.
+    targets = _flip_close_targets(positions, "short")
+    assert [p.position_id for p in targets] == [1, 3]
+
+
+def test_flip_close_targets_empty_on_flat_or_no_positions() -> None:
+    assert _flip_close_targets([_pos(1, "long")], "flat") == []
+    assert _flip_close_targets([], "long") == []
+
+
+def test_flip_close_targets_nothing_when_same_direction() -> None:
+    assert _flip_close_targets([_pos(1, "long")], "long") == []
 
 
 def test_r_multiple_for_long_and_short() -> None:

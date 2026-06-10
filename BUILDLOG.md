@@ -6,6 +6,29 @@
 
 ## 2026-06-10
 
+### feat(momentum-bot): exit-on-flip — противоположный сигнал закрывает встречную позицию (согласовано)
+
+`<pending>`
+
+**Симптом (из аудита логики):** при флипе momentum-сигнала long↔short бот
+открывал встречную позицию, НЕ закрывая старую → две противонаправленные
+позиции по символу: экспозиция нулевая, спред/комиссия уплачены дважды,
+обе позиции дальше живут на SL/trailing. Пользователь подтвердил: править.
+
+**Решение (канон trend-following reversal — Donchian; Faith «Way of the
+Turtle» 2007: выход по противоположному сигналу):** перед открытием по
+флипу закрываются все встречные позиции символа (`_flip_close_targets`,
+только managed_labels — чужие боты не затронуты). Закрытие выполняется
+независимо от max_positions (выход важнее входа и освобождает слот),
+`open_count` декрементируется, в decision-note добавляется
+`+flip_closed:N`. Сбор `positions_by_symbol` теперь не зависит от
+`position_management_enabled` (нужен и flip'у, и VP-гейту already_open —
+заодно закрыт скрытый изъян VP-гейтинга при выключенном management).
+
+Тесты: +3 на `_flip_close_targets`, сьют 1202 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`
+
 ### feat(momentum-bot): runner-выход у momentum (TP убран) + VP-цель по канону POC (согласовано)
 
 `<pending>`
