@@ -35,14 +35,14 @@ class ScalpSettings(BaseSettings):
     enabled_strategies: str = Field(default="sweep_fade,density_bounce,density_break")
 
     # Per-symbol LONG-блок (CSV): на этих символах входы в ЛОНГ запрещены ВСЕМ
-    # стратегиям, шорты разрешены. v0.18.17 (C-07): exposure-management по запросу
-    # пользователя — ZEC-лонги тянут весь минус (sweep_fade −84.67/WR 16.7%,
-    # density_break −107), ZEC-шорты около нуля/плюс; асимметрия согласуется с
-    # research DMI long-gate (контртренд-лонги на альт-перпах опаснее — ликвидационные
-    # каскады). [ОГРАНИЧЕНИЕ] это фильтр инструмент×сторона по P&L на малой выборке
-    # (ZEC long n≈25 < 100, sample-size.mdc) — reversible exposure-lever, НЕ
-    # валидированный эдж; пересмотр при n≥100 по ZEC или смене макрорежима. Пусто =
-    # выкл. env SCALP_NO_LONG_SYMBOLS.
+    # стратегиям, шорты разрешены. v0.18.17 (C-07) ставил ZECUSDT; v0.18.19
+    # СНЯТ (одобрено пользователем): полная выборка показала, что лонг-минус
+    # ZEC на ~85% набран при ×2.0-инверсии payoff (A-1; до 06-05 long −15.68 ≈
+    # short −18.95 — симметрично), а шорты ZEC тоже минусовые (sweep_fade −64,
+    # break −43.59) — side-асимметрия была иллюзией окна замера. Контртренд-
+    # лонг риск покрыт структурно (DMI long-gate v0.18.18 + HTF-гейты).
+    # Механизм сохранён как reversible exposure-lever (вкл. через env без
+    # деплоя кода). Пусто = выкл. env SCALP_NO_LONG_SYMBOLS.
     no_long_symbols: str = Field(default="")
 
     # ─── Авто-селектор вселенной (data/universe.py) ──────────────────────────
