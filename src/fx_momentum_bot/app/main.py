@@ -266,6 +266,23 @@ def _flip_close_targets(
     return [p for p in positions if p.side != new_direction]
 
 
+def _momentum_sign_direction(momentum_value: float) -> str:
+    """Направление, которое поддерживает ЗНАК momentum ('' если ровно 0).
+
+    TSMOM sign rule (Moskowitz/Ooi/Pedersen 2012, «Time Series Momentum»,
+    J. Financial Economics): позиция удерживается, пока знак momentum
+    совпадает с её направлением. Пересечение нуля против позиции = тезис
+    сделки умер → выход, не дожидаясь полного флипа за -threshold или SL.
+    Вход остаётся на ±threshold → гистерезис (вход на импульсе, выход на
+    его затухании), защита прибыли «когда дальше роста не будет».
+    """
+    if momentum_value > 0:
+        return "long"
+    if momentum_value < 0:
+        return "short"
+    return ""
+
+
 def _should_record_direction(*, live: bool, wants_open: bool, executed: bool) -> bool:
     """Обновлять ли last_direction после цикла (edge-trigger памяти сигнала).
 
@@ -750,39 +767,43 @@ def run() -> None:
                     and executor is not None
                 )
 
-                # Exit-on-flip (Turtle/Donchian reversal): противоположный
-                # сигнал сначала ЗАКРЫВАЕТ встречные позиции по символу,
-                # потом открывается новая. Закрытие выполняем независимо от
-                # max_positions — выход важнее входа (и освобождает слот).
-                flip_closed = 0
-                if wants_open and executor is not None:
+                # Sign-decay exit (TSMOM sign rule, Moskowitz 2012) —
+                # обобщение exit-on-flip: позиция живёт, пока ЗНАК momentum
+                # совпадает с её направлением. Momentum пересёк ноль против
+                # позиции (включая полный флип за -threshold) → закрываем.
+                # Выполняем каждый цикл, независимо от max_positions —
+                # выход важнее входа (и освобождает слот).
+                sign_dir = _momentum_sign_direction(signal_data.momentum_value)
+                decay_closed = 0
+                if executor is not None and sign_dir:
                     targets = _flip_close_targets(
-                        positions_by_symbol.get(symbol, []), signal_data.direction
+                        positions_by_symbol.get(symbol, []), sign_dir
                     )
                     for pos in targets:
                         close_res = executor.close_position(pos.position_id, pos.volume)
                         if close_res.success:
-                            flip_closed += 1
+                            decay_closed += 1
                             open_count = max(0, open_count - 1)
                             log.info(
-                                "FLIP CLOSE %s #%d %s vol=%d (signal -> %s)",
+                                "DECAY CLOSE %s #%d %s vol=%d "
+                                "(momentum=%.5f against position)",
                                 symbol,
                                 pos.position_id,
                                 pos.side,
                                 pos.volume,
-                                signal_data.direction,
+                                signal_data.momentum_value,
                             )
                         else:
                             log.error(
-                                "FLIP CLOSE failed %s #%d: %s",
+                                "DECAY CLOSE failed %s #%d: %s",
                                 symbol,
                                 pos.position_id,
                                 close_res.error,
                             )
-                    if flip_closed:
+                    if decay_closed:
                         positions_by_symbol[symbol] = [
                             p for p in positions_by_symbol.get(symbol, [])
-                            if p.side == signal_data.direction
+                            if p.side == sign_dir
                         ]
 
                 should_open = wants_open and open_count < settings.max_open_positions
@@ -798,8 +819,8 @@ def run() -> None:
                     note = "skip:max_positions"
                 else:
                     note = "live_open:pending"
-                if flip_closed:
-                    note = f"{note}+flip_closed:{flip_closed}"
+                if decay_closed:
+                    note = f"{note}+decay_closed:{decay_closed}"
 
                 if should_open:
                     sl_distance = signal_data.atr * settings.atr_stop_mult

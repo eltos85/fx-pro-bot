@@ -6,6 +6,7 @@ from fx_momentum_bot.app.main import (
     _calc_partial_close_volume,
     _drop_forming_bar,
     _flip_close_targets,
+    _momentum_sign_direction,
     _r_multiple,
     _should_record_direction,
 )
@@ -92,6 +93,22 @@ def test_flip_close_targets_empty_on_flat_or_no_positions() -> None:
 
 def test_flip_close_targets_nothing_when_same_direction() -> None:
     assert _flip_close_targets([_pos(1, "long")], "long") == []
+
+
+def test_momentum_sign_direction() -> None:
+    # TSMOM sign rule: знак momentum определяет, какая сторона «жива».
+    assert _momentum_sign_direction(0.0008) == "long"
+    assert _momentum_sign_direction(-0.0001) == "short"
+    assert _momentum_sign_direction(0.0) == ""
+
+
+def test_decay_close_selection_via_sign() -> None:
+    # momentum слегка отрицательный (< 0, но > -threshold): лонг закрывается
+    # по затуханию, шорт остаётся жить.
+    positions = [_pos(1, "long"), _pos(2, "short")]
+    sign_dir = _momentum_sign_direction(-0.0004)
+    targets = _flip_close_targets(positions, sign_dir)
+    assert [p.position_id for p in targets] == [1]
 
 
 def test_r_multiple_for_long_and_short() -> None:

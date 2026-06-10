@@ -6,6 +6,33 @@
 
 ## 2026-06-10
 
+### feat(momentum-bot): sign-decay exit — momentum пересёк ноль против позиции → выход (согласовано)
+
+`<pending>`
+
+**Контекст:** на счёте висели 3 позиции в плюсе (USDJPY +$1.26 с BE,
+2×GBPUSD +$2.31/+$0.67 на 0.69R/0.32R без защиты). В лесенке BE@1R →
+partial@1.5R → trailing@1.5R позиция между 0 и 1R могла висеть бесконечно
+с полным исходным риском. Пользователь: «сохранять прибыль, если видно,
+что дальше роста не будет». Выбран вариант A (sign-exit), B/C отклонены.
+
+**Решение (TSMOM sign rule — Moskowitz/Ooi/Pedersen 2012, «Time Series
+Momentum», JFE):** позиция удерживается, пока ЗНАК momentum совпадает с её
+направлением. Momentum пересёк ноль против позиции → импульс-тезис умер →
+полное закрытие по рынку, не дожидаясь полного флипа за -threshold или SL.
+Вход остаётся на ±threshold (0.15%) → гистерезис: вход на импульсе, выход
+на затухании. Это обобщение exit-on-flip (флип за -threshold — частный
+случай пересечения нуля), отдельный flip-блок заменён на
+`_momentum_sign_direction` + `_flip_close_targets`. Лог `DECAY CLOSE`,
+decision-note `+decay_closed:N`. После decay-выхода при сигнале flat
+last_direction становится flat → повторный вход на новом импульсе не
+блокируется edge-trigger'ом. VP-позиции (XAUUSD) не затронуты — у них
+своя структурная SL/TP-логика.
+
+Тесты: +2 (`_momentum_sign_direction`, выбор decay-целей), сьют 1204 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`
+
 ### feat(momentum-bot): exit-on-flip — противоположный сигнал закрывает встречную позицию (согласовано)
 
 `<pending>`
