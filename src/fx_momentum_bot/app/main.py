@@ -4,11 +4,14 @@ import logging
 import signal
 import time
 from dataclasses import dataclass
+from datetime import datetime, time as dt_time, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
 
 from fx_momentum_bot.config.settings import MomentumBotSettings
+from fx_pro_bot.config.settings import calc_lot_size
 from fx_momentum_bot.state.store import MomentumStore
 from fx_momentum_bot.strategy.event_guard import high_impact_event_near
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
@@ -123,6 +126,82 @@ def _subscribe_spots(executor: TradeExecutor, symbols: tuple[str, ...]) -> None:
         executor.client.subscribe_spots(sids)
     except Exception as exc:  # noqa: BLE001
         log.warning("subscribe_spots failed (fallback на yfinance close): %s", exc)
+
+
+def _position_lot(
+    settings: MomentumBotSettings, symbol: str, sl_distance: float, fallback_lot: float
+) -> float:
+    """ATR-scaled лот от фикс-риска $ (Tharp ch.11) либо legacy фикс-лот.
+
+    Переиспользует advisor'овский calc_lot_size: lot = risk / (sl_pips ×
+    pip_value), клампы [0.01, max_lot_size]. Выравнивает риск на сделку
+    между FX (~$2-3 при 0.01) и золотом (~$24-32 при 0.01): один стоп
+    золота не должен стоить 10 FX-винов (broker-truth 06-05→06-10).
+    """
+    if settings.risk_per_trade_usd <= 0:
+        return fallback_lot
+    return calc_lot_size(
+        symbol,
+        sl_distance,
+        settings.risk_per_trade_usd,
+        max_lot=settings.max_lot_size,
+    )
+
+
+def _spread_too_wide(
+    executor: TradeExecutor, symbol: str, sl_distance: float, max_fraction: float
+) -> str | None:
+    """Причина скипа, если live спред > max_fraction от SL-дистанции.
+
+    Спред — прямой вычет из R (вход по ask, выход/SL по bid): при спреде
+    10% от риска система 2:1 теряет ~0.1R на сделку до начала торговли
+    (cost-to-risk, Harris 2003 ch.21). Меряем фактический bid/ask — ночь,
+    роллувер 17:00 ET и пост-релизные минуты блокируются сами собой.
+    Нет данных спреда (нет подписки/стейл) — НЕ блокируем: guard защита,
+    не зависимость.
+    """
+    if max_fraction <= 0 or sl_distance <= 0:
+        return None
+    info = executor.symbols.resolve_yfinance(symbol)
+    if info is None:
+        return None
+    try:
+        px = executor.client.get_spot_price(info.symbol_id, max_age_sec=900.0)
+    except Exception:  # noqa: BLE001
+        return None
+    if not px or px.get("bid") is None or px.get("ask") is None:
+        return None
+    spread = float(px["ask"]) - float(px["bid"])
+    if spread <= 0:
+        return None
+    fraction = spread / sl_distance
+    if fraction > max_fraction:
+        return f"spread={spread:.5f}={fraction:.0%} of SL-dist (max {max_fraction:.0%})"
+    return None
+
+
+def _parse_hhmm(raw: str) -> dt_time:
+    hh, mm = raw.strip().split(":")
+    return dt_time(int(hh), int(mm))
+
+
+def _vp_entry_window_open(
+    settings: MomentumBotSettings, now_utc: datetime | None = None
+) -> bool:
+    """Открыто ли окно VP-входов (ликвидная сессия, vp_session_tz).
+
+    Day-timeframe канон (Dalton 2007): торгуем сессию, которую описывает
+    профиль; овернайт (после 17:00 ET) — тонкий рынок, чужие участники.
+    """
+    try:
+        tz = ZoneInfo(settings.vp_session_tz)
+        start = _parse_hhmm(settings.vp_entry_start)
+        end = _parse_hhmm(settings.vp_entry_end)
+    except Exception:  # noqa: BLE001
+        log.exception("vp_entry_window: bad config (окно считаю открытым)")
+        return True
+    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+    return start <= now_local.time() < end
 
 
 def _fetch_candles(symbol: str, interval: str, period: str, retries: int = 3):
@@ -544,6 +623,12 @@ def _open_vp_position(
     tp_distance = abs(sig.tp_price - sig.entry)
     if sl_distance <= 0 or tp_distance <= 0:
         return False, "vp_bad_sl_tp"
+    spread_err = _spread_too_wide(
+        executor, symbol, sl_distance, settings.max_spread_risk_fraction
+    )
+    if spread_err:
+        return False, f"vp_skip:wide_spread({spread_err})"
+    lot = _position_lot(settings, symbol, sl_distance, settings.vp_lot_size)
     # entry_price_hint — в координатах БРОКЕРА (spot XAUUSD), не фьючерса.
     # Со sig.entry (GC=F) slippage-guard видел базис фьючерс-спот ($15-40 ≈
     # 150-400 pip) как «slippage» и резал 8/9 валидных входов с уплатой
@@ -555,7 +640,7 @@ def _open_vp_position(
         direction=sig.direction,
         sl_distance=sl_distance,
         tp_distance=tp_distance,
-        lot_size=settings.vp_lot_size,
+        lot_size=lot,
         comment=settings.vp_order_label,
         entry_price_hint=entry_hint,
         label=settings.position_label,
@@ -568,7 +653,7 @@ def _open_vp_position(
             symbol=symbol,
             entry_price=result.fill_price if result.fill_price > 0 else entry_hint,
             initial_volume=(
-                result.volume if result.volume > 0 else lots_to_volume(settings.vp_lot_size)
+                result.volume if result.volume > 0 else lots_to_volume(lot)
             ),
             risk_price=sl_distance,
         )
@@ -577,7 +662,7 @@ def _open_vp_position(
         symbol,
         sig.setup,
         sig.direction,
-        settings.vp_lot_size,
+        lot,
         sig.entry,
         sig.sl_price,
         sig.tp_price,
@@ -595,6 +680,7 @@ def _process_vp_symbol(
     settings: MomentumBotSettings,
     positions_by_symbol: dict[str, list[ManagedPosition]],
     news_block: str | None = None,
+    session_ok: bool = True,
 ) -> bool:
     """Гейтинг + открытие VP-сделки. Возврат True если позиция открыта.
 
@@ -604,6 +690,7 @@ def _process_vp_symbol(
 
     news_block — event-guard (2026-06-10): релиз сбрасывает аукцион
     (Dalton 2007), профиль до релиза невалиден → входы в окне блокируем.
+    session_ok — окно VP-входов (_vp_entry_window_open): овернайт не входим.
     """
     executed = False
     note = "no_setup"
@@ -616,6 +703,7 @@ def _process_vp_symbol(
         and executor is not None
         and not already_open
         and news_block is None
+        and session_ok
         and day_count < settings.vp_max_trades_per_dir_per_day
     )
     if can_open and executor is not None:
@@ -628,6 +716,8 @@ def _process_vp_symbol(
             note = "vp_skip:position_open"
         elif news_block is not None:
             note = f"vp_skip:news_window({news_block})"
+        elif not session_ok:
+            note = "vp_skip:off_session"
         elif day_count >= settings.vp_max_trades_per_dir_per_day:
             note = "vp_skip:daily_limit"
         elif executor is None:
@@ -757,21 +847,34 @@ def run() -> None:
 
             # Event-guard: HIGH-impact релиз в окне ±N минут → новые входы
             # (momentum + VP) блокируются; сопровождение и выходы работают.
+            # Per-symbol scoping: US-релизы (CPI/FOMC/NFP) блокируют всё,
+            # ECB — только EUR-пары, BoJ — только JPY-пары.
             # Кейс 2026-06-10: VP-шорт золота за 8 мин до CPI (−$24.70) +
             # ре-вход после релиза (−$32.61). Andersen et al. 2003; Dalton.
-            news_block: str | None = None
+            news_blocks: dict[str, str] = {}
             if settings.news_block_enabled:
-                news_block = high_impact_event_near(
-                    before_min=settings.news_block_before_min,
-                    after_min=settings.news_block_after_min,
-                )
-                if news_block:
-                    log.info("EVENT-GUARD: входы заблокированы — %s", news_block)
+                for symbol in settings.all_symbols:
+                    reason = high_impact_event_near(
+                        symbol=symbol,
+                        before_min=settings.news_block_before_min,
+                        after_min=settings.news_block_after_min,
+                    )
+                    if reason:
+                        news_blocks[symbol] = reason
+                if news_blocks:
+                    log.info(
+                        "EVENT-GUARD: входы заблокированы — %s",
+                        "; ".join(f"{s}: {r}" for s, r in news_blocks.items()),
+                    )
+            # Окно VP-входов (ликвидная сессия): овернайт не входим.
+            vp_window_ok = _vp_entry_window_open(settings)
 
             for symbol in settings.all_symbols:
                 signal_data = signal_by_symbol.get(symbol)
                 if signal_data is None:
                     continue
+
+                sym_news_block = news_blocks.get(symbol)
 
                 if symbol in vp_symbols and isinstance(signal_data, VolumeProfileSignal):
                     # VP-позиция momentum-лимит не занимает (open_count
@@ -783,7 +886,8 @@ def run() -> None:
                         store=store,
                         settings=settings,
                         positions_by_symbol=positions_by_symbol,
-                        news_block=news_block,
+                        news_block=sym_news_block,
+                        session_ok=vp_window_ok,
                     )
                     continue
 
@@ -837,7 +941,7 @@ def run() -> None:
                 should_open = (
                     wants_open
                     and open_count < settings.max_open_positions
-                    and news_block is None
+                    and sym_news_block is None
                 )
 
                 executed = False
@@ -847,11 +951,11 @@ def run() -> None:
                     note = "flat"
                 elif signal_data.direction == last_direction:
                     note = "same_direction"
-                elif news_block is not None:
+                elif sym_news_block is not None:
                     # Event-guard: вход отложен, direction НЕ фиксируется
                     # (_should_record_direction) → попытка повторится после
                     # окна, пока сигнал актуален. Сигнал не теряется.
-                    note = f"skip:news_window({news_block})"
+                    note = f"skip:news_window({sym_news_block})"
                 elif not should_open:
                     note = "skip:max_positions"
                 else:
@@ -861,6 +965,19 @@ def run() -> None:
 
                 if should_open:
                     sl_distance = signal_data.atr * settings.atr_stop_mult
+                    spread_err = _spread_too_wide(
+                        executor, symbol, sl_distance,
+                        settings.max_spread_risk_fraction,
+                    )
+                    if spread_err:
+                        # direction не фиксируется (wants_open и не executed)
+                        # → попытка повторится, когда спред нормализуется.
+                        should_open = False
+                        note = f"skip:wide_spread({spread_err})"
+                if should_open:
+                    lot = _position_lot(
+                        settings, symbol, sl_distance, settings.lot_size
+                    )
                     # БЕЗ брокерского TP: выход ведёт сопровождение — BE@1R,
                     # partial@1.5R, ATR-trailing (Raschke partial+runner,
                     # LeBeau Chandelier). Старый TP=3.5 ATR стоял на 1.4R и
@@ -873,7 +990,7 @@ def run() -> None:
                         direction=signal_data.direction,
                         sl_distance=sl_distance,
                         tp_distance=None,
-                        lot_size=settings.lot_size,
+                        lot_size=lot,
                         comment=settings.order_label,
                         # hint в координатах брокера (для slippage-guard);
                         # fallback на yfinance close для FX безопасен.
@@ -896,7 +1013,7 @@ def run() -> None:
                                     result.fill_price if result.fill_price > 0 else signal_data.last_close
                                 ),
                                 initial_volume=(
-                                    result.volume if result.volume > 0 else lots_to_volume(settings.lot_size)
+                                    result.volume if result.volume > 0 else lots_to_volume(lot)
                                 ),
                                 risk_price=risk_price,
                             )
@@ -905,7 +1022,7 @@ def run() -> None:
                             "OPEN %s %s lot=%.2f sl=%.6f tp=runner(BE/partial/trail)",
                             symbol,
                             signal_data.direction,
-                            settings.lot_size,
+                            lot,
                             sl_distance,
                         )
 

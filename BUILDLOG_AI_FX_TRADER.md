@@ -2,6 +2,22 @@
 
 ## 2026-06-10
 
+### feat(econ_calendar): + ECB и BoJ decision dates 2026 (symbol-scoped, для momentum-бота)
+
+`<pending>`
+
+Cross-cutting правка shared-модуля `data/econ_calendar.py` по запросу
+momentum-бота (он торгует EURUSD/USDJPY, см. BUILDLOG.md 2026-06-10).
+Для fx_ai_trader поведение НЕ меняется: ECB затрагивает только
+EUR-пары, BoJ — только JPY-пары (`EconEvent.symbols`), а символы
+fx_ai_trader (XAUUSD/BZ=F/NG=F) отфильтровываются через `affects()` —
+в промпт эти события не попадают. Источники (api-docs): ecb.europa.eu
+(решение 14:15 CET вторым днём заседания), boj.or.jp PDF mref250731a
+(8 MPM 2026; номинал 12:00 JST — фиксированного времени релиза нет).
+Тесты календаря fx_ai_trader не затронуты (1251 passed).
+
+**Файлы:** `src/fx_ai_trader/data/econ_calendar.py`
+
 ### fix+feat: пакет аудита fx_ai_trader — данные в LLM, промпт, server-side верификация, анти-churn
 
 `<pending>`

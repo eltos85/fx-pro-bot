@@ -27,7 +27,9 @@ shared-инфраструктура (фактические даты релиз�
 аналогично тому, как fx_ai_trader переиспользует cTrader-движок
 fx_pro_bot (см. strategy-guard.mdc, «Изоляция кодовых баз»).
 Покрытие: US CPI (static 2026, BLS), FOMC decision (static 2026, Fed),
-NFP (правило: первая пятница 08:30 ET). PPI/Retail Sales/GDP НЕ покрыты.
+NFP (правило: первая пятница 08:30 ET), ECB decision (static 2026,
+ecb.europa.eu — только EUR-пары), BoJ MPM (static 2026, boj.or.jp —
+только JPY-пары). PPI/Retail Sales/GDP НЕ покрыты.
 """
 from __future__ import annotations
 
@@ -42,12 +44,16 @@ log = logging.getLogger(__name__)
 def high_impact_event_near(
     now_utc: datetime | None = None,
     *,
+    symbol: str | None = None,
     before_min: int = 60,
     after_min: int = 60,
 ) -> str | None:
     """Описание HIGH-impact события в окне [now−after, now+before], либо None.
 
     None == входы разрешены. Строка == входы блокируются (текст для лога).
+    symbol — yf-символ для scoping: US-релизы (CPI/FOMC/NFP, symbols=())
+    блокируют все инструменты; ECB — только EUR-пары, BoJ — только
+    JPY-пары (golden VP не блокируются чужими ЦБ). None = любое событие.
     Сбой календаря НЕ блокирует торговлю (guard — защита, не зависимость).
     """
     now = now_utc or datetime.now(timezone.utc)
@@ -57,7 +63,8 @@ def high_impact_event_near(
         # (пост-релизная волатильность, кейс ре-входа 13:28).
         ref = now - timedelta(minutes=after_min)
         horizon_hours = (before_min + after_min) / 60.0 + 0.1
-        events = upcoming_events(ref, ("*",), horizon_hours=horizon_hours)
+        scope = (symbol,) if symbol else ("*",)
+        events = upcoming_events(ref, scope, horizon_hours=horizon_hours)
     except Exception:
         log.exception("event_guard: calendar failed (входы НЕ блокирую)")
         return None

@@ -207,3 +207,139 @@ def test_event_guard_quiet_day_not_blocked() -> None:
     # Обычный день без HIGH-impact релизов поблизости.
     quiet = datetime(2026, 6, 16, 9, 0, tzinfo=timezone.utc)
     assert high_impact_event_near(quiet, before_min=60, after_min=60) is None
+
+
+def test_event_guard_symbol_scoping_ecb_boj() -> None:
+    # ECB decision 2026-06-11 14:15 CEST = 12:15 UTC (ecb.europa.eu):
+    # блокирует EUR-пары, но НЕ золото и НЕ JPY.
+    ecb_near = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+    assert high_impact_event_near(ecb_near, symbol="EURUSD=X") is not None
+    assert high_impact_event_near(ecb_near, symbol="GC=F") is None
+    assert high_impact_event_near(ecb_near, symbol="USDJPY=X") is None
+    # BoJ MPM 2026-06-16, номинал 12:00 JST = 03:00 UTC (boj.or.jp):
+    # блокирует JPY-пары, но НЕ EUR и НЕ золото.
+    boj_near = datetime(2026, 6, 16, 2, 30, tzinfo=timezone.utc)
+    assert high_impact_event_near(boj_near, symbol="USDJPY=X") is not None
+    assert high_impact_event_near(boj_near, symbol="EURUSD=X") is None
+    assert high_impact_event_near(boj_near, symbol="GC=F") is None
+
+
+def test_event_guard_us_events_block_all_symbols() -> None:
+    # US CPI (symbols=()) блокирует и FX, и золото.
+    cpi_near = datetime(2026, 6, 10, 12, 22, tzinfo=timezone.utc)
+    for sym in ("EURUSD=X", "USDJPY=X", "GC=F"):
+        assert high_impact_event_near(cpi_near, symbol=sym) is not None
+
+
+# ─── ATR-scaled sizing (Tharp, reuse advisor calc_lot_size) ──────────────
+
+
+def _sizing_settings(risk: float, max_lot: float = 0.05):
+    from types import SimpleNamespace
+    return SimpleNamespace(risk_per_trade_usd=risk, max_lot_size=max_lot)
+
+
+def test_position_lot_scales_fx_up_and_caps() -> None:
+    from fx_momentum_bot.app.main import _position_lot
+    # EURUSD: SL 25 pips (0.0025), pip=$0.10/0.01lot → риск $2.5 на 0.01.
+    # Для $15 нужно 0.06 → cap 0.05 (MAX после инцидента 23.04).
+    lot = _position_lot(_sizing_settings(15.0), "EURUSD=X", 0.0025, 0.01)
+    assert lot == 0.05
+
+
+def test_position_lot_gold_clamped_to_min() -> None:
+    from fx_momentum_bot.app.main import _position_lot
+    # GC=F: SL 24 пункта → риск $24 на 0.01 лоте > $15 → кламп на min 0.01
+    # (меньше минимального лота уменьшить риск нельзя).
+    lot = _position_lot(_sizing_settings(15.0), "GC=F", 24.0, 0.01)
+    assert lot == 0.01
+
+
+def test_position_lot_disabled_falls_back_to_fixed() -> None:
+    from fx_momentum_bot.app.main import _position_lot
+    assert _position_lot(_sizing_settings(0.0), "EURUSD=X", 0.0025, 0.03) == 0.03
+
+
+# ─── VP: окно входов (ликвидная сессия, Dalton day-timeframe) ────────────
+
+
+def _vp_window_settings():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        vp_session_tz="America/New_York",
+        vp_entry_start="07:00",
+        vp_entry_end="17:00",
+    )
+
+
+def test_vp_entry_window_open_during_ny_session() -> None:
+    from fx_momentum_bot.app.main import _vp_entry_window_open
+    # 14:00 UTC июнь = 10:00 NY (EDT) — внутри окна.
+    now = datetime(2026, 6, 10, 14, 0, tzinfo=timezone.utc)
+    assert _vp_entry_window_open(_vp_window_settings(), now) is True
+
+
+def test_vp_entry_window_closed_overnight() -> None:
+    from fx_momentum_bot.app.main import _vp_entry_window_open
+    # 23:54 UTC = 19:54 NY — реальное время ночных VP-попыток 06-09
+    # (тонкий рынок, мгновенные стоп-ауты в выписке).
+    night = datetime(2026, 6, 9, 23, 54, tzinfo=timezone.utc)
+    assert _vp_entry_window_open(_vp_window_settings(), night) is False
+    # 00:44 UTC = 20:44 NY — тоже закрыто.
+    night2 = datetime(2026, 6, 10, 0, 44, tzinfo=timezone.utc)
+    assert _vp_entry_window_open(_vp_window_settings(), night2) is False
+
+
+def test_vp_entry_window_edge_17et_closed() -> None:
+    from fx_momentum_bot.app.main import _vp_entry_window_open
+    # Ровно 17:00 ET (CME settlement) — окно уже закрыто.
+    at_17 = datetime(2026, 6, 10, 21, 0, tzinfo=timezone.utc)
+    assert _vp_entry_window_open(_vp_window_settings(), at_17) is False
+
+
+# ─── Spread-guard (cost-to-risk, Harris 2003) ────────────────────────────
+
+
+class _FakeSpotClient:
+    def __init__(self, bid: float | None, ask: float | None):
+        self._bid, self._ask = bid, ask
+
+    def get_spot_price(self, symbol_id: int, max_age_sec: float | None = None):
+        if self._bid is None and self._ask is None:
+            return None
+        return {"bid": self._bid, "ask": self._ask, "mid": None, "ts": 0, "age_sec": 0}
+
+
+class _FakeSymbols:
+    def resolve_yfinance(self, symbol: str):
+        from types import SimpleNamespace
+        return SimpleNamespace(symbol_id=1)
+
+
+def _fake_executor(bid: float | None, ask: float | None):
+    from types import SimpleNamespace
+    return SimpleNamespace(symbols=_FakeSymbols(), client=_FakeSpotClient(bid, ask))
+
+
+def test_spread_guard_blocks_wide_spread() -> None:
+    from fx_momentum_bot.app.main import _spread_too_wide
+    # SL 25 pips, спред 5 pips = 20% риска > 10% → блок (ночь/роллувер).
+    err = _spread_too_wide(_fake_executor(1.15500, 1.15550), "EURUSD=X", 0.0025, 0.10)
+    assert err is not None and "20%" in err
+
+
+def test_spread_guard_passes_normal_spread() -> None:
+    from fx_momentum_bot.app.main import _spread_too_wide
+    # Спред 1.5 pips от SL 25 pips = 6% < 10% → вход разрешён.
+    assert _spread_too_wide(_fake_executor(1.15500, 1.15515), "EURUSD=X", 0.0025, 0.10) is None
+
+
+def test_spread_guard_no_data_does_not_block() -> None:
+    from fx_momentum_bot.app.main import _spread_too_wide
+    # Нет spot-данных — guard защита, не зависимость: НЕ блокируем.
+    assert _spread_too_wide(_fake_executor(None, None), "EURUSD=X", 0.0025, 0.10) is None
+
+
+def test_spread_guard_disabled() -> None:
+    from fx_momentum_bot.app.main import _spread_too_wide
+    assert _spread_too_wide(_fake_executor(1.0, 2.0), "EURUSD=X", 0.0025, 0.0) is None

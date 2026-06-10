@@ -55,7 +55,31 @@ class MomentumBotSettings(BaseSettings):
         default=0.0015, validation_alias="MOMENTUM_BOT_SIGNAL_THRESHOLD"
     )
 
+    # Fallback-лот, если ATR-сайзинг выключен (risk_per_trade_usd=0).
     lot_size: float = Field(default=0.01, validation_alias="MOMENTUM_BOT_LOT_SIZE")
+    # ─── ATR-scaled sizing (Tharp ch.11, Vince 1992) ───
+    # 2026-06-10 (broker-truth, momentum_pnl_audit 06-05→06-10): при фикс
+    # 0.01 лота риск VP-сделки по золоту $24–32, FX-сделки $2–3 — один стоп
+    # золота съедает ~10 FX-винов. Канон fixed-fractional risk уже
+    # реализован у advisor (calc_lot_size, риск $15 = 1% от $1500) —
+    # переиспользуем ту же функцию. lot = risk / (sl_pips × pip_value);
+    # cap MAX_LOT_SIZE=0.05 (инцидент 23.04). 0 = выключить (фикс-лот).
+    risk_per_trade_usd: float = Field(
+        default=15.0, validation_alias="MOMENTUM_BOT_RISK_PER_TRADE_USD"
+    )
+    max_lot_size: float = Field(
+        default=0.05, validation_alias="MOMENTUM_BOT_MAX_LOT_SIZE"
+    )
+    # ─── Spread-guard на входе ───
+    # Скип входа, если live bid/ask спред > доли SL-дистанции: спред —
+    # прямой вычет из R (вход по ask, SL/выход по bid). При 10% спреда
+    # к риску система 2:1 теряет ~0.1R на сделку до начала торговли
+    # (cost-to-risk контроль, Harris «Trading and Exchanges» 2003 ch.21).
+    # Естественно блокирует ночь/роллувер 17:00 ET/пост-релизные минуты —
+    # меряем фактический спред, не хардкодим часы. 0 = выключить.
+    max_spread_risk_fraction: float = Field(
+        default=0.10, validation_alias="MOMENTUM_BOT_MAX_SPREAD_RISK_FRACTION"
+    )
     # Лимит ТОЛЬКО для momentum-стратегии (позиции по momentum-символам).
     # VP-стратегия (золото) гейтится отдельно: 1 позиция на символ
     # (already_open) + дневной лимит 2/сторону — momentum-позиции её слот
@@ -178,6 +202,20 @@ class MomentumBotSettings(BaseSettings):
     vp_lot_size: float = Field(default=0.01, validation_alias="MOMENTUM_BOT_VP_LOT_SIZE")
     vp_order_label: str = Field(
         default="momentum-bot-vp", validation_alias="MOMENTUM_BOT_VP_ORDER_LABEL"
+    )
+    # ─── VP: окно входов (ликвидная сессия) ───
+    # Day-timeframe канон (Dalton 2007): торгуется сессия, которую
+    # описывает профиль; overnight — другие участники, тонкая ликвидность,
+    # широкий спред (в выписке 06-09/06-10 — попытки VP-входов в
+    # 23:54–01:14 UTC). Профиль строится по London pre-NY (03:00–07:00 NY),
+    # входы — после его завершения и до закрытия фьючерсной сессии
+    # 17:00 ET (CME Globex settlement; далее maintenance break и тонкий
+    # овернайт). Таймзона — vp_session_tz.
+    vp_entry_start: str = Field(
+        default="07:00", validation_alias="MOMENTUM_BOT_VP_ENTRY_START"
+    )
+    vp_entry_end: str = Field(
+        default="17:00", validation_alias="MOMENTUM_BOT_VP_ENTRY_END"
     )
 
     # Dedicated cTrader credentials for this bot only.

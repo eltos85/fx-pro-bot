@@ -13,6 +13,10 @@ proximity (через сколько часов, какие символы за�
 - EIA Weekly Petroleum Status: среда 10:30 ET;
   EIA Natural Gas Storage: четверг 10:30 ET (eia.gov release schedule).
 - US Nonfarm Payrolls (NFP): первая пятница месяца 08:30 ET (BLS).
+- ECB Governing Council 2026 (решение 14:15 CET вторым днём заседания):
+  ecb.europa.eu (Webcasts: monetary policy decisions; meeting calendar).
+- BoJ MPM 2026 (statement ~полдень JST вторым днём, времени-якоря нет):
+  boj.or.jp/en/mopo/mpmsche_minu (PDF mref250731a от 2025-07-31).
 
 Время релизов хранится в ET и конвертируется в UTC через zoneinfo
 (America/New_York) — корректный учёт DST без magic-offset'ов.
@@ -33,6 +37,8 @@ log = logging.getLogger(__name__)
 
 _ET = ZoneInfo("America/New_York")
 _UTC = ZoneInfo("UTC")
+_FRANKFURT = ZoneInfo("Europe/Berlin")
+_TOKYO = ZoneInfo("Asia/Tokyo")
 
 # FOMC 2026 decision days (Wednesday — второй день заседания), 14:00 ET.
 # Источник: federalreserve.gov press release 2024-08-09.
@@ -47,6 +53,30 @@ _CPI_2026 = [
     date(2026, 4, 10), date(2026, 5, 12), date(2026, 6, 10),
     date(2026, 7, 14), date(2026, 8, 12), date(2026, 9, 11),
     date(2026, 10, 14), date(2026, 11, 10), date(2026, 12, 10),
+]
+# ECB Governing Council 2026, decision day (второй день заседания).
+# Решение публикуется в 14:15 по Франкфурту (CET/CEST), пресс-конференция
+# 14:45. Источник: ecb.europa.eu (Webcasts: ECB monetary policy decisions;
+# meeting calendar 2026: Feb 4-5, Mar 18-19, Apr 29-30, Jun 10-11,
+# Jul 22-23, Sep 9-10, Oct 28-29, Dec 16-17).
+# Затрагивает EUR-пары (momentum-бот: EURUSD=X); для XAUUSD/BZ=F/NG=F
+# событие отфильтруется по symbols.
+_ECB_2026 = [
+    date(2026, 2, 5), date(2026, 3, 19), date(2026, 4, 30),
+    date(2026, 6, 11), date(2026, 7, 23), date(2026, 9, 10),
+    date(2026, 10, 29), date(2026, 12, 17),
+]
+# Bank of Japan MPM 2026, decision day (второй день заседания).
+# Источник: boj.or.jp «Scheduled Dates of Monetary Policy Meetings in
+# 2026» (PDF mref250731a, July 31 2025): Jan 22-23, Mar 18-19, Apr 27-28,
+# Jun 15-16, Jul 30-31, Sep 17-18, Oct 29-30, Dec 17-18.
+# ВАЖНО: у BoJ нет фиксированного времени релиза statement (обычно
+# 11:30–13:00 JST по окончании заседания) — берём номинал 12:00 JST,
+# окно ±60 мин покрывает типичный разброс. Затрагивает JPY-пары.
+_BOJ_2026 = [
+    date(2026, 1, 23), date(2026, 3, 19), date(2026, 4, 28),
+    date(2026, 6, 16), date(2026, 7, 31), date(2026, 9, 18),
+    date(2026, 10, 30), date(2026, 12, 18),
 ]
 
 
@@ -139,6 +169,30 @@ def upcoming_events(
         when = _et_to_utc(d, 8, 30)
         if when >= now_utc:
             events.append(EconEvent("US CPI", when, "HIGH", ()))
+            break
+    # ECB/BoJ — symbol-scoped (EUR-/JPY-пары momentum-бота): для
+    # XAUUSD/BZ=F/NG=F (fx_ai_trader) отфильтруются через affects().
+    for d in _ECB_2026:
+        when = datetime.combine(d, time(14, 15), tzinfo=_FRANKFURT).astimezone(_UTC)
+        if when >= now_utc:
+            events.append(
+                EconEvent(
+                    "ECB rate decision", when, "HIGH",
+                    ("EURUSD=X", "EURGBP=X", "EURJPY=X"),
+                )
+            )
+            break
+    for d in _BOJ_2026:
+        # Номинал 12:00 JST: фиксированного времени у BoJ-statement нет
+        # (обычно 11:30-13:00 JST), окно guard'а ±60 мин кроет разброс.
+        when = datetime.combine(d, time(12, 0), tzinfo=_TOKYO).astimezone(_UTC)
+        if when >= now_utc:
+            events.append(
+                EconEvent(
+                    "BoJ rate decision", when, "HIGH",
+                    ("USDJPY=X", "EURJPY=X", "GBPJPY=X"),
+                )
+            )
             break
 
     horizon = now_utc + timedelta(hours=horizon_hours)

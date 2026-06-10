@@ -6,6 +6,51 @@
 
 ## 2026-06-10
 
+### feat(momentum-bot): закрытие канон-дыр — ATR-сайзинг, VP-сессия, ECB/BoJ календарь, спред-гард (согласовано)
+
+`<pending>`
+
+Аудит канона после CPI-инцидента (запрос пользователя «изучи подробнее
+канон, что ещё не хватает»). Четыре дыры, все одобрены:
+
+**1. ATR-сайзинг от фикс-риска $15 (Tharp ch.11, Vince 1992).**
+Broker-truth 06-05→06-10: при фикс 0.01 лота риск VP-сделки золота
+$24–32, FX — $2–3: один стоп золота съедал ~10 FX-винов. Переиспользован
+advisor'овский `calc_lot_size` (lot = risk / (sl_pips × pip_value), cap
+0.05 после инцидента 23.04). EURUSD при SL 25 pips теперь 0.05 лота
+(риск $12.5 ≈ FX выровнен к золоту). Env:
+`MOMENTUM_BOT_RISK_PER_TRADE_USD` (15.0; 0 = legacy фикс-лот),
+`MOMENTUM_BOT_MAX_LOT_SIZE` (0.05).
+
+**2. VP: окно входов 07:00–17:00 NY (Dalton day-timeframe).** В выписке
+06-09/06-10 — VP-попытки в 23:54–01:14 UTC (тонкий овернайт). Канон:
+торгуется сессия, которую описывает профиль; после 17:00 ET — CME
+settlement и тонкий рынок. Сопровождение открытых позиций НЕ гейтится.
+Env: `MOMENTUM_BOT_VP_ENTRY_START/END`.
+
+**3. Календарь: + ECB и BoJ (officially sourced).** Бот торгует
+EURUSD/USDJPY, а календарь знал только US-релизы. ECB 2026 (решение
+14:15 CET вторым днём; ecb.europa.eu) и BoJ MPM 2026 (номинал 12:00 JST,
+фиксированного времени нет; boj.or.jp PDF mref250731a) добавлены в
+shared `fx_ai_trader.data.econ_calendar` с symbol-scoping: ECB блокирует
+только EUR-пары, BoJ — только JPY-пары, золото чужими ЦБ не блокируется.
+event_guard переведён на per-symbol проверку.
+
+**4. Спред-гард на входе (Harris 2003 ch.21, cost-to-risk).** Скип
+входа при live спреде > 10% SL-дистанции: спред — прямой вычет из R;
+ночь/роллувер 17:00 ET/пост-релизные минуты блокируются по фактическому
+bid/ask, без хардкода часов. Нет spot-данных — не блокируем (guard —
+защита, не зависимость). Сигнал momentum при скипе не теряется
+(direction не фиксируется). Env:
+`MOMENTUM_BOT_MAX_SPREAD_RISK_FRACTION` (0.10; 0 = off).
+
+**Тесты:** +12 (сайзинг FX/gold/off, VP-окно день/ночь/граница 17:00 ET,
+спред-гард 4 кейса, ECB/BoJ scoping, US-события блокируют всё). Сьют
+1251 passed.
+
+**Файлы:** `src/fx_momentum_bot/{app/main.py,config/settings.py,strategy/event_guard.py}`,
+`src/fx_ai_trader/data/econ_calendar.py`, `tests/test_fx_momentum_bot.py`
+
 ### feat(momentum-bot): event-guard — блок входов ±60 мин вокруг HIGH-impact релизов (согласовано)
 
 `<pending>`
