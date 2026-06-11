@@ -343,3 +343,50 @@ def test_spread_guard_no_data_does_not_block() -> None:
 def test_spread_guard_disabled() -> None:
     from fx_momentum_bot.app.main import _spread_too_wide
     assert _spread_too_wide(_fake_executor(1.0, 2.0), "EURUSD=X", 0.0025, 0.0) is None
+
+
+# ─── VP friday-flat: не несём day-timeframe позицию через выходные ───────
+
+
+def _flat_settings(enabled: bool = True):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        vp_friday_flat_enabled=enabled,
+        vp_session_tz="America/New_York",
+        vp_friday_flat_start="16:45",
+        vp_friday_flat_end="17:30",
+    )
+
+
+def test_vp_friday_flat_due_in_window() -> None:
+    from fx_momentum_bot.app.main import _vp_friday_flat_due
+    # 2026-06-12 — пятница; 20:50 UTC = 16:50 NY (EDT) — внутри окна.
+    fri = datetime(2026, 6, 12, 20, 50, tzinfo=timezone.utc)
+    assert _vp_friday_flat_due(_flat_settings(), fri) is True
+
+
+def test_vp_friday_flat_not_due_earlier_friday() -> None:
+    from fx_momentum_bot.app.main import _vp_friday_flat_due
+    # Пятница 12:00 NY — рано, обычная торговля.
+    fri_noon = datetime(2026, 6, 12, 16, 0, tzinfo=timezone.utc)
+    assert _vp_friday_flat_due(_flat_settings(), fri_noon) is False
+
+
+def test_vp_friday_flat_not_due_other_days() -> None:
+    from fx_momentum_bot.app.main import _vp_friday_flat_due
+    # Четверг 16:50 NY — не пятница.
+    thu = datetime(2026, 6, 11, 20, 50, tzinfo=timezone.utc)
+    assert _vp_friday_flat_due(_flat_settings(), thu) is False
+
+
+def test_vp_friday_flat_window_closes_after_market() -> None:
+    from fx_momentum_bot.app.main import _vp_friday_flat_due
+    # Пятница 17:35 NY — рынок закрыт, не спамим close-ордерами.
+    late = datetime(2026, 6, 12, 21, 35, tzinfo=timezone.utc)
+    assert _vp_friday_flat_due(_flat_settings(), late) is False
+
+
+def test_vp_friday_flat_disabled() -> None:
+    from fx_momentum_bot.app.main import _vp_friday_flat_due
+    fri = datetime(2026, 6, 12, 20, 50, tzinfo=timezone.utc)
+    assert _vp_friday_flat_due(_flat_settings(enabled=False), fri) is False

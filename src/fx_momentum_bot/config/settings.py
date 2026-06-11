@@ -217,6 +217,25 @@ class MomentumBotSettings(BaseSettings):
     vp_entry_end: str = Field(
         default="17:00", validation_alias="MOMENTUM_BOT_VP_ENTRY_END"
     )
+    # ─── VP: friday-flat (не несём day-timeframe позицию через выходные) ───
+    # Day-timeframe канон (Dalton 2007): сделка живёт внутри сессии,
+    # которую описывает профиль; понедельничный профиль — другой рынок.
+    # Гэп выходных исполняет SL хуже запланированного (gap-risk вне 1R).
+    # Открытые VP-позиции принудительно закрываются в пятницу в окне
+    # [flat_start, flat_end) по vp_session_tz — до закрытия рынка 17:00 ET.
+    # На momentum-позиции НЕ распространяется: трендовый канон
+    # (Turtle/TSMOM) намеренно держит через выходные.
+    vp_friday_flat_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_VP_FRIDAY_FLAT_ENABLED"
+    )
+    vp_friday_flat_start: str = Field(
+        default="16:45", validation_alias="MOMENTUM_BOT_VP_FRIDAY_FLAT_START"
+    )
+    # Верхняя граница попыток: после закрытия рынка close-ордера всё равно
+    # отвергаются — не спамим ошибками до полуночи.
+    vp_friday_flat_end: str = Field(
+        default="17:30", validation_alias="MOMENTUM_BOT_VP_FRIDAY_FLAT_END"
+    )
 
     # Dedicated cTrader credentials for this bot only.
     ctrader_host_type: str = Field(

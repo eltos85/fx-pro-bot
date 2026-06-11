@@ -204,6 +204,30 @@ def _vp_entry_window_open(
     return start <= now_local.time() < end
 
 
+def _vp_friday_flat_due(
+    settings: MomentumBotSettings, now_utc: datetime | None = None
+) -> bool:
+    """Пора ли принудительно закрывать VP-позиции перед выходными.
+
+    True только в пятницу (vp_session_tz) в окне [flat_start, flat_end).
+    Day-timeframe канон (Dalton 2007): профиль описывает сессию — позицию
+    не несём через выходные (гэп понедельника исполняет SL вне плана).
+    """
+    if not settings.vp_friday_flat_enabled:
+        return False
+    try:
+        tz = ZoneInfo(settings.vp_session_tz)
+        start = _parse_hhmm(settings.vp_friday_flat_start)
+        end = _parse_hhmm(settings.vp_friday_flat_end)
+    except Exception:  # noqa: BLE001
+        log.exception("vp_friday_flat: bad config (правило выключаю)")
+        return False
+    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
+    if now_local.weekday() != 4:  # Friday
+        return False
+    return start <= now_local.time() < end
+
+
 def _fetch_candles(symbol: str, interval: str, period: str, retries: int = 3):
     # yfinance периодически отдаёт пустой результат / "possibly delisted"
     # по ОДНОМУ тикеру при транзиентном сбое Yahoo (остальные в том же
@@ -868,6 +892,32 @@ def run() -> None:
                     )
             # Окно VP-входов (ликвидная сессия): овернайт не входим.
             vp_window_ok = _vp_entry_window_open(settings)
+
+            # Friday-flat: VP-позиции (day-timeframe) закрываются перед
+            # выходными — пятница 16:45–17:30 NY, до закрытия рынка.
+            # Не зависит от сигналов (закрываем по факту наличия позиции).
+            if executor is not None and _vp_friday_flat_due(settings):
+                for vp_sym in settings.vp_symbols:
+                    remaining: list[ManagedPosition] = []
+                    for pos in positions_by_symbol.get(vp_sym, []):
+                        close_res = executor.close_position(
+                            pos.position_id, pos.volume
+                        )
+                        if close_res.success:
+                            log.info(
+                                "VP FRIDAY FLAT %s #%d %s vol=%d closed "
+                                "(day-timeframe: не несём через выходные)",
+                                vp_sym, pos.position_id, pos.side, pos.volume,
+                            )
+                        else:
+                            remaining.append(pos)
+                            log.error(
+                                "VP FRIDAY FLAT failed %s #%d: %s "
+                                "(повтор в следующем цикле)",
+                                vp_sym, pos.position_id, close_res.error,
+                            )
+                    if vp_sym in positions_by_symbol:
+                        positions_by_symbol[vp_sym] = remaining
 
             for symbol in settings.all_symbols:
                 signal_data = signal_by_symbol.get(symbol)
