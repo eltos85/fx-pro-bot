@@ -1150,6 +1150,24 @@ def test_resolve_same_side_picks_highest_score():
     assert resolve([a, b]) is b  # выше score
 
 
+def test_resolve_same_side_collision_logged(caplog):
+    """v0.18.21: same-side коллизия логируется (замер частоты — решение о
+    Partial-брекетах по данным), победитель прежний (max score)."""
+    import logging
+    a = _sig("long", 4, "sweep_fade")
+    b = _sig("long", 6, "density_bounce")
+    with caplog.at_level(logging.INFO, logger="scalp_bot.play"):
+        assert resolve([a, b]) is b
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("SAME-SIDE КОЛЛИЗИЯ" in m and "sweep_fade(score=4)" in m
+               for m in msgs)
+    # одиночный сигнал коллизию не пишет
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="scalp_bot.play"):
+        assert resolve([a]) is a
+    assert not any("КОЛЛИЗИЯ" in r.getMessage() for r in caplog.records)
+
+
 def test_resolve_conflicting_sides_skips():
     # long и short по одному символу → неоднозначность → не берём ничего
     assert resolve([_sig("long", 5), _sig("short", 9, "density_bounce")]) is None

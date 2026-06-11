@@ -29,8 +29,20 @@
 для честной статы density_*. Тесты: +1 (`test_last_sl_close_ts_per_strategy`),
 сьют 195 passed.
 
-**Файлы:** `state/db.py`, `app/main.py`, `config/settings.py`,
-`tests/test_scalp_bot.py`, `STRATEGY_RATIONALE_SCALP.md`.
+**Same-side коллизии (вторая часть запроса «обе страты должны заходить»)**:
+честный двойной вход двух страт по одному символу упирается в Bybit one-way
+mode — одноимённые позиции агрегируются, брекеты ставятся на позицию целиком
+(`tpslMode=Full`, второй вход перезаписал бы SL/TP первого), закрытие
+детектится по `pos.size==0`, биржевые TP/SL-филлы без нашего linkId
+атрибутируются «первой open-сделке символа». Нужны Partial-брекеты + qty-aware
+manage/атрибуция — крупная правка живого исполнения. По решению пользователя
+(вариант «сначала измерить»): в `resolve()` добавлен лог `SAME-SIDE КОЛЛИЗИЯ`
+с победителем/проигравшими — частоту коллизий замеряем на live, решение о
+Partial-переделке примем по данным (no-data-fitting). Тест:
+`test_resolve_same_side_collision_logged`.
+
+**Файлы:** `state/db.py`, `app/main.py`, `analysis/strategies.py`,
+`config/settings.py`, `tests/test_scalp_bot.py`, `STRATEGY_RATIONALE_SCALP.md`.
 
 ### v0.18.20 — sweep_fade_canon: канон-вариант параллельным A/B форвард-тестом
 `<hash>`

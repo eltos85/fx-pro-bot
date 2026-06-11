@@ -776,6 +776,12 @@ def resolve(signals: list[Signal]) -> Signal | None:
     - все сигналы в ОДНУ сторону → берём с максимальным score (при равенстве —
       первый по порядку стратегий);
     - есть и long, и short → конфликт, не берём НИЧЕГО (неоднозначность).
+
+    v0.18.21 (запрос пользователя 2026-06-11): same-side коллизия ЛОГИРУЕТСЯ —
+    проигравшая страта теряет сигнал из своей выборки (Bybit one-way агрегирует
+    одноимённые позиции, честный двойной вход требует Partial-брекетов).
+    Решение «строить ли Partial» примем по замеренной частоте коллизий
+    (no-data-fitting: сначала данные, потом переделка исполнения).
     """
     if not signals:
         return None
@@ -786,4 +792,12 @@ def resolve(signals: list[Signal]) -> Signal | None:
         play.info("🛑 [%s] конфликт стратегий (%s): разные направления — "
                   "пропускаю тик", syms, names)
         return None
-    return max(signals, key=lambda s: s.score)
+    win = max(signals, key=lambda s: s.score)
+    if len(signals) > 1:
+        losers = ", ".join(f"{s.strategy}(score={s.score})"
+                           for s in signals if s is not win)
+        play.info("⚖️ [%s] SAME-SIDE КОЛЛИЗИЯ (%s): входит %s (score=%d), "
+                  "сигнал потеряли: %s — замер частоты для решения о "
+                  "Partial-брекетах", win.symbol, win.side, win.strategy,
+                  win.score, losers)
+    return win
