@@ -32,7 +32,32 @@ class ScalpSettings(BaseSettings):
     # Активные стратегии (CSV). Каждая ищет/сопровождает входы независимо;
     # конфликт направлений по символу → тик пропускается (см. strategies.py).
     # sweep_fade + density_bounce (fade) + density_break (momentum-пробой, v0.8.0).
-    enabled_strategies: str = Field(default="sweep_fade,density_bounce,density_break")
+    # sweep_fade_canon (v0.18.20) — параллельный КАНОН-вариант sweep_fade
+    # (форвард-тест A/B, одобрено пользователем 2026-06-11): значимые уровни
+    # (PDH/PDL + дневные экстремумы) + full reclaim + вселенная мейджоров.
+    enabled_strategies: str = Field(
+        default="sweep_fade,density_bounce,density_break,sweep_fade_canon")
+
+    # ─── sweep_fade_canon (v0.18.20): канон-вариант параллельным форвард-тестом ──
+    # Базовый sweep_fade живёт ниже канонного WR 60%+ (live 899 сделок: WR 35%,
+    # лучшая неделя 52%). Разрыв с каноном CAP — три упрощения: (1) фейдим
+    # 3-минутный микро-экстремум вместо ЗНАЧИМОГО уровня ликвидности (PDH/PDL,
+    # session H/L — где реально стоят стопы: Osler 2003 NY Fed «stop orders
+    # cluster»; CAP/chartwhisperer «sweep of liquidity pool»); (2) reclaim 50%
+    # пути вместо полного возврата ЗА уровень (CAP Rule 2 буквально); (3) vol-
+    # вселенная подобрана под пробой, а fade канонически живёт в ликвидных
+    # рейнджах (live: ETH WR 55% vs ZEC 28%). Канон-вариант исправляет все три,
+    # выходы/SL/TP оставлены ИДЕНТИЧНЫМИ базовому — A/B изолирует качество входа.
+    # Обе версии копят выборку параллельно (атрибуция в БД по колонке strategy),
+    # решение по n≥100 на каждую (sample-size.mdc).
+    # Вселенная канона: ликвидные мейджоры (深 книги, рейнджи — Tradeify
+    # «ES deep book → fade»; наш live ETH 55% WR). Торгуются ТОЛЬКО канон-стратой
+    # (symbol_scope), авто-вселенная других страт не затронута.
+    sweep_fade_canon_symbols: str = Field(
+        default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT")
+    # Full reclaim (CAP Rule 2): цена должна ВЕРНУТЬСЯ за свипнутый уровень
+    # (1.0 = весь путь), а не 50% как у базового.
+    sweep_fade_canon_reclaim_frac: float = Field(default=1.0)
 
     # Per-symbol LONG-блок (CSV): на этих символах входы в ЛОНГ запрещены ВСЕМ
     # стратегиям, шорты разрешены. v0.18.17 (C-07) ставил ZECUSDT; v0.18.19
@@ -185,10 +210,12 @@ class ScalpSettings(BaseSettings):
     sweep_fade_sl_cooldown_sec: float = Field(default=3600.0)
 
     def sl_cooldown_for(self, strategy: str) -> float:
-        """Пауза после SL по стратегии. sweep_fade (fade) — расширенное окно 60м
-        (канон MR + sweep n=829); остальные (density_break пробой, density_bounce
-        — не валидировались на длинное окно) — базовый sl_cooldown_sec."""
-        if strategy == "sweep_fade":
+        """Пауза после SL по стратегии. Семейство sweep_fade* (fade, вкл. канон-
+        вариант v0.18.20) — расширенное окно 60м (канон MR «if stopped — done
+        ≥60 min» Fondeo + sweep n=829); остальные (density_break пробой,
+        density_bounce — не валидировались на длинное окно) — базовый
+        sl_cooldown_sec."""
+        if strategy.startswith("sweep_fade"):
             return self.sweep_fade_sl_cooldown_sec
         return self.sl_cooldown_sec
 
@@ -544,6 +571,11 @@ class ScalpSettings(BaseSettings):
     @property
     def no_long_list(self) -> list[str]:
         return [s.strip().upper() for s in self.no_long_symbols.split(",")
+                if s.strip()]
+
+    @property
+    def sweep_fade_canon_symbol_list(self) -> list[str]:
+        return [s.strip().upper() for s in self.sweep_fade_canon_symbols.split(",")
                 if s.strip()]
 
     @property

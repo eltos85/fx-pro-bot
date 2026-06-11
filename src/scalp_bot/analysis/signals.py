@@ -277,9 +277,16 @@ class SweepReclaimDetector:
       confirm_bar_sec>0 (default 0) — опц. fallback: ждать закрытия N-сек бара.
     """
 
-    def __init__(self, symbol: str, cfg) -> None:
+    def __init__(self, symbol: str, cfg, level_gate=None) -> None:
         self.symbol = symbol
         self.cfg = cfg
+        # v0.18.20 (sweep_fade_canon): опциональный гейт значимого уровня.
+        # callable(symbol, side, swept) -> str|None (имя уровня). Если задан —
+        # ВЗВОД разрешён только когда свип took out ключевой уровень (PDH/PDL/
+        # дневной экстремум) — канон CAP «sweep of liquidity pool», а не
+        # 3-минутный микро-экстремум. None (default) — поведение базового
+        # sweep_fade не изменено.
+        self.level_gate = level_gate
         self._armed: dict | None = None
         self._last_wait_log = 0.0
         self._last_bar: int | None = None  # индекс текущего confirm-бара (bar-close)
@@ -333,15 +340,22 @@ class SweepReclaimDetector:
                 prior = max(x.price for x in early)
                 exc = swept - prior
             if exc > 0:
+                key_level = None
+                if self.level_gate is not None:
+                    key_level = self.level_gate(self.symbol, side, swept)
+                    if key_level is None:
+                        continue  # свип не took out значимый уровень — не взводимся
                 was = self._armed
-                self._armed = {"side": side, "swept": swept, "exc": exc, "ts": now}
+                self._armed = {"side": side, "swept": swept, "exc": exc,
+                               "ts": now, "key_level": key_level}
                 # лог только на НОВЫЙ взвод или смену уровня (не каждый тик)
                 if was is None or was["side"] != side or abs(was["swept"] - swept) > 1e-9:
                     absorb = "продавцов выдыхают" if side == "long" else "покупателей выдыхают"
-                    play.info("🎯 [%s] ВЗВОД %s: свип уровня %.4f + дивергенция CVD "
+                    key_note = f" [key={key_level}]" if key_level else ""
+                    play.info("🎯 [%s] ВЗВОД %s: свип уровня %.4f%s + дивергенция CVD "
                               "(%s). Жду reclaim %.4f (%.0f%% отката) и разворот CVD, "
                               "таймаут %.0fс",
-                              self.symbol, _SIDE_RU.get(side, side), swept, absorb,
+                              self.symbol, _SIDE_RU.get(side, side), swept, key_note,
                               self._target(self._armed), cfg.reclaim_frac * 100,
                               cfg.arm_timeout_sec)
                     self._last_wait_log = now
@@ -399,6 +413,8 @@ class SweepReclaimDetector:
         # reclaim + разворот совпали → ob_imb как единственный бонус (funding/liq
         # убраны в аудите v0.9.0: 0.2% присутствия на 502 входах, factor-noise).
         reasons = ["sweep", "cvd_div", "reclaim", "mom"]
+        if a.get("key_level"):
+            reasons.append("key_" + a["key_level"])  # канон-гейт значимого уровня
         if ob_ok:
             reasons.append("ob_imb")
         bonus = [r for r in reasons if r in ("ob_imb",)]

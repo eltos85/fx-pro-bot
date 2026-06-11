@@ -17,6 +17,9 @@
 - ``density_break``   — пробой НА СНОСЕ плотности («прострел», momentum) —
                         зеркало density_bounce: выстоявшая стена пробита → вход
                         по ходу пробоя (Данилов YouTube 2026).
+- ``sweep_fade_canon`` — канон-вариант sweep_fade (v0.18.20, параллельный
+                        форвард-тест): значимые уровни (PDH/PDL + дневные
+                        экстремумы) + full reclaim + вселенная мейджоров.
 """
 from __future__ import annotations
 
@@ -163,6 +166,73 @@ class SweepFadeStrategy:
                 and now - tr.ts_open >= getattr(cfg, "scratch_min_age_sec", 20.0)):
             return ("flow_scratch", price)
         return None
+
+
+class _CfgOverlay:
+    """Прозрачная обёртка cfg с точечными override-полями (для пер-стратегийных
+    отклонений без копирования всего конфига). Читает override, иначе — базу."""
+
+    def __init__(self, base, **overrides) -> None:
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str):
+        ov = object.__getattribute__(self, "_overrides")
+        if name in ov:
+            return ov[name]
+        return getattr(object.__getattribute__(self, "_base"), name)
+
+
+class SweepFadeCanonStrategy(SweepFadeStrategy):
+    """Стратегия №4 (v0.18.20): КАНОН-вариант sweep_fade — параллельный
+    форвард-тест A/B против базового (одобрено пользователем 2026-06-11).
+
+    ─── Research basis ───
+    Базовый sweep_fade живёт ниже канонного WR 60%+ (live n=899: WR 35%; лучшая
+    неделя 52%; ETH 55% vs ZEC 28%). Три задокументированных упрощения канона
+    CAP (chartwhisperer order-flow 2026) исправлены здесь:
+    1. ЗНАЧИМЫЕ УРОВНИ: взвод только на свипе PDH/PDL или дневного экстремума
+       (KeyLevels) — там реально стоят стопы (Osler 2003 NY Fed «stop orders
+       cluster on visible levels»), а не 3-минутный микро-экстремум.
+    2. FULL RECLAIM (CAP Rule 2 буквально): цена ВЕРНУЛАСЬ за свипнутый уровень
+       (reclaim_frac=1.0), а не 50% пути.
+    3. ВСЕЛЕННАЯ МЕЙДЖОРОВ: fade канонически живёт в ликвидных рейнджевых
+       книгах (Tradeify «ES deep book → fade»; live ETH WR 55%). Канон-страта
+       торгует ТОЛЬКО symbol_scope (BTC/ETH/SOL/BNB/XRP по умолчанию),
+       vol-вселенная остальных страт не затронута.
+
+    Выходы/SL/TP/гейты (HTF, ADX, DMI) — ИДЕНТИЧНЫ базовому sweep_fade
+    (наследование): A/B изолирует качество ВХОДА. Обе версии копят выборку
+    параллельно (атрибуция через колонку strategy в БД), решение по n≥100
+    на каждую (sample-size.mdc).
+    """
+
+    name = "sweep_fade_canon"
+    htf_filtered = True
+    regime_gated = True
+
+    def __init__(self, cfg, symbols: list[str]) -> None:
+        # full reclaim через overlay: детектор читает cfg.reclaim_frac
+        canon_cfg = _CfgOverlay(cfg, reclaim_frac=cfg.sweep_fade_canon_reclaim_frac)
+        super().__init__(canon_cfg, [])
+        # KeyLevels инжектится из main (нужен REST-клиент); до инжекта детекторы
+        # не взводятся (level_gate fail-closed возвращает None при нет данных).
+        self.key_levels = None
+        self.symbol_scope = set(cfg.sweep_fade_canon_symbol_list)
+        self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
+
+    def _level_gate(self, symbol: str, side: str, swept: float) -> str | None:
+        if self.key_levels is None:
+            return None  # fail-closed: уровни ещё не прогреты — не торгуем
+        return self.key_levels.swept_key_level(symbol, side, swept)
+
+    def ensure_symbols(self, symbols: list[str]) -> None:
+        for s in symbols:
+            if s not in self.symbol_scope:
+                continue
+            if s not in self._det:
+                self._det[s] = SweepReclaimDetector(s, self.cfg,
+                                                    level_gate=self._level_gate)
 
 
 # ─── density_bounce helpers (чистые, тестируемые без WS) ───────────────────
@@ -685,6 +755,7 @@ def build_strategies(cfg, symbols: list[str]) -> list[Strategy]:
         SweepFadeStrategy.name: SweepFadeStrategy,
         DensityBounceStrategy.name: DensityBounceStrategy,
         DensityBreakStrategy.name: DensityBreakStrategy,
+        SweepFadeCanonStrategy.name: SweepFadeCanonStrategy,
     }
     out: list[Strategy] = []
     for name in enabled:

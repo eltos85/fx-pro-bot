@@ -2479,3 +2479,147 @@ def test_on_signal_rejected_marks_entry_rejected(tmp_path):
     ).fetchone()
     assert row[0] == "closed" and row[1] == "entry_Rejected"
     assert ex._link2trade == {} and ex._fills == {}  # трекинг снят (_forget_trade)
+
+
+# ─── sweep_fade_canon (v0.18.20): значимые уровни + full reclaim + скоуп ────
+
+def _kline_row(ts_sec: float, hi: float, lo: float):
+    """Строка Bybit get_kline: [startTime(ms), o, h, l, c, vol, turnover]."""
+    mid = (hi + lo) / 2
+    return [str(int(ts_sec * 1000)), str(mid), str(hi), str(lo), str(mid),
+            "1", "1"]
+
+
+def test_day_levels_pdh_pdl_and_current_day():
+    from scalp_bot.data.levels import day_levels
+    day = 86_400.0
+    now = 2 * day + 6 * 3600  # 06:00 UTC второго дня
+    rows = []
+    # предыдущий день (полное покрытие 96 баров)
+    for i in range(96):
+        ts = day + i * 900
+        hi, lo = (110.0, 90.0) if i == 50 else (101.0, 99.0)
+        rows.append(_kline_row(ts, hi, lo))
+    # текущий день: закрытые бары до 05:45 + ФОРМИРУЮЩИЙСЯ бар (06:00) с
+    # экстремальным лоем — должен быть ИСКЛЮЧЁН из day_low
+    for i in range(23):
+        ts = 2 * day + i * 900
+        hi, lo = (105.0, 95.0) if i == 10 else (100.5, 99.5)
+        rows.append(_kline_row(ts, hi, lo))
+    rows.append(_kline_row(now, 120.0, 80.0))  # формирующийся бар
+    lv = day_levels(list(reversed(rows)), now)  # Bybit DESC (новые сверху)
+    assert lv is not None
+    assert lv["pdh"] == pytest.approx(110.0) and lv["pdl"] == pytest.approx(90.0)
+    assert lv["day_high"] == pytest.approx(105.0)
+    assert lv["day_low"] == pytest.approx(95.0)  # 80 из формирующегося бара не взят
+
+
+def test_day_levels_fail_closed_without_full_prev_day():
+    from scalp_bot.data.levels import day_levels
+    day = 86_400.0
+    now = 2 * day + 6 * 3600
+    # история начинается с СЕРЕДИНЫ предыдущего дня → PDH/PDL по обрезку врут
+    rows = [_kline_row(day + i * 900, 101.0, 99.0) for i in range(48, 96)]
+    assert day_levels(list(reversed(rows)), now) is None
+
+
+def test_key_levels_swept_gate_sides():
+    from scalp_bot.data.levels import KeyLevels
+    kl = KeyLevels()
+    kl._levels["ETHUSDT"] = {"pdh": 110.0, "pdl": 90.0,
+                             "day_high": 105.0, "day_low": 95.0}
+    # long: свип took out дневной лоу / PDL
+    assert kl.swept_key_level("ETHUSDT", "long", 94.9) == "day_low"
+    assert kl.swept_key_level("ETHUSDT", "long", 89.5) == "day_low"  # ниже обоих
+    assert kl.swept_key_level("ETHUSDT", "long", 96.0) is None  # выше уровней
+    # short: свип took out дневной хай / PDH
+    assert kl.swept_key_level("ETHUSDT", "short", 105.5) == "day_high"
+    assert kl.swept_key_level("ETHUSDT", "short", 104.0) is None
+    # fail-closed: символ без данных
+    assert kl.swept_key_level("BTCUSDT", "long", 1.0) is None
+
+
+def test_detector_level_gate_blocks_arm_without_key_level():
+    """v0.18.20: с level_gate взвод разрешён только на свипе значимого уровня
+    (канон CAP «sweep of liquidity pool»), микро-экстремум не взводит."""
+    det = SweepReclaimDetector("ETHUSDT", _cfg(),
+                               level_gate=lambda sym, side, swept: None)
+    assert det.update(_snap(_arm_samples(), last_price=96.5), now=100.0) is None
+    assert det.armed is False  # свип есть, но не значимого уровня
+
+
+def test_detector_level_gate_arms_and_tags_reason():
+    det = SweepReclaimDetector("ETHUSDT", _cfg(),
+                               level_gate=lambda sym, side, swept: "pdl")
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    assert det.armed is True
+    sig = det.update(_snap(_fire_samples(), last_price=97.6), now=130.0)
+    assert sig is not None and "key_pdl" in sig.reasons
+
+
+def _canon_cfg(**over):
+    base = _cfg(sweep_fade_canon_reclaim_frac=1.0,
+                sweep_fade_canon_symbol_list=["ETHUSDT"],
+                sweep_fade_sl_risk_mult=None)
+    for k, v in over.items():
+        setattr(base, k, v)
+    return base
+
+
+class _FakeKeyLevels:
+    def __init__(self, name="pdl"):
+        self.name = name
+
+    def swept_key_level(self, symbol, side, swept):
+        return self.name
+
+
+def test_canon_strategy_scope_and_fail_closed_levels():
+    from scalp_bot.analysis.strategies import SweepFadeCanonStrategy
+    st = SweepFadeCanonStrategy(_canon_cfg(), ["ZECUSDT", "ETHUSDT"])
+    # скоуп: детектор только на whitelisted символе
+    assert st.update(_snap(_arm_samples(), symbol="ZECUSDT", last_price=96.5),
+                     now=100.0) is None
+    assert st.armed("ZECUSDT") is False
+    # fail-closed: key_levels не инжектнут → не взводимся даже на своём символе
+    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st.armed("ETHUSDT") is False
+    # ensure_symbols не заводит чужие символы
+    st.ensure_symbols(["XLMUSDT"])
+    assert "XLMUSDT" not in st._det
+
+
+def test_canon_strategy_full_reclaim_required():
+    """reclaim_frac=1.0 (CAP Rule 2 буквально): вход только при ПОЛНОМ возврате
+    за свипнутый уровень (early min=98), полпути (97.6, хватало базовому при
+    0.5) — мало."""
+    from scalp_bot.analysis.strategies import SweepFadeCanonStrategy
+    st = SweepFadeCanonStrategy(_canon_cfg(), ["ETHUSDT"])
+    st.key_levels = _FakeKeyLevels("pdl")
+    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st.armed("ETHUSDT") is True
+    # 97.6 = reclaim 73% пути (базовому с frac=0.5 хватило бы) → канону мало
+    assert st.update(_snap(_fire_samples(), symbol="ETHUSDT", last_price=97.6),
+                     now=110.0) is None
+    assert st.armed("ETHUSDT") is True
+    # полный возврат за уровень 98 → выстрел
+    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
+            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
+    sig = st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
+    assert sig is not None and sig.side == "long"
+    assert sig.strategy == "sweep_fade_canon" and "key_pdl" in sig.reasons
+
+
+def test_canon_strategy_in_registry_and_cooldown_family():
+    from scalp_bot.analysis.strategies import build_strategies
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = _canon_cfg()
+    cfg.strategy_list = ["sweep_fade_canon"]
+    out = build_strategies(cfg, ["ETHUSDT"])
+    assert [s.name for s in out] == ["sweep_fade_canon"]
+    # канон наследует MR-гейты (HTF/ADX/DMI) базового sweep_fade
+    assert out[0].htf_filtered is True and out[0].regime_gated is True
+    # SL-cooldown семейства fade (60м) распространяется и на канон
+    s = ScalpSettings()
+    assert s.sl_cooldown_for("sweep_fade_canon") == s.sweep_fade_sl_cooldown_sec
+    assert "sweep_fade_canon" in s.strategy_list  # включён по умолчанию (A/B)

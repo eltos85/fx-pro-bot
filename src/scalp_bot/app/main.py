@@ -24,6 +24,7 @@ from scalp_bot.data.aggregates import SymbolState
 from scalp_bot.data.exec_stream import BybitExecStream
 from scalp_bot.data.funding import FundingSchedule
 from scalp_bot.data.htf import HtfTrend
+from scalp_bot.data.levels import KeyLevels
 from scalp_bot.data.market_stream import BybitMarketStream
 from scalp_bot.data.universe import (apply_pins, filter_tickers,
                                      hourly_range_rvol, pad_universe,
@@ -86,6 +87,16 @@ def run() -> None:
             # v0.18.0: НЕ флэтим — даём открытым позициям дожить до TP/SL
             _adopt_on_start(client, db)
 
+    # v0.18.20: вселенная канон-страты (мейджоры) ВСЕГДА в WS-подписках, но
+    # торгуется ТОЛЬКО sweep_fade_canon (symbol_scope); остальные стратегии
+    # canon-only символы не трогают (canon_only-гейт ниже) — их vol-вселенная
+    # не изменена, A/B чистый.
+    canon_syms: list[str] = (cfg.sweep_fade_canon_symbol_list
+                             if "sweep_fade_canon" in cfg.strategy_list else [])
+    universe_syms = set(symbols)
+    if canon_syms:
+        symbols = list(dict.fromkeys(symbols + canon_syms))
+
     log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
              "kill day/total=$%.0f/$%.0f | strats=%s", mode, ",".join(symbols),
              cfg.position_usd, cfg.min_position_usd, cfg.max_daily_loss_usd,
@@ -130,6 +141,26 @@ def run() -> None:
                       if getattr(s, "di_long_gated", getattr(s, "htf_filtered", True))}
     executor = Executor(db, cfg, client, notifier=notifier, strategies=strategies)
 
+    # v0.18.20: ключевые уровни (PDH/PDL + дневные экстремумы) для канон-страты.
+    # Инжектим в стратегию (ей нужен REST-клиент только опосредованно — через
+    # этот кэш). Fail-closed: пока уровни не прогреты, канон-детектор не взводится.
+    key_levels = None
+    levels_strats = [s for s in strategies if hasattr(s, "key_levels")]
+    last_levels = 0.0
+    if levels_strats:
+        key_levels = KeyLevels(cfg.htf_interval)
+        for s in levels_strats:
+            s.key_levels = key_levels
+        if client is not None:
+            try:
+                key_levels.refresh(client, canon_syms)
+                last_levels = time.time()
+            except Exception:
+                log.exception("key levels initial refresh failed")
+    # canon-only символы: в WS-подписках ради канон-страты, но НЕ в авто-вселенной
+    # остальных стратегий — те их пропускают (чистота A/B).
+    canon_only = set(canon_syms) - universe_syms
+
     # HTF-bias: трендовый фильтр старшего ТФ (EMA200 1H). Первичный прогрев на
     # старте, далее refresh раз в htf_refresh_sec (метрика медленная).
     htf = HtfTrend(cfg.htf_ema_len, cfg.htf_interval, cfg.htf_adx_len)
@@ -167,9 +198,12 @@ def run() -> None:
                 last_universe = now
                 try:
                     prev_syms = set(symbols)
-                    stream, states, symbols = _rotate_universe(
+                    stream, states, symbols, picked = _rotate_universe(
                         client, cfg, db, stream, states, strategies, symbols,
-                        notifier)
+                        notifier, extra_syms=canon_syms)
+                    if picked:
+                        universe_syms = set(picked)
+                        canon_only = set(canon_syms) - universe_syms
                     funding.refresh(client, symbols)  # новые символы → их график
                     # v0.18.2: прогрев HTF новых символов СРАЗУ (до того как они
                     # смогут торговаться) — закрываем fail-open окно ≤htf_refresh_sec.
@@ -190,6 +224,16 @@ def run() -> None:
                     htf.refresh(client, symbols)
                 except Exception:
                     log.exception("htf refresh failed")
+
+            # 0a3) ключевые уровни канон-страты (PDH/PDL + дневные экстремумы;
+            # 15m-клины, та же каденция, что HTF)
+            if (client is not None and key_levels is not None
+                    and now - last_levels >= cfg.htf_refresh_sec):
+                last_levels = now
+                try:
+                    key_levels.refresh(client, canon_syms)
+                except Exception:
+                    log.exception("key levels refresh failed")
 
             # 0b) забрать исполнения из приватного WS → атрибуция к сделкам
             if exec_stream is not None:
@@ -244,6 +288,15 @@ def run() -> None:
                     continue
                 candidates = []
                 for st in strategies:
+                    # v0.18.20: пер-стратегийный скоуп символов. Канон-страта
+                    # торгует ТОЛЬКО свой whitelist (symbol_scope); остальные
+                    # НЕ трогают canon-only мейджоры (их вселенная не менялась
+                    # — A/B чистый, поведение базовых страт не задето).
+                    scope = getattr(st, "symbol_scope", None)
+                    if scope is not None and sym not in scope:
+                        continue
+                    if scope is None and sym in canon_only:
+                        continue
                     try:
                         s = st.update(snap, now)
                     except Exception:
@@ -590,8 +643,13 @@ def _select_universe(client, cfg) -> list[str]:
 
 
 def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
-                     notifier):
-    """Часовой пересмотр вселенной. Возвращает (stream, states, symbols).
+                     notifier, extra_syms: list[str] | None = None):
+    """Часовой пересмотр вселенной. Возвращает (stream, states, symbols, picked)
+    — picked = свежая авто-вселенная (None при сбое; нужна вызывающему для
+    учёта canon-only символов).
+
+    ``extra_syms`` (v0.18.20) — символы канон-страты: всегда остаются в
+    WS-подписках независимо от авто-фильтра (торгуются только своей стратой).
 
     Безопасно для открытых: символ с открытой позицией НЕ выкидываем, пока она
     не закроется (даже если выпал из топа). Существующие SymbolState
@@ -602,12 +660,13 @@ def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
     picked = _select_universe(client, cfg)
     if not picked:
         log.warning("ротация: авто-вселенная пуста — оставляю текущие символы")
-        return stream, states, symbols
+        return stream, states, symbols, None
     open_syms = {tr.symbol for tr in db.open_trades()}
-    # топ-N плюс символы с открытыми позициями (доводим до закрытия)
-    target = list(dict.fromkeys(list(picked) + [s for s in open_syms]))
+    # топ-N плюс канон-символы плюс символы с открытыми позициями
+    target = list(dict.fromkeys(
+        list(picked) + list(extra_syms or []) + [s for s in open_syms]))
     if set(target) == set(symbols):
-        return stream, states, symbols
+        return stream, states, symbols, picked
     log.info("ротация вселенной: %s → %s", ",".join(symbols), ",".join(target))
     new_states = {
         s: states.get(s) or SymbolState(
@@ -623,7 +682,7 @@ def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
         st.ensure_symbols(target)
     # TG-уведомление о ротации убрано (спам — с RVOL-отбором состав меняется
     # часто). Смена состава видна в логах (log.info «ротация вселенной» выше).
-    return new_stream, new_states, target
+    return new_stream, new_states, target, picked
 
 
 def in_active_session(now: float, cfg) -> bool:

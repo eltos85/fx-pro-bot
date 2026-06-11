@@ -4,6 +4,58 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-11
+
+### v0.18.20 — sweep_fade_canon: канон-вариант параллельным A/B форвард-тестом
+`<hash>`
+
+**Запрос пользователя**: «sweep_fade рассчитан на 60%+ иначе убыточен — это
+по канону; если меньше, значит где-то не дотянули канон и сделали отсебятину.
+…оставить текущий sweep_fade собирать свои 100 сделок, а параллельно запустить
+sweep_fade с этими тремя правками как отдельную страту».
+
+**Диагноз** (live n=899 sweep_fade): WR 35% всего, лучшая неделя (06-05+) 52%,
+ETH 55% (n=22, +$3) vs ZEC 28% (n=175, −$212). Три задокументированных
+упрощения канона CAP: (1) фейдим 3-мин микро-экстремум вместо значимого уровня
+ликвидности (PDH/PDL/session H/L — Osler 2003 NY Fed «stops cluster on visible
+levels»); (2) reclaim 50% пути вместо полного возврата за уровень (CAP Rule 2);
+(3) vol-вселенная (range 6–20%) подобрана под пробой, fade канонически живёт в
+ликвидных рейнджах (Tradeify ES-deep→fade).
+
+**Решение**: НЕ трогаем боевой sweep_fade (его ×1.0-форвард копит выборку до
+n≥100, sample-size.mdc) — новая стратегия `sweep_fade_canon` (наследник
+`SweepFadeStrategy`), исправляющая все три пункта. Выходы/SL/TP/гейты
+HTF+ADX+DMI/sl_cooldown 60м — идентичны базовому: A/B изолирует качество входа.
+
+- **Значимые уровни**: новый `data/levels.py` (`KeyLevels`, `day_levels`) —
+  PDH/PDL + дневные экстремумы по ЗАКРЫТЫМ 15m-барам (формирующийся бар
+  исключён: уровень должен существовать ДО свипа; fail-closed без полного
+  покрытия предыдущего дня). Гейт взвода в `SweepReclaimDetector` (новый
+  параметр `level_gate`, default None → базовый sweep_fade не изменён).
+  Reasons получают тег `key_pdl`/`key_day_low`/… — разрез WR по типу уровня.
+- **Full reclaim**: `SCALP_SWEEP_FADE_CANON_RECLAIM_FRAC=1.0` через `_CfgOverlay`
+  (прозрачная обёртка cfg, базовый reclaim_frac=0.5 не тронут).
+- **Вселенная мейджоров**: `SCALP_SWEEP_FADE_CANON_SYMBOLS=BTC,ETH,SOL,BNB,XRP`
+  — всегда в WS-подписках, торгуются ТОЛЬКО канон-стратой (`symbol_scope`);
+  остальные стратегии canon-only символы пропускают (гейт в main) — их
+  vol-вселенная не задета, A/B чистый.
+- main: lifecycle `KeyLevels` (refresh с каденцией HTF 120с, инжект в страту),
+  `_rotate_universe` принимает `extra_syms` и возвращает `picked` (4-tuple).
+- `sl_cooldown_for`: семейство `sweep_fade*` → 60м окно (канон MR «if stopped
+  — done ≥60 min», Fondeo).
+- Тесты: +9 (day_levels PDH/PDL + исключение формирующегося бара + fail-closed,
+  swept_key_level стороны, level_gate блок/тег, скоуп + fail-closed без уровней,
+  full reclaim требует полного возврата, реестр+cooldown). Сьют 194 passed.
+
+**Критерий решения** (заранее, против подгонки): n≥100 на канон-страту,
+сравнение WR/EXP с базовым sweep_fade за тот же период; ожидание по канону —
+WR заметно выше базового на значимых уровнях. Если канон не подтвердится —
+выключается одной строкой env (SCALP_ENABLED_STRATEGIES).
+
+**Файлы:** `config/settings.py`, `data/levels.py` (новый), `analysis/signals.py`,
+`analysis/strategies.py`, `app/main.py`, `docker-compose.yml`,
+`tests/test_scalp_bot.py`, `STRATEGY_RATIONALE_SCALP.md`.
+
 ## 2026-06-10
 
 ### v0.18.19 — полный аудит бота + фиксы P-1/P-2/P-3/P-4 (все одобрены пользователем)

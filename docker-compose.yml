@@ -299,9 +299,19 @@ services:
       # если включён авто-селектор вселенной (ниже).
       SCALP_SYMBOLS: ${SCALP_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
       # Активные стратегии (CSV): sweep_fade + density_bounce (fade) +
-      # density_break (momentum-пробой на сносе плотности, v0.8.0). Реальное
+      # density_break (momentum-пробой на сносе плотности, v0.8.0) +
+      # sweep_fade_canon (v0.18.20: параллельный КАНОН-вариант sweep_fade —
+      # значимые уровни PDH/PDL + full reclaim + вселенная мейджоров; A/B
+      # форвард-тест, одобрено пользователем 2026-06-11). Реальное
       # значение — из .env (env_file); тут дефолт для свежего деплоя.
-      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break}
+      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon}
+      # v0.18.20: вселенная канон-страты — ликвидные мейджоры (глубокие книги,
+      # рейнджи: канон fade; live ETH WR 55% vs ZEC 28%). Торгуются ТОЛЬКО
+      # sweep_fade_canon (symbol_scope), авто-вселенная других страт не задета.
+      SCALP_SWEEP_FADE_CANON_SYMBOLS: ${SCALP_SWEEP_FADE_CANON_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT}
+      # Full reclaim (CAP Rule 2 буквально): возврат ЗА свипнутый уровень (1.0),
+      # а не 50% пути как у базового sweep_fade.
+      SCALP_SWEEP_FADE_CANON_RECLAIM_FRAC: ${SCALP_SWEEP_FADE_CANON_RECLAIM_FRAC:-1.0}
       # Авто-селектор: бот сам выбирает монеты под стратегию из get_tickers
       # (композит range%/turnover/spread), берёт ВСЕ прошедшие фильтр и
       # пересматривает раз в 5 мин (ротация — no-op если состав не сменился).
