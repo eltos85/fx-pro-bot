@@ -2667,8 +2667,15 @@ def test_canon_strategy_in_registry_and_cooldown_family():
     cfg.strategy_list = ["sweep_fade_canon"]
     out = build_strategies(cfg, ["ETHUSDT"])
     assert [s.name for s in out] == ["sweep_fade_canon"]
-    # канон наследует MR-гейты (HTF/ADX/DMI) базового sweep_fade
-    assert out[0].htf_filtered is True and out[0].regime_gated is True
+    # v0.18.22: направленные гейты (EMA200 HTF + DMI-лонг) у канона СНЯТЫ —
+    # фейд дневного уровня контртрендовый по построению (свип PDH ⇒ HTF=long
+    # всегда ⇒ 252/252 сигналов дня 1 резались гейтом). ADX-режим остаётся.
+    assert out[0].htf_filtered is False
+    assert out[0].di_long_gated is False
+    assert out[0].regime_gated is True
+    # базовый sweep_fade направленные гейты СОХРАНЯЕТ (A/B не задет)
+    from scalp_bot.analysis.strategies import SweepFadeStrategy
+    assert getattr(SweepFadeStrategy, "htf_filtered", True) is True
     # SL-cooldown семейства fade (60м) распространяется и на канон
     s = ScalpSettings()
     assert s.sl_cooldown_for("sweep_fade_canon") == s.sweep_fade_sl_cooldown_sec
