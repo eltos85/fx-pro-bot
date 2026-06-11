@@ -356,8 +356,8 @@ class SweepReclaimDetector:
                               "(%s). Жду reclaim %.4f (%.0f%% отката) и разворот CVD, "
                               "таймаут %.0fс",
                               self.symbol, _SIDE_RU.get(side, side), swept, key_note,
-                              self._target(self._armed), cfg.reclaim_frac * 100,
-                              cfg.arm_timeout_sec)
+                              absorb, self._target(self._armed),
+                              cfg.reclaim_frac * 100, cfg.arm_timeout_sec)
                     self._last_wait_log = now
             break
         if not self._armed:
