@@ -229,15 +229,27 @@ class ScalpDB:
         ).fetchone()
         return int(row["c"] or 0)
 
-    def last_sl_close_ts(self, symbol: str, side: str) -> float | None:
+    def last_sl_close_ts(self, symbol: str, side: str,
+                         strategy: str | None = None) -> float | None:
         """ts_close последнего выхода по SL (close_reason='sl_hit') для символа+
-        стороны. Для sl_cooldown_sec: не перефейдить провалившийся уровень сразу
-        (см. settings.sl_cooldown_sec). None — такого закрытия не было."""
-        row = self._conn.execute(
-            "SELECT MAX(ts_close) AS t FROM trades WHERE status='closed' "
-            "AND close_reason='sl_hit' AND symbol=? AND side=?",
-            (symbol, side),
-        ).fetchone()
+        стороны (+ опционально стратегии). Для sl_cooldown_sec: не перефейдить
+        провалившийся уровень сразу (см. settings.sl_cooldown_sec).
+
+        v0.18.21: фильтр по strategy — cooldown ПЕР-СТРАТЕГИЙНЫЙ (запрос
+        пользователя 2026-06-11). Раньше SL любой страты блокировал ВСЕ
+        остальные по символу+стороне (sweep_fade — на 60 мин): density_break/
+        density_bounce теряли сигналы из-за чужого стопа, что портило их
+        выборку. Тезис «не перефейдить провалившийся уровень» относится к
+        логике КОНКРЕТНОЙ страты: SL фейда ничего не говорит о пробое.
+        strategy=None — старое поведение (по всем стратам).
+        None — такого закрытия не было."""
+        q = ("SELECT MAX(ts_close) AS t FROM trades WHERE status='closed' "
+             "AND close_reason='sl_hit' AND symbol=? AND side=?")
+        args: list = [symbol, side]
+        if strategy is not None:
+            q += " AND strategy=?"
+            args.append(strategy)
+        row = self._conn.execute(q, args).fetchone()
         t = row["t"] if row else None
         return float(t) if t is not None else None
 

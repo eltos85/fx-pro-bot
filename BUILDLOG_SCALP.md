@@ -6,6 +6,32 @@
 
 ## 2026-06-11
 
+### v0.18.21 — пер-стратегийные cooldown'ы (signal + SL)
+`<hash>`
+
+**Запрос пользователя**: «раз sweep_fade_canon и sweep_fade по-разному будут
+работать, cooldown должен быть у каждой страты свой»; «подозрение, что из-за
+общего cooldown мы ещё теряем сигналы density_break и density_bounce».
+
+Подозрение подтверждено по коду — было два общих замка:
+- `signal_cooldown` (60с анти-даблклик) ключевался ТОЛЬКО по символу: вход
+  (или даже неналитая maker-вставка) одной страты глушил по символу ВСЕ
+  стратегии. Теперь ключ **(strategy, symbol)**.
+- `sl_cooldown`: `last_sl_close_ts` искал последний SL по символу+стороне БЕЗ
+  фильтра по стратегии → SL sweep_fade блокировал density_break/bounce (и
+  наоборот; для fade-семейства — на 60-мин окно). Тезис «не перефейдить
+  провалившийся уровень» (Connors/Raschke) относится к логике конкретной
+  страты: стоп фейда ничего не говорит о пробое. Теперь
+  `last_sl_close_ts(symbol, side, strategy=...)`.
+
+Эффект: страты больше не загрязняют выборки друг друга пропущенными
+сигналами — критично для параллельного A/B sweep_fade vs sweep_fade_canon и
+для честной статы density_*. Тесты: +1 (`test_last_sl_close_ts_per_strategy`),
+сьют 195 passed.
+
+**Файлы:** `state/db.py`, `app/main.py`, `config/settings.py`,
+`tests/test_scalp_bot.py`, `STRATEGY_RATIONALE_SCALP.md`.
+
 ### v0.18.20 — sweep_fade_canon: канон-вариант параллельным A/B форвард-тестом
 `<hash>`
 

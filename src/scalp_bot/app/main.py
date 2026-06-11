@@ -181,7 +181,9 @@ def run() -> None:
         except Exception:
             log.exception("funding initial refresh failed")
 
-    cooldown: dict[str, float] = {}
+    # анти-даблклик после входа: ключ (strategy, symbol) — пер-стратегийный
+    # (v0.18.21); раньше ключ был только symbol и глушил все страты разом.
+    cooldown: dict[tuple[str, str], float] = {}
     last_heartbeat = 0.0
     last_universe = time.time()  # уже выбрали на старте — ждём refresh до ротации
     kill_notified = False
@@ -284,8 +286,6 @@ def run() -> None:
                     for st in strategies:  # не взводимся пока есть позиция
                         st.reset(sym)
                     continue
-                if now - cooldown.get(sym, 0.0) < cfg.signal_cooldown_sec:
-                    continue
                 candidates = []
                 for st in strategies:
                     # v0.18.20: пер-стратегийный скоуп символов. Канон-страта
@@ -296,6 +296,14 @@ def run() -> None:
                     if scope is not None and sym not in scope:
                         continue
                     if scope is None and sym in canon_only:
+                        continue
+                    # v0.18.21: signal_cooldown ПЕР-СТРАТЕГИЙНЫЙ (запрос
+                    # пользователя 2026-06-11). Раньше вход (или неналитая
+                    # maker-вставка) ОДНОЙ страты глушил по символу ВСЕ на 60с
+                    # — density_break/bounce теряли сигналы из-за чужого входа,
+                    # стата страт перемешивалась. Анти-даблклик остаётся, но
+                    # только для страты, которая сама только что входила.
+                    if now - cooldown.get((st.name, sym), 0.0) < cfg.signal_cooldown_sec:
                         continue
                     try:
                         s = st.update(snap, now)
@@ -380,9 +388,14 @@ def run() -> None:
                 # 3мин). Противоположную сторону не трогаем (реальный разворот
                 # ловим). Окно пер-стратегийное (v0.18.14): sweep_fade=60м
                 # (канон MR + sweep n=829), прочие — базовые 300с.
+                # v0.18.21: окно И сам факт SL — пер-стратегийные (запрос
+                # пользователя 2026-06-11): SL фейда ничего не говорит о
+                # пробое — раньше чужой стоп глушил страту на её же окно
+                # (sweep_fade — 60 мин), и density_break/bounce теряли сигналы.
                 cd_sec = cfg.sl_cooldown_for(sig.strategy)
                 if cd_sec > 0:
-                    last_sl = db.last_sl_close_ts(sig.symbol, sig.side)
+                    last_sl = db.last_sl_close_ts(sig.symbol, sig.side,
+                                                  strategy=sig.strategy)
                     if last_sl is not None and now - last_sl < cd_sec:
                         play.info("🧊 [%s] %s — недавний SL %.0fс назад (<%.0fс "
                                   "cooldown), не перефейдиваю уровень сразу",
@@ -402,7 +415,7 @@ def run() -> None:
                     log.info("gate block: %s", gate.reason)
                     break
                 if executor.on_signal(sig) is not None:
-                    cooldown[sym] = now
+                    cooldown[(sig.strategy, sym)] = now
                     open_symbols.add(sym)
                     for st in strategies:
                         st.reset(sym)

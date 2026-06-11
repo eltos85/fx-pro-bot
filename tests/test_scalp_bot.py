@@ -1247,6 +1247,38 @@ def test_last_sl_close_ts(tmp_path):
     db.close()
 
 
+def test_last_sl_close_ts_per_strategy(tmp_path):
+    """v0.18.21: SL-cooldown пер-стратегийный — стоп ОДНОЙ страты не глушит
+    другие по тому же символу+стороне (density_break/bounce теряли сигналы от
+    чужого SL sweep_fade на 60-мин окно). strategy=None — старое поведение."""
+    db = ScalpDB(str(tmp_path))
+
+    def closed(strategy, ts_close):
+        tid = db.insert_open(symbol="NEARUSDT", side="long", qty=1.0, entry=100.0,
+                             sl=99.0, tp=102.0, score=5, reasons="x", mode="paper",
+                             strategy=strategy, ts_open=ts_close - 60)
+        db.mark_closed(tid, exit_price=99.0, pnl_usd=-1.0, fees_usd=0.0,
+                       close_reason="sl_hit", ts_close=ts_close)
+
+    closed("sweep_fade", 1000.0)
+    # SL фейда виден фейду, но НЕ блокирует пробой/баунс/канон
+    assert db.last_sl_close_ts("NEARUSDT", "long",
+                               strategy="sweep_fade") == pytest.approx(1000.0)
+    assert db.last_sl_close_ts("NEARUSDT", "long", strategy="density_break") is None
+    assert db.last_sl_close_ts("NEARUSDT", "long", strategy="density_bounce") is None
+    assert db.last_sl_close_ts("NEARUSDT", "long",
+                               strategy="sweep_fade_canon") is None
+    # своя страта видит только свой последний SL
+    closed("density_break", 2000.0)
+    assert db.last_sl_close_ts("NEARUSDT", "long",
+                               strategy="density_break") == pytest.approx(2000.0)
+    assert db.last_sl_close_ts("NEARUSDT", "long",
+                               strategy="sweep_fade") == pytest.approx(1000.0)
+    # strategy=None — агрегат по всем (обратная совместимость)
+    assert db.last_sl_close_ts("NEARUSDT", "long") == pytest.approx(2000.0)
+    db.close()
+
+
 def test_sl_cooldown_for_per_strategy():
     """v0.18.14: sweep_fade имеет расширенное окно SL-cooldown (60м, канон MR +
     sweep n=829), а density_break/bounce — базовый sl_cooldown_sec. Дефолты:
