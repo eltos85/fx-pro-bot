@@ -22,13 +22,22 @@ class GateDecision:
 
 
 def is_killed(db, settings, now: float | None = None) -> GateDecision:
-    """Жёсткая остановка по дневному/совокупному убытку."""
-    day_pnl = db.realized_pnl_since(_start_of_utc_day(now))
-    if day_pnl <= -abs(settings.max_daily_loss_usd):
-        return GateDecision(False, f"daily loss {day_pnl:.2f} ≤ -{settings.max_daily_loss_usd}")
-    total_pnl = db.total_realized_pnl()
-    if total_pnl <= -abs(settings.max_total_loss_usd):
-        return GateDecision(False, f"total loss {total_pnl:.2f} ≤ -{settings.max_total_loss_usd}")
+    """Жёсткая остановка по дневному/совокупному убытку.
+
+    Лимит ≤ 0 = ВЫКЛЮЧЕН (v0.18.23, запрос пользователя 2026-06-12: на
+    демо-счёте killswitch не нужен — деньги виртуальные, остановка лишь
+    прерывает сбор форвард-статы; total-лимит не сбрасывается и заблокировал
+    бы бота навсегда при total −807.37 ≤ −800). Для live-счёта вернуть
+    лимиты через env SCALP_MAX_DAILY_LOSS_USD / SCALP_MAX_TOTAL_LOSS_USD.
+    """
+    if settings.max_daily_loss_usd > 0:
+        day_pnl = db.realized_pnl_since(_start_of_utc_day(now))
+        if day_pnl <= -settings.max_daily_loss_usd:
+            return GateDecision(False, f"daily loss {day_pnl:.2f} ≤ -{settings.max_daily_loss_usd}")
+    if settings.max_total_loss_usd > 0:
+        total_pnl = db.total_realized_pnl()
+        if total_pnl <= -settings.max_total_loss_usd:
+            return GateDecision(False, f"total loss {total_pnl:.2f} ≤ -{settings.max_total_loss_usd}")
     return GateDecision(True)
 
 

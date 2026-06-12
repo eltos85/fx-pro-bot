@@ -1085,6 +1085,27 @@ def test_is_killed_total_loss():
     assert d.allowed is False
 
 
+def test_is_killed_zero_limit_disables(tmp_path):
+    """v0.18.23: лимит ≤0 = killswitch ВЫКЛЮЧЕН (демо-счёт; запрос пользователя
+    2026-06-12 — total −807 ≤ −800 навсегда блокировал форвард-тест). Каждый
+    лимит независим: 0 у одного не отключает другой."""
+    cfg0 = _ks_cfg(max_daily_loss_usd=0.0, max_total_loss_usd=0.0)
+    assert killswitch.is_killed(
+        _FakeDB(day=-9999.0, total=-9999.0), cfg0, now=1000.0).allowed is True
+    # дневной выключен, совокупный активен
+    cfg_t = _ks_cfg(max_daily_loss_usd=0.0, max_total_loss_usd=150.0)
+    assert killswitch.is_killed(_FakeDB(day=-9999.0), cfg_t, now=1000.0).allowed is True
+    assert killswitch.is_killed(_FakeDB(total=-150.0), cfg_t, now=1000.0).allowed is False
+    # совокупный выключен, дневной активен
+    cfg_d = _ks_cfg(max_daily_loss_usd=50.0, max_total_loss_usd=0.0)
+    assert killswitch.is_killed(_FakeDB(total=-9999.0), cfg_d, now=1000.0).allowed is True
+    assert killswitch.is_killed(_FakeDB(day=-50.0), cfg_d, now=1000.0).allowed is False
+    # прод-дефолт compose = 0/0 — выключено; дефолты класса защитные (500/800)
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.max_daily_loss_usd == 500.0 and s.max_total_loss_usd == 800.0
+
+
 def test_can_open_blocks_on_max_positions():
     d = killswitch.can_open(_FakeDB(open_n=2), _ks_cfg(), now=1000.0)
     assert d.allowed is False

@@ -131,8 +131,11 @@ class ScalpSettings(BaseSettings):
     position_usd: float = Field(default=100.0)
     min_position_usd: float = Field(default=10.0)
     max_leverage: int = Field(default=5)
-    # Killswitch (demo): дневной убыток $500, совокупный $800 (буфер до
-    # обнуления $1000 депо), max 2 позиции, 5 сделок/час (анти-overtrade).
+    # Killswitch: дневной/совокупный лимит убытка. ≤0 = ВЫКЛЮЧЕН (v0.18.23,
+    # запрос пользователя: на демо killswitch не нужен — total-лимит не
+    # сбрасывается и навсегда блокирует форвард-тест; прод-значение 0 в
+    # docker-compose). Для live вернуть через env (например 500/800).
+    # Дефолты класса оставлены защитными — fail-safe вне compose.
     max_daily_loss_usd: float = Field(default=500.0)
     max_total_loss_usd: float = Field(default=800.0)
     max_open_positions: int = Field(default=2)

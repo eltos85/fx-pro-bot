@@ -393,8 +393,11 @@ services:
       SCALP_POSITION_USD: ${SCALP_POSITION_USD:-100}
       SCALP_MIN_POSITION_USD: ${SCALP_MIN_POSITION_USD:-10}
       SCALP_MAX_LEVERAGE: ${SCALP_MAX_LEVERAGE:-5}
-      SCALP_MAX_DAILY_LOSS_USD: ${SCALP_MAX_DAILY_LOSS_USD:-500}
-      SCALP_MAX_TOTAL_LOSS_USD: ${SCALP_MAX_TOTAL_LOSS_USD:-800}
+      # v0.18.23: 0 = killswitch выключен (демо-счёт, деньги виртуальные; total-
+      # лимит не сбрасывается и навсегда заблокировал бы форвард-тест −807 ≤ −800).
+      # Для live вернуть лимиты (например 500/800).
+      SCALP_MAX_DAILY_LOSS_USD: ${SCALP_MAX_DAILY_LOSS_USD:-0}
+      SCALP_MAX_TOTAL_LOSS_USD: ${SCALP_MAX_TOTAL_LOSS_USD:-0}
       SCALP_MAX_OPEN_POSITIONS: ${SCALP_MAX_OPEN_POSITIONS:-2}
       # 20→5/ч (v0.10.0): анти-overtrade. Канон 3–12 сигналов/день; у нас было
       # ~17/ч у кэпа при gross edge ≈0 (402 сделки/24ч → −$60).
