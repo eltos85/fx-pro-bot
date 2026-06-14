@@ -289,11 +289,13 @@ class SweepReclaimDetector:
         # sweep_fade не изменено.
         self.level_gate = level_gate
         # v0.18.24 (sweep_fade_canon): пер-детекторный тип входа. None →
-        # глобальный maker (база sweep_fade). Канон ставит "market" (taker):
-        # ~70% непролива канон-maker = post-only отмены биржей на быстром
-        # full-reclaim, не таймаут (диагностика A-5/06-14). Taker наливает на
-        # подтверждённом reclaim — это и есть канон-вход (Connors/Raschke
-        # Turtle Soup входит ПО reclaim, не пассивной лимиткой ниже цены).
+        # глобальный maker (база sweep_fade, не трогаем). Канон ставит "market"
+        # (taker) ПО КАНОНУ Turtle Soup: вход — buy-stop НАД уровнем, срабатывает
+        # на возврате цены сквозь уровень = активный вход ПО reclaim (Connors/
+        # Raschke 1995 «Street Smarts»; SFP). Пассивная maker-лимитка ниже цены
+        # = вход «купить откат вниз», ПРОТИВОПОЛОЖНЫЙ канон-входу вверх (maker
+        # был fee-overlay v0.10.0, не из канона). Подтверждение на данных (не
+        # причина): канон-maker наливался 0/4 за сутки.
         self.entry_order_type = entry_order_type
         self._armed: dict | None = None
         self._last_wait_log = 0.0

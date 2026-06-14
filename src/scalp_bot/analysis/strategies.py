@@ -238,9 +238,11 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
         return self.key_levels.swept_key_level(symbol, side, swept)
 
     def ensure_symbols(self, symbols: list[str]) -> None:
-        # v0.18.24: канон-вход — taker (cfg.sweep_fade_canon_entry_order_type).
-        # ~70% непролива канон-maker = post-only отмены на быстром full-reclaim
-        # (диагностика A-5); taker наливает на подтверждённом reclaim = канон.
+        # v0.18.24: канон-вход — taker ПО КАНОНУ Turtle Soup (Connors/Raschke
+        # 1995): вход — стоп НАД/ПОД уровнем, срабатывает на возврате цены сквозь
+        # уровень = активный вход ПО reclaim. Пассивный maker ниже цены инвертит
+        # канон-вход (был fee-overlay v0.10.0). cfg.sweep_fade_canon_entry_order
+        # _type; пусто → глобальный maker.
         otype = getattr(self.cfg, "sweep_fade_canon_entry_order_type", None) or None
         for s in symbols:
             if s not in self.symbol_scope:

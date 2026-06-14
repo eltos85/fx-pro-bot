@@ -55,15 +55,14 @@ class ScalpSettings(BaseSettings):
     # (symbol_scope), авто-вселенная других страт не затронута.
     sweep_fade_canon_symbols: str = Field(
         default="BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT")
-    # v0.18.24: тип входа канона — TAKER (одобрено пользователем 2026-06-14).
-    # Диагностика fill-rate (A-5, вариант 4): ~70% непролива канон-maker —
-    # post-only ОТМЕНЫ биржей на быстром full-reclaim (не таймаут), canon
-    # наливался 0/4 за сутки → A/B не копит данные. Канон Turtle Soup/SFP
-    # входит ПО подтверждённому reclaim (активно, по ходу разворота), а не
-    # пассивной лимиткой ниже цены — taker делает вход ЧИЩЕ по канону, не
-    # смешивает философию (сигнал-логика уровней/reclaim/CVD/ADX не тронута).
-    # Прецедент: density_break=market (C-06). База sweep_fade ОСТАЁТСЯ maker
-    # (контраст A/B maker vs taker). None/пусто → глобальный maker.
+    # v0.18.24: тип входа канона — TAKER ПО КАНОНУ Turtle Soup (Connors/Raschke
+    # 1995 «Street Smarts»): канон-вход — стоп НАД/ПОД уровнем, срабатывает на
+    # возврате цены сквозь уровень = активный вход ПО reclaim (исполняется как
+    # taker). Пассивная maker-лимитка ниже цены = вход «купить откат вниз»,
+    # ПРОТИВОПОЛОЖНЫЙ канон-входу вверх — maker был fee-overlay (v0.10.0), не из
+    # канона свипа. Taker = возврат к канону. Подтверждение на данных (не
+    # причина): канон-maker наливался 0/4 за сутки. База sweep_fade НЕ тронута
+    # (остаётся maker, копим стату). None/пусто → глобальный maker.
     sweep_fade_canon_entry_order_type: str = Field(default="market")
     # Full reclaim (CAP Rule 2): цена должна ВЕРНУТЬСЯ за свипнутый уровень
     # (1.0 = весь путь), а не 50% как у базового.
