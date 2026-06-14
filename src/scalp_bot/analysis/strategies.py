@@ -238,12 +238,17 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
         return self.key_levels.swept_key_level(symbol, side, swept)
 
     def ensure_symbols(self, symbols: list[str]) -> None:
+        # v0.18.24: канон-вход — taker (cfg.sweep_fade_canon_entry_order_type).
+        # ~70% непролива канон-maker = post-only отмены на быстром full-reclaim
+        # (диагностика A-5); taker наливает на подтверждённом reclaim = канон.
+        otype = getattr(self.cfg, "sweep_fade_canon_entry_order_type", None) or None
         for s in symbols:
             if s not in self.symbol_scope:
                 continue
             if s not in self._det:
                 self._det[s] = SweepReclaimDetector(s, self.cfg,
-                                                    level_gate=self._level_gate)
+                                                    level_gate=self._level_gate,
+                                                    entry_order_type=otype)
 
 
 # ─── density_bounce helpers (чистые, тестируемые без WS) ───────────────────

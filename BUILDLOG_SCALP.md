@@ -4,6 +4,38 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-14
+
+### v0.18.24 — sweep_fade_canon: вход taker (диагностика fill-rate, вариант 4)
+`<hash>`
+
+**Запрос пользователя**: «проверь работу стратегий, как сказались правки» →
+canon ожил после v0.18.22 (0→12 сделок), но fill-rate низкий. Пользователь
+выбрал «сначала докопать диагноз» (вариант 4), затем одобрил taker с условием
+подтверждения, что это НЕ смешивание философий («главная цель canon — привести
+К ЧИСТОМУ КАНОНУ»).
+
+**Диагностика (A-5, read-only по БД VPS)**: разбор непролива по close_reason.
+Среди нефиллов **~67–70% = `entry_Cancelled`** (post-only отмены биржей: цена
+прошла сквозь уровень на быстром reclaim), лишь ~30% = `entry_timeout`. Вывод:
+расширение таймаута бесполезно (лечит 30%); причина — невозможность maker
+налиться в момент быстрого разворота. canon наливался 0/4 за сутки → A/B не
+копит данные. Зеркало C-06 (density_break, fill 42.6% → taker).
+
+**Фикс (исполнительный, no-data-fitting «технические улучшения»; сигнал-логика
+канона — уровни/full-reclaim/CVD/ADX — НЕ тронута)**: `SweepReclaimDetector`
+получил параметр `entry_order_type`; `SweepFadeCanonStrategy` ставит его в
+`market` (env `SCALP_SWEEP_FADE_CANON_ENTRY_ORDER_TYPE`, default market).
+Подтверждение «не смешивание философий»: канон Turtle Soup/SFP входит ПО
+reclaim активно, пассивный maker = adverse selection (пропуск резких
+разворотов = эталонных сетапов) → taker ЧИЩЕ по канону. Базовый sweep_fade
+ОСТАЁТСЯ maker — контраст A/B maker vs taker. Тесты: +1 (+проверка taker в
+full-reclaim тесте), 198 passed.
+
+**Файлы:** `analysis/signals.py` (detector entry_order_type),
+`analysis/strategies.py` (canon ensure_symbols), `config/settings.py`,
+`docker-compose.yml`, `tests/test_scalp_bot.py`, `STRATEGY_RATIONALE_SCALP.md`.
+
 ## 2026-06-12
 
 ### v0.18.23 — killswitch выключен на демо (лимит 0 = off)

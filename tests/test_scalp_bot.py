@@ -2631,6 +2631,7 @@ def test_detector_level_gate_arms_and_tags_reason():
 def _canon_cfg(**over):
     base = _cfg(sweep_fade_canon_reclaim_frac=1.0,
                 sweep_fade_canon_symbol_list=["ETHUSDT"],
+                sweep_fade_canon_entry_order_type="market",
                 sweep_fade_sl_risk_mult=None)
     for k, v in over.items():
         setattr(base, k, v)
@@ -2679,6 +2680,24 @@ def test_canon_strategy_full_reclaim_required():
     sig = st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
     assert sig is not None and sig.side == "long"
     assert sig.strategy == "sweep_fade_canon" and "key_pdl" in sig.reasons
+    # v0.18.24: канон-вход — taker (market), не пассивный maker (A-5: ~70%
+    # непролива maker = post-only отмены на full-reclaim). База остаётся maker.
+    assert sig.entry_order_type == "market"
+
+
+def test_canon_entry_taker_base_sweep_fade_maker():
+    """v0.18.24: канон ставит entry_order_type=market на детекторах; базовый
+    sweep_fade — None (→ глобальный maker), A/B контраст maker vs taker."""
+    from scalp_bot.analysis.strategies import (SweepFadeStrategy,
+                                               SweepFadeCanonStrategy)
+    canon = SweepFadeCanonStrategy(_canon_cfg(), ["ETHUSDT"])
+    assert canon._det["ETHUSDT"].entry_order_type == "market"
+    base = SweepFadeStrategy(_cfg(sweep_fade_sl_risk_mult=None), ["ETHUSDT"])
+    assert base._det["ETHUSDT"].entry_order_type is None
+    # пустой/None override → канон-детектор тоже None (фолбэк на глоб. maker)
+    c2 = SweepFadeCanonStrategy(_canon_cfg(sweep_fade_canon_entry_order_type=""),
+                                ["ETHUSDT"])
+    assert c2._det["ETHUSDT"].entry_order_type is None
 
 
 def test_canon_strategy_in_registry_and_cooldown_family():

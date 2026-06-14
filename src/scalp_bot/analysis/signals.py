@@ -277,7 +277,8 @@ class SweepReclaimDetector:
       confirm_bar_sec>0 (default 0) — опц. fallback: ждать закрытия N-сек бара.
     """
 
-    def __init__(self, symbol: str, cfg, level_gate=None) -> None:
+    def __init__(self, symbol: str, cfg, level_gate=None,
+                 entry_order_type: str | None = None) -> None:
         self.symbol = symbol
         self.cfg = cfg
         # v0.18.20 (sweep_fade_canon): опциональный гейт значимого уровня.
@@ -287,6 +288,13 @@ class SweepReclaimDetector:
         # 3-минутный микро-экстремум. None (default) — поведение базового
         # sweep_fade не изменено.
         self.level_gate = level_gate
+        # v0.18.24 (sweep_fade_canon): пер-детекторный тип входа. None →
+        # глобальный maker (база sweep_fade). Канон ставит "market" (taker):
+        # ~70% непролива канон-maker = post-only отмены биржей на быстром
+        # full-reclaim, не таймаут (диагностика A-5/06-14). Taker наливает на
+        # подтверждённом reclaim — это и есть канон-вход (Connors/Raschke
+        # Turtle Soup входит ПО reclaim, не пассивной лимиткой ниже цены).
+        self.entry_order_type = entry_order_type
         self._armed: dict | None = None
         self._last_wait_log = 0.0
         self._last_bar: int | None = None  # индекс текущего confirm-бара (bar-close)
@@ -423,7 +431,7 @@ class SweepReclaimDetector:
         # fallback на глобальный sl_risk_mult (харнес --sl-mult работает как был).
         sf_mult = getattr(cfg, "sweep_fade_sl_risk_mult", None)
         sig = build_signal(snap, side, a["swept"], cfg, len(reasons), reasons,
-                           sl_mult=sf_mult)
+                           sl_mult=sf_mult, order_type=self.entry_order_type)
         if sig is None:
             # reclaim+разворот были, но риск/комиссии не прошли fee-guard
             play.info("⛔ [%s] %s: reclaim+разворот ✓, но fee-guard — цель не "

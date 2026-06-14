@@ -312,6 +312,11 @@ services:
       # Full reclaim (CAP Rule 2 буквально): возврат ЗА свипнутый уровень (1.0),
       # а не 50% пути как у базового sweep_fade.
       SCALP_SWEEP_FADE_CANON_RECLAIM_FRAC: ${SCALP_SWEEP_FADE_CANON_RECLAIM_FRAC:-1.0}
+      # v0.18.24: вход канона — TAKER (market). ~70% непролива канон-maker —
+      # post-only отмены на быстром full-reclaim (0/4 за сутки, A-5). Канон
+      # Turtle Soup входит ПО reclaim, не пассивной лимиткой → taker чище по
+      # канону. База sweep_fade остаётся maker (контраст A/B).
+      SCALP_SWEEP_FADE_CANON_ENTRY_ORDER_TYPE: ${SCALP_SWEEP_FADE_CANON_ENTRY_ORDER_TYPE:-market}
       # Авто-селектор: бот сам выбирает монеты под стратегию из get_tickers
       # (композит range%/turnover/spread), берёт ВСЕ прошедшие фильтр и
       # пересматривает раз в 5 мин (ротация — no-op если состав не сменился).
