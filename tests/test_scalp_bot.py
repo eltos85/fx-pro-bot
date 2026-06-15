@@ -1364,6 +1364,9 @@ def test_density_break_prod_defaults():
     assert s.density_break_confirm_cvd is True
     assert s.momentum_window_sec == 30.0                  # follow-through = канон-окно
     assert s.density_break_require_ob is True              # канон-гейт абсорбции
+    # v0.18.25 (V1): close-confirmation ВКЛ по умолчанию (канон «закрытие за
+    # уровнем, не first-touch»); 60с — прецедент v0.11.0.
+    assert s.density_break_confirm_bar_sec == 60.0
 
 
 def test_db_migration_adds_strategy_column(tmp_path):
@@ -1842,6 +1845,71 @@ def test_density_break_ob_gate_off_is_legacy():
     snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
                  bids=flat_bids, asks=flat_asks, ob_imbalance=0.40)
     assert st.update(snap, now=16.0) is not None
+
+
+# ─── v0.18.25 (V1): close-confirmation density_break (канон «не first-touch») ──
+
+def test_density_break_no_fire_on_first_touch():
+    """V1: с confirm_bar>0 пробой НЕ входит на первом касании — армится и ждёт
+    закрытия бара (канон C-06: avoid entering on the first touch)."""
+    cfg = _density_cfg(density_break_confirm_bar_sec=60.0)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    assert st.update(snap, now=16.0) is None          # армлен, входа на тике нет
+    assert st._pending.get("SOLUSDT") is not None      # ждёт закрытия бара
+
+
+def test_density_break_fires_after_bar_close_still_beyond():
+    """V1: пробой подтверждён — на ЗАКРЫТИИ бара цена всё ещё за уровнем → вход."""
+    cfg = _density_cfg(density_break_confirm_bar_sec=60.0)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    arm = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                bids=flat_bids, asks=flat_asks)
+    assert st.update(arm, now=16.0) is None            # арм в баре 0
+    close = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                  bids=flat_bids, asks=flat_asks)
+    sig = st.update(close, now=70.0)                    # бар закрылся (бар 1)
+    assert sig is not None and sig.side == "long"
+    assert "wall_break" in sig.reasons and sig.strategy == "density_break"
+    assert sig.sl_level < 100.0 < sig.entry_ref
+
+
+def test_density_break_fake_breakout_returns_inside():
+    """V1: first-touch фейкаут — к закрытию бара цена вернулась за уровень → отбой,
+    входа нет, pending снят."""
+    cfg = _density_cfg(density_break_confirm_bar_sec=60.0)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    arm = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                bids=flat_bids, asks=flat_asks)
+    assert st.update(arm, now=16.0) is None            # арм в баре 0
+    # к закрытию бара цена ушла ОБРАТНО под уровень 100.0 → фейкаут
+    back = _snap([], last_price=99.90, best_bid=99.89, best_ask=99.91,
+                 bids=bids, asks=asks)
+    assert st.update(back, now=70.0) is None
+    assert st._pending.get("SOLUSDT") is None          # отбой, наблюдение снято
+
+
+def test_density_break_confirm_bar_zero_is_legacy_first_touch():
+    """V1: confirm_bar=0 → legacy-режим (вход на первом тике пробоя)."""
+    cfg = _density_cfg(density_break_confirm_bar_sec=0.0)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "long"      # тиковый вход (legacy)
 
 
 # ─── ИЗОЛЯЦИЯ v0.18.16: sweep_fade и density_bounce НЕ задеты ────────────────

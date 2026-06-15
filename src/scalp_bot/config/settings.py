@@ -411,6 +411,19 @@ class ScalpSettings(BaseSettings):
     # Порог = тот же research-grounded ob_imbalance_min (0.58), без нового числа.
     # ТОЛЬКО density_break (фейды свой ob-гейт имеют). False = legacy (без гейта).
     density_break_require_ob: bool = Field(default=True)
+    # v0.18.25 (V1, close-confirmation): КАНОН-вход пробоя. Канон C-06 (GrandAlgo /
+    # PriceActionNinja / Alpha Learning): «настоящий пробой = ЗАКРЫТИЕ свечи за
+    # уровнем; avoid entering on the first touch — wait for confirmed close (and
+    # retest)». Раньше входили на ПЕРВОМ касании уровня (broke = last>level на
+    # тике) — это прямое нарушение канона: first-touch ловит фейкауты/grab'ы,
+    # отсюда WR 13% при канон-ожидании ≥33%. Теперь пробой АРМИТСЯ и подтверждается
+    # на ЗАКРЫТИИ бара: цена всё ещё за уровнем = настоящий пробой → вход; цена
+    # вернулась = first-touch фейкаут → отбой. bar=0 → legacy (вход на тике).
+    # 60с — прецедент v0.11.0 (bar-close для тикового бота, тот же confirm_bar_sec).
+    # V1 = шаги 1-2 канон-входа (пробит уровень + закрытие за ним). V2 (следующий
+    # шаг к канону, см. BUILDLOG): + ретест уровня лимиткой (шаг 3) — лучшая цена и
+    # ещё жёстче фильтр фейкаутов. V1 — чистый ПРЕФИКС V2, без анти-канон логики.
+    density_break_confirm_bar_sec: float = Field(default=60.0)
 
     # ─── HTF-bias: трендовый фильтр старшего ТФ (аудит v0.9.3) ────────────
     # Канон CAP «без контекста CVD-дивергенция — шум» (gates 1–3); Murphy 1999

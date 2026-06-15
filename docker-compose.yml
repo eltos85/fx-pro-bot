@@ -392,6 +392,14 @@ services:
       # Вход только если resting ob_imbalance НЕ застакан против пробоя. Едино для
       # ВСЕХ монет (≠ скип BTC), порог = ob_imbalance_min. false = legacy.
       SCALP_DENSITY_BREAK_REQUIRE_OB: ${SCALP_DENSITY_BREAK_REQUIRE_OB:-true}
+      # v0.18.25 (V1, close-confirmation): КАНОН-вход пробоя. Канон C-06 (GrandAlgo/
+      # PriceActionNinja/Alpha Learning): «реальный пробой = ЗАКРЫТИЕ за уровнем;
+      # avoid entering on the first touch». Раньше входили на ПЕРВОМ касании
+      # (фейкауты/grab'ы → WR 13% vs канон ≥33%). Теперь пробой подтверждается на
+      # ЗАКРЫТИИ N-сек бара за уровнем (вернулась цена = фейкаут, отбой). 60с —
+      # прецедент v0.11.0. V1 = шаги 1-2 канона; V2 (см. BUILDLOG) добавит ретест.
+      # 0 = legacy (вход на тике). ТОЛЬКО density_break.
+      SCALP_DENSITY_BREAK_CONFIRM_BAR_SEC: ${SCALP_DENSITY_BREAK_CONFIRM_BAR_SEC:-60}
       # Капитал/лот: депо $1000, лот $100 (минимум $10 — иначе комиссия
       # съедает прибыль скальпа).
       SCALP_VIRTUAL_CAPITAL: ${SCALP_VIRTUAL_CAPITAL:-1000}
