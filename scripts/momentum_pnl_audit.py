@@ -13,10 +13,21 @@
 5. Сводит winrate / profit factor / expectancy ($/сделку) по инструментам
    и итог. Также печатает текущие open-позиции (reconcile) с label.
 
-ВАЖНО про атрибуцию: ProtoOADeal НЕ содержит label (label только у
-ProtoOAPosition.tradeData у открытых). Closed-сделки атрибутируем по факту:
-fx_ai_trader за период сделал 0 сделок, advisor profile=disabled → ВСЕ deal'ы
-счёта принадлежат fx_momentum_bot. Для open-позиций label печатаем явно.
+ВАЖНО про атрибуцию (исправлено 2026-06-15): ProtoOADeal НЕ содержит label
+(label только у ProtoOAPosition.tradeData у открытых). Раньше скрипт считал,
+что ВСЕ deal'ы счёта = fx_momentum_bot (fx_ai_trader якобы 0 сделок). Это
+СЛОМАЛОСЬ: после аудит-правок fx_ai_trader активно торгует BRENT/NAT.GAS/gold
+на том же cTrader-счёте → его сделки попадали в momentum-стату (06-15:
+BRENT/NAT.GAS −$5.48 ошибочно атрибутированы momentum).
+
+Теперь атрибутируем по ТОРГОВОЙ ВСЕЛЕННОЙ momentum из его же конфига:
+FX-мажоры (settings.symbols) + VP-золото (settings.vp_symbols), резолвленные
+в cTrader-имена. Deal'ы вне этой вселенной (BRENT/NAT.GAS/oil/indices) идут
+в отдельную секцию «другие боты» и в momentum-итог НЕ входят.
+Остаточная неоднозначность: XAUUSD торгуют и VP momentum, и fx_ai_trader
+(label-разделение для closed-deal'ов недоступно, у fx_ai_trader отдельный
+volume) — gold у fx_ai_trader редок и помечен label="ai-fx-trader";
+для точной сверки золота см. fx_ai_trader.sqlite.positions.
 
 Запуск (внутри fx-momentum-bot контейнера, ai-trader предварительно
 остановлен чтобы не превысить лимит 2 коннекта/app):
@@ -60,6 +71,20 @@ def main() -> int:
         info = symbols.get_by_id(sid)
         return info.name if info else f"id={sid}"
 
+    # Торговая вселенная momentum (его конфиг) → cTrader symbol_ids.
+    # Только эти deal'ы принадлежат momentum; остальное — другие боты.
+    momentum_sids: set[int] = set()
+    momentum_names: set[str] = set()
+    for yf_sym in settings.all_symbols:
+        info = symbols.resolve_yfinance(yf_sym)
+        if info is not None:
+            momentum_sids.add(info.symbol_id)
+            momentum_names.add(info.name)
+    print(f"Momentum trading universe: {sorted(momentum_names)}\n")
+
+    def is_momentum(sid: int) -> bool:
+        return sid in momentum_sids
+
     # 1. Deal list
     resp = client.get_deal_list(from_ts=from_ms, to_ts=now_ms, max_rows=2000)
     deals = list(resp.deal) if hasattr(resp, "deal") else []
@@ -87,11 +112,15 @@ def main() -> int:
           f"{'gross':>8} {'swap':>6} {'comm':>6} {'NET$':>8} status")
     print("-" * 96)
     rows: list[dict] = []
+    other_rows: list[dict] = []  # сделки других ботов (вне вселенной momentum)
     for pid in sorted(by_pos, key=lambda p: int(getattr(by_pos[p][0], "executionTimestamp", 0))):
         ds = sorted(by_pos[pid], key=lambda x: int(getattr(x, "executionTimestamp", 0)))
         opening = ds[0]
         closings = [x for x in ds if x.HasField("closePositionDetail")]
-        sname = sym_name(int(getattr(opening, "symbolId", 0)))
+        sid = int(getattr(opening, "symbolId", 0))
+        sname = sym_name(sid)
+        mine = is_momentum(sid)
+        tag = "" if mine else " [OTHER-BOT]"
         side = "BUY" if int(getattr(opening, "tradeSide", 0)) == 1 else "SELL"
         opened_iso = _ts_to_iso(int(getattr(opening, "executionTimestamp", 0)))
         gross = swap = comm = 0.0
@@ -108,11 +137,11 @@ def main() -> int:
         status = "OPEN" if is_open else "closed"
         if closings:
             print(f"{pid:<11} {sname:<9} {side:<5} {opened_iso:<11} {closed_iso:<11} "
-                  f"{gross:>+8.2f} {swap:>+6.2f} {comm:>+6.2f} {net:>+8.2f} {status}")
-            rows.append({"sym": sname, "net": net})
+                  f"{gross:>+8.2f} {swap:>+6.2f} {comm:>+6.2f} {net:>+8.2f} {status}{tag}")
+            (rows if mine else other_rows).append({"sym": sname, "net": net})
         else:
             print(f"{pid:<11} {sname:<9} {side:<5} {opened_iso:<11} {'-':<11} "
-                  f"{'(open)':>8} {'-':>6} {'-':>6} {'-':>8} {status}")
+                  f"{'(open)':>8} {'-':>6} {'-':>6} {'-':>8} {status}{tag}")
 
     # 5. Aggregates by instrument + total
     def agg(label: str, vals: list[float]) -> None:
@@ -129,13 +158,22 @@ def main() -> int:
               f"WR={wr:>3.0f}%  net=${net:>+8.2f}  avg=${net/len(vals):>+6.2f}  "
               f"PF={pf:>5.2f}  best=${max(vals):>+6.2f} worst=${min(vals):>+6.2f}")
 
-    print("\n=== CLOSED trades summary (broker NET, ground truth) ===")
+    print("\n=== MOMENTUM closed trades (broker NET, ground truth) ===")
     by_sym: dict[str, list[float]] = {}
     for r in rows:
         by_sym.setdefault(r["sym"], []).append(r["net"])
     for s in sorted(by_sym):
         agg(s, by_sym[s])
     agg("TOTAL", [r["net"] for r in rows])
+
+    if other_rows:
+        print("\n=== EXCLUDED — другие боты (НЕ momentum, вне его вселенной) ===")
+        other_by_sym: dict[str, list[float]] = {}
+        for r in other_rows:
+            other_by_sym.setdefault(r["sym"], []).append(r["net"])
+        for s in sorted(other_by_sym):
+            agg(s, other_by_sym[s])
+        agg("OTHER TOTAL", [r["net"] for r in other_rows])
 
     print("\n=== Currently OPEN on broker ===")
     for pid in sorted(open_meta):

@@ -370,6 +370,16 @@ def _flip_close_targets(
     return [p for p in positions if p.side != new_direction]
 
 
+def _is_market_closed_error(err: str | None) -> bool:
+    """Ошибка закрытия/открытия = рынок закрыт (выходные, maintenance break).
+
+    cTrader возвращает ProtoOAErrorRes с текстом 'MARKET_CLOSED' когда
+    символ вне торговых часов (FX закрыт Пт ~21:00 → Вс ~21:00 UTC).
+    https://help.ctrader.com/open-api/ — ордера вне сессии отвергаются.
+    """
+    return bool(err) and "MARKET_CLOSED" in err
+
+
 def _momentum_sign_direction(momentum_value: float) -> str:
     """Направление, которое поддерживает ЗНАК momentum ('' если ровно 0).
 
@@ -780,6 +790,11 @@ def run() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     vp_symbols = set(settings.vp_symbols)
+    # Дедуп логов «рынок закрыт»: sign-decay/friday-flat хотят закрыть
+    # позицию, но рынок закрыт (выходные) — попытки повторяются каждый
+    # цикл (чтобы исполнить сразу на открытии), но логируем один раз на
+    # переходе, иначе 569 ERROR-строк за выходные (BUILDLOG 2026-06-15).
+    market_closed_pids: set[int] = set()
     log.info(
         "Momentum bot started | mode=%s | momentum=%s | vp=%s | interval=%s/%s | db=%s",
         "LIVE" if (settings.trading_enabled and executor is not None) else "PAPER",
@@ -904,11 +919,21 @@ def run() -> None:
                             pos.position_id, pos.volume
                         )
                         if close_res.success:
+                            market_closed_pids.discard(pos.position_id)
                             log.info(
                                 "VP FRIDAY FLAT %s #%d %s vol=%d closed "
                                 "(day-timeframe: не несём через выходные)",
                                 vp_sym, pos.position_id, pos.side, pos.volume,
                             )
+                        elif _is_market_closed_error(close_res.error):
+                            remaining.append(pos)
+                            if pos.position_id not in market_closed_pids:
+                                market_closed_pids.add(pos.position_id)
+                                log.info(
+                                    "VP FRIDAY FLAT отложен %s #%d: рынок "
+                                    "уже закрыт",
+                                    vp_sym, pos.position_id,
+                                )
                         else:
                             remaining.append(pos)
                             log.error(
@@ -966,6 +991,7 @@ def run() -> None:
                         if close_res.success:
                             decay_closed += 1
                             open_count = max(0, open_count - 1)
+                            market_closed_pids.discard(pos.position_id)
                             log.info(
                                 "DECAY CLOSE %s #%d %s vol=%d "
                                 "(momentum=%.5f against position)",
@@ -975,6 +1001,17 @@ def run() -> None:
                                 pos.volume,
                                 signal_data.momentum_value,
                             )
+                        elif _is_market_closed_error(close_res.error):
+                            # Рынок закрыт (выходные): попытку повторим в
+                            # след. цикле — исполнится на открытии. Логируем
+                            # один раз на переходе, без спама каждые 5 мин.
+                            if pos.position_id not in market_closed_pids:
+                                market_closed_pids.add(pos.position_id)
+                                log.info(
+                                    "DECAY CLOSE отложен %s #%d %s: рынок "
+                                    "закрыт, закрою на открытии",
+                                    symbol, pos.position_id, pos.side,
+                                )
                         else:
                             log.error(
                                 "DECAY CLOSE failed %s #%d: %s",

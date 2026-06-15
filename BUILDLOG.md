@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-06-15
+
+### fix(momentum-bot): глушим спам DECAY CLOSE при закрытом рынке + чиним атрибуцию аудита
+
+`<pending>`
+
+Два баг-фикса (технические, без изменения стратегии).
+
+**1. Спам `DECAY CLOSE failed MARKET_CLOSED`.** Симптом: 569 ERROR-строк
+за выходные (Пт 21:02 → Вс 20:56). Причина: в пятницу momentum
+развернулся против AUDUSD-лонга #151586083, sign-decay захотел закрыть,
+но FX-рынок закрыт (выходные) — close-команда отвергалась и повторялась
+каждые 5 мин все выходные. Закрылась штатно в воскресенье на открытии
+(−$0.72). Решение: `_is_market_closed_error()` + дедуп `market_closed_pids`
+— попытки закрытия ПРОДОЛЖАЕМ каждый цикл (чтобы исполнить сразу на
+открытии, как и сработало), но логируем один раз на переходе (INFO
+«отложен, закрою на открытии»), без спама. Применено и к sign-decay, и
+к friday-flat close. Источник: help.ctrader.com/open-api/ — ордера вне
+торговой сессии отвергаются (MARKET_CLOSED).
+
+**2. Атрибуция `momentum_pnl_audit.py`.** Симптом: BRENT/NAT.GAS
+fx_ai_trader'а (−$5.48) попадали в momentum-стату. Причина: скрипт
+считал «все deal'ы счёта = momentum» (устарело — fx_ai_trader активно
+торгует на общем cTrader-счёте после аудит-правок). Решение:
+атрибуция по торговой вселенной momentum из его конфига (FX symbols +
+VP vp_symbols → cTrader symbol_ids); deal'ы вне вселенной → секция
+«EXCLUDED — другие боты», в momentum-итог не входят. Остаточно: XAUUSD
+торгуют и VP, и fx_ai_trader (label closed-deal'ов недоступен, у
+ai_trader отдельный volume) — для точной сверки золота см.
+fx_ai_trader.sqlite.
+
+**Тесты:** +2 (`_is_market_closed_error`). Сьют 1274 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`, `scripts/momentum_pnl_audit.py`
+
 ## 2026-06-11
 
 ### feat(momentum-bot): VP friday-flat — принудительное закрытие VP-позиций перед выходными (согласовано)

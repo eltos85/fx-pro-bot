@@ -390,3 +390,20 @@ def test_vp_friday_flat_disabled() -> None:
     from fx_momentum_bot.app.main import _vp_friday_flat_due
     fri = datetime(2026, 6, 12, 20, 50, tzinfo=timezone.utc)
     assert _vp_friday_flat_due(_flat_settings(enabled=False), fri) is False
+
+
+# ─── Market-closed дедуп (баг-фикс 2026-06-15: спам DECAY CLOSE) ──────────
+
+
+def test_is_market_closed_error_detects() -> None:
+    from fx_momentum_bot.app.main import _is_market_closed_error
+    assert _is_market_closed_error(
+        "cTrader error MARKET_CLOSED: Trading is not available: Market is closed."
+    ) is True
+
+
+def test_is_market_closed_error_other_errors_false() -> None:
+    from fx_momentum_bot.app.main import _is_market_closed_error
+    assert _is_market_closed_error("SLIPPAGE guard rejected") is False
+    assert _is_market_closed_error(None) is False
+    assert _is_market_closed_error("") is False
