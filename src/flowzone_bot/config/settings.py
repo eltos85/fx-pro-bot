@@ -61,6 +61,9 @@ class FlowzoneSettings(BaseSettings):
     max_daily_loss_usd: float = Field(default=0.0)
     max_total_loss_usd: float = Field(default=0.0)
     max_open_positions: int = Field(default=2)
+    # НЕ канон (в STRATEGY лимита частоты нет; §5.3/§8 поощряют reload). Generic
+    # анти-overtrading гард из модели scalp (TASKSPEC §6 п.8). ≤0 = ВЫКЛЮЧЕН —
+    # тогда темп входов держат только max_open_positions + per-symbol cooldown'ы.
     max_trades_per_hour: int = Field(default=5)
 
     # ─── Исполнение ──────────────────────────────────────────────────────

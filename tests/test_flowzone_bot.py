@@ -425,6 +425,36 @@ def test_in_session_london_ny_windows():
     assert in_session(ts_at(3.0), [])      # пустые окна → круглосуточно
 
 
+def test_can_open_rate_limit_disabled_when_zero():
+    from flowzone_bot.safety import killswitch
+
+    class _DB:
+        def __init__(self, ntrades):
+            self._n = ntrades
+        def realized_pnl_since(self, ts):
+            return 0.0
+        def total_realized_pnl(self):
+            return 0.0
+        def open_count(self):
+            return 0
+        def trades_since(self, ts):
+            return self._n
+
+    class _Set:
+        max_daily_loss_usd = 0.0
+        max_total_loss_usd = 0.0
+        max_open_positions = 2
+        max_trades_per_hour = 5
+
+    db = _DB(ntrades=10)  # уже 10 сделок за час
+    # лимит 5/ч → блок
+    assert not killswitch.can_open(db, _Set(), now=1000.0).allowed
+    # лимит 0 = выключен → НЕ блокируем (canon reload)
+    s = _Set()
+    s.max_trades_per_hour = 0
+    assert killswitch.can_open(db, s, now=1000.0).allowed
+
+
 def test_in_session_overnight_window():
     import calendar
 

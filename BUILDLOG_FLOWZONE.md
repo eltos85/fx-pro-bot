@@ -11,6 +11,26 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-06-16
 
+### fix(killswitch): max_trades_per_hour ≤0 = ВЫКЛ (rate-limit не канон, режет reload)
+`<pending commit>`
+
+Симптом: на чистом даунтренде NEAR бот хотел перезаряжаться (reload, канон §5.3),
+но упирался в `gate block: rate-limit ≥ 5/h` — generic анти-overtrading лимит из
+модели scalp (TASKSPEC §6 п.8), которого НЕТ в каноне flowzone. Лимит резал
+ключевую механику стратегии и занижал выборку форвард-теста.
+
+Причина-2 (баг): `can_open` блокировал при `trades_since ≥ max_trades_per_hour`
+без guard на ≤0 — постановка лимита в 0 заблокировала бы ВСЕ входы (0 ≥ 0).
+
+Решение: `max_trades_per_hour ≤0 = выключен` (как у loss-лимитов в `is_killed`);
+аналогичный guard на `max_open_positions`. На demo выставлен
+`FLOWZONE_MAX_TRADES_PER_HOUR=0` — темп входов держат `max_open_positions=2` +
+per-symbol cooldown'ы (signal 60с / reload 10с). Решение data/canon-driven (reload
+— инвариант канона), не подгонка под P&L (выборка 17 сделок = шум, sample-size).
+
+**Файлы:** `src/flowzone_bot/safety/killswitch.py`,
+`src/flowzone_bot/config/settings.py`, `tests/test_flowzone_bot.py`
+
 ### Фаза 6 — session gate (London/NY) + sizing + лимиты
 `<pending commit>`
 

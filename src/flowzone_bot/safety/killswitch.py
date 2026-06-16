@@ -37,13 +37,19 @@ def is_killed(db, settings, now: float | None = None) -> GateDecision:
 
 
 def can_open(db, settings, now: float | None = None) -> GateDecision:
-    """Можно ли открыть НОВУЮ позицию (поверх is_killed)."""
+    """Можно ли открыть НОВУЮ позицию (поверх is_killed). Лимит ≤0 = ВЫКЛЮЧЕН.
+
+    ``max_trades_per_hour`` — НЕ канон-параметр (в STRATEGY_FLOWZONE.md лимита
+    частоты нет; канон §5.3/§8 наоборот поощряет reload). Это generic анти-
+    overtrading гард из модели scalp (TASKSPEC §6 п.8). ≤0 → выключен, тогда темп
+    входов ограничивают только ``max_open_positions`` и per-symbol cooldown'ы."""
     killed = is_killed(db, settings, now)
     if not killed.allowed:
         return killed
-    if db.open_count() >= settings.max_open_positions:
+    if settings.max_open_positions > 0 and db.open_count() >= settings.max_open_positions:
         return GateDecision(False, f"open positions ≥ {settings.max_open_positions}")
     now = now if now is not None else time.time()
-    if db.trades_since(now - 3600.0) >= settings.max_trades_per_hour:
+    if (settings.max_trades_per_hour > 0
+            and db.trades_since(now - 3600.0) >= settings.max_trades_per_hour):
         return GateDecision(False, f"rate-limit ≥ {settings.max_trades_per_hour}/h")
     return GateDecision(True)
