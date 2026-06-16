@@ -1,0 +1,298 @@
+# STRATEGY — flowzone_bot
+
+**Канон (единственный источник правды):** Fabervaale ENG — «How To Find The
+BEST Entry Zones» — <https://youtu.be/06R-ebyOhDI>
+
+Этот документ описывает стратегию **полностью и автономно**, строго по
+первоисточнику (ролику). Он НЕ сравнивает методику с другими ботами проекта и
+НЕ содержит наших готовых решений — только канон. Любая будущая правка логики
+flowzone_bot сверяется с этим документом и с роликом, а не с интуицией.
+
+---
+
+## 0. Суть в одном абзаце
+
+Цену двигает **только объём** (исполненные сделки). Мы определяем **контекст
+аукциона** (тренд или баланс), находим **зоны высокой вероятности** через
+объёмный профиль + поток ордеров (delta, крупные сделки), и входим **по
+направлению аукциона** (продолжение), когда в зоне приходит **подтверждение
+потоком** — поглощение (absorption) противоположной стороны. Стоп — сразу за
+зоной, цели — ближайшие swing-точки, с частичной фиксацией и перезарядкой
+(reload) на следующей зоне.
+
+---
+
+## 1. Философия (Auction Market Theory)
+
+- **Рынок — это аукцион.** Цена ищет баланс (где идёт двусторонняя торговля) и
+  совершает направленные движения, когда баланс нарушается. Источник правды о
+  происходящем — **исполненный объём**, а не свечи и не классические уровни
+  поддержки/сопротивления.
+- **Торгуем ПО направлению аукциона** (continuation), а не против. Если рынок в
+  трендовом сценарии вниз — ищем точки для **перезарядки шорта**; если вверх —
+  для перезарядки лонга.
+- **Никаких догадок.** Каждый вход подтверждается реальным потоком ордеров
+  (delta / крупные сделки / поглощение), наблюдаемым **в реальном времени**, а
+  не постфактум.
+
+> Цитата канона: *«Sensitive high probability reversal area following the
+> direction of the trend… the only thing that move price is volume… no
+> conspiracy theory, just visualization of order entering the market.»*
+
+---
+
+## 2. Шаг 1 — Контекст рынка (profile shape)
+
+Прежде чем искать вход, классифицируем рыночный сценарий по **форме объёмного
+профиля**:
+
+- **Трендовый сценарий (trade THIS):** есть **чистый пробой** предыдущего уровня
+  с выраженной агрессией, и после пробоя цена **акцептируется (acceptance)** за
+  пределами value area — то есть торгуется и принимается **ниже Value Area Low**
+  (для шорта) или **выше Value Area High** (для лонга). Это значит: рынок ищет
+  **новый баланс**, и мы ожидаем **направленное продолжение**.
+- **Балансовый сценарий:** цена ходит внутри value area, акцепта за её границами
+  нет — направленного ожидания нет, входов по этой методике **не берём**.
+
+> Цитата канона: *«London session start with clear breakout of the previous
+> level, a lot of aggression… they created a condition of trend scenario…
+> because they accepted after the breakout below the value area low… we are
+> seeking new balance of price and what we can expect here is direction.»*
+
+**Важно:** **не берём первое движение** (часто оно до открытия сессии / без
+подтверждённого контекста). Ждём **второе, ясное** движение в установленном
+направлении.
+
+> Цитата канона: *«I didn't took the first movement because it was before the
+> opening of the London session, but the second movement was so clear.»*
+
+---
+
+## 3. Шаг 2 — Определение торговой зоны (где может быть вход)
+
+Зона — это **место максимального давления в прошлом**, куда цена вернётся для
+перезарядки. Строится по объёмному профилю предыдущей swing-точки. Компоненты:
+
+### 3.1 Объёмный профиль (Volume Profile)
+- **Value Area High / Low (VAH / VAL)** — границы зоны, где сосредоточено
+  основное (≈70%) принятие объёма.
+- **POC (Point of Control)** — цена с максимальным объёмом.
+- **Volume ledge** — место, где объём **резко** переходит от high-volume node
+  (пик) к low-volume node (провал). Это сильный ориентир зоны.
+
+> Цитата канона: *«the most relevant area… is this clear volume ledge. Volume
+> ledge is where the volume goes from really peak point to really low point…
+> from high volume node to low volume node really fast.»*
+
+### 3.2 Delta-профиль (delta print)
+- На swing-точке измеряем, **сколько было давления** через дельту (агрессивный
+  buy − sell), исполненную ИМЕННО на этом уровне. Это «delta print» — зона,
+  основанная на фактически исполненном потоке, а не на свечах.
+
+> Цитата канона: *«you can measure how much pressure there was in the market
+> during this swing point using the delta profile… this is not based on some
+> support and resistance… is based on actual orderflow data that got executed
+> previously.»*
+
+### 3.3 Крупные сделки (big trades)
+- Уровни, где объём был **поддержан крупными исполненными сделками** —
+  важнейшие ценовые уровни.
+
+> Цитата канона: *«this area is based on the profile of the previous swing
+> point… you can see is when the volume got support by these big trades and
+> this is the reason you see there is a lot of delta pressure on this area.»*
+
+### 3.4 Конфлюэнс (confluence) = «super strong area»
+- Самая сильная зона — там, где **совпадают несколько факторов**: например
+  **Value Area High + big trades + delta-уровень**. Чем больше совпадений — тем
+  выше вероятность отработки.
+
+> Цитата канона: *«it's nice to notice also that the value area high it's here.
+> So you have a confluence of value area high, big trades and delta level. This
+> one is a super strong area.»*
+
+**На зону ставим алерт** и ждём, когда цена к ней подойдёт.
+
+---
+
+## 4. Шаг 3 — Триггер входа (подтверждение потоком в зоне)
+
+Сама по себе зона — **не сигнал**. Вход берём **только** при подтверждении
+ордерфлоу, когда цена доходит до зоны:
+
+1. **Реакция агрессоров в направлении сделки.** При подходе к зоне видим
+   **сильных агрессивных продавцов** (для шорта) / покупателей (для лонга).
+2. **Поглощение (absorption) противоположной стороны.** Ключевой триггер:
+   контр-сторона пытается перехватить контроль, но её **поглощают**. Видно по
+   **агрессивным deep-trades в ТЕЛЕ свечи**: «битва» за уровень выиграна
+   доминирующей стороной.
+   - Для **шорта**: агрессивные покупатели поглощены продавцами → «failed
+     buyers».
+   - Для **лонга** (зеркально): агрессивные продавцы поглощены покупателями.
+3. **Подтверждение в реальном времени.** Серия «control of buyers… failed
+   buyers» (или зеркально) на потоке = подтверждение. Данные не задержанные.
+
+> Цитата канона: *«this battle of the sellers got won by sellers. Why?
+> Aggressive orders, deep trades in the body of the candle… absorption of the
+> aggressive buyers… buyers try to take control again but they got absorbed…
+> control of the buyers… failed buyers… you can use them as a confirmation to
+> execute your trades.»*
+
+Только после подтверждения — **ставим лимитный ордер** в зоне (или исполняем,
+защищаясь за зоной).
+
+> Цитата канона: *«after this candle the situation is super clear, so you can
+> already put a limit order here… from here the market collapse.»*
+
+---
+
+## 5. Шаг 4 — Управление сделкой
+
+### 5.1 Вход
+- **Лимитный ордер** в зоне после подтверждения потоком.
+
+### 5.2 Стоп-лосс
+- **Сразу ЗА зоной**: для шорта — **выше** идентифицированной area; для лонга —
+  ниже. Стоп защищает «область, которую мы уже определили».
+- **Масштаб стопа 1-2-3 / 1-2-4 / 1-2-5** — насколько консервативно ставить
+  стоп (дальше за зону = безопаснее, но хуже R). Выбор зависит от желаемого
+  запаса прочности.
+
+> Цитата канона: *«execution that you can make protecting yourself above the
+> area that we already identified… this is a 1-2-3, 1-2-4, 1-2-5, it depends on
+> how much you want to be safe on the stop-loss placement.»*
+
+### 5.3 Цели и перезарядка (reload)
+- **Цель — ближайшая swing-точка.**
+- После взятия цели на первой сделке — ищем **следующую сильную зону** в том же
+  направлении (фрактальный анализ: новый dealing range, новая агрессия) и
+  **перезаряжаемся** (re-entry), снова защищаясь за новой зоной.
+
+> Цитата канона: *«you can take also a re-entry here, covering above the area,
+> targeting for a swing point… after you go to take profit on the first one,
+> you have a condition again of super strong swing point.»*
+
+### 5.4 Направление
+- **Только по направлению аукциона/тренда** (continuation). Контртренд по этой
+  методике **не торгуем**.
+
+---
+
+## 6. Сессии и тайм-фреймы (масштаб)
+
+### 6.1 Сессии
+- Примеры канона — **London** и **New York** сессии, входы привязаны к их
+  динамике/открытию. Высокая ликвидность сессий нужна, чтобы absorption и big
+  trades были читаемы. Вне активных сессий поток разрежен → методика не
+  применяется.
+
+> Цитата канона: *«one in London session and one in New York session.»*
+
+### 6.2 Масштаб профиля и входа
+Канон задаёт масштаб НЕ числом баров, а структурно:
+
+- **Контекст / профиль — на уровне СЕССИИ.** Анализ начинается с формы профиля
+  сессии (London/NY). Это «рамка» аукциона.
+- **Fixed profile (фиксированный профиль).** Объёмный профиль **прибит** к
+  диапазону — сессии / swing-точке / **dealing range**, а НЕ скользящее окно.
+  Зона строится от **профиля предыдущей swing-точки**.
+- **Вход — на уровне СВЕЧИ.** Подтверждение читается по потоку **внутри свечи**
+  («deep trades в теле свечи»), решение — «после этой свечи».
+- **Фрактальность.** Один и тот же паттерн (зона → поглощение → продолжение)
+  повторяется на разных масштабах — метод **scale-agnostic**, после взятия цели
+  ищем следующую зону в новом dealing range.
+
+> Цитаты канона: *«start with the profile shape… London session»; «fixed profile
+> volume analysis»; «area based on the profile of the previous swing point… this
+> is dynamic»; «aggressive orders, deep trades in the body of the candle… after
+> this candle the situation is super clear»; «in the fractal analysis we have
+> another strong area»; «the market create again a new dealing range».*
+
+### 6.3 Конкретика из ролика (скриншот графика)
+По кадру платформы в ролике видно фактические настройки канона:
+
+- **График / тайм-фрейм входа = `5 Minuti` (M5, 5 минут).**
+- **Инструмент канона = `NQ` (фьючерс Nasdaq-100)** — глубоко-ликвидный рынок
+  (подтверждает требование ликвидности §6.1).
+- **Профили — order-flow (footprint), а не из баров.** В панели включены
+  `Order Flow - Vol. Profile`, `Order Flow - Bid/Ask`, `Dly Vol./Delta Profile`,
+  `Wkly Vol./Delta Profile`, `Comp. Vol. Profile` — то есть профили объёма/дельты
+  строятся из **исполненного потока (tick/footprint)** и привязываются к
+  **дню / неделе / композиту / сессии**, отображаясь на 5m-графике.
+
+**Вывод:** канон-вход — **M5**; профиль объёма/дельты — **tick/order-flow**
+(footprint), привязанный к сессии/дню/неделе. Это снимает неопределённость по
+числовому ТФ и по источнику профиля.
+
+---
+
+## 7. Пошаговый чеклист входа (детерминированный)
+
+1. **Контекст:** есть ли трендовый сценарий? (чистый пробой + акцепт за VAH/VAL).
+   Нет → не торгуем.
+2. **Не первое движение:** ждём второе, ясное движение в направлении тренда.
+3. **Зона:** построить объёмный профиль предыдущей swing-точки → найти VAH/VAL /
+   POC / volume ledge + delta-уровень + big trades. Конфлюэнс ≥2 факторов = зона.
+4. **Алерт** на зону, ждём подхода цены.
+5. **Подтверждение потоком в зоне:** агрессия в сторону сделки + поглощение
+   контр-стороны (deep trades в теле свечи, «failed» контр-сторона).
+6. **Вход:** лимитка в зоне.
+7. **Стоп:** за зоной (1-2-3/4/5 по консервативности).
+8. **Цель:** ближайший swing-point; частичная фиксация.
+9. **Reload:** следующая сильная зона по тренду → повтор с шага 3.
+
+---
+
+## 8. Чего стратегия НЕ делает (анти-канон)
+
+- **Не входит против направления аукциона** (никакого контртренда).
+- **Не входит по первому движению** / без подтверждённого контекста.
+- **Не входит «по уровню» без подтверждения потоком** — зона без absorption/делта
+  подтверждения сигналом не является.
+- **Не опирается на классические индикаторы / свечные паттерны** как на источник
+  правды — только исполненный объём и поток.
+- **Не торгует в балансе** (внутри value area, без акцепта за границами).
+
+---
+
+## 9. Сверка с первоисточником (verification)
+
+| Пункт документа | Подтверждение в ролике | ✓ |
+|---|---|---|
+| Только объём двигает цену; auction theory | «the only thing that move price is volume… auction market theory» | ✓ |
+| Контекст: пробой + acceptance за value area = тренд | «clear breakout… accepted below the value area low… we can expect direction» | ✓ |
+| Не брать первое движение, ждать второе | «I didn't took the first movement… the second movement was so clear» | ✓ |
+| Зона = профиль swing-точки (VAH/VAL, POC, ledge) | «area based on the profile of the previous swing point… volume ledge» | ✓ |
+| Delta print = исполненный поток на уровне | «delta profile… actual orderflow data that got executed previously» | ✓ |
+| Big trades маркируют уровень | «volume got support by these big trades» | ✓ |
+| Confluence (VAH + big trades + delta) = сильная зона | «confluence of value area high, big trades and delta level… super strong area» | ✓ |
+| Триггер = absorption контр-стороны (deep trades в теле) | «absorption of the aggressive buyers… deep trades in the body of the candle» | ✓ |
+| Подтверждение в реальном времени | «this information in real time… as a confirmation to execute» | ✓ |
+| Вход лимиткой после подтверждения | «you can already put a limit order here» | ✓ |
+| Стоп за зоной, масштаб 1-2-3/4/5 | «protecting yourself above the area… 1-2-3, 1-2-4, 1-2-5» | ✓ |
+| Цель swing-point, reload на след. зоне | «targeting for a swing point… re-entry… super strong swing point» | ✓ |
+| Сессии London/NY | «one in London session and one in New York session» | ✓ |
+| Масштаб: сессионный fixed-профиль + свечной вход + фрактальность | «start with the profile shape»; «fixed profile volume analysis»; «deep trades in the body of the candle»; «fractal analysis»; «new dealing range» | ✓ |
+| ТФ входа = M5 (5 минут); инструмент NQ | скриншот графика: `5 Minuti`, `NQ-202512` | ✓ |
+| Профили — order-flow/footprint (tick), привязка день/неделя/композит | скриншот: `Order Flow - Vol. Profile`, `Dly/Wkly/Comp. Vol./Delta Profile` | ✓ |
+| Только по тренду (continuation) | «reversal area following the direction of the trend» | ✓ |
+
+Все пункты документа имеют прямое подтверждение в ролике. Расхождений с
+первоисточником при сверке не выявлено.
+
+---
+
+## 10. Открытые вопросы к реализации (решаются в ТЗ, не в стратегии)
+
+Эти вопросы НЕ относятся к канону стратегии, но нужны для автономной реализации
+(см. `TASKSPEC_FLOWZONE.md`):
+
+- На каком инструменте(ах) торговать (ликвидность критична для VP/absorption;
+  канон демонстрировался на NQ — глубокий рынок, §6.3).
+- Формализация «big trades», «volume ledge», «acceptance» в числовые пороги
+  (каждый порог — со ссылкой на канон Market Profile: Steidlmayer / Dalton).
+
+**Снято скриншотом (§6.3) — больше не открыто:**
+- ТФ входа = **M5**; профиль = **tick/order-flow footprint**, привязка
+  день/неделя/композит/сессия. Реализация должна строить VP из исполненного
+  потока (а не из kline-volume), вход — на 5m.

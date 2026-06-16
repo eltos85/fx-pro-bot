@@ -1,0 +1,439 @@
+"""Тесты flowzone_bot (фазы 1-2): агрегаты, Volume Profile, контекст аукциона.
+
+Позитивные сценарии — на ЧЕСТНОЙ синтетике с известным распределением объёма
+(no-data-fitting.mdc: данные не рисуются «под результат», проверяется логика
+формул VP/контекста).
+"""
+from __future__ import annotations
+
+from flowzone_bot.analysis.context import BALANCE, TREND_DOWN, TREND_UP, classify
+from flowzone_bot.analysis.orderflow import (big_trade_threshold,
+                                             detect_absorption,
+                                             detect_big_trades, size_percentile,
+                                             zone_delta)
+from flowzone_bot.analysis.swings import (find_swings, nearest_swing_target,
+                                          swing_targets)
+from flowzone_bot.analysis.volume_profile import (build_profile, find_hvn_lvn,
+                                                  find_ledges)
+from flowzone_bot.analysis.zone import build_zones
+from flowzone_bot.data.aggregates import SymbolState, TradePrint
+
+
+# ─── Фаза 1: агрегаты (footprint-принты + дневной VP) ────────────────────
+
+def test_symbolstate_keeps_raw_prints_and_evicts():
+    t = {"now": 1000.0}
+    st = SymbolState("BTCUSDT", trade_window_sec=10.0, ob_levels=5,
+                     now=lambda: t["now"])
+    st.on_trade(100.0, 1.5, "Buy")
+    st.on_trade(100.5, 2.0, "Sell")
+    snap = st.snapshot()
+    assert len(snap.trades) == 2
+    assert snap.last_price == 100.5
+    assert snap.trades[0].signed_delta == 1.5
+    assert snap.trades[1].signed_delta == -2.0
+    # вытеснение за окном
+    t["now"] = 1011.0
+    st.on_trade(101.0, 1.0, "Buy")
+    assert len(st.snapshot().trades) == 1
+
+
+def test_symbolstate_ob_imbalance():
+    st = SymbolState("ETHUSDT", ob_levels=5)
+    st.on_orderbook([(99.0, 3.0), (98.0, 2.0)], [(101.0, 1.0), (102.0, 1.0)])
+    snap = st.snapshot()
+    assert abs(snap.ob_imbalance - 5.0 / 7.0) < 1e-9
+
+
+def test_symbolstate_incremental_vp_day_anchored():
+    wall = {"t": 86400.0 * 100 + 10}  # внутри дня 100
+    st = SymbolState("BTCUSDT", trade_window_sec=999.0, vp_bucket_size=1.0,
+                     wall_now=lambda: wall["t"])
+    st.on_trade(100.4, 2.0, "Buy")   # idx 100
+    st.on_trade(100.9, 1.0, "Sell")  # idx 100
+    st.on_trade(102.1, 4.0, "Buy")   # idx 102
+    snap = st.snapshot()
+    assert snap.vp_bucket_size == 1.0
+    assert snap.vp_buckets[100] == (2.0, 1.0)
+    assert snap.vp_buckets[102] == (4.0, 0.0)
+    # смена дня сбрасывает профиль
+    wall["t"] = 86400.0 * 101 + 5
+    st.on_trade(103.0, 1.0, "Buy")
+    snap2 = st.snapshot()
+    assert set(snap2.vp_buckets) == {103}
+
+
+# ─── Фаза 2: Volume Profile engine ───────────────────────────────────────
+
+def _triangular_buckets() -> dict[int, tuple[float, float]]:
+    """Симметричный треугольный профиль, пик на idx 10. (buy=vol, sell=0)."""
+    vols = {10: 100, 9: 80, 11: 80, 8: 60, 12: 60, 7: 40, 13: 40,
+            6: 20, 14: 20, 5: 10, 15: 10}
+    return {i: (float(v), 0.0) for i, v in vols.items()}
+
+
+def test_build_profile_poc_and_value_area():
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0,
+                         value_area_pct=0.70)
+    assert prof is not None
+    assert prof.poc_idx == 10
+    assert prof.poc_price == 10.5
+    assert prof.total_volume == 520.0
+    # двухрядное расширение от POC до ≥70% (364): VA idx 8..12
+    assert prof.va_lo_idx == 8
+    assert prof.va_hi_idx == 12
+    assert prof.val == 8.0
+    assert prof.vah == 13.0
+    assert prof.value_area_volume >= 0.70 * prof.total_volume
+
+
+def test_build_profile_empty_returns_none():
+    assert build_profile({}, bucket_size=1.0) is None
+    assert build_profile({1: (0.0, 0.0)}, bucket_size=1.0) is None
+    assert build_profile({1: (5.0, 0.0)}, bucket_size=0.0) is None
+
+
+def test_build_profile_delta_at_price():
+    buckets = {10: (8.0, 2.0), 11: (1.0, 5.0)}
+    prof = build_profile(buckets, bucket_size=1.0)
+    assert prof.bucket_delta(10) == 6.0    # 8 buy − 2 sell
+    assert prof.delta_at_price(11.5) == -4.0
+
+
+def test_find_hvn_lvn_triangular():
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)
+    hvn, lvn = find_hvn_lvn(prof)
+    assert hvn == [10]   # единственный пик
+    assert lvn == []     # монотонные склоны → нет внутренних минимумов
+
+
+def test_find_ledges_sharp_drop():
+    # объём 100,100, затем обрыв до 10 (10% от пика) — резкий ledge.
+    buckets = {0: (100.0, 0.0), 1: (100.0, 0.0), 2: (10.0, 0.0)}
+    prof = build_profile(buckets, bucket_size=1.0)
+    ledges = find_ledges(prof, drop_frac=0.5)
+    assert len(ledges) == 1
+    assert ledges[0].side == "above"
+    assert ledges[0].price == 2.0
+    assert ledges[0].drop_ratio == 0.1
+
+
+# ─── Фаза 2: контекст аукциона (тренд vs баланс) ─────────────────────────
+
+def test_classify_trend_up_on_acceptance_above_vah():
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)  # VAH=13
+    trades = [TradePrint(ts=0, price=14.0, size=5.0, side="Buy"),
+              TradePrint(ts=1, price=14.5, size=5.0, side="Buy")]
+    ctx = classify(prof, trades, last_price=14.0, accept_frac=0.5)
+    assert ctx.state == TREND_UP
+    assert ctx.trade_side == "long"
+    assert ctx.accept_above == 1.0
+
+
+def test_classify_trend_down_on_acceptance_below_val():
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)  # VAL=8
+    trades = [TradePrint(ts=0, price=7.0, size=3.0, side="Sell"),
+              TradePrint(ts=1, price=6.5, size=3.0, side="Sell")]
+    ctx = classify(prof, trades, last_price=7.0, accept_frac=0.5)
+    assert ctx.state == TREND_DOWN
+    assert ctx.trade_side == "short"
+
+
+def test_classify_balance_inside_value_area():
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)
+    trades = [TradePrint(ts=0, price=10.0, size=5.0, side="Buy")]
+    ctx = classify(prof, trades, last_price=10.0, accept_frac=0.5)
+    assert ctx.state == BALANCE
+    assert ctx.trade_side is None
+
+
+def test_classify_balance_when_price_beyond_but_no_acceptance():
+    # цена за VAH, но объём за границей мал (один фитиль) → не acceptance.
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)  # VAH=13
+    trades = [TradePrint(ts=0, price=14.0, size=1.0, side="Buy"),
+              TradePrint(ts=1, price=10.0, size=9.0, side="Buy")]
+    ctx = classify(prof, trades, last_price=14.0, accept_frac=0.5)
+    assert ctx.accept_above == 0.1
+    assert ctx.state == BALANCE
+
+
+# ─── Фаза 3: order-flow (big trades + absorption) ────────────────────────
+
+def test_size_percentile_and_big_threshold():
+    assert size_percentile([], 0.9) is None
+    assert size_percentile([5.0], 0.9) == 5.0
+    assert size_percentile([0.0, 10.0], 0.5) == 5.0
+    # мало сэмплов → None (sample-size)
+    assert big_trade_threshold([TradePrint(0, 1, 1, "Buy")] * 5,
+                               pct=0.9, min_samples=20) is None
+    trades = [TradePrint(0, 1, float(i), "Buy") for i in range(1, 101)]
+    thr = big_trade_threshold(trades, pct=0.90, min_samples=20)
+    assert thr is not None and 89.0 <= thr <= 92.0
+
+
+def test_detect_big_trades_side_filter():
+    trades = [TradePrint(0, 1, 10.0, "Buy"), TradePrint(1, 1, 2.0, "Sell"),
+              TradePrint(2, 1, 8.0, "Sell")]
+    assert len(detect_big_trades(trades, 5.0)) == 2
+    assert len(detect_big_trades(trades, 5.0, side="Sell")) == 1
+    assert len(detect_big_trades(trades, 5.0, side="Buy")) == 1
+
+
+def test_zone_delta_band():
+    trades = [TradePrint(0, 100.0, 5.0, "Buy"), TradePrint(1, 100.5, 3.0, "Sell"),
+              TradePrint(2, 101.0, 2.0, "Buy"), TradePrint(3, 99.0, 4.0, "Sell")]
+    # полоса [100, 100.6] ловит первые два: +5 (buy) −3 (sell) = +2
+    assert zone_delta(trades, 100.0, 100.6) == 2.0
+
+
+def test_absorption_short_failed_buyers_confirmed():
+    # агрессивные покупатели (включая крупного) давят, но цена не растёт.
+    trades = [TradePrint(0, 100.0, 8.0, "Buy"),   # крупный buy (порог 5)
+              TradePrint(1, 100.0, 2.0, "Sell"),
+              TradePrint(2, 99.5, 1.0, "Sell")]   # price_move = −0.5
+    res = detect_absorption(trades, "short", big_threshold=5.0,
+                            min_counter_frac=0.5)
+    assert res.confirmed
+    assert res.big_counter == 1
+    assert "price_absorbed" in res.reasons
+
+
+def test_absorption_long_failed_sellers_confirmed():
+    trades = [TradePrint(0, 100.0, 8.0, "Sell"),  # крупный sell
+              TradePrint(1, 100.0, 2.0, "Buy"),
+              TradePrint(2, 100.5, 1.0, "Buy")]   # price_move = +0.5
+    res = detect_absorption(trades, "long", big_threshold=5.0,
+                            min_counter_frac=0.5)
+    assert res.confirmed
+
+
+def test_absorption_rejected_when_price_follows_counter():
+    # короткий сетап, но покупатели ПРОДАВИЛИ цену вверх → не поглощены.
+    trades = [TradePrint(0, 100.0, 8.0, "Buy"),
+              TradePrint(1, 100.0, 2.0, "Sell"),
+              TradePrint(2, 100.6, 1.0, "Buy")]   # price_move = +0.6
+    res = detect_absorption(trades, "short", big_threshold=5.0)
+    assert not res.confirmed
+
+
+def test_absorption_rejected_without_deep_trade():
+    # нет крупной сделки контр-стороны (порог недостижим) → не absorption.
+    trades = [TradePrint(0, 100.0, 1.0, "Buy"), TradePrint(1, 99.5, 1.0, "Sell")]
+    res = detect_absorption(trades, "short", big_threshold=100.0)
+    assert not res.confirmed
+
+
+# ─── Фаза 4: zone builder (confluence) ───────────────────────────────────
+
+def test_build_zones_confluence_poc_and_delta():
+    # односторонний (buy) треугольный профиль: POC и delta-уровень совпадают на
+    # одной корзине → конфлюэнс {poc, delta}. cluster_ticks=1 разводит дальние
+    # (но края профиля дают ledge-зону у VAH — её не проверяем здесь).
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)  # POC idx10
+    zones = build_zones(prof, "short", ref_price=5.0, recent_trades=[],
+                        big_threshold=None, min_confluence=2, cluster_ticks=1,
+                        delta_min_frac=0.6)
+    poc_delta = [z for z in zones if set(z.factors) == {"poc", "delta"}]
+    assert len(poc_delta) == 1
+    z = poc_delta[0]
+    assert z.score == 2
+    assert z.low <= 10.5 <= z.high
+    assert z.side == "short"
+    assert all(z.side == "short" for z in zones)
+
+
+def test_build_zones_side_filter_keeps_only_continuation_side():
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)
+    # для шорта зоны только ВЫШЕ ref; ref выше всего профиля → ничего
+    assert build_zones(prof, "short", ref_price=99.0, recent_trades=[],
+                       big_threshold=None, min_confluence=2) == []
+    # для лонга зоны только НИЖЕ ref; ref ниже всего → ничего
+    assert build_zones(prof, "long", ref_price=0.0, recent_trades=[],
+                       big_threshold=None, min_confluence=2) == []
+
+
+def test_build_zones_below_min_confluence_dropped():
+    # один изолированный фактор (cluster_ticks=0) не дотягивает до ≥2.
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)
+    zones = build_zones(prof, "short", ref_price=5.0, recent_trades=[],
+                        big_threshold=None, min_confluence=3, cluster_ticks=0)
+    assert zones == []
+
+
+# ─── Фаза 4: strategy.evaluate (контекст → зона → absorption → Signal) ───
+
+class _Cfg:
+    """Минимальный cfg-стаб для evaluate (только нужные поля)."""
+    big_trade_pct = 0.90
+    big_trade_min_samples = 3
+    zone_min_confluence = 2
+    zone_cluster_ticks = 5
+    zone_delta_min_frac = 0.6
+    absorption_window_sec = 120.0
+    absorption_min_counter_frac = 0.5
+    sl_buffer_bps = 8.0
+    min_sl_bps = 10.0
+
+
+def _evictless_state_snapshot(buckets, bucket_size, trades, last_price, ts):
+    from flowzone_bot.data.aggregates import SymbolSnapshot
+    return SymbolSnapshot(
+        symbol="BTCUSDT", ts=ts, last_price=last_price, best_bid=None,
+        best_ask=None, ob_imbalance=None, trades=trades, stale=False,
+        vp_bucket_size=bucket_size, vp_buckets=buckets)
+
+
+def test_evaluate_short_continuation_full_checklist():
+    # Профиль: пик idx100, VA≈[99,102], VAH≈103, POC=100.5. Корзины с buy-only.
+    buckets = {100: (100.0, 0.0), 99: (60.0, 0.0), 101: (60.0, 0.0),
+               98: (30.0, 0.0), 102: (30.0, 0.0)}
+    prof = build_profile(buckets, bucket_size=1.0)
+    assert prof.poc_price == 100.5
+
+    # Поток (ts растёт): downtrend-объём НИЖЕ VAL множеством МЕЛКИХ сделок (вне
+    # absorption-окна 120с, формирует контекст trend_down) + недавний бёрст
+    # КРУПНЫХ покупателей у зоны, поглощённых (цена не выросла) — deep trades.
+    now = 1000.0
+    trades = [TradePrint(now - 200 + i, 97.0, 5.0, "Sell") for i in range(20)]
+    trades += [
+        TradePrint(now - 30, 100.0, 8.0, "Buy"),     # крупный buy у зоны (deep)
+        TradePrint(now - 20, 100.0, 8.0, "Buy"),
+        TradePrint(now - 5, 99.8, 2.0, "Sell"),      # цена НЕ выросла → поглощены
+    ]
+    snap = _evictless_state_snapshot(buckets, 1.0, trades, last_price=99.8, ts=now)
+
+    ctx = classify(prof, [t for t in trades if t.ts >= now - 300],
+                   snap.last_price, accept_frac=0.5)
+    assert ctx.state == TREND_DOWN  # объём окна доминирует ниже VAL
+
+    from flowzone_bot.analysis.strategy import evaluate
+    sig = evaluate(snap, prof, ctx, cfg=_Cfg())
+    assert sig is not None
+    assert sig.side == "short"
+    assert sig.sl_level > sig.entry_ref > sig.tp_level  # геометрия шорта
+    assert sig.score >= 2
+
+
+def test_evaluate_none_when_balance_context():
+    buckets = {100: (100.0, 0.0), 99: (60.0, 0.0), 101: (60.0, 0.0)}
+    prof = build_profile(buckets, bucket_size=1.0)
+    trades = [TradePrint(1000.0, 100.4, 5.0, "Buy")]  # внутри VA
+    snap = _evictless_state_snapshot(buckets, 1.0, trades, 100.4, 1000.0)
+    from flowzone_bot.analysis.context import classify as _cl
+    ctx = _cl(prof, trades, snap.last_price, accept_frac=0.5)
+    from flowzone_bot.analysis.strategy import evaluate
+    assert evaluate(snap, prof, ctx, cfg=_Cfg()) is None
+
+
+# ─── Фаза 5: swing-точки (фракталы) + цели/частичная фиксация ────────────
+
+def test_find_swings_williams_fractal():
+    # пик на idx3 (=10), впадина на idx7 (=1); left=right=2.
+    highs = [3, 4, 6, 10, 6, 5, 4, 3, 4, 5]
+    lows = [2, 3, 5, 8, 4, 3, 2, 1, 3, 4]
+    sw = find_swings(highs, lows, left=2, right=2)
+    highs_sw = [s for s in sw if s.kind == "high"]
+    lows_sw = [s for s in sw if s.kind == "low"]
+    assert any(s.idx == 3 and s.price == 10 for s in highs_sw)
+    assert any(s.idx == 7 and s.price == 1 for s in lows_sw)
+
+
+def test_find_swings_edges_not_classified():
+    # экстремум на краю (idx0) без left-окна → не фрактал.
+    highs = [10, 1, 2, 3, 4]
+    lows = [9, 0, 1, 2, 3]
+    sw = find_swings(highs, lows, left=2, right=2)
+    assert all(s.idx != 0 for s in sw)
+
+
+def test_nearest_and_list_swing_targets():
+    swings = [
+        # swing lows ниже 100: 98, 95 (для шорта)
+        type("S", (), {"kind": "low", "price": 98.0})(),
+        type("S", (), {"kind": "low", "price": 95.0})(),
+        type("S", (), {"kind": "high", "price": 105.0})(),  # выше (для лонга)
+        type("S", (), {"kind": "high", "price": 110.0})(),
+    ]
+    # шорт: ближайший low ниже входа = 98, список по близости [98, 95]
+    assert nearest_swing_target(swings, "short", 100.0) == 98.0
+    assert swing_targets(swings, "short", 100.0) == [98.0, 95.0]
+    # лонг: ближайший high выше входа = 105, список [105, 110]
+    assert nearest_swing_target(swings, "long", 100.0) == 105.0
+    assert swing_targets(swings, "long", 100.0) == [105.0, 110.0]
+
+
+def test_evaluate_uses_swing_target_over_structural():
+    buckets = {100: (100.0, 0.0), 99: (60.0, 0.0), 101: (60.0, 0.0),
+               98: (30.0, 0.0), 102: (30.0, 0.0)}
+    prof = build_profile(buckets, bucket_size=1.0)
+    now = 1000.0
+    trades = [TradePrint(now - 200 + i, 97.0, 5.0, "Sell") for i in range(20)]
+    trades += [TradePrint(now - 30, 100.0, 8.0, "Buy"),
+               TradePrint(now - 20, 100.0, 8.0, "Buy"),
+               TradePrint(now - 5, 99.8, 2.0, "Sell")]
+    snap = _evictless_state_snapshot(buckets, 1.0, trades, 99.8, now)
+    ctx = classify(prof, [t for t in trades if t.ts >= now - 300], 99.8,
+                   accept_frac=0.5)
+    # swing lows ниже входа: 98.5 (ближняя) и 96.0 (дальняя)
+    swings = [type("S", (), {"kind": "low", "price": 98.5})(),
+              type("S", (), {"kind": "low", "price": 96.0})()]
+    from flowzone_bot.analysis.strategy import evaluate
+    sig = evaluate(snap, prof, ctx, cfg=_Cfg(), swings=swings)
+    assert sig is not None
+    assert sig.tp_level == 98.5      # ближайший swing, не VP-структура
+    assert sig.tp2_level == 96.0     # цель 2 для частичной фиксации
+    assert "tp=swing" in sig.reasons
+
+
+def test_partial_exchange_tp_decision():
+    from flowzone_bot.trading.executor import partial_exchange_tp
+    # частичная фиксация вкл (fraction>0) + есть цель 2 → биржевой TP = цель 2
+    assert partial_exchange_tp(98.5, 96.0, 0.5) == (96.0, True)
+    # нет цели 2 → биржевой TP = цель 1, частичной фиксации нет
+    assert partial_exchange_tp(98.5, None, 0.5) == (98.5, False)
+    # частичная фиксация выкл (fraction=0) → биржевой TP = цель 1
+    assert partial_exchange_tp(98.5, 96.0, 0.0) == (98.5, False)
+
+
+# ─── Фаза 6: session gate (London/NY, UTC-окна) ──────────────────────────
+
+def test_parse_windows():
+    from flowzone_bot.analysis.session import parse_windows
+    assert parse_windows("07:00-16:00,12:00-21:00") == [(7.0, 16.0), (12.0, 21.0)]
+    assert parse_windows("07:30-08:00") == [(7.5, 8.0)]
+    assert parse_windows("") == []
+    assert parse_windows("garbage,9-10") == [(9.0, 10.0)]
+
+
+def test_in_session_london_ny_windows():
+    import calendar
+
+    from flowzone_bot.analysis.session import in_session
+
+    def ts_at(hour: float) -> float:
+        # 2026-06-16 — произвольный день; считаем по UTC-часу
+        h = int(hour)
+        m = int(round((hour - h) * 60))
+        return calendar.timegm((2026, 6, 16, h, m, 0, 0, 0, 0))
+
+    wins = [(7.0, 16.0), (12.0, 21.0)]  # London + NY
+    assert in_session(ts_at(9.0), wins)    # London
+    assert in_session(ts_at(14.0), wins)   # перекрытие
+    assert in_session(ts_at(20.0), wins)   # NY
+    assert not in_session(ts_at(3.0), wins)   # азиатская сессия — вне
+    assert not in_session(ts_at(22.0), wins)  # после NY — вне
+    assert in_session(ts_at(3.0), [])      # пустые окна → круглосуточно
+
+
+def test_in_session_overnight_window():
+    import calendar
+
+    from flowzone_bot.analysis.session import in_session
+
+    def ts_at(hour: int) -> float:
+        return calendar.timegm((2026, 6, 16, hour, 0, 0, 0, 0, 0))
+
+    wins = [(22.0, 2.0)]  # окно через полночь
+    assert in_session(ts_at(23), wins)
+    assert in_session(ts_at(1), wins)
+    assert not in_session(ts_at(12), wins)

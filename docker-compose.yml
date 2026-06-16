@@ -511,6 +511,73 @@ services:
     volumes:
       - scalp_bot_data:/data
 
+  # ─── flowzone-bot: order-flow бот Bybit (Auction Market Theory, без LLM) ──
+  # Полностью изолирован. Стратегия — STRATEGY_FLOWZONE.md (Volume Profile +
+  # Order Flow, continuation-вход из зон высокой вероятности; канон-ролик
+  # https://youtu.be/06R-ebyOhDI). Фаза 1: observe (trading_enabled=false).
+  flowzone-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.flowzone-bot
+    image: flowzone-bot:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      FLOWZONE_DATA_DIR: /data
+      FLOWZONE_LOG_LEVEL: ${FLOWZONE_LOG_LEVEL:-INFO}
+      # Fallback-список (используется только при сбое авто-селектора).
+      FLOWZONE_SYMBOLS: ${FLOWZONE_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
+      # Bybit demo: свои FLOWZONE_BYBIT_* с дефолтом на ключи ai_trader, чтобы
+      # аудит ключей был раздельным (TASKSPEC §3).
+      FLOWZONE_BYBIT_API_KEY: ${FLOWZONE_BYBIT_API_KEY:-${AI_TRADER_BYBIT_API_KEY:-}}
+      FLOWZONE_BYBIT_API_SECRET: ${FLOWZONE_BYBIT_API_SECRET:-${AI_TRADER_BYBIT_API_SECRET:-}}
+      FLOWZONE_BYBIT_DEMO: ${FLOWZONE_BYBIT_DEMO:-true}
+      FLOWZONE_BYBIT_CATEGORY: ${FLOWZONE_BYBIT_CATEGORY:-linear}
+      # Фаза 1: observe. trading_enabled включать только после проверки циклов
+      # (TASKSPEC §1 «Демо сначала»).
+      FLOWZONE_TRADING_ENABLED: ${FLOWZONE_TRADING_ENABLED:-false}
+      # Авто-селектор вселенной (переиспользуем методику scalp; §4 TASKSPEC).
+      FLOWZONE_AUTO_UNIVERSE_ENABLED: ${FLOWZONE_AUTO_UNIVERSE_ENABLED:-true}
+      FLOWZONE_UNIVERSE_TOP_N: ${FLOWZONE_UNIVERSE_TOP_N:-15}
+      FLOWZONE_UNIVERSE_REFRESH_SEC: ${FLOWZONE_UNIVERSE_REFRESH_SEC:-300}
+      FLOWZONE_UNIVERSE_MIN_TURNOVER_USD: ${FLOWZONE_UNIVERSE_MIN_TURNOVER_USD:-100000000}
+      FLOWZONE_UNIVERSE_PIN_SYMBOLS: ${FLOWZONE_UNIVERSE_PIN_SYMBOLS:-}
+      FLOWZONE_UNIVERSE_MIN_RANGE_PCT: ${FLOWZONE_UNIVERSE_MIN_RANGE_PCT:-6}
+      FLOWZONE_UNIVERSE_MAX_RANGE_PCT: ${FLOWZONE_UNIVERSE_MAX_RANGE_PCT:-20}
+      FLOWZONE_UNIVERSE_MAX_SPREAD_BPS: ${FLOWZONE_UNIVERSE_MAX_SPREAD_BPS:-5}
+      FLOWZONE_UNIVERSE_MIN_RVOL: ${FLOWZONE_UNIVERSE_MIN_RVOL:-1.0}
+      FLOWZONE_UNIVERSE_MIN_SYMBOLS: ${FLOWZONE_UNIVERSE_MIN_SYMBOLS:-3}
+      # Капитал/риск — модель scalp (demo; §6 п.8 TASKSPEC).
+      FLOWZONE_VIRTUAL_CAPITAL: ${FLOWZONE_VIRTUAL_CAPITAL:-1000}
+      FLOWZONE_RISK_PER_TRADE_USD: ${FLOWZONE_RISK_PER_TRADE_USD:-10.0}
+      FLOWZONE_MIN_POSITION_USD: ${FLOWZONE_MIN_POSITION_USD:-10}
+      FLOWZONE_MAX_LEVERAGE: ${FLOWZONE_MAX_LEVERAGE:-5}
+      FLOWZONE_MAX_OPEN_POSITIONS: ${FLOWZONE_MAX_OPEN_POSITIONS:-2}
+      FLOWZONE_MAX_TRADES_PER_HOUR: ${FLOWZONE_MAX_TRADES_PER_HOUR:-5}
+      # Killswitch выключен на demo (≤0). Для live вернуть лимиты.
+      FLOWZONE_MAX_DAILY_LOSS_USD: ${FLOWZONE_MAX_DAILY_LOSS_USD:-0}
+      FLOWZONE_MAX_TOTAL_LOSS_USD: ${FLOWZONE_MAX_TOTAL_LOSS_USD:-0}
+      # Session gate (London/NY, §6.1) — окна UTC, тюнятся без правки кода.
+      FLOWZONE_SESSION_GATE_ENABLED: ${FLOWZONE_SESSION_GATE_ENABLED:-true}
+      FLOWZONE_SESSION_WINDOWS_UTC: ${FLOWZONE_SESSION_WINDOWS_UTC:-07:00-16:00,12:00-21:00}
+      # Управление сделкой (фаза 5): частичная фиксация и reload (§5.3, §8).
+      FLOWZONE_PARTIAL_FRACTION: ${FLOWZONE_PARTIAL_FRACTION:-0.5}
+      FLOWZONE_RELOAD_COOLDOWN_SEC: ${FLOWZONE_RELOAD_COOLDOWN_SEC:-10}
+      FLOWZONE_SIGNAL_COOLDOWN_SEC: ${FLOWZONE_SIGNAL_COOLDOWN_SEC:-60}
+      # Telegram — чат ai_trader, префикс [flowzone] (TASKSPEC §3).
+      FLOWZONE_TELEGRAM_ENABLED: ${FLOWZONE_TELEGRAM_ENABLED:-false}
+      FLOWZONE_TELEGRAM_BOT_TOKEN: ${FLOWZONE_TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}
+      FLOWZONE_TELEGRAM_CHAT_ID: ${FLOWZONE_TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}
+      FLOWZONE_TELEGRAM_PREFIX: ${FLOWZONE_TELEGRAM_PREFIX:-[flowzone]}
+    volumes:
+      - flowzone_data:/data
+
   # ─── fx-momentum-bot: isolated FX momentum bot ───────────────────────────
   # Полностью отдельный runtime: свои MOMENTUM_BOT_* env, своя БД/токены в
   # отдельном volume, без использования legacy переменных advisor/scalp/ai.
@@ -581,4 +648,5 @@ services:
 volumes:
   ai_trader_data:
   scalp_bot_data:
+  flowzone_data:
   momentum_bot_data:
