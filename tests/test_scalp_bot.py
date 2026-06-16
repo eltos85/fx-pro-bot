@@ -1145,6 +1145,7 @@ from scalp_bot.analysis.strategies import (  # noqa: E402
     DensityBounceStrategy,
     DensityBreakStrategy,
     RollingBaseline,
+    SweepFadeCanonStrategy,
     SweepFadeStrategy,
     build_strategies,
     detect_wall,
@@ -1584,6 +1585,62 @@ def test_near_round_hier_recognizes_half_levels():
     # дорогая монета: ½-уровень $63 500 ловится (старый near_round видел лишь $1000)
     assert near_round(63500.0, 0.001) is False            # шаг 1000 → ближ. 64000
     assert near_round_hier(63500.0, 0.001) == "round50"   # ½-шаг 500 → 63500
+
+
+# ─── v0.18.26: база sweep_fade — skip-round gate + full reclaim (изоляция) ──
+
+def test_detector_skip_round_blocks_arm():
+    """round_gate=True → детектор НЕ взводится на свипе у round-уровня (B).
+    Артефакт: scalp_backtest_regime --level-decomp (round хуже микро)."""
+    det = SweepReclaimDetector("SOLUSDT", _cfg(), round_gate=lambda s: True)
+    assert det.update(_snap(_arm_samples(), last_price=96.5), now=100.0) is None
+    assert det.armed is False
+
+
+def test_detector_round_gate_none_arms_normally():
+    """round_gate=None (canon/дефолт) → взвод как обычно, gate не вмешивается."""
+    det = SweepReclaimDetector("SOLUSDT", _cfg(), round_gate=None)
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    assert det.armed is True
+
+
+def test_detector_reclaim_frac_override():
+    """Пер-детекторный reclaim_frac перекрывает глобальный cfg.reclaim_frac."""
+    base_cfg = _cfg(reclaim_frac=0.5)
+    assert SweepReclaimDetector("S", base_cfg)._rf() == 0.5
+    assert SweepReclaimDetector("S", base_cfg, reclaim_frac=1.0)._rf() == 1.0
+
+
+def test_base_sweep_fade_wires_skip_round_and_reclaim():
+    """База sweep_fade: skip_round=True → round_gate стоит; reclaim=1.0."""
+    cfg = _cfg(sweep_fade_skip_round=True, sweep_fade_reclaim_frac=1.0,
+               density_round_frac=0.003)
+    det = SweepFadeStrategy(cfg, ["SOLUSDT"])._det["SOLUSDT"]
+    assert det.round_gate is not None
+    assert det._rf() == 1.0
+    assert det.round_gate(96.5) is True     # round50 → блок
+    assert det.round_gate(50.25) is False   # ни 00, ни 50 → пропуск
+
+
+def test_base_sweep_fade_skip_round_off_rollback():
+    """SCALP_SWEEP_FADE_SKIP_ROUND=false → round_gate снят (путь отката)."""
+    cfg = _cfg(sweep_fade_skip_round=False, sweep_fade_reclaim_frac=0.5)
+    det = SweepFadeStrategy(cfg, ["SOLUSDT"])._det["SOLUSDT"]
+    assert det.round_gate is None
+    assert det._rf() == 0.5
+
+
+def test_canon_isolated_from_base_round_and_reclaim():
+    """ИЗОЛЯЦИЯ: canon НЕ скипает round и читает СВОЙ reclaim, несмотря на
+    включённые base-флаги (skip_round=True, base reclaim=0.5)."""
+    cfg = _cfg(sweep_fade_skip_round=True, sweep_fade_reclaim_frac=0.5,
+               density_round_frac=0.003,
+               sweep_fade_canon_reclaim_frac=1.0,
+               sweep_fade_canon_symbol_list=["SOLUSDT"],
+               sweep_fade_canon_entry_order_type="market")
+    det = SweepFadeCanonStrategy(cfg, ["SOLUSDT"])._det["SOLUSDT"]
+    assert det.round_gate is None          # canon фейдит round намеренно
+    assert det._rf() == 1.0                # свой reclaim, не base 0.5
 
 
 def test_density_bounce_fires_on_non_round_wall():

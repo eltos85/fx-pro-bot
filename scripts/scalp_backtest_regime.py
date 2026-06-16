@@ -29,6 +29,7 @@ from __future__ import annotations
 import gzip
 import io
 import logging
+import math
 import os
 import sys
 import urllib.request
@@ -257,6 +258,31 @@ def _blocked(side: str, htf: str, adx: float, mode: str, adx_thresh: float,
     return False
 
 
+# ─── тег значимости свипнутого уровня (тест канон-разрыва №1) ───────────────
+# Реплика near_round_hier из analysis/strategies.py (канон Osler 2003 / Данилов:
+# стопы кластеризуются на видимых уровнях — круглых и PDH/PDL). НЕ подгонка:
+# та же формула шага 10^(порядок−1), что в проде; PDH/PDL — предыдущий UTC-день.
+def _round_tier(price: float, frac: float) -> str | None:
+    if price <= 0:
+        return None
+    step = 10.0 ** (math.floor(math.log10(price)) - 1)
+    if step <= 0:
+        return None
+
+    def _near(s: float) -> bool:
+        nearest = round(price / s) * s
+        return abs(price - nearest) <= frac * price
+    if _near(step):
+        return "round00"
+    if _near(step / 2.0):
+        return "round50"
+    return None
+
+
+def _near_level(price: float, level: float | None, frac: float) -> bool:
+    return level is not None and level > 0 and abs(price - level) <= frac * price
+
+
 def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
            filter_mode: str = "none", adx_thresh: float = 25.0,
            sl_cooldown: float = 0.0, session_hours: set | None = None,
@@ -292,9 +318,20 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
     eval_next = 0.0
     last_sl_ts = {"long": -1e18, "short": -1e18}  # для sl_cooldown
     post_watch: list = []  # активные stop-reverse наблюдатели
+    day_hl: dict[int, list[float]] = {}  # день(UTC)->[lo,hi] для PDH/PDL
+    lvl_frac = getattr(cfg, "density_round_frac", 0.003)  # та же близость, что round-гейт
     for ts, side, size, price in ticks:
         clk.t = ts
         state.on_trade(price, size, side)
+        _d = int(ts // 86400)
+        hl = day_hl.get(_d)
+        if hl is None:
+            day_hl[_d] = [price, price]
+        else:
+            if price < hl[0]:
+                hl[0] = price
+            if price > hl[1]:
+                hl[1] = price
         if post_out is not None and post_watch:
             still = []
             for w in post_watch:
@@ -367,9 +404,15 @@ def replay(symbol: str, ticks: list, cfg, regime_at, scratch_cf: bool = False,
                     hr = int((ts % 86400.0) // 3600.0)  # UTC-час входа
                     if hr not in session_hours:
                         continue  # вне активной торговой сессии
-                pos = {"side": sig.side, "entry": sig.entry_ref, "sl": sig.sl_level,
+                prev = day_hl.get(int(ts // 86400) - 1)  # PDH/PDL пред. UTC-дня
+                pdl, pdh = (prev[0], prev[1]) if prev else (None, None)
+                ep = sig.entry_ref
+                pos = {"side": sig.side, "entry": ep, "sl": sig.sl_level,
                        "tp": sig.tp_level, "ts_open": ts, "regime": reg, "adx": adx,
-                       "risk": abs(sig.entry_ref - sig.sl_level)}
+                       "risk": abs(sig.entry_ref - sig.sl_level),
+                       "lvl_round": _round_tier(ep, lvl_frac),
+                       "lvl_pdhpdl": (_near_level(ep, pdh, lvl_frac)
+                                      or _near_level(ep, pdl, lvl_frac))}
         else:
             tr = SimpleNamespace(ts_open=pos["ts_open"], entry=pos["entry"],
                                  sl=pos["sl"], side=pos["side"], strategy="sweep_fade")
@@ -420,6 +463,8 @@ def _close(pos, reason, exit_price, ts, fee, slippage_bps=0.0):
             "reason": reason, "gross_R": gross_R, "net_R": net_R,
             "net_frac": net_frac, "hold": ts - pos["ts_open"],
             "e_over_risk": e / risk,  # для аналитического slip-sweep
+            "lvl_round": pos.get("lvl_round"),
+            "lvl_pdhpdl": pos.get("lvl_pdhpdl", False),
             "would_scratch": pos.get("would_scratch", False),
             "scratch_R": pos.get("scratch_R")}
 
@@ -496,6 +541,9 @@ def main():
     slm = _argf("--sl-mult", None)           # множитель ширины SL (гипотеза шире-стоп)
     if slm is not None:
         upd["sl_risk_mult"] = slm
+    rf = _argf("--reclaim-frac", None)       # доля reclaim (CAP Rule 2: база 0.5 → канон 1.0)
+    if rf is not None:
+        upd["reclaim_frac"] = rf
     cfg = load_settings().model_copy(update=upd)
     sweep = "--sweep" in sys.argv
     fmode = sys.argv[sys.argv.index("--filter") + 1] if "--filter" in sys.argv else "none"
@@ -524,6 +572,7 @@ def main():
     print(f"конфиг: fe_activate={cfg.flow_exit_activate_r}R "
           f"scratch_adverse={cfg.scratch_min_adverse_r}R "
           f"scratch_on={cfg.scratch_on_flow_flip} tp={cfg.take_profit_r}R "
+          f"reclaim_frac={cfg.reclaim_frac} "
           f"ob-гейт=ВЫКЛ | filter={fmode} (adx_thresh={adx_thresh} "
           f"slope_thresh={slope_thresh}% lk={slope_lk}) "
           f"htf_tf={htf_iv}m slippage={slip_bps}bps/side")
@@ -691,6 +740,35 @@ def main():
             print(f"{k:14} {n:>4} {w/max(n,1)*100:>3.0f}% {net:>+7.1f} "
                   f"{net/max(n,1):>+7.3f} {len(sl):>4} {len(sl)/max(n,1)*100:>6.0f}% "
                   f"{slnet:>+7.1f} {len(fx):>4} {fxavg:>+7.2f}")
+        return
+    if "--level-decomp" in sys.argv:
+        t = all_trades
+
+        def lblk(label, rows):
+            n = len(rows)
+            if not n:
+                print(f"  {label:<22} n=0"); return
+            w = sum(1 for r in rows if r["net_R"] > 0)
+            net = sum(r["net_R"] for r in rows)
+            print(f"  {label:<22} n={n:>4} WR={w/n*100:>3.0f}% "
+                  f"netR={net:>+7.1f} avgR={net/n:>+6.3f}")
+        print(f"\n===== LEVEL-DECOMP (filter={fmode} htf_tf={htf_iv}m) — "
+              f"тест канон-разрыва №1: WR у значимого уровня vs микро =====")
+        print(f"близость = {getattr(cfg,'density_round_frac',0.003)*100:.2f}% цены "
+              f"(round-tier + PDH/PDL пред. дня)")
+        print(">>> ROUND-уровень (Osler/Данилов):")
+        lblk("round00", [r for r in t if r["lvl_round"] == "round00"])
+        lblk("round50", [r for r in t if r["lvl_round"] == "round50"])
+        lblk("любой round", [r for r in t if r["lvl_round"]])
+        lblk("НЕ round (микро)", [r for r in t if not r["lvl_round"]])
+        print(">>> PDH/PDL (пред. UTC-день):")
+        lblk("у PDH/PDL", [r for r in t if r["lvl_pdhpdl"]])
+        lblk("НЕ у PDH/PDL", [r for r in t if not r["lvl_pdhpdl"]])
+        print(">>> ЗНАЧИМЫЙ (round ИЛИ PDH/PDL) vs микро:")
+        sig_ = [r for r in t if r["lvl_round"] or r["lvl_pdhpdl"]]
+        lblk("значимый уровень", sig_)
+        lblk("микро-экстремум", [r for r in t if not (r["lvl_round"] or r["lvl_pdhpdl"])])
+        print(f"\nВсего сделок: {len(t)}")
         return
     if sweep:
         t = all_trades

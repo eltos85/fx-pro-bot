@@ -462,6 +462,17 @@ services:
       #   WR ≈42%). Харнес v0.18.8 мерил netR в base_risk-единицах и не видел
       #   $-сжатия win-стороны. density_break не задет (sl_mult=1.0 в коде).
       SCALP_SWEEP_FADE_SL_RISK_MULT: ${SCALP_SWEEP_FADE_SL_RISK_MULT:-1.0}
+      # v0.18.26 (B) — база sweep_fade пропускает фейд у round-уровня (round00/50).
+      # Артефакт scalp_backtest_regime --level-decomp (06-10..15, n=956): round
+      # WR 35%/avgR-0.231 ХУЖЕ микро WR 42%/-0.063 (инверсия канона; даунтренд
+      # пробивает round, Connors/Raschke). Forward-test с откатом (1 режим/5д,
+      # пользователь принял риск). ИЗОЛЯЦИЯ: только база (canon/density не задеты).
+      # Откат: false.
+      SCALP_SWEEP_FADE_SKIP_ROUND: ${SCALP_SWEEP_FADE_SKIP_ROUND:-true}
+      # v0.18.26 (шаг 2) — база sweep_fade: full reclaim 1.0 (CAP Rule 2, как canon).
+      # Артефакт --reclaim-frac sweep (06-10..15, n≈950): 0.5→1.0 netR -128→-117
+      # (слабо, в канон-сторону). ИЗОЛЯЦИЯ: только база. Откат: 0.5.
+      SCALP_SWEEP_FADE_RECLAIM_FRAC: ${SCALP_SWEEP_FADE_RECLAIM_FRAC:-1.0}
       # flow_exit профит-лок. v0.13.0: 1.0→1.5 — sweep 15д (data/scalp_sweep.txt):
       # выше порог = крупнее средний зафиксированный винер, винеры бегут дальше к
       # TP=3.5R (Философия B «let winners run», Schwager/Brooks).

@@ -216,9 +216,21 @@ market-входа (density_break) SL/TP пересчитываются от ре
   - [research] CAP Rule 2 (reclaim / CHoCH).
 - Формула `reversal_momentum(window)`: ΔCVD за window в сторону сделки.
   - [research] CAP Rule 5 / tape-shift.
-- `reclaim_frac = 0.5` — доля возврата.
+- `reclaim_frac = 0.5` (глобальный дефолт) — доля возврата.
   - [research] середина пути как баланс «подтверждён разворот / не упустить вход».
     [ограничение] конкретно 0.5 — не из отдельного A/B, инженерный центр.
+  - [v0.18.26 — база sweep_fade] свой `sweep_fade_reclaim_frac = 1.0` (full
+    reclaim, CAP Rule 2, как canon). Артефакт `--reclaim-frac` sweep (06-10..15,
+    n≈950): 0.5→1.0 netR −128→−117 (эффект слабый). Изоляция: per-detector
+    override, canon/density не задеты. Forward-test с откатом (env), малая
+    выборка/1 режим — риск принят пользователем (BUILDLOG v0.18.26).
+- `sweep_fade_skip_round = True` (v0.18.26 — ТОЛЬКО база) — пропуск фейда у
+  round-уровня (round00/50, `near_round_hier`).
+  - [наш бэктест] `--level-decomp` (06-10..15, n=956): round WR 35%/avgR −0.231
+    ХУЖЕ микро WR 42%/−0.063 — ИНВЕРСИЯ канон-ожидания (даунтренд-режим пробивает
+    round, а не фейдит; Connors/Raschke). [ограничение] 1 режим/5дней, без OOS/p —
+    sample-size.mdc нарушено осознанно, forward-test с откатом `=false`. canon
+    фейдит значимые уровни намеренно (round_gate не ставится).
 - `cvd_window_sec = 180`, `sweep_lookback_sec = 300`, `momentum_window_sec = 30`.
   - [research] окна микроструктуры; 30с разворот = «1–3 свечи после свипа».
     [ограничение] точные секунды — не из per-параметр A/B.

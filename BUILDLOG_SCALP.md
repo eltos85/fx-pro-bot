@@ -4,6 +4,60 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-16
+
+### v0.18.26 — база sweep_fade: skip-round gate + full reclaim (изоляция)
+`<hash>`
+
+**Цель пользователя**: база `sweep_fade` живёт ниже канон-WR. После диагностики
+(billog-майнинг + бэктест-харнес) применить найденные правки В БАЗУ как
+forward-test с откатом, **строгая изоляция** — не задеть `density_*` и
+`sweep_fade_canon`.
+
+**Что менялось (2 правки в базе sweep_fade)**:
+1. **B — skip-round gate**: база больше НЕ фейдит свип у round-уровня
+   (round00/round50, `near_round_hier`). Артефакт:
+   `scripts/scalp_backtest_regime.py --level-decomp` (окно 06-10..06-15, n=956,
+   альты NEAR/ZEC/TAO/WLD, прод-фильтры): фейд у round-уровня WR **35%** / avgR
+   **−0.231** ХУЖЕ микро-экстремума WR **42%** / avgR **−0.063**. Это ИНВЕРСИЯ
+   канон-ожидания (round-уровни как магниты для фейда) — в наблюдаемом
+   даунтренд-режиме round-уровни пробиваются, а не отбиваются (Connors/Raschke
+   «не фейди сильный тренд»). Гейт на ФАЗЕ ВЗВОДА: свип у round → не взводимся.
+2. **шаг 2 — full reclaim 1.0** (CAP Rule 2, как у canon): база читала
+   `reclaim_frac=0.5`, теперь свой `sweep_fade_reclaim_frac=1.0`. Артефакт:
+   `--reclaim-frac` sweep (то же окно, n≈950): 0.5→1.0 netR −128→−117 — эффект
+   СЛАБЫЙ, но в канон-сторону.
+3. **шаг 1 (фильтры не дискриминируют)** — конкретной правки НЕ даёт: ob/CVD
+   присутствуют в 100% и винов, и проигрышей; снятие ob-гейта противопоказано
+   (v0.10.0: no-ob входы gross 0.00R). Зафиксировано как «без правки».
+
+**Изоляция (per-detector, не глобально)**: `SweepReclaimDetector` получил
+параметры `round_gate` и `reclaim_frac` (per-instance override). База строит
+детекторы через `_make_detector` (round_gate + reclaim=1.0); `sweep_fade_canon`
+строит СВОИМ `ensure_symbols` БЕЗ round_gate (фейдит значимые уровни намеренно) и
+читает свой `sweep_fade_canon_reclaim_frac`; `density_*` этот детектор не
+используют. Откат без редеплоя кода: `SCALP_SWEEP_FADE_SKIP_ROUND=false`,
+`SCALP_SWEEP_FADE_RECLAIM_FRAC=0.5`.
+
+**Sample-size note (sample-size.mdc — ЯВНО НАРУШЕНО, осознанно)**: артефакт
+покрывает **1 рыночный режим (даунтренд-альты), ~5 дней**, БЕЗ OOS и без
+p-value. Это НЕ удовлетворяет порогам правила (≥100 сделок/связку × ≥2 недели ×
+разные режимы × p<0.05). Пользователь, как владелец demo-счёта, **сознательно
+принял риск** и распорядился внедрить как forward-test с откатом по env. Правка
+помечена как гипотеза под наблюдением, НЕ как валидированный edge; пересмотр —
+после набора выборки в разных режимах. Round-инверсия особенно подозрительна на
+оверфит к одному режиму.
+
+**Тесты**: +6 (round_gate блокирует взвод; round_gate=None взводится; reclaim
+override; база ставит gate+reclaim=1.0; откат skip_round=false; canon
+изолирован от base-флагов). 1312 passed.
+
+**Файлы:** `analysis/signals.py` (`SweepReclaimDetector`: `round_gate`,
+`reclaim_frac`, `_rf`, гейт во взводе), `analysis/strategies.py`
+(`SweepFadeStrategy._make_detector`/`_round_gate`; canon-изоляция),
+`config/settings.py` (`sweep_fade_skip_round`, `sweep_fade_reclaim_frac`),
+`docker-compose.yml` (env), `tests/test_scalp_bot.py`.
+
 ## 2026-06-15
 
 ### v0.18.25 — density_break (V1): close-confirmation вместо first-touch

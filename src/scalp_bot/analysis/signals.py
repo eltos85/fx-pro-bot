@@ -278,9 +278,19 @@ class SweepReclaimDetector:
     """
 
     def __init__(self, symbol: str, cfg, level_gate=None,
-                 entry_order_type: str | None = None) -> None:
+                 entry_order_type: str | None = None,
+                 round_gate=None, reclaim_frac: float | None = None) -> None:
         self.symbol = symbol
         self.cfg = cfg
+        # v0.18.26 (B): round_gate(swept)->bool. Если задан и вернул True —
+        # свип у round-уровня, НЕ взводимся (база sweep_fade фейдит у round хуже
+        # микро, scalp_backtest_regime --level-decomp). None — не гейтим (canon
+        # фейдит значимые уровни намеренно; density этот детектор не использует).
+        self.round_gate = round_gate
+        # v0.18.26 (шаг 2): пер-детекторный reclaim_frac override. None →
+        # глобальный cfg.reclaim_frac. База sweep_fade ставит 1.0 (full reclaim),
+        # canon — свой sweep_fade_canon_reclaim_frac. Изолирует значение по страте.
+        self._reclaim_frac = reclaim_frac
         # v0.18.20 (sweep_fade_canon): опциональный гейт значимого уровня.
         # callable(symbol, side, swept) -> str|None (имя уровня). Если задан —
         # ВЗВОД разрешён только когда свип took out ключевой уровень (PDH/PDL/
@@ -308,11 +318,16 @@ class SweepReclaimDetector:
     def reset(self) -> None:
         self._armed = None
 
+    def _rf(self) -> float:
+        """Эффективный reclaim_frac (per-detector override или глобальный)."""
+        return (self._reclaim_frac if self._reclaim_frac is not None
+                else self.cfg.reclaim_frac)
+
     def _target(self, a: dict) -> float:
         """Цена reclaim — куда должна вернуться цена, чтобы дать выстрел."""
         if a["side"] == "long":
-            return a["swept"] + self.cfg.reclaim_frac * a["exc"]
-        return a["swept"] - self.cfg.reclaim_frac * a["exc"]
+            return a["swept"] + self._rf() * a["exc"]
+        return a["swept"] - self._rf() * a["exc"]
 
     def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
         cfg = self.cfg
@@ -350,6 +365,10 @@ class SweepReclaimDetector:
                 prior = max(x.price for x in early)
                 exc = swept - prior
             if exc > 0:
+                # v0.18.26 (B): база sweep_fade не фейдит у round-уровня (хуже
+                # микро). canon round_gate=None → не задет; density детектор не юзает.
+                if self.round_gate is not None and self.round_gate(swept):
+                    continue
                 key_level = None
                 if self.level_gate is not None:
                     key_level = self.level_gate(self.symbol, side, swept)
@@ -367,7 +386,7 @@ class SweepReclaimDetector:
                               "таймаут %.0fс",
                               self.symbol, _SIDE_RU.get(side, side), swept, key_note,
                               absorb, self._target(self._armed),
-                              cfg.reclaim_frac * 100, cfg.arm_timeout_sec)
+                              self._rf() * 100, cfg.arm_timeout_sec)
                     self._last_wait_log = now
             break
         if not self._armed:

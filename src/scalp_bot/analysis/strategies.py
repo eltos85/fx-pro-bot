@@ -91,6 +91,14 @@ class SweepFadeStrategy:
          отскоков — противоречит MR «дождаться отскока»). Полагаемся на биржевой
          SL. Если включён — режет ход в МИНУС ≥ scratch_min_adverse_r×R при флипе
          ленты и «созревании» сделки (≥ scratch_min_age_sec).
+
+    v0.18.26 — ВХОД (изолировано от canon/density, per-detector override):
+      (a) skip-round гейт — не фейдим свип у round-уровня (round00/50): бэктест
+          --level-decomp 06-10..15 n=956 показал round WR 35% ХУЖЕ микро 42%
+          (инверсия канона в даунтренд-режиме; sweep_fade_skip_round);
+      (b) full reclaim 1.0 (CAP Rule 2, как canon; sweep_fade_reclaim_frac).
+    Forward-test с откатом по env, малая выборка/1 режим (sample-size.mdc
+    нарушено осознанно по решению пользователя — см. BUILDLOG_SCALP v0.18.26).
     """
 
     name = "sweep_fade"
@@ -103,8 +111,23 @@ class SweepFadeStrategy:
     def __init__(self, cfg, symbols: list[str]) -> None:
         self.cfg = cfg
         self._det: dict[str, SweepReclaimDetector] = {
-            s: SweepReclaimDetector(s, cfg) for s in symbols
+            s: self._make_detector(s) for s in symbols
         }
+
+    def _round_gate(self, swept: float) -> bool:
+        """v0.18.26 (B): свип у round-уровня (round00/50). База НЕ фейдит такие —
+        scalp_backtest_regime --level-decomp: round хуже микро (WR 35% vs 42%)."""
+        return near_round_hier(
+            swept, getattr(self.cfg, "density_round_frac", 0.003)) is not None
+
+    def _make_detector(self, s: str) -> SweepReclaimDetector:
+        # Изоляция: round_gate и reclaim override применяются ТОЛЬКО к базе
+        # sweep_fade (canon строит детекторы своим ensure_symbols без них).
+        rg = self._round_gate if getattr(
+            self.cfg, "sweep_fade_skip_round", False) else None
+        return SweepReclaimDetector(
+            s, self.cfg, round_gate=rg,
+            reclaim_frac=getattr(self.cfg, "sweep_fade_reclaim_frac", None))
 
     def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
         det = self._det.get(snap.symbol)
@@ -126,7 +149,8 @@ class SweepFadeStrategy:
 
     def ensure_symbols(self, symbols: list[str]) -> None:
         for s in symbols:
-            self._det.setdefault(s, SweepReclaimDetector(s, self.cfg))
+            if s not in self._det:
+                self._det[s] = self._make_detector(s)
 
     def should_exit(self, tr, snap: SymbolSnapshot, now: float
                     ) -> tuple[str, float] | None:
@@ -248,6 +272,11 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
             if s not in self.symbol_scope:
                 continue
             if s not in self._det:
+                # ИЗОЛЯЦИЯ от base (v0.18.26): canon строит детекторы САМ, БЕЗ
+                # round_gate (фейдит значимые уровни намеренно) и без reclaim
+                # override — reclaim берётся из своего _CfgOverlay
+                # (sweep_fade_canon_reclaim_frac). Правки base sweep_fade его не
+                # касаются.
                 self._det[s] = SweepReclaimDetector(s, self.cfg,
                                                     level_gate=self._level_gate,
                                                     entry_order_type=otype)

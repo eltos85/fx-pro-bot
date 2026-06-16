@@ -254,6 +254,21 @@ class ScalpSettings(BaseSettings):
     require_ob_imbalance: bool = Field(default=True)
     # Доля возврата цены от свип-экстремума к свипнутому уровню (0..1).
     reclaim_frac: float = Field(default=0.5)
+    # v0.18.26 (шаг 2) — база sweep_fade: full reclaim 1.0 (CAP Rule 2, как canon).
+    # Артефакт: scripts/scalp_backtest_regime.py --reclaim-frac sweep (06-10..15,
+    # NEAR/ZEC/TAO/WLD, прод-фильтры, n≈950): 0.5→1.0 netR -128→-117 (эффект
+    # слабый, в канон-сторону). ИЗОЛЯЦИЯ: только база (canon — свой
+    # sweep_fade_canon_reclaim_frac; density reclaim не использует). Откат: =0.5.
+    sweep_fade_reclaim_frac: float = Field(default=1.0)
+    # v0.18.26 (B) — база sweep_fade пропускает фейд у round-уровня (round00/50).
+    # Артефакт: scripts/scalp_backtest_regime.py --level-decomp (06-10..15, n=956,
+    # 4 альта, прод-фильтры): round WR 35%/avgR -0.231 ХУЖЕ микро WR 42%/-0.063 —
+    # инверсия канон-ожидания (в даунтренд-режиме round-уровни пробивают, а не
+    # фейдятся; Connors/Raschke «не фейди сильный тренд»). Forward-test с откатом,
+    # пользователь принял риск малой выборки (1 режим/5д, BUILDLOG v0.18.26).
+    # ИЗОЛЯЦИЯ: только база (canon фейдит значимые уровни намеренно → round_gate
+    # не ставится; density этот детектор не использует). Откат: =false.
+    sweep_fade_skip_round: bool = Field(default=True)
     # Двухфазный детектор: сколько секунд держим «взвод» после свипа, ожидая
     # reclaim+разворот. Канон: разворот печатается в 1-3 свечах после свипа.
     # v0.14.0: 120→60с — bar-close убран (см. confirm_bar_sec), а 120с поднимали
