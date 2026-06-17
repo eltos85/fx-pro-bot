@@ -6,6 +6,46 @@
 
 ## 2026-06-17
 
+### fix(pnl): универсальный REST true-up закрытых сделок против closedPnl
+`6c1ccc6`
+
+**Симптом**: локальная БД систематически дрейфует от биржевого `closedPnl`
+(недосчёт комиссий на единицы центов на сделку). `reconcile()` досверял по REST
+**только** `pnl_provisional=1`; WS-финализированные сделки (`finalize_pnl` снимал
+provisional, но не верифицировал) больше никогда не пересверялись → дрейф копился.
+Та же дыра, что вычистили в `flowzone_bot` 2026-06-17 — переносим фикс (общая
+логика учёта).
+
+**Причина**: WS-нет (`Σ execPnl − Σ execFee`) теряет часть комиссии при гонке
+филлов выхода / рестарте, а единственным источником правды по офдоку
+(<https://bybit-exchange.github.io/docs/v5/position/close-pnl>) является
+`closedPnl` (уже net = gross − openFee − closeFee). Сверки против него для
+WS-complete сделок не было.
+
+**Решение (канон: REST closedPnl — источник правды для ВСЕХ закрытий)**:
+- `state/db.py`: колонка `pnl_verified` + идемпотентная миграция; `verify_pnl()`
+  (ставит net, снимает provisional, помечает verified); `unverified_closed_live_
+  since()` — все закрытые live, ещё не сверённые (технич. закрытия `entry_*`/
+  `restart_flat` исключены — у них нет closedPnl).
+- `trading/client.py`: `closed_pnl_position()` — суммирует `closedPnl` по ВСЕЙ
+  позиции (частичные закрытия/мульти-филл), фильтр `execType in (Trade,BustTrade)`
+  (funding/Settle не входят в матч по объёму), `entry_tol=1e-5` разделяет соседние
+  reload'ы; матч принимается только если `Σ closedSize ≈ qty`.
+- `trading/executor.py`: в `reconcile()` второй цикл — универсальный true-up по
+  `unverified_closed_live_since` (точечный `closed_pnl_detail` → фолбэк на
+  `closed_pnl_position`), под тем же rate-budget. `_rest_finalize` теперь пишет
+  через `verify_pnl` (REST авторитетен → сразу verified). `_rest_verify` с
+  `_VERIFY_MAX_FAILS=3`: неоднозначные (несколько сделок того же символа+entry)
+  после 3 неудач принимаются как WS-net и верифицируются — не жжём бюджет.
+
+**Изоляция/правила**: меняется только учёт P&L (сверка с биржей), торговая логика
+sweep_fade/density_* НЕ тронута. Источник правды — офдок Bybit close-pnl
+(`api-docs.mdc`), не подгонка (`no-data-fitting.mdc`).
+
+**Тесты**: +6 (`tests/test_scalp_bot.py`): partial-sum, skip Settle, verify_pnl,
+unverified-селектор (paper/tech/verified исключены), true-up WS-дрейфа,
+give-up после max-fails. Всего 222 scalp / 1340 общий — зелёные.
+
 ### feat(universe): переключатель метода отбора монет «rvol/momentum» (A/B)
 `<pending commit>`
 

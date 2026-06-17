@@ -744,6 +744,10 @@ class _FakeClosedPnlClient:
         self.calls += 1
         return self.by_qty.get(qty)
 
+    def closed_pnl_position(self, symbol, *, qty, since_ms, until_ms,
+                            entry_price=None):
+        return None  # partial-sum фолбэк: по умолчанию не матчит
+
 
 def _mk_provisional(db, *, qty, ts_close, pnl=-3.67, sym="NEARUSDT",
                     strat="density_bounce"):
@@ -947,6 +951,126 @@ def test_closed_pnl_detail_no_entry_match_returns_none():
     pages = [[_rec(70.0, 10.0, 1.0, 71.0, 100)]]
     cl = _mk_client(pages)
     assert cl.closed_pnl_detail("SOLUSDT", qty=10.0, entry_price=66.0) is None
+
+
+# ─── partial-sum closed_pnl_position + универсальный true-up (port flowzone) ─
+def _rec_x(entry, size, pnl, exit_px, exec_type="Trade"):
+    r = _rec(entry, size, pnl, exit_px)
+    r["execType"] = exec_type
+    return r
+
+
+def test_closed_pnl_position_sums_partials():
+    """Частичные закрытия одной позиции (один avgEntryPrice, разные closedSize)
+    суммируются в общий net, если Σ closedSize ≈ qty."""
+    pages = [[
+        _rec_x(2.0, 0.6, 3.0, 2.1),
+        _rec_x(2.0, 0.4, 2.0, 2.2),
+    ]]
+    cl = _mk_client(pages)
+    d = cl.closed_pnl_position("AAAUSDT", qty=1.0, entry_price=2.0,
+                               since_ms=0, until_ms=10**13)
+    assert d is not None and d["pnl"] == pytest.approx(5.0) and d["count"] == 2
+
+
+def test_closed_pnl_position_skips_funding_settle_records():
+    """Settle/funding-записи (execType!=Trade) НЕ входят в матч по объёму и
+    не искажают сумму (офдок close-pnl: execType)."""
+    pages = [[
+        _rec_x(2.0, 0.6, 3.0, 2.1),
+        _rec_x(2.0, 0.4, 2.0, 2.2),
+        _rec_x(2.0, 0.5, 99.0, 2.0, exec_type="Settle"),   # funding — игнор
+    ]]
+    cl = _mk_client(pages)
+    d = cl.closed_pnl_position("AAAUSDT", qty=1.0, entry_price=2.0,
+                               since_ms=0, until_ms=10**13)
+    assert d is not None and d["pnl"] == pytest.approx(5.0)  # без +99
+
+
+def test_verify_pnl_marks_verified_and_clears_provisional(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ZECUSDT", side="long", qty=0.19, entry=518.14,
+                         sl=517.0, tp=519.0, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1000.0)
+    db.mark_closed(tid, exit_price=519.0, pnl_usd=0.07, fees_usd=0.0,
+                   close_reason="tp_hit", ts_close=1090.0, provisional=True)
+    db.verify_pnl(tid, pnl_usd=0.0398, exit_price=518.92)
+    assert db.provisional_closed_since(0.0) == []
+    assert db.unverified_closed_live_since(0.0) == []
+    row = db._conn.execute(
+        "SELECT pnl_usd, pnl_verified, pnl_provisional FROM trades WHERE id=?",
+        (tid,)).fetchone()
+    assert row["pnl_verified"] == 1 and row["pnl_provisional"] == 0
+    assert row["pnl_usd"] == pytest.approx(0.0398)
+    db.close()
+
+
+def test_unverified_selector_excludes_paper_tech_and_verified(tmp_path):
+    db = ScalpDB(str(tmp_path))
+
+    def _closed(mode, reason, *, qty=1.0):
+        tid = db.insert_open(symbol="XUSDT", side="long", qty=qty, entry=1.0,
+                             sl=0.9, tp=1.1, score=3, reasons="x", mode=mode,
+                             strategy="sweep_fade", ts_open=900.0)
+        db.mark_closed(tid, exit_price=1.05, pnl_usd=1.0, fees_usd=0.0,
+                       close_reason=reason, ts_close=1000.0)
+        return tid
+
+    live = _closed("live", "tp_hit")
+    _closed("paper", "tp_hit")                 # paper — нет closedPnl
+    _closed("live", "entry_timeout")           # технич. закрытие
+    verified = _closed("live", "sl_hit")
+    db.verify_pnl(verified, pnl_usd=-2.0)
+    ids = {t.id for t in db.unverified_closed_live_since(0.0)}
+    assert ids == {live}
+    db.close()
+
+
+def test_reconcile_trues_up_ws_drift_against_closedpnl(tmp_path):
+    """WS-финализированная live-сделка (provisional=0, verified=0) с дрейфом
+    комиссии досверяется до биржевого closedPnl и помечается verified."""
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="JTOUSDT", side="long", qty=10.0, entry=2.0,
+                         sl=1.9, tp=2.2, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1900.0)
+    # WS-нет завысил (недосчёт комиссии): записан 0.50, биржа даёт 0.42
+    db.mark_closed(tid, exit_price=2.05, pnl_usd=0.50, fees_usd=0.0,
+                   close_reason="tp_hit", ts_close=2000.0, provisional=False)
+    client = _FakeClosedPnlClient({10.0: {"pnl": 0.42, "exit": 2.05}})
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()
+    row = db._conn.execute(
+        "SELECT pnl_usd, pnl_verified FROM trades WHERE id=?", (tid,)).fetchone()
+    assert row["pnl_verified"] == 1
+    assert row["pnl_usd"] == pytest.approx(0.42)
+    assert db.unverified_closed_live_since(0.0) == []
+    db.close()
+
+
+def test_rest_verify_gives_up_after_max_fails(tmp_path):
+    """Неоднозначная сделка (REST не матчится) после _VERIFY_MAX_FAILS попыток
+    принимается как есть (WS-net) и помечается verified — не жжём бюджет."""
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="TAOUSDT", side="long", qty=1.0, entry=300.0,
+                         sl=290.0, tp=320.0, score=4, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1900.0)
+    db.mark_closed(tid, exit_price=310.0, pnl_usd=7.5, fees_usd=0.0,
+                   close_reason="tp_hit", ts_close=2000.0, provisional=False)
+    client = _FakeClosedPnlClient({})          # REST никогда не матчит
+    cfg = SimpleNamespace(reconcile_rest_grace_sec=0.0,
+                          reconcile_rest_retry_sec=300.0)
+    ex = Executor(db=db, settings=cfg, client=client, now=lambda: 5000.0)
+    ex.reconcile()                              # fail 1
+    ex._now = lambda: 5400.0
+    ex.reconcile()                              # fail 2
+    ex._now = lambda: 5800.0
+    ex.reconcile()                              # fail 3 → сдаёмся, verified
+    row = db._conn.execute(
+        "SELECT pnl_usd, pnl_verified FROM trades WHERE id=?", (tid,)).fetchone()
+    assert row["pnl_verified"] == 1
+    assert row["pnl_usd"] == pytest.approx(7.5)  # оставлен WS-net
+    db.close()
 
 
 # ─── fee-aware дискреционный выход sweep_fade (через should_exit) ───────────

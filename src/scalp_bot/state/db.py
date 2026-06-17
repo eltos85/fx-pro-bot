@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl_usd REAL,
     fees_usd REAL,
     close_reason TEXT,
-    pnl_provisional INTEGER NOT NULL DEFAULT 0
+    pnl_provisional INTEGER NOT NULL DEFAULT 0,
+    pnl_verified INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ts_close ON trades(ts_close);
@@ -62,6 +63,7 @@ class TradeRow:
     fees_usd: float | None
     close_reason: str | None
     pnl_provisional: int = 0
+    pnl_verified: int = 0
 
 
 @dataclass
@@ -102,6 +104,11 @@ class ScalpDB:
             # PnL предварительный (оценка), требует сверки с биржей
             self._conn.execute(
                 "ALTER TABLE trades ADD COLUMN pnl_provisional INTEGER "
+                "NOT NULL DEFAULT 0")
+        if "pnl_verified" not in cols:
+            # PnL сверён с биржевым closedPnl (авторитетный true-up)
+            self._conn.execute(
+                "ALTER TABLE trades ADD COLUMN pnl_verified INTEGER "
                 "NOT NULL DEFAULT 0")
         # индекс создаём после миграции (на старой БД колонки ещё не было)
         self._conn.execute(
@@ -193,11 +200,48 @@ class ScalpDB:
             f"UPDATE trades SET {', '.join(sets)} WHERE id=?", tuple(args))
         self._conn.commit()
 
+    def verify_pnl(self, trade_id: int, *, pnl_usd: float,
+                   exit_price: float | None = None,
+                   close_reason: str | None = None) -> None:
+        """Авторитетный true-up против биржевого closedPnl: ставит net, снимает
+        provisional И помечает verified (больше не пересверяем — rate-limit).
+        closedPnl уже net (офдок close-pnl: gross − openFee − closeFee)."""
+        sets = ["pnl_usd=?", "pnl_provisional=0", "pnl_verified=1"]
+        args: list = [pnl_usd]
+        if exit_price is not None:
+            sets.insert(1, "exit=?")
+            args.append(exit_price)
+        if close_reason is not None:
+            sets.append("close_reason=?")
+            args.append(close_reason)
+        args.append(trade_id)
+        self._conn.execute(
+            f"UPDATE trades SET {', '.join(sets)} WHERE id=?", tuple(args))
+        self._conn.commit()
+
+    # закрытия без биржевого closedPnl (нечего сверять)
+    _NON_TRADE_REASONS = ("restart_flat", "entry_Cancelled", "entry_Rejected",
+                          "entry_Deactivated", "entry_timeout")
+
     def provisional_closed_since(self, ts: float) -> list[TradeRow]:
         """Закрытые сделки с оценочным PnL (нужна сверка с биржей), ts_close>=ts."""
         rows = self._conn.execute(
             "SELECT * FROM trades WHERE status='closed' AND pnl_provisional=1 "
             "AND ts_close>=? ORDER BY id", (ts,)
+        ).fetchall()
+        return [self._row(r) for r in rows]
+
+    def unverified_closed_live_since(self, ts: float) -> list[TradeRow]:
+        """Закрытые LIVE-сделки, ещё не сверённые с биржевым closedPnl
+        (pnl_verified=0). Канон: REST closedPnl — источник правды для ВСЕХ
+        закрытий, не только provisional (иначе WS-дрейф комиссий не чинится).
+        Технические закрытия (entry_* / restart_flat) исключаем — нет closedPnl."""
+        placeholders = ",".join("?" for _ in self._NON_TRADE_REASONS)
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE status='closed' AND mode='live' "
+            "AND pnl_verified=0 AND ts_close>=? "
+            f"AND (close_reason IS NULL OR close_reason NOT IN ({placeholders})) "
+            "ORDER BY id", (ts, *self._NON_TRADE_REASONS)
         ).fetchall()
         return [self._row(r) for r in rows]
 
@@ -298,4 +342,5 @@ class ScalpDB:
             fees_usd=r["fees_usd"], close_reason=r["close_reason"],
             pnl_provisional=r["pnl_provisional"] if "pnl_provisional"
             in r.keys() else 0,
+            pnl_verified=r["pnl_verified"] if "pnl_verified" in r.keys() else 0,
         )

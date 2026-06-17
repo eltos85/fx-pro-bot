@@ -429,6 +429,78 @@ class ScalpBybitClient:
             "created": _as_float(chosen.get("createdTime")),
         }
 
+    def closed_pnl_position(self, symbol: str, *, qty: float,
+                            since_ms: int, until_ms: int,
+                            entry_price: float | None = None,
+                            entry_tol: float = 1e-5,
+                            qty_tol_frac: float = 0.05,
+                            max_pages: int = 10) -> dict | None:
+        """Суммарный net по ВСЕЙ позиции (частичные закрытия + остаток).
+
+        Bybit пишет отдельную ``closedPnl``-запись на каждое частичное закрытие
+        позиции: один ``avgEntryPrice``, разные ``closedSize``. Точечный матч
+        ``closed_pnl_detail`` по ``closedSize ≈ qty`` такие сделки не ловит (ни
+        одна запись не равна полному объёму) → сделка зависает provisional с
+        завышенной оценкой. Здесь собираем ВСЕ записи символа в окне, фильтруем
+        по ``avgEntryPrice`` (допуск ``entry_tol`` — разделяет соседние reload'ы)
+        и суммируем ``closedPnl`` ТОЛЬКО если ``Σ closedSize ≈ qty`` (вся позиция
+        собрана). Иначе ``None`` (не выдумываем — `no-data-fitting`).
+
+        Funding/settlement (``execType`` Settle/SessionSettlePnL/MovePosition) в
+        матч по объёму НЕ входят. ``closedPnl`` уже net (комиссии + funding).
+        Источник: https://bybit-exchange.github.io/docs/v5/position/close-pnl"""
+        if qty <= 0:
+            return None
+        base: dict = {"category": self._category, "symbol": symbol, "limit": 100,
+                      "startTime": int(since_ms), "endTime": int(until_ms)}
+        min_start = base["endTime"] - (7 * 24 * 3600 - 3600) * 1000
+        base["startTime"] = max(base["startTime"], min_start)
+        items: list = []
+        cursor = None
+        for _ in range(max(1, max_pages)):
+            params = dict(base)
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                resp = self._session.get_closed_pnl(**params)
+            except Exception:
+                log.exception("get_closed_pnl(position) %s failed", symbol)
+                return None
+            lst = resp.get("result", {}).get("list", []) or []
+            items += lst
+            cursor = resp.get("result", {}).get("nextPageCursor")
+            if not cursor or not lst:
+                break
+        sum_pnl = 0.0
+        sum_qty = 0.0
+        sum_exit_val = 0.0
+        n = 0
+        for it in items:
+            if str(it.get("execType", "Trade")) not in ("Trade", "BustTrade"):
+                continue
+            cs = _as_float(it.get("closedSize"))
+            if cs is None or cs <= 0:
+                continue
+            if entry_price and entry_price > 0:
+                ep = _as_float(it.get("avgEntryPrice"))
+                if ep is None or abs(ep - entry_price) / entry_price > entry_tol:
+                    continue
+            pnl = _as_float(it.get("closedPnl"))
+            if pnl is None:
+                continue
+            ex = _as_float(it.get("avgExitPrice")) or 0.0
+            sum_pnl += pnl
+            sum_qty += cs
+            sum_exit_val += ex * cs
+            n += 1
+        if n == 0 or abs(sum_qty - qty) > max(qty * qty_tol_frac, 1e-9):
+            return None
+        return {
+            "pnl": sum_pnl,
+            "exit": (sum_exit_val / sum_qty) if sum_qty > 0 else None,
+            "count": n,
+        }
+
     def closed_pnl(self, symbol: str, *, order_id: str | None = None,
                    qty: float | None = None, since_ms: int | None = None,
                    near_ms: int | None = None, until_ms: int | None = None,
