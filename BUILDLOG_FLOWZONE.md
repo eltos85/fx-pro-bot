@@ -46,7 +46,10 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
   (несколько сделок того же символа+entry, не делимы по closedSize) после 3
   неудачных REST-попыток принимаем как WS-net (verified) — не жжём бюджет.
 - `closed_pnl_position`: фильтр `execType ∈ {Trade,BustTrade}` (funding/Settle не
-  искажают матч по объёму).
+  искажают матч по объёму) + допуск по entry ужесточён `1e-3 → 1e-5` (как в
+  `closed_pnl_detail`): быстрые reload'ы по символу заходят на близких ценах
+  (напр. JTO 0.7689 vs 0.7684 = 0.065%) — широкий допуск слипал их записи, Σ
+  closedSize ≠ qty → REST сдавался. avgEntryPrice совпадает с нашим entry до 0%.
 - REST-пути (`_rest_finalize`/`_rest_verify`) зовут `verify_pnl` (авторитетно) —
   одного запроса достаточно, без повторной сверки.
 

@@ -377,7 +377,7 @@ class FlowzoneBybitClient:
     def closed_pnl_position(self, symbol: str, *, qty: float,
                             since_ms: int, until_ms: int,
                             entry_price: float | None = None,
-                            entry_tol: float = 1e-3,
+                            entry_tol: float = 1e-5,
                             qty_tol_frac: float = 0.05,
                             max_pages: int = 10) -> dict | None:
         """Суммарный net по ВСЕЙ позиции (частичные закрытия + остаток).
