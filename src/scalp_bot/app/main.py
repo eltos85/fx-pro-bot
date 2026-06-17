@@ -26,6 +26,7 @@ from scalp_bot.data.funding import FundingSchedule
 from scalp_bot.data.htf import HtfTrend
 from scalp_bot.data.levels import KeyLevels
 from scalp_bot.data.market_stream import BybitMarketStream
+from scalp_bot.data.momentum_universe import select_momentum_universe
 from scalp_bot.data.universe import (apply_pins, filter_tickers,
                                      hourly_range_rvol, pad_universe,
                                      rank_rows)
@@ -74,7 +75,8 @@ def run() -> None:
             picked = _select_universe(client, cfg)
             if picked:
                 symbols = picked
-                log.info("авто-вселенная (топ-%d): %s", cfg.universe_top_n,
+                log.info("авто-вселенная (метод=%s, топ-%d): %s",
+                         cfg.universe_method, cfg.universe_top_n,
                          ",".join(symbols))
             else:
                 log.warning("авто-вселенная пуста — fallback на SCALP_SYMBOLS=%s",
@@ -615,10 +617,22 @@ def _fresh_rvol(client, cfg, rows: list[dict]) -> dict[str, float]:
 
 
 def _select_universe(client, cfg) -> list[str]:
-    """Монеты под стратегию: 24h hard-фильтр (ликвидность/спред/анти-памп) →
-    свежий intraday RVOL-гейт+ранжирование (что «в игре сейчас», v0.14.0) →
-    floor «минимум N монет» (P-4, v0.18.19) → пины. См. data/universe.py."""
+    """Монеты под стратегию. Метод задаётся cfg.universe_method:
+    - "momentum" — ТОП по 24h росту/падению + порог оборота (как в ролике
+      SerCrypto, data/momentum_universe.py). Без анти-памп кэпа.
+    - "rvol" (default) — 24h hard-фильтр (ликвидность/спред/анти-памп) → свежий
+      intraday RVOL-гейт+ранжирование (что «в игре сейчас», v0.14.0) → floor
+      «минимум N монет» (P-4, v0.18.19) → пины. См. data/universe.py."""
     tickers = client.get_tickers()
+    if cfg.universe_method.strip().lower() == "momentum":
+        picked = select_momentum_universe(
+            tickers,
+            top_n=cfg.universe_top_n,
+            min_turnover=cfg.momentum_min_turnover_usd,
+            min_abs_change_pct=cfg.momentum_min_change_pct,
+            max_spread_bps=cfg.momentum_max_spread_bps,
+            direction=cfg.momentum_direction.strip().lower())
+        return apply_pins(picked, cfg.universe_pin_list, cfg.universe_top_n)
     rows = filter_tickers(
         tickers,
         min_turnover=cfg.universe_min_turnover_usd,

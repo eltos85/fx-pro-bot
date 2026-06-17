@@ -2215,6 +2215,111 @@ def test_universe_min_symbols_default():
     assert ScalpSettings().universe_min_symbols == 3
 
 
+# ─── momentum-селектор вселенной (метод «как в ролике», momentum_universe.py) ─
+
+def _mticker(sym, last, pcnt, turnover, bid=None, ask=None, pre=""):
+    """Тикер для momentum-отбора: price24hPcnt = 24h изменение (доля)."""
+    return {"symbol": sym, "lastPrice": str(last), "price24hPcnt": str(pcnt),
+            "turnover24h": str(turnover),
+            "bid1Price": "" if bid is None else str(bid),
+            "ask1Price": "" if ask is None else str(ask),
+            "curPreListingPhase": pre}
+
+
+def test_momentum_ranks_by_abs_change_and_filters_turnover():
+    from scalp_bot.data.momentum_universe import select_momentum_universe
+    tickers = [
+        _mticker("BANANAUSDT", 1.0, 0.44, 85e6),    # +44%, оборот ок
+        _mticker("DUMPUSDT", 1.0, -0.60, 120e6),    # −60% (топ по модулю)
+        _mticker("MIDUSDT", 1.0, 0.20, 90e6),       # +20%
+        _mticker("DUSTUSDT", 1.0, 1.20, 1e6),       # +120% но оборот 1M < floor
+        _mticker("ETHUSDC", 3000, 0.30, 1e9),       # не USDT-перп
+    ]
+    picked = select_momentum_universe(
+        tickers, top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0)
+    # порядок по |24h change| убыв.: DUMP(60) > BANANA(44) > MID(20); DUST/ETHUSDC отсеяны
+    assert picked == ["DUMPUSDT", "BANANAUSDT", "MIDUSDT"]
+
+
+def test_momentum_direction_up_only():
+    from scalp_bot.data.momentum_universe import select_momentum_universe
+    tickers = [
+        _mticker("UPUSDT", 1.0, 0.30, 100e6),
+        _mticker("DOWNUSDT", 1.0, -0.50, 100e6),
+    ]
+    picked = select_momentum_universe(
+        tickers, top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0, direction="up")
+    assert picked == ["UPUSDT"]
+
+
+def test_momentum_direction_down_only():
+    from scalp_bot.data.momentum_universe import select_momentum_universe
+    tickers = [
+        _mticker("UPUSDT", 1.0, 0.30, 100e6),
+        _mticker("DOWNUSDT", 1.0, -0.50, 100e6),
+    ]
+    picked = select_momentum_universe(
+        tickers, top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0, direction="down")
+    assert picked == ["DOWNUSDT"]
+
+
+def test_momentum_min_change_pct_floor():
+    from scalp_bot.data.momentum_universe import select_momentum_universe
+    tickers = [
+        _mticker("HOTUSDT", 1.0, 0.15, 100e6),   # +15% проходит
+        _mticker("FLATUSDT", 1.0, 0.03, 100e6),  # +3% < floor 10%
+    ]
+    picked = select_momentum_universe(
+        tickers, top_n=5, min_turnover=50e6, min_abs_change_pct=10.0,
+        max_spread_bps=0.0)
+    assert picked == ["HOTUSDT"]
+
+
+def test_momentum_top_n_cap_and_no_anti_pump_cap():
+    from scalp_bot.data.momentum_universe import select_momentum_universe
+    # параболический +90% НЕ режется (в отличие от RVOL range-cap 20%)
+    tickers = [_mticker(f"M{i}USDT", 1.0, 0.90 - i * 0.05, 100e6)
+               for i in range(6)]
+    picked = select_momentum_universe(
+        tickers, top_n=3, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0)
+    assert picked == ["M0USDT", "M1USDT", "M2USDT"]
+
+
+def test_momentum_spread_cap_optional():
+    from scalp_bot.data.momentum_universe import select_momentum_universe
+    wide = _mticker("WIDEUSDT", 100, 0.30, 100e6, bid=99.0, ask=100.0)
+    # spread cap выкл (0) → проходит (как в ролике)
+    assert select_momentum_universe(
+        [wide], top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0) == ["WIDEUSDT"]
+    # spread cap вкл → режется
+    assert select_momentum_universe(
+        [wide], top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=5.0) == []
+
+
+def test_momentum_skips_pre_listing_and_bad_rows():
+    from scalp_bot.data.momentum_universe import select_momentum_universe
+    pre = _mticker("NEWUSDT", 10, 0.30, 100e6, pre="Phase1")
+    bad = {"symbol": "BADUSDT", "lastPrice": "0", "price24hPcnt": "0.3",
+           "turnover24h": "100000000"}
+    assert select_momentum_universe(
+        [pre, bad], top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0) == []
+
+
+def test_universe_method_default_is_rvol():
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = ScalpSettings()
+    assert cfg.universe_method == "rvol"
+    assert cfg.momentum_min_turnover_usd == 50_000_000.0
+    assert cfg.momentum_direction == "both"
+
+
 # ─── HTF-bias (трендовый фильтр старшего ТФ, v0.9.3) ───────────────────────
 
 from scalp_bot.data.htf import HtfTrend, compute_ema  # noqa: E402

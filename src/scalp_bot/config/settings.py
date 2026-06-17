@@ -85,6 +85,31 @@ class ScalpSettings(BaseSettings):
     # к математике fee-guard и live-границе (BUILDLOG_SCALP 2026-05-30), а НЕ
     # подгоняются под прошлый P&L (no-data-fitting.mdc).
     auto_universe_enabled: bool = Field(default=True)
+    # Метод авто-отбора монет (переключатель «старый/новый»):
+    #   "rvol"     — штатный селектор data/universe.py: 24h ликвидность/спред +
+    #                анти-памп range-cap + intraday RVOL-ранжирование (default).
+    #   "momentum" — метод «как в ролике» (data/momentum_universe.py): ТОП по
+    #                росту/падению за 24h + порог оборота, БЕЗ анти-памп кэпа
+    #                (ролик SerCrypto https://youtu.be/gCgYS-CsGWc).
+    # Меняет ТОЛЬКО список символов, подаваемый стратегиям; сама торговая логика
+    # sweep_fade не трогается → чистый A/B отбора монет. Решение «что лучше» —
+    # по форвард-выборке n≥100 (sample-size.mdc), не по первым сделкам.
+    # env SCALP_UNIVERSE_METHOD=momentum.
+    universe_method: str = Field(default="rvol")
+    # ─── momentum-метод (используется при universe_method="momentum") ────────
+    # Порог суточного оборота. Ролик: «от 50 млн уже можно рассматривать, в
+    # идеале 100+ млн». Дефолт 50M = нижняя граница ролика (мягче RVOL-floor
+    # 100M намеренно — momentum берёт «то что стреляет», даже на меньшем обороте).
+    momentum_min_turnover_usd: float = Field(default=50_000_000.0)
+    # Минимальный |24h change| (%) для попадания в кандидаты. 0 = без порога,
+    # только ранжируем по модулю движения (берём топ мувёров каков бы рынок ни был).
+    momentum_min_change_pct: float = Field(default=0.0)
+    # Спред-cap (bps). В ролике спред-фильтра нет → дефолт 0 (выкл). Включить,
+    # если на тонких мувёрах спред съедает цель (sweep_fade fee-guard).
+    momentum_max_spread_bps: float = Field(default=0.0)
+    # Сторона отбора: "both" — гейнеры+лузеры (по модулю движения; sweep_fade сам
+    # выберет сторону по HTF-гейту), "up" — только рост, "down" — только падение.
+    momentum_direction: str = Field(default="both")
     # «Качество, не количество»: берём ВСЕ монеты, прошедшие hard-фильтр; это —
     # лишь safety-кап на число WS-подписок (≤0 = без лимита). Подошло 5 — берём
     # 5, подошло 2 — берём 2 (запрос пользователя 2026-05-31).

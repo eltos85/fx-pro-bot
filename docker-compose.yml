@@ -322,6 +322,21 @@ services:
       # пересматривает раз в 5 мин (ротация — no-op если состав не сменился).
       # Пороги привязаны к fee-guard и live-границе (BUILDLOG_SCALP) — не подгонка.
       SCALP_AUTO_UNIVERSE_ENABLED: ${SCALP_AUTO_UNIVERSE_ENABLED:-true}
+      # Метод отбора монет: "rvol" (штатный) | "momentum" (ТОП по 24h росту/
+      # падению + оборот, как в ролике SerCrypto https://youtu.be/gCgYS-CsGWc).
+      # 2026-06-17: ПЕРЕКЛЮЧЕНО на momentum для форвард-A/B отбора монет на
+      # активной sweep_fade (по запросу пользователя). Применяется к авто-
+      # вселенной (sweep_fade/density_bounce/density_break); sweep_fade_canon
+      # на своих мейджорах (symbol_scope) — НЕ затронут. Сама торговая логика не
+      # меняется. Откат: SCALP_UNIVERSE_METHOD=rvol.
+      SCALP_UNIVERSE_METHOD: ${SCALP_UNIVERSE_METHOD:-momentum}
+      # momentum-параметры (действуют при METHOD=momentum). Ролик: оборот «от
+      # 50 млн можно, 100+ идеал»; анти-памп range-cap НЕТ (берём «то что стреляет»).
+      SCALP_MOMENTUM_MIN_TURNOVER_USD: ${SCALP_MOMENTUM_MIN_TURNOVER_USD:-50000000}
+      SCALP_MOMENTUM_MIN_CHANGE_PCT: ${SCALP_MOMENTUM_MIN_CHANGE_PCT:-0}
+      SCALP_MOMENTUM_MAX_SPREAD_BPS: ${SCALP_MOMENTUM_MAX_SPREAD_BPS:-0}
+      # both = гейнеры+лузеры (sweep_fade выберет сторону по HTF-гейту).
+      SCALP_MOMENTUM_DIRECTION: ${SCALP_MOMENTUM_DIRECTION:-both}
       # safety-кап на число WS-подписок; берём ВСЕ прошедшие фильтр (≤0=без лимита)
       SCALP_UNIVERSE_TOP_N: ${SCALP_UNIVERSE_TOP_N:-15}
       SCALP_UNIVERSE_REFRESH_SEC: ${SCALP_UNIVERSE_REFRESH_SEC:-300}

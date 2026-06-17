@@ -4,6 +4,50 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-17
+
+### feat(universe): переключатель метода отбора монет «rvol/momentum» (A/B)
+`<pending commit>`
+
+**Цель пользователя**: `flowzone_bot` работает, но при создании был открыт
+вопрос «как подбирать монету». Разобрали ролик SerCrypto «Bybit стратегия
+трейдинга на 2026» (<https://youtu.be/gCgYS-CsGWc>): его метод отбора — ТОП по
+росту/падению за 24h + порог суточного оборота («от 50 млн можно, 100+ идеал»),
+без анти-памп кэпа. Решение: реализовать этот метод как ОТДЕЛЬНЫЙ модуль и
+протестировать его подбор монет на живой активной стратегии `sweep_fade` через
+переключатель, **не меняя саму стратегию** (чистый A/B оси отбора).
+
+**Что добавлено**:
+- `src/scalp_bot/data/momentum_universe.py` — новый селектор: `score_momentum_
+  ticker` / `filter_momentum` / `rank_momentum` / `select_momentum_universe`.
+  Ранжирует по МОДУЛЮ `price24hPcnt` (топ мувёров — гейнеры+лузеры), hard-фильтр
+  только по `turnover24h`; опциональные `min_abs_change_pct`, `max_spread_bps`,
+  `direction` (both/up/down). Анти-памп range-cap НЕТ (в отличие от RVOL-
+  селектора) — в ролике берут именно сильно сдвинувшиеся монеты.
+- `config/settings.py`: `universe_method` ("rvol" default | "momentum"),
+  `momentum_min_turnover_usd` (50M, нижняя граница ролика),
+  `momentum_min_change_pct` (0), `momentum_max_spread_bps` (0=выкл, как в ролике),
+  `momentum_direction` ("both"). env `SCALP_UNIVERSE_METHOD=momentum` и пр.
+- `app/main.py`: `_select_universe` ветвится по методу; стартовый лог пишет
+  `метод=...`. RVOL-путь (фильтр+RVOL+pad+пины) не тронут.
+
+**Изоляция / правила**: торговая логика sweep_fade НЕ изменена — меняется только
+список символов, подаваемый стратегиям → чистый A/B (`no-data-fitting.mdc`).
+Дефолт остаётся `rvol`, переключение через env без правки кода. Это РЕАЛИЗАЦИЯ
+метода из ролика, а не тюнинг порогов под P&L; вывод «momentum лучше/хуже» —
+только по форвард-выборке n≥100 (`sample-size.mdc`). Поле `price24hPcnt` из Bybit
+get_tickers (офдок <https://bybit-exchange.github.io/docs/v5/market/tickers>,
+`api-docs.mdc`).
+
+**Тесты**: +9 (`tests/test_scalp_bot.py`): ранжирование по |24h|, фильтр
+оборота, direction up/down, min-change floor, top_n cap + отсутствие анти-памп
+кэпа, опциональный spread cap, skip pre-listing/bad, дефолт `universe_method`.
+Всего 216, все зелёные.
+
+**Файлы:** `src/scalp_bot/data/momentum_universe.py`,
+`src/scalp_bot/config/settings.py`, `src/scalp_bot/app/main.py`,
+`tests/test_scalp_bot.py`
+
 ## 2026-06-16
 
 ### v0.18.26 — база sweep_fade: skip-round gate + full reclaim (изоляция)
