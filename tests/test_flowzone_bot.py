@@ -577,3 +577,50 @@ def test_rest_finalize_partial_falls_back_to_position_sum():
     assert ok
     assert db.finalized[0] == 7
     assert db.finalized[1] == 8.0   # суммарный net, не завышенная оценка
+
+
+# ─── momentum-селектор вселенной (метод «как в ролике», momentum_universe.py) ─
+
+def _fz_mticker(sym, last, pcnt, turnover, bid=None, ask=None, pre=""):
+    return {"symbol": sym, "lastPrice": str(last), "price24hPcnt": str(pcnt),
+            "turnover24h": str(turnover),
+            "bid1Price": "" if bid is None else str(bid),
+            "ask1Price": "" if ask is None else str(ask),
+            "curPreListingPhase": pre}
+
+
+def test_flowzone_momentum_ranks_by_abs_change_and_filters_turnover():
+    from flowzone_bot.data.momentum_universe import select_momentum_universe
+    tickers = [
+        _fz_mticker("BANANAUSDT", 1.0, 0.44, 85e6),
+        _fz_mticker("DUMPUSDT", 1.0, -0.60, 120e6),
+        _fz_mticker("MIDUSDT", 1.0, 0.20, 90e6),
+        _fz_mticker("DUSTUSDT", 1.0, 1.20, 1e6),    # оборот < floor
+        _fz_mticker("ETHUSDC", 3000, 0.30, 1e9),    # не USDT-перп
+    ]
+    picked = select_momentum_universe(
+        tickers, top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0)
+    assert picked == ["DUMPUSDT", "BANANAUSDT", "MIDUSDT"]
+
+
+def test_flowzone_momentum_direction_and_no_anti_pump_cap():
+    from flowzone_bot.data.momentum_universe import select_momentum_universe
+    tickers = [
+        _fz_mticker("UPUSDT", 1.0, 0.90, 100e6),    # +90% НЕ режется (нет range-cap)
+        _fz_mticker("DOWNUSDT", 1.0, -0.50, 100e6),
+    ]
+    assert select_momentum_universe(
+        tickers, top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0, direction="up") == ["UPUSDT"]
+    assert select_momentum_universe(
+        tickers, top_n=5, min_turnover=50e6, min_abs_change_pct=0.0,
+        max_spread_bps=0.0, direction="down") == ["DOWNUSDT"]
+
+
+def test_flowzone_universe_method_default_is_rvol():
+    from flowzone_bot.config.settings import FlowzoneSettings
+    cfg = FlowzoneSettings()
+    assert cfg.universe_method == "rvol"
+    assert cfg.momentum_min_turnover_usd == 50_000_000.0
+    assert cfg.momentum_direction == "both"

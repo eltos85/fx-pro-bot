@@ -11,6 +11,42 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-06-17
 
+### feat(universe): переключатель отбора монет rvol/momentum + тестово на momentum
+`<pending commit>`
+
+**Цель пользователя**: протестировать на flowzone метод подбора монет «как в
+ролике» SerCrypto (<https://youtu.be/gCgYS-CsGWc>): ТОП по 24h росту/падению +
+порог оборота, без анти-памп кэпа. Аналогично переключателю в scalp_bot
+(sweep_fade). Сама стратегия flowzone (footprint/absorption/zone) НЕ меняется —
+меняется только список символов (чистый A/B оси отбора).
+
+**Что добавлено**:
+- `src/flowzone_bot/data/momentum_universe.py` — момент-селектор (параллельная,
+  изолированная от scalp_bot копия): ранг по МОДУЛЮ `price24hPcnt` (топ мувёров),
+  hard-фильтр по `turnover24h`; опции `min_abs_change_pct`/`max_spread_bps`/
+  `direction`. Анти-памп range-cap НЕТ (в отличие от RVOL-селектора).
+- `config/settings.py`: `universe_method` ("rvol" default | "momentum"),
+  `momentum_min_turnover_usd` (50M), `momentum_min_change_pct` (0),
+  `momentum_max_spread_bps` (0=выкл), `momentum_direction` ("both").
+- `app/main.py`: `_select_universe` ветвится по методу; лог пишет `метод=...`.
+  RVOL-путь не тронут.
+- `docker-compose.yml`: дефолт flowzone-bot переключён на `momentum`.
+
+**Канон-оговорка (STRATEGY §6.1)**: footprint/absorption читаемы на ЛИКВИДНОСТИ
+(канон на NQ). Momentum тянет «то что стреляет», в т.ч. тонкие памп-альты без
+анти-памп кэпа — на них order-flow шумит. Осознанный риск форвард-теста; вывод
+«лучше/хуже RVOL» — только n≥100 (`sample-size.mdc`), не по первым сделкам
+(`no-data-fitting.mdc`). Поле `price24hPcnt` из Bybit get_tickers
+(<https://bybit-exchange.github.io/docs/v5/market/tickers>, `api-docs.mdc`).
+
+**Тесты**: +3 (`tests/test_flowzone_bot.py`): ранг по |24h| + фильтр оборота,
+direction up/down + отсутствие анти-памп кэпа, дефолт `universe_method`. Всего
+41, все зелёные.
+
+**Файлы:** `src/flowzone_bot/data/momentum_universe.py`,
+`src/flowzone_bot/config/settings.py`, `src/flowzone_bot/app/main.py`,
+`docker-compose.yml`, `tests/test_flowzone_bot.py`
+
 ### fix(executor): сведение P&L на частичных закрытиях (DB == Bybit closedPnl)
 `<pending commit>`
 

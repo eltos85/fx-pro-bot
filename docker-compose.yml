@@ -570,6 +570,15 @@ services:
       FLOWZONE_TRADING_ENABLED: ${FLOWZONE_TRADING_ENABLED:-false}
       # Авто-селектор вселенной (переиспользуем методику scalp; §4 TASKSPEC).
       FLOWZONE_AUTO_UNIVERSE_ENABLED: ${FLOWZONE_AUTO_UNIVERSE_ENABLED:-true}
+      # Метод отбора монет: "rvol" (штатный) | "momentum" (ТОП по 24h росту/
+      # падению + оборот, как в ролике SerCrypto https://youtu.be/gCgYS-CsGWc).
+      # 2026-06-17: тестово ПЕРЕКЛЮЧЕНО на momentum (по запросу пользователя).
+      # Стратегия flowzone не меняется. Откат: FLOWZONE_UNIVERSE_METHOD=rvol.
+      FLOWZONE_UNIVERSE_METHOD: ${FLOWZONE_UNIVERSE_METHOD:-momentum}
+      FLOWZONE_MOMENTUM_MIN_TURNOVER_USD: ${FLOWZONE_MOMENTUM_MIN_TURNOVER_USD:-50000000}
+      FLOWZONE_MOMENTUM_MIN_CHANGE_PCT: ${FLOWZONE_MOMENTUM_MIN_CHANGE_PCT:-0}
+      FLOWZONE_MOMENTUM_MAX_SPREAD_BPS: ${FLOWZONE_MOMENTUM_MAX_SPREAD_BPS:-0}
+      FLOWZONE_MOMENTUM_DIRECTION: ${FLOWZONE_MOMENTUM_DIRECTION:-both}
       FLOWZONE_UNIVERSE_TOP_N: ${FLOWZONE_UNIVERSE_TOP_N:-15}
       FLOWZONE_UNIVERSE_REFRESH_SEC: ${FLOWZONE_UNIVERSE_REFRESH_SEC:-300}
       FLOWZONE_UNIVERSE_MIN_TURNOVER_USD: ${FLOWZONE_UNIVERSE_MIN_TURNOVER_USD:-100000000}

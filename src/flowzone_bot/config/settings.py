@@ -38,6 +38,18 @@ class FlowzoneSettings(BaseSettings):
     # отбирает по 24h turnover/range/spread + intraday RVOL. Калибровка
     # ликвидности (§4 TASKSPEC) — по факту форвард-теста, через env, не кодом.
     auto_universe_enabled: bool = Field(default=True)
+    # Метод авто-отбора монет: "rvol" (штатный selector data/universe.py) |
+    # "momentum" (ТОП по 24h росту/падению + оборот, БЕЗ анти-памп кэпа — метод
+    # из ролика SerCrypto https://youtu.be/gCgYS-CsGWc, data/momentum_universe.py).
+    # 2026-06-17: тестово ПЕРЕКЛЮЧЕНО на momentum (форвард-A/B отбора монет).
+    # Меняет ТОЛЬКО список символов; стратегия flowzone не трогается. Откат:
+    # FLOWZONE_UNIVERSE_METHOD=rvol. Решение «что лучше» — n≥100 (sample-size.mdc).
+    universe_method: str = Field(default="rvol")
+    # momentum-параметры (действуют при universe_method="momentum").
+    momentum_min_turnover_usd: float = Field(default=50_000_000.0)
+    momentum_min_change_pct: float = Field(default=0.0)
+    momentum_max_spread_bps: float = Field(default=0.0)
+    momentum_direction: str = Field(default="both")
     universe_top_n: int = Field(default=15)
     universe_refresh_sec: float = Field(default=300.0)
     universe_min_turnover_usd: float = Field(default=100_000_000.0)
