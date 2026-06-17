@@ -113,6 +113,7 @@ class Executor:
         self._fills: dict[int, dict] = {}
         self._close_pending: dict[int, dict] = {}
         self._rest_recon_attempts: dict[int, float] = {}
+        self._verify_fail: dict[int, int] = {}  # tid → счётчик неудачных REST-сверок
         self._partial: dict[int, dict] = {}   # частичная фиксация: tid → состояние
         self._last_win: dict[str, float] = {}  # символ → ts последнего профита (reload)
 
@@ -342,6 +343,10 @@ class Executor:
         mark = "≈" if approx else ""
         self._notify(f"{emoji} close #{tid} {symbol} pnl={mark}${pnl:.2f} ({label})")
 
+    # макс. попыток REST-сверки до сдачи (неоднозначные сделки того же символа+
+    # entry не разделимы по closedSize → не зацикливаем бюджет; оставляем WS-net).
+    _VERIFY_MAX_FAILS = 3
+
     def reconcile(self) -> None:
         now = self._now()
         ws_horizon = now - 600.0
@@ -350,6 +355,7 @@ class Executor:
         rest_grace = 60.0
         rest_retry = 300.0
         rest_budget = 3
+        # 1) provisional: быстрый WS-финал (полные филлы) или REST-фолбэк
         for tr in self._db.provisional_closed_since(now - rest_horizon):
             ts_close = getattr(tr, "ts_close", None) or now
             if ts_close >= ws_horizon:
@@ -357,6 +363,8 @@ class Executor:
                 if complete:
                     reason = reconciled_bracket_reason(
                         getattr(tr, "close_reason", None), net)
+                    # WS-net снимает provisional, но НЕ verified — REST-true-up
+                    # (цикл 2) досверит против closedPnl (ловит дрейф комиссий).
                     self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px,
                                           close_reason=reason)
                     pend = self._close_pending.pop(tr.id, None)
@@ -379,10 +387,28 @@ class Executor:
                 self._send_close_msg(tr.id, pend["symbol"], tr.pnl_usd or 0.0,
                                      pend["label"], approx=True)
                 self._close_pending.pop(tr.id, None)
+        # 2) универсальный true-up: ВСЕ закрытые live, ещё не сверённые с биржей
+        # (verified=0), включая WS-финализированные. Канон: REST closedPnl —
+        # единственный источник правды (офдок close-pnl: closedPnl уже net).
+        for tr in self._db.unverified_closed_live_since(now - rest_horizon):
+            if tr.pnl_provisional:
+                continue  # provisional обрабатывает цикл выше
+            if rest_budget <= 0:
+                break
+            ts_close = getattr(tr, "ts_close", None) or now
+            age = now - ts_close
+            if (self._client is None or age < rest_grace
+                    or now - self._rest_recon_attempts.get(tr.id, 0.0) < rest_retry):
+                continue
+            self._rest_recon_attempts[tr.id] = now
+            rest_budget -= 1
+            self._rest_verify(tr, ts_close)
 
-    def _rest_finalize(self, tr, ts_close: float) -> bool:
+    def _fetch_closed_pnl(self, tr, ts_close: float) -> dict | None:
+        """Биржевой closedPnl сделки: точечный матч (одиночное закрытие) →
+        фолбэк на сумму по позиции (партиалы, §5.3). None если не сматчилось."""
         if self._client is None:
-            return False
+            return None
         window = 180.0
         ts_open = getattr(tr, "ts_open", None) or ts_close
         near = int(ts_close * 1000)
@@ -393,27 +419,59 @@ class Executor:
             d = self._client.closed_pnl_detail(
                 tr.symbol, qty=tr.qty, entry_price=entry,
                 near_ms=near, since_ms=since_ms, until_ms=until_ms)
-            # фолбэк для частичных закрытий: точечный матч по closedSize≈qty не
-            # ловит партиалы (несколько записей по позиции) → суммируем все
-            # записи позиции в окне (Σ closedSize ≈ qty). См. STRATEGY §5.3.
             if (not d or d.get("pnl") is None) and tr.qty > 0:
                 d = self._client.closed_pnl_position(
                     tr.symbol, qty=tr.qty, entry_price=entry,
                     since_ms=since_ms, until_ms=until_ms)
         except Exception:
             log.exception("reconcile REST #%d %s failed", tr.id, tr.symbol)
-            return False
+            return None
+        return d
+
+    def _rest_finalize(self, tr, ts_close: float) -> bool:
+        """REST-сведение provisional-сделки: closedPnl авторитетен → verify."""
+        d = self._fetch_closed_pnl(tr, ts_close)
         if not d or d.get("pnl") is None:
             return False
         reason = reconciled_bracket_reason(getattr(tr, "close_reason", None),
                                            d["pnl"])
-        self._db.finalize_pnl(tr.id, pnl_usd=d["pnl"], exit_price=d.get("exit"),
-                              close_reason=reason)
+        self._db.verify_pnl(tr.id, pnl_usd=d["pnl"], exit_price=d.get("exit"),
+                            close_reason=reason)
         pend = self._close_pending.pop(tr.id, None)
         if pend is not None:
             self._send_close_msg(tr.id, pend["symbol"], d["pnl"], pend["label"])
         self._rest_recon_attempts.pop(tr.id, None)
+        self._verify_fail.pop(tr.id, None)
         self._forget_trade(tr.id)
+        return True
+
+    def _rest_verify(self, tr, ts_close: float) -> bool:
+        """True-up уже финализированной (WS) сделки против биржевого closedPnl:
+        чинит дрейф недосчитанных комиссий и помечает verified. Неоднозначные
+        (несколько сделок того же символа+entry) после _VERIFY_MAX_FAILS попыток
+        принимаем как есть (WS-net), чтобы не жечь бюджет вечными ретраями."""
+        d = self._fetch_closed_pnl(tr, ts_close)
+        if not d or d.get("pnl") is None:
+            fails = self._verify_fail.get(tr.id, 0) + 1
+            self._verify_fail[tr.id] = fails
+            if fails >= self._VERIFY_MAX_FAILS:
+                self._db.verify_pnl(tr.id, pnl_usd=tr.pnl_usd or 0.0)
+                self._verify_fail.pop(tr.id, None)
+                self._rest_recon_attempts.pop(tr.id, None)
+                log.info("true-up #%d %s: REST не сматчился ×%d — оставляю WS-net "
+                         "$%.4f (verified)", tr.id, tr.symbol, fails,
+                         tr.pnl_usd or 0.0)
+            return False
+        net = d["pnl"]
+        old = tr.pnl_usd or 0.0
+        reason = reconciled_bracket_reason(getattr(tr, "close_reason", None), net)
+        self._db.verify_pnl(tr.id, pnl_usd=net, exit_price=d.get("exit"),
+                            close_reason=reason)
+        self._rest_recon_attempts.pop(tr.id, None)
+        self._verify_fail.pop(tr.id, None)
+        if abs(net - old) >= 0.01:
+            log.info("true-up #%d %s: WS-net $%.4f → closedPnl $%.4f (Δ$%.4f)",
+                     tr.id, tr.symbol, old, net, net - old)
         return True
 
     def _maybe_partial(self, tr, price: float | None) -> None:

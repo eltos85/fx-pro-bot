@@ -11,6 +11,56 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-06-17
 
+### fix(stats): REST closedPnl — источник правды для ВСЕХ закрытых live (true-up)
+`<pending commit>`
+
+Симптом: после фикса партиалов оставался систематический дрейф ~+$1.29/сутки
+(синхронный срез 08:35 UTC: БД +$11.77 vs Bybit closedPnl +$10.48), сконцентрир.
+в мульти-филл сделках (JTO +0.80, XLM +0.59). Прошлые «расхождения» +$19/+$4.45
+оказались артефактами НЕсинхронных снимков (БД и Bybit читались с лагом ~12 мин,
+бот успевал наторговать) — пропавших строк/багов там не было.
+
+Причина (исследование офдоки + BUILDLOG_SCALP v0.18.11/12/13): `reconcile`
+досверял против биржи ТОЛЬКО `pnl_provisional=1`. Сделки, закрытые WS как
+«complete» (qty≥98%), брали net из WS-леджера (`Σ execPnl − Σ execFee`) и больше
+НЕ сверялись. В гонке «позиция закрыта (get_position) vs WS-филл» терялся fill с
+комиссией → net занижал комиссию → дрейф копился и не чинился.
+
+Канон (офдок Bybit):
+- [closed-pnl](https://bybit-exchange.github.io/docs/v5/position/close-pnl):
+  `closedPnl` уже net (gross − `openFee` − `closeFee`, оба поля в ответе); funding
+  идёт отдельными записями (`execType` = `Settle`/`SessionSettlePnL`).
+- [execution/list](https://bybit-exchange.github.io/docs/v5/order/execution):
+  realized PnL ОТСУТСТВУЕТ (только `execFee`) → REST execution не источник pnl.
+→ REST `closedPnl` — единственный авторитетный источник; WS первичен лишь для
+быстрого provisional (низкая задержка для killswitch/уведомлений).
+
+Решение: REST closedPnl досверяет ВСЕ закрытые live-сделки, не только provisional.
+- БД: колонка `pnl_verified` (+аддитивная миграция ALTER для существующих БД),
+  `verify_pnl()` (ставит net + provisional=0 + verified=1), селектор
+  `unverified_closed_live_since()` (исключает paper и технические entry_*/
+  restart_flat закрытия — у них нет closedPnl).
+- `reconcile`: цикл 2 — универсальный true-up unverified закрытых live против
+  closedPnl (общий бюджет 3/цикл + throttle 300с). WS-net снимает provisional,
+  но НЕ verified → true-up досверяет и ловит дрейф комиссий. Неоднозначные
+  (несколько сделок того же символа+entry, не делимы по closedSize) после 3
+  неудачных REST-попыток принимаем как WS-net (verified) — не жжём бюджет.
+- `closed_pnl_position`: фильтр `execType ∈ {Trade,BustTrade}` (funding/Settle не
+  искажают матч по объёму).
+- REST-пути (`_rest_finalize`/`_rest_verify`) зовут `verify_pnl` (авторитетно) —
+  одного запроса достаточно, без повторной сверки.
+
+Существующие 86 закрытых сделок самобэкфилятся reconcile-ом после деплоя (по
+бюджету за несколько минут). Чисто учётный слой: стратегии/сайзинг/входы/выходы
+НЕ затронуты; killswitch и reload-тайминг станут точнее. Тесты: +8 (true-up
+дрейфа, give-up после N, селектор, verify_pnl, execType-фильтр), всего 46
+flowzone / 1334 общих — зелёные.
+
+**Файлы:** `src/flowzone_bot/state/db.py` (колонка+миграция+verify_pnl+селектор),
+`src/flowzone_bot/trading/executor.py` (reconcile цикл 2 + `_fetch_closed_pnl` +
+`_rest_verify`), `src/flowzone_bot/trading/client.py` (execType-фильтр),
+`tests/test_flowzone_bot.py`
+
 ### feat(universe): переключатель отбора монет rvol/momentum + тестово на momentum
 `<pending commit>`
 

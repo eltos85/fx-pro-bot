@@ -422,6 +422,11 @@ class FlowzoneBybitClient:
         sum_exit_val = 0.0
         n = 0
         for it in items:
+            # только торговые закрытия: funding/settlement (Settle,
+            # SessionSettlePnL, MovePosition) не входят в realized сделки и не
+            # должны искажать матч по объёму. Офдок closed-pnl: поле execType.
+            if str(it.get("execType", "Trade")) not in ("Trade", "BustTrade"):
+                continue
             cs = _as_float(it.get("closedSize"))
             if cs is None or cs <= 0:
                 continue

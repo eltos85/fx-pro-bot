@@ -564,9 +564,9 @@ def test_rest_finalize_partial_falls_back_to_position_sum():
 
     class _FakeDB:
         def __init__(self):
-            self.finalized = None
-        def finalize_pnl(self, tid, *, pnl_usd, exit_price, close_reason):
-            self.finalized = (tid, pnl_usd, exit_price, close_reason)
+            self.verified = None
+        def verify_pnl(self, tid, *, pnl_usd, exit_price, close_reason):
+            self.verified = (tid, pnl_usd, exit_price, close_reason)
 
     db = _FakeDB()
     ex = Executor(db=db, settings=_Cfg(), client=_FakeClient(), now=lambda: 5000.0)
@@ -575,8 +575,123 @@ def test_rest_finalize_partial_falls_back_to_position_sum():
                         "close_reason": "tp_sl", "pnl_usd": 99.0})()
     ok = ex._rest_finalize(tr, 2000.0)
     assert ok
-    assert db.finalized[0] == 7
-    assert db.finalized[1] == 8.0   # суммарный net, не завышенная оценка
+    assert db.verified[0] == 7
+    assert db.verified[1] == 8.0    # суммарный net, не завышенная оценка
+    # REST авторитетен → сразу verified (не нужен второй запрос на true-up)
+
+
+def test_closed_pnl_position_skips_funding_settle_records():
+    # запись funding (execType=Settle) не должна попадать в матч по объёму.
+    cl = _client_no_http()
+    cl._session = _FakeSession([
+        {"closedPnl": "3.0", "closedSize": "5", "avgEntryPrice": "100.0",
+         "avgExitPrice": "98.0", "createdTime": "1000", "execType": "Trade"},
+        {"closedPnl": "5.0", "closedSize": "5", "avgEntryPrice": "100.0",
+         "avgExitPrice": "96.0", "createdTime": "2000", "execType": "Trade"},
+        {"closedPnl": "0.7", "closedSize": "10", "avgEntryPrice": "100.0",
+         "avgExitPrice": "0", "createdTime": "1500", "execType": "Settle"},
+    ])
+    d = cl.closed_pnl_position("ZECUSDT", qty=10.0, entry_price=100.0,
+                              since_ms=0, until_ms=10_000)
+    assert d is not None
+    assert d["pnl"] == 8.0          # funding-запись исключена из суммы и объёма
+
+
+# ─── канон: REST closedPnl = источник правды для ВСЕХ закрытых live ───────
+
+def _fz_db(tmp_path):
+    from flowzone_bot.state.db import FlowzoneDB
+    return FlowzoneDB(str(tmp_path))
+
+
+def test_verify_pnl_marks_verified_and_clears_provisional(tmp_path):
+    db = _fz_db(tmp_path)
+    tid = db.insert_open(symbol="XLMUSDT", side="long", qty=100.0, entry=0.22,
+                         sl=0.21, tp=0.24, score=3, reasons="x", mode="live")
+    db.mark_closed(tid, exit_price=0.225, pnl_usd=-10.60, fees_usd=0.0,
+                   close_reason="tp_hit", provisional=False)
+    rows = db.unverified_closed_live_since(0.0)
+    assert [r.id for r in rows] == [tid]      # ещё не сверена
+    db.verify_pnl(tid, pnl_usd=-11.10, exit_price=0.2249, close_reason="sl_hit")
+    assert db.unverified_closed_live_since(0.0) == []   # сверена — ушла из выборки
+    assert db.total_realized_pnl() == -11.10
+    db.close()
+
+
+def test_unverified_selector_excludes_paper_tech_and_verified(tmp_path):
+    db = _fz_db(tmp_path)
+    # live торговое закрытие — должно попасть
+    t1 = db.insert_open(symbol="A", side="long", qty=1, entry=1, sl=1, tp=2,
+                        score=1, reasons="", mode="live")
+    db.mark_closed(t1, exit_price=1.1, pnl_usd=0.5, fees_usd=0,
+                   close_reason="tp_hit")
+    # технические закрытия (нет closedPnl) — НЕ должны попасть
+    t2 = db.insert_open(symbol="B", side="long", qty=1, entry=1, sl=1, tp=2,
+                        score=1, reasons="", mode="live")
+    db.mark_closed(t2, exit_price=1.0, pnl_usd=0.0, fees_usd=0,
+                   close_reason="entry_timeout")
+    # paper — не live, не должно попасть
+    t3 = db.insert_open(symbol="C", side="long", qty=1, entry=1, sl=1, tp=2,
+                        score=1, reasons="", mode="paper")
+    db.mark_closed(t3, exit_price=1.1, pnl_usd=0.5, fees_usd=0,
+                   close_reason="tp")
+    ids = {r.id for r in db.unverified_closed_live_since(0.0)}
+    assert ids == {t1}
+    db.close()
+
+
+def test_reconcile_trues_up_ws_drift_against_closedpnl(tmp_path):
+    """Сделка закрыта через WS (non-provisional) с заниженной комиссией —
+    универсальный true-up чинит её до биржевого closedPnl и метит verified."""
+    from flowzone_bot.trading.executor import Executor
+
+    class _FakeClient:
+        def closed_pnl_detail(self, *a, **k):
+            return {"pnl": -11.10, "exit": 0.2249, "order_id": "x",
+                    "created": 0.0}
+        def closed_pnl_position(self, *a, **k):
+            return None
+
+    db = _fz_db(tmp_path)
+    tid = db.insert_open(symbol="XLMUSDT", side="long", qty=100.0, entry=0.22,
+                         sl=0.21, tp=0.24, score=3, reasons="x", mode="live",
+                         ts_open=9000.0)
+    # WS закрыл с дрейфом: −10.60 вместо реальных −11.10
+    db.mark_closed(tid, exit_price=0.225, pnl_usd=-10.60, fees_usd=0.0,
+                   close_reason="tp_hit", ts_close=9000.0, provisional=False)
+    ex = Executor(db=db, settings=_Cfg(), client=_FakeClient(), now=lambda: 10000.0)
+    ex.reconcile()
+    assert db.total_realized_pnl() == -11.10           # дрейф исправлен
+    assert db.unverified_closed_live_since(0.0) == []  # помечена verified
+    db.close()
+
+
+def test_rest_verify_gives_up_after_max_fails(tmp_path):
+    """Неоднозначную сделку (REST не матчится) после N попыток принимаем как
+    есть (WS-net) и метим verified — не зацикливаем бюджет."""
+    from flowzone_bot.trading.executor import Executor
+
+    class _FakeClient:
+        def closed_pnl_detail(self, *a, **k):
+            return None
+        def closed_pnl_position(self, *a, **k):
+            return None
+
+    db = _fz_db(tmp_path)
+    tid = db.insert_open(symbol="JTOUSDT", side="short", qty=500.0, entry=0.77,
+                         sl=0.78, tp=0.76, score=3, reasons="x", mode="live",
+                         ts_open=9000.0)
+    db.mark_closed(tid, exit_price=0.769, pnl_usd=0.5, fees_usd=0.0,
+                   close_reason="tp_hit", ts_close=9000.0, provisional=False)
+    ex = Executor(db=db, settings=_Cfg(), client=_FakeClient(), now=lambda: 10000.0)
+    tr = db.unverified_closed_live_since(0.0)[0]
+    assert ex._rest_verify(tr, 9000.0) is False    # попытка 1
+    assert ex._rest_verify(tr, 9000.0) is False    # попытка 2
+    assert db.unverified_closed_live_since(0.0)    # ещё не сдались
+    assert ex._rest_verify(tr, 9000.0) is False    # попытка 3 → сдаёмся
+    assert db.unverified_closed_live_since(0.0) == []   # verified (WS-net 0.5)
+    assert db.total_realized_pnl() == 0.5
+    db.close()
 
 
 # ─── momentum-селектор вселенной (метод «как в ролике», momentum_universe.py) ─
