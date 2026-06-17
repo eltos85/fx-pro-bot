@@ -308,7 +308,14 @@ class Executor:
         net, exit_px, complete = self._realized_from_fills(tr)
         if complete:
             return (net, exit_px if exit_px is not None else exit_price, True)
-        pnl = taker_pnl(tr.side, tr.entry, exit_price, tr.qty)
+        # incomplete: оценка provisional. Учитываем уже зафиксированную долю
+        # (частичная фиксация на цели 1) из реальных филлов, а taker-оценку
+        # считаем ТОЛЬКО на остаток позиции — иначе на партиалах полный объём
+        # по финальной (более выгодной) цене завышает net.
+        acc = self._fills.get(tr.id) or {}
+        realized = acc.get("pnl", 0.0) - acc.get("fee", 0.0)
+        remaining = max(tr.qty - acc.get("close_qty", 0.0), 0.0)
+        pnl = realized + taker_pnl(tr.side, tr.entry, exit_price, remaining)
         return (pnl, exit_price, False)
 
     def _forget_trade(self, tid: int) -> None:
@@ -379,11 +386,20 @@ class Executor:
         window = 180.0
         ts_open = getattr(tr, "ts_open", None) or ts_close
         near = int(ts_close * 1000)
+        since_ms = int((ts_open - 60.0) * 1000)
+        until_ms = int((ts_close + window) * 1000)
+        entry = getattr(tr, "entry", None)
         try:
             d = self._client.closed_pnl_detail(
-                tr.symbol, qty=tr.qty, entry_price=getattr(tr, "entry", None),
-                near_ms=near, since_ms=int((ts_open - 60.0) * 1000),
-                until_ms=int((ts_close + window) * 1000))
+                tr.symbol, qty=tr.qty, entry_price=entry,
+                near_ms=near, since_ms=since_ms, until_ms=until_ms)
+            # фолбэк для частичных закрытий: точечный матч по closedSize≈qty не
+            # ловит партиалы (несколько записей по позиции) → суммируем все
+            # записи позиции в окне (Σ closedSize ≈ qty). См. STRATEGY §5.3.
+            if (not d or d.get("pnl") is None) and tr.qty > 0:
+                d = self._client.closed_pnl_position(
+                    tr.symbol, qty=tr.qty, entry_price=entry,
+                    since_ms=since_ms, until_ms=until_ms)
         except Exception:
             log.exception("reconcile REST #%d %s failed", tr.id, tr.symbol)
             return False

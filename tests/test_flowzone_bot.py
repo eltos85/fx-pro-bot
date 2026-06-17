@@ -467,3 +467,113 @@ def test_in_session_overnight_window():
     assert in_session(ts_at(23), wins)
     assert in_session(ts_at(1), wins)
     assert not in_session(ts_at(12), wins)
+
+
+# ─── сведение P&L на партиалах (DB == Bybit closedPnl) ───────────────────
+
+def _client_no_http():
+    """FlowzoneBybitClient без HTTP-сессии (для юнит-тестов REST-разбора)."""
+    from flowzone_bot.trading.client import FlowzoneBybitClient
+    cl = object.__new__(FlowzoneBybitClient)
+    cl._category = "linear"
+    cl._instr = {}
+    return cl
+
+
+class _FakeSession:
+    def __init__(self, records):
+        self._records = records
+    def get_closed_pnl(self, **kwargs):
+        return {"result": {"list": list(self._records), "nextPageCursor": ""}}
+
+
+def test_closed_pnl_position_sums_partials():
+    # позиция qty=10: партиал 5 (+3.0) на цели 1 + остаток 5 (+5.0) на цели 2.
+    # Точечный матч по closedSize≈10 не нашёл бы ни одной записи → нужна сумма.
+    cl = _client_no_http()
+    cl._session = _FakeSession([
+        {"closedPnl": "3.0", "closedSize": "5", "avgEntryPrice": "100.0",
+         "avgExitPrice": "98.0", "createdTime": "1000"},
+        {"closedPnl": "5.0", "closedSize": "5", "avgEntryPrice": "100.0",
+         "avgExitPrice": "96.0", "createdTime": "2000"},
+    ])
+    d = cl.closed_pnl_position("ZECUSDT", qty=10.0, entry_price=100.0,
+                              since_ms=0, until_ms=10_000)
+    assert d is not None
+    assert d["pnl"] == 8.0          # Σ closedPnl (уже net)
+    assert d["count"] == 2
+    assert d["exit"] == 97.0        # qty-взвешенный выход
+
+
+def test_closed_pnl_position_incomplete_returns_none():
+    # собрана лишь половина позиции (Σ closedSize=5 != qty=10) → None (не врём).
+    cl = _client_no_http()
+    cl._session = _FakeSession([
+        {"closedPnl": "3.0", "closedSize": "5", "avgEntryPrice": "100.0",
+         "avgExitPrice": "98.0", "createdTime": "1000"},
+    ])
+    d = cl.closed_pnl_position("ZECUSDT", qty=10.0, entry_price=100.0,
+                              since_ms=0, until_ms=10_000)
+    assert d is None
+
+
+def test_closed_pnl_position_filters_by_entry_price():
+    # запись чужой позиции (другой avgEntryPrice) в окне не должна попасть в сумму.
+    cl = _client_no_http()
+    cl._session = _FakeSession([
+        {"closedPnl": "3.0", "closedSize": "5", "avgEntryPrice": "100.0",
+         "avgExitPrice": "98.0", "createdTime": "1000"},
+        {"closedPnl": "5.0", "closedSize": "5", "avgEntryPrice": "100.0",
+         "avgExitPrice": "96.0", "createdTime": "2000"},
+        {"closedPnl": "99.0", "closedSize": "5", "avgEntryPrice": "200.0",
+         "avgExitPrice": "190.0", "createdTime": "1500"},
+    ])
+    d = cl.closed_pnl_position("ZECUSDT", qty=10.0, entry_price=100.0,
+                              since_ms=0, until_ms=10_000)
+    assert d is not None
+    assert d["pnl"] == 8.0          # запись с entry=200 отфильтрована
+
+
+def test_realized_or_estimate_partial_uses_remaining_qty():
+    from flowzone_bot.trading.executor import Executor, taker_pnl
+    ex = Executor(db=None, settings=_Cfg(), client=None, now=lambda: 1000.0)
+    tr = type("T", (), {"id": 7, "symbol": "ZECUSDT", "side": "long",
+                        "entry": 100.0, "qty": 10.0})()
+    # партиал 5 уже реально зафиксирован на цели 1 (+10.0 net), остаток 5 едет
+    # на цель 2 (104, более выгодную). close_val — по цене партиала (102).
+    ex._fills[7] = {"fee": 0.0, "pnl": 10.0, "close_val": 5 * 102.0,
+                    "close_qty": 5.0, "open_val": 0.0, "open_qty": 0.0}
+    pnl, exitp, is_real = ex._realized_or_estimate(tr, 104.0)
+    assert not is_real
+    # оценка = реальный партиал(10.0) + taker на ОСТАТОК 5 (не на полные 10)
+    expected = 10.0 + taker_pnl("long", 100.0, 104.0, 5.0)
+    assert abs(pnl - expected) < 1e-9
+    # старое (ошибочное) поведение завышало профит: taker на полные 10 по 104
+    assert pnl < taker_pnl("long", 100.0, 104.0, 10.0)
+
+
+def test_rest_finalize_partial_falls_back_to_position_sum():
+    from flowzone_bot.trading.executor import Executor
+
+    class _FakeClient:
+        def closed_pnl_detail(self, *a, **k):
+            return None  # точечный матч по qty не нашёл (партиал)
+        def closed_pnl_position(self, symbol, *, qty, entry_price,
+                                since_ms, until_ms):
+            return {"pnl": 8.0, "exit": 97.0, "count": 2}
+
+    class _FakeDB:
+        def __init__(self):
+            self.finalized = None
+        def finalize_pnl(self, tid, *, pnl_usd, exit_price, close_reason):
+            self.finalized = (tid, pnl_usd, exit_price, close_reason)
+
+    db = _FakeDB()
+    ex = Executor(db=db, settings=_Cfg(), client=_FakeClient(), now=lambda: 5000.0)
+    tr = type("T", (), {"id": 7, "symbol": "ZECUSDT", "qty": 10.0,
+                        "entry": 100.0, "ts_open": 1000.0, "ts_close": 2000.0,
+                        "close_reason": "tp_sl", "pnl_usd": 99.0})()
+    ok = ex._rest_finalize(tr, 2000.0)
+    assert ok
+    assert db.finalized[0] == 7
+    assert db.finalized[1] == 8.0   # суммарный net, не завышенная оценка

@@ -9,6 +9,41 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-06-17
+
+### fix(executor): сведение P&L на частичных закрытиях (DB == Bybit closedPnl)
+`<pending commit>`
+
+Симптом: при сверке статы локальная БД показывала net +$28.79, а Bybit
+`closedPnl` (ground truth, `stats-collection.mdc`) — +$9.42 (+$19.38 завышения,
+основной вклад — ZECUSDT). 6 сделок зависли `provisional` навсегда.
+
+Причина (цепочка на партиалах, канон §5.3 частичная фиксация):
+1. **REST-матч не ловит партиал.** `closed_pnl_detail` матчит ОДНУ запись по
+   `closedSize ≈ qty`. Bybit же пишет ОТДЕЛЬНУЮ `closedPnl`-запись на каждое
+   частичное закрытие (цель 1) + остаток (цель 2) — ни одна не равна полному
+   объёму → матч `None` → REST-фолбэк не срабатывал → сделка вечно provisional.
+2. **Оценка provisional завышала.** При закрытии позиции, если WS-филлы ещё не
+   собрались, `_realized_or_estimate` считал `taker_pnl` на ПОЛНЫЙ объём по
+   финальной (более выгодной, цель 2) цене — игнорируя, что половина уже закрылась
+   на цели 1 (менее выгодной). Для лонга цель2>цель1 → завышение профита.
+
+Решение:
+- `client.closed_pnl_position()` — суммирует ВСЕ `closedPnl`-записи позиции в окне
+  `[ts_open, ts_close+180с]`, фильтр по `avgEntryPrice`, и принимает сумму ТОЛЬКО
+  если `Σ closedSize ≈ qty` (вся позиция собрана; иначе `None` — не выдумываем,
+  `no-data-fitting.mdc`). Окно изолирует сделку: «один сетап на символ» + cooldown.
+- `_rest_finalize`: точечный матч → фолбэк на `closed_pnl_position` (партиалы).
+- `_realized_or_estimate`: оценка = реальный зафиксированный партиал (из филлов) +
+  `taker_pnl` на ОСТАТОК объёма (не на полный) → транзиентная оценка не завышает.
+
+closedPnl уже net (комиссии+funding) — приоритетнее расчётного `(exit−entry)×qty`
+в БД (`stats-collection.mdc`). Тесты: +5 (`closed_pnl_position` sum/incomplete/
+entry-filter, estimate-remaining, rest-finalize-fallback). Всего 38, все зелёные.
+
+**Файлы:** `src/flowzone_bot/trading/client.py`,
+`src/flowzone_bot/trading/executor.py`, `tests/test_flowzone_bot.py`
+
 ## 2026-06-16
 
 ### fix(killswitch): max_trades_per_hour ≤0 = ВЫКЛ (rate-limit не канон, режет reload)
