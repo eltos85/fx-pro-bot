@@ -64,6 +64,25 @@ flowzone / 1334 общих — зелёные.
 `_rest_verify`), `src/flowzone_bot/trading/client.py` (execType-фильтр),
 `tests/test_flowzone_bot.py`
 
+### revert(universe): flowzone обратно на rvol (momentum-отбор — наблюдаемый регресс)
+`<pending commit>`
+
+Откат дефолта `FLOWZONE_UNIVERSE_METHOD` momentum→rvol по наблюдению
+пользователя: на форвард-тесте momentum-отбора (топ-15 по 24h движению, без
+анти-памп кэпа) виден заметный регресс flowzone vs штатный rvol-селектор.
+
+Это согласуется с канон-оговоркой (STRATEGY §6.1): footprint/absorption читаемы
+на ЛИКВИДНОСТИ; momentum тянул тонкие памп-альты (BEAT/LAB/H/WLD без анти-памп
+кэпа) где order-flow шумит. Откат к ПРОВЕРЕННОМУ baseline (rvol) — консервативное
+направление, НЕ отключение стратегии по малой выборке (`sample-size.mdc`).
+Выборка за ~4ч < порога значимости — «регресс» статистически не доказан, поэтому
+вывод фиксируется как НАБЛЮДЕНИЕ, не валидированное решение; код момент-селектора
+и переключатель сохранены (env-реактивируемы для будущего A/B на n≥100).
+
+Scalp_bot остаётся на momentum (отдельный эксперимент пользователя, не тронут).
+
+**Файлы:** `docker-compose.yml`
+
 ### feat(universe): переключатель отбора монет rvol/momentum + тестово на momentum
 `<pending commit>`
 
