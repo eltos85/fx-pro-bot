@@ -260,43 +260,6 @@ def test_position_lot_disabled_falls_back_to_fixed() -> None:
     assert _position_lot(_sizing_settings(0.0), "EURUSD=X", 0.0025, 0.03) == 0.03
 
 
-# ─── VP: окно входов (ликвидная сессия, Dalton day-timeframe) ────────────
-
-
-def _vp_window_settings():
-    from types import SimpleNamespace
-    return SimpleNamespace(
-        vp_session_tz="America/New_York",
-        vp_entry_start="07:00",
-        vp_entry_end="17:00",
-    )
-
-
-def test_vp_entry_window_open_during_ny_session() -> None:
-    from fx_momentum_bot.app.main import _vp_entry_window_open
-    # 14:00 UTC июнь = 10:00 NY (EDT) — внутри окна.
-    now = datetime(2026, 6, 10, 14, 0, tzinfo=timezone.utc)
-    assert _vp_entry_window_open(_vp_window_settings(), now) is True
-
-
-def test_vp_entry_window_closed_overnight() -> None:
-    from fx_momentum_bot.app.main import _vp_entry_window_open
-    # 23:54 UTC = 19:54 NY — реальное время ночных VP-попыток 06-09
-    # (тонкий рынок, мгновенные стоп-ауты в выписке).
-    night = datetime(2026, 6, 9, 23, 54, tzinfo=timezone.utc)
-    assert _vp_entry_window_open(_vp_window_settings(), night) is False
-    # 00:44 UTC = 20:44 NY — тоже закрыто.
-    night2 = datetime(2026, 6, 10, 0, 44, tzinfo=timezone.utc)
-    assert _vp_entry_window_open(_vp_window_settings(), night2) is False
-
-
-def test_vp_entry_window_edge_17et_closed() -> None:
-    from fx_momentum_bot.app.main import _vp_entry_window_open
-    # Ровно 17:00 ET (CME settlement) — окно уже закрыто.
-    at_17 = datetime(2026, 6, 10, 21, 0, tzinfo=timezone.utc)
-    assert _vp_entry_window_open(_vp_window_settings(), at_17) is False
-
-
 # ─── Spread-guard (cost-to-risk, Harris 2003) ────────────────────────────
 
 
@@ -343,53 +306,6 @@ def test_spread_guard_no_data_does_not_block() -> None:
 def test_spread_guard_disabled() -> None:
     from fx_momentum_bot.app.main import _spread_too_wide
     assert _spread_too_wide(_fake_executor(1.0, 2.0), "EURUSD=X", 0.0025, 0.0) is None
-
-
-# ─── VP friday-flat: не несём day-timeframe позицию через выходные ───────
-
-
-def _flat_settings(enabled: bool = True):
-    from types import SimpleNamespace
-    return SimpleNamespace(
-        vp_friday_flat_enabled=enabled,
-        vp_session_tz="America/New_York",
-        vp_friday_flat_start="16:45",
-        vp_friday_flat_end="17:30",
-    )
-
-
-def test_vp_friday_flat_due_in_window() -> None:
-    from fx_momentum_bot.app.main import _vp_friday_flat_due
-    # 2026-06-12 — пятница; 20:50 UTC = 16:50 NY (EDT) — внутри окна.
-    fri = datetime(2026, 6, 12, 20, 50, tzinfo=timezone.utc)
-    assert _vp_friday_flat_due(_flat_settings(), fri) is True
-
-
-def test_vp_friday_flat_not_due_earlier_friday() -> None:
-    from fx_momentum_bot.app.main import _vp_friday_flat_due
-    # Пятница 12:00 NY — рано, обычная торговля.
-    fri_noon = datetime(2026, 6, 12, 16, 0, tzinfo=timezone.utc)
-    assert _vp_friday_flat_due(_flat_settings(), fri_noon) is False
-
-
-def test_vp_friday_flat_not_due_other_days() -> None:
-    from fx_momentum_bot.app.main import _vp_friday_flat_due
-    # Четверг 16:50 NY — не пятница.
-    thu = datetime(2026, 6, 11, 20, 50, tzinfo=timezone.utc)
-    assert _vp_friday_flat_due(_flat_settings(), thu) is False
-
-
-def test_vp_friday_flat_window_closes_after_market() -> None:
-    from fx_momentum_bot.app.main import _vp_friday_flat_due
-    # Пятница 17:35 NY — рынок закрыт, не спамим close-ордерами.
-    late = datetime(2026, 6, 12, 21, 35, tzinfo=timezone.utc)
-    assert _vp_friday_flat_due(_flat_settings(), late) is False
-
-
-def test_vp_friday_flat_disabled() -> None:
-    from fx_momentum_bot.app.main import _vp_friday_flat_due
-    fri = datetime(2026, 6, 12, 20, 50, tzinfo=timezone.utc)
-    assert _vp_friday_flat_due(_flat_settings(enabled=False), fri) is False
 
 
 # ─── Market-closed дедуп (баг-фикс 2026-06-15: спам DECAY CLOSE) ──────────

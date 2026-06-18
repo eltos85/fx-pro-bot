@@ -58,12 +58,12 @@ class MomentumBotSettings(BaseSettings):
     # Fallback-лот, если ATR-сайзинг выключен (risk_per_trade_usd=0).
     lot_size: float = Field(default=0.01, validation_alias="MOMENTUM_BOT_LOT_SIZE")
     # ─── ATR-scaled sizing (Tharp ch.11, Vince 1992) ───
-    # 2026-06-10 (broker-truth, momentum_pnl_audit 06-05→06-10): при фикс
-    # 0.01 лота риск VP-сделки по золоту $24–32, FX-сделки $2–3 — один стоп
-    # золота съедает ~10 FX-винов. Канон fixed-fractional risk уже
-    # реализован у advisor (calc_lot_size, риск $15 = 1% от $1500) —
-    # переиспользуем ту же функцию. lot = risk / (sl_pips × pip_value);
-    # cap MAX_LOT_SIZE=0.05 (инцидент 23.04). 0 = выключить (фикс-лот).
+    # Фиксированный риск $ на сделку, лот пересчитывается из SL-дистанции:
+    # выравнивает риск между инструментами с разной ценой пункта. Канон
+    # fixed-fractional risk уже реализован у advisor (calc_lot_size, риск
+    # $15 = 1% от $1500) — переиспользуем ту же функцию. lot = risk /
+    # (sl_pips × pip_value); cap MAX_LOT_SIZE=0.05 (инцидент 23.04).
+    # 0 = выключить (фикс-лот).
     risk_per_trade_usd: float = Field(
         default=15.0, validation_alias="MOMENTUM_BOT_RISK_PER_TRADE_USD"
     )
@@ -80,11 +80,7 @@ class MomentumBotSettings(BaseSettings):
     max_spread_risk_fraction: float = Field(
         default=0.10, validation_alias="MOMENTUM_BOT_MAX_SPREAD_RISK_FRACTION"
     )
-    # Лимит ТОЛЬКО для momentum-стратегии (позиции по momentum-символам).
-    # VP-стратегия (золото) гейтится отдельно: 1 позиция на символ
-    # (already_open) + дневной лимит 2/сторону — momentum-позиции её слот
-    # не занимают (раздельные лимиты с 2026-06-10, по просьбе пользователя:
-    # «3 позиции одной страты не должны блокировать другую»).
+    # Лимит одновременно открытых momentum-позиций (по всем символам).
     max_open_positions: int = Field(
         default=3, validation_alias="MOMENTUM_BOT_MAX_OPEN_POSITIONS"
     )
@@ -95,8 +91,8 @@ class MomentumBotSettings(BaseSettings):
     # на общем счёте: и fx_momentum_bot, и fx_ai_trader сидят на одном
     # cTrader-аккаунте. fx_ai_trader фильтрует свои позиции по label
     # "ai-fx-trader"; momentum обязан помечать свои отдельным label и
-    # управлять/считать ТОЛЬКО их (иначе подхватит XAUUSD-сделки AI после
-    # включения VP-стратегии по золоту). См. BUILDLOG.md 2026-06-09.
+    # управлять/считать ТОЛЬКО их (иначе подхватит XAUUSD-сделки AI на
+    # общем счёте). См. BUILDLOG.md 2026-06-09.
     position_label: str = Field(
         default="momentum-bot", validation_alias="MOMENTUM_BOT_POSITION_LABEL"
     )
@@ -117,11 +113,10 @@ class MomentumBotSettings(BaseSettings):
             lbl for lbl in (self.position_label, self.manage_legacy_label) if lbl
         )
     # ─── Event-guard: блок входов вокруг HIGH-impact релизов ───
-    # 2026-06-10: VP-шорт золота за 8 мин до US CPI → −$24.70, ре-вход
-    # после релиза → −$32.61 (90% дневного убытка). Окно ±60 мин по
-    # Andersen et al. 2003 (пик реакции и волатильности); Dalton 2007 —
-    # релиз сбрасывает аукцион, профиль до релиза невалиден. Блокируются
-    # ТОЛЬКО входы (momentum + VP); сопровождение и выходы работают.
+    # Окно ±60 мин по Andersen et al. 2003 (пик реакции и волатильности):
+    # вход momentum в момент релиза ловит шип/фейкаут. Блокируются ТОЛЬКО
+    # входы; сопровождение и выходы работают. Per-symbol scoping: US-релизы
+    # (CPI/FOMC/NFP) блокируют все пары, ECB — только EUR, BoJ — только JPY.
     # См. src/fx_momentum_bot/strategy/event_guard.py.
     news_block_enabled: bool = Field(
         default=True, validation_alias="MOMENTUM_BOT_NEWS_BLOCK_ENABLED"
@@ -154,87 +149,6 @@ class MomentumBotSettings(BaseSettings):
     )
     trailing_atr_mult: float = Field(
         default=1.5, validation_alias="MOMENTUM_BOT_TRAILING_ATR_MULT"
-    )
-
-    # ─── Volume Profile strategy (optional, OFF by default) ───
-    # Механический Market/Volume Profile сетап (Steidlmayer 2003 / Dalton
-    # 2007), gold-only. Символы из vp_symbols идут на эту стратегию вместо
-    # momentum; данные качаются на vp_yfinance_interval (5m, реальный объём
-    # у фьючерса GC=F). Пусто = выключено.
-    vp_symbols_raw: str = Field(
-        default="", validation_alias="MOMENTUM_BOT_VP_SYMBOLS"
-    )
-    vp_yfinance_interval: str = Field(
-        default="5m", validation_alias="MOMENTUM_BOT_VP_YFINANCE_INTERVAL"
-    )
-    vp_yfinance_period: str = Field(
-        default="5d", validation_alias="MOMENTUM_BOT_VP_YFINANCE_PERIOD"
-    )
-    # Сессионное окно профиля (London pre-NY), таймзона по NY.
-    vp_session_start: str = Field(
-        default="03:00", validation_alias="MOMENTUM_BOT_VP_SESSION_START"
-    )
-    vp_session_end: str = Field(
-        default="07:00", validation_alias="MOMENTUM_BOT_VP_SESSION_END"
-    )
-    vp_session_tz: str = Field(
-        default="America/New_York", validation_alias="MOMENTUM_BOT_VP_SESSION_TZ"
-    )
-    # Value area = 70% объёма (канон Dalton, ≈1σ) — не подгонять без источника.
-    vp_value_area_pct: float = Field(
-        default=0.70, validation_alias="MOMENTUM_BOT_VP_VALUE_AREA_PCT"
-    )
-    vp_num_bins: int = Field(default=50, validation_alias="MOMENTUM_BOT_VP_NUM_BINS")
-    vp_atr_period: int = Field(default=14, validation_alias="MOMENTUM_BOT_VP_ATR_PERIOD")
-    # Минимальный risk:reward (видео: «at least 1:2»; берём 1.5 как мягкий пол).
-    vp_min_rr: float = Field(default=1.5, validation_alias="MOMENTUM_BOT_VP_MIN_RR")
-    # Сколько 5m-баров назад искать свип (failed auction) / держать консолидацию.
-    vp_breach_lookback: int = Field(
-        default=6, validation_alias="MOMENTUM_BOT_VP_BREACH_LOOKBACK"
-    )
-    vp_consolidation_bars: int = Field(
-        default=6, validation_alias="MOMENTUM_BOT_VP_CONSOLIDATION_BARS"
-    )
-    # Лимит сделок в одну сторону за день (видео: max 2 per direction).
-    vp_max_trades_per_dir_per_day: int = Field(
-        default=2, validation_alias="MOMENTUM_BOT_VP_MAX_TRADES_PER_DIR_PER_DAY"
-    )
-    vp_lot_size: float = Field(default=0.01, validation_alias="MOMENTUM_BOT_VP_LOT_SIZE")
-    vp_order_label: str = Field(
-        default="momentum-bot-vp", validation_alias="MOMENTUM_BOT_VP_ORDER_LABEL"
-    )
-    # ─── VP: окно входов (ликвидная сессия) ───
-    # Day-timeframe канон (Dalton 2007): торгуется сессия, которую
-    # описывает профиль; overnight — другие участники, тонкая ликвидность,
-    # широкий спред (в выписке 06-09/06-10 — попытки VP-входов в
-    # 23:54–01:14 UTC). Профиль строится по London pre-NY (03:00–07:00 NY),
-    # входы — после его завершения и до закрытия фьючерсной сессии
-    # 17:00 ET (CME Globex settlement; далее maintenance break и тонкий
-    # овернайт). Таймзона — vp_session_tz.
-    vp_entry_start: str = Field(
-        default="07:00", validation_alias="MOMENTUM_BOT_VP_ENTRY_START"
-    )
-    vp_entry_end: str = Field(
-        default="17:00", validation_alias="MOMENTUM_BOT_VP_ENTRY_END"
-    )
-    # ─── VP: friday-flat (не несём day-timeframe позицию через выходные) ───
-    # Day-timeframe канон (Dalton 2007): сделка живёт внутри сессии,
-    # которую описывает профиль; понедельничный профиль — другой рынок.
-    # Гэп выходных исполняет SL хуже запланированного (gap-risk вне 1R).
-    # Открытые VP-позиции принудительно закрываются в пятницу в окне
-    # [flat_start, flat_end) по vp_session_tz — до закрытия рынка 17:00 ET.
-    # На momentum-позиции НЕ распространяется: трендовый канон
-    # (Turtle/TSMOM) намеренно держит через выходные.
-    vp_friday_flat_enabled: bool = Field(
-        default=True, validation_alias="MOMENTUM_BOT_VP_FRIDAY_FLAT_ENABLED"
-    )
-    vp_friday_flat_start: str = Field(
-        default="16:45", validation_alias="MOMENTUM_BOT_VP_FRIDAY_FLAT_START"
-    )
-    # Верхняя граница попыток: после закрытия рынка close-ордера всё равно
-    # отвергаются — не спамим ошибками до полуночи.
-    vp_friday_flat_end: str = Field(
-        default="17:30", validation_alias="MOMENTUM_BOT_VP_FRIDAY_FLAT_END"
     )
 
     # Dedicated cTrader credentials for this bot only.
@@ -279,18 +193,6 @@ class MomentumBotSettings(BaseSettings):
     @property
     def symbols(self) -> tuple[str, ...]:
         return tuple(s.strip() for s in self.symbols_raw.split(",") if s.strip())
-
-    @property
-    def vp_symbols(self) -> tuple[str, ...]:
-        return tuple(s.strip() for s in self.vp_symbols_raw.split(",") if s.strip())
-
-    @property
-    def all_symbols(self) -> tuple[str, ...]:
-        """Momentum-символы + VP-символы (для fetch/позиций), без дублей."""
-        seen: dict[str, None] = {}
-        for s in (*self.symbols, *self.vp_symbols):
-            seen.setdefault(s, None)
-        return tuple(seen)
 
     @property
     def db_path(self) -> Path:

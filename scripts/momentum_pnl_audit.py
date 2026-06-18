@@ -21,13 +21,9 @@
 BRENT/NAT.GAS −$5.48 ошибочно атрибутированы momentum).
 
 Теперь атрибутируем по ТОРГОВОЙ ВСЕЛЕННОЙ momentum из его же конфига:
-FX-мажоры (settings.symbols) + VP-золото (settings.vp_symbols), резолвленные
-в cTrader-имена. Deal'ы вне этой вселенной (BRENT/NAT.GAS/oil/indices) идут
-в отдельную секцию «другие боты» и в momentum-итог НЕ входят.
-Остаточная неоднозначность: XAUUSD торгуют и VP momentum, и fx_ai_trader
-(label-разделение для closed-deal'ов недоступно, у fx_ai_trader отдельный
-volume) — gold у fx_ai_trader редок и помечен label="ai-fx-trader";
-для точной сверки золота см. fx_ai_trader.sqlite.positions.
+FX-мажоры (settings.symbols), резолвленные в cTrader-имена. Deal'ы вне
+этой вселенной (BRENT/NAT.GAS/oil/indices/gold) идут в отдельную секцию
+«другие боты» и в momentum-итог НЕ входят.
 
 Запуск (внутри fx-momentum-bot контейнера, ai-trader предварительно
 остановлен чтобы не превысить лимит 2 коннекта/app):
@@ -75,7 +71,7 @@ def main() -> int:
     # Только эти deal'ы принадлежат momentum; остальное — другие боты.
     momentum_sids: set[int] = set()
     momentum_names: set[str] = set()
-    for yf_sym in settings.all_symbols:
+    for yf_sym in settings.symbols:
         info = symbols.resolve_yfinance(yf_sym)
         if info is not None:
             momentum_sids.add(info.symbol_id)

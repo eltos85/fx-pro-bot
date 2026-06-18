@@ -4,8 +4,6 @@ import logging
 import signal
 import time
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time, timezone
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
@@ -15,10 +13,6 @@ from fx_pro_bot.config.settings import calc_lot_size
 from fx_momentum_bot.state.store import MomentumStore
 from fx_momentum_bot.strategy.event_guard import high_impact_event_near
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
-from fx_momentum_bot.strategy.volume_profile import (
-    VolumeProfileSignal,
-    build_signal as build_vp_signal,
-)
 from fx_pro_bot.trading.auth import TokenData
 from fx_pro_bot.trading.client import CTraderClient
 from fx_pro_bot.trading.executor import TradeExecutor
@@ -178,54 +172,6 @@ def _spread_too_wide(
     if fraction > max_fraction:
         return f"spread={spread:.5f}={fraction:.0%} of SL-dist (max {max_fraction:.0%})"
     return None
-
-
-def _parse_hhmm(raw: str) -> dt_time:
-    hh, mm = raw.strip().split(":")
-    return dt_time(int(hh), int(mm))
-
-
-def _vp_entry_window_open(
-    settings: MomentumBotSettings, now_utc: datetime | None = None
-) -> bool:
-    """Открыто ли окно VP-входов (ликвидная сессия, vp_session_tz).
-
-    Day-timeframe канон (Dalton 2007): торгуем сессию, которую описывает
-    профиль; овернайт (после 17:00 ET) — тонкий рынок, чужие участники.
-    """
-    try:
-        tz = ZoneInfo(settings.vp_session_tz)
-        start = _parse_hhmm(settings.vp_entry_start)
-        end = _parse_hhmm(settings.vp_entry_end)
-    except Exception:  # noqa: BLE001
-        log.exception("vp_entry_window: bad config (окно считаю открытым)")
-        return True
-    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
-    return start <= now_local.time() < end
-
-
-def _vp_friday_flat_due(
-    settings: MomentumBotSettings, now_utc: datetime | None = None
-) -> bool:
-    """Пора ли принудительно закрывать VP-позиции перед выходными.
-
-    True только в пятницу (vp_session_tz) в окне [flat_start, flat_end).
-    Day-timeframe канон (Dalton 2007): профиль описывает сессию — позицию
-    не несём через выходные (гэп понедельника исполняет SL вне плана).
-    """
-    if not settings.vp_friday_flat_enabled:
-        return False
-    try:
-        tz = ZoneInfo(settings.vp_session_tz)
-        start = _parse_hhmm(settings.vp_friday_flat_start)
-        end = _parse_hhmm(settings.vp_friday_flat_end)
-    except Exception:  # noqa: BLE001
-        log.exception("vp_friday_flat: bad config (правило выключаю)")
-        return False
-    now_local = (now_utc or datetime.now(timezone.utc)).astimezone(tz)
-    if now_local.weekday() != 4:  # Friday
-        return False
-    return start <= now_local.time() < end
 
 
 def _fetch_candles(symbol: str, interval: str, period: str, retries: int = 3):
@@ -511,7 +457,7 @@ def _manage_positions(
     executor: TradeExecutor,
     store: MomentumStore,
     settings: MomentumBotSettings,
-    signal_by_symbol: dict[str, MomentumSignal | VolumeProfileSignal],
+    signal_by_symbol: dict[str, MomentumSignal],
     positions_by_symbol: dict[str, list[ManagedPosition]],
 ) -> None:
     # Trader-backed policy:
@@ -644,135 +590,6 @@ def _manage_positions(
         log.info("Momentum state cleanup: removed %d stale positions", cleaned)
 
 
-def _open_vp_position(
-    *,
-    executor: TradeExecutor,
-    store: MomentumStore,
-    settings: MomentumBotSettings,
-    symbol: str,
-    sig: VolumeProfileSignal,
-) -> tuple[bool, str]:
-    """Открыть VP-позицию с явными SL/TP (дистанции из цен сетапа)."""
-    sl_distance = abs(sig.entry - sig.sl_price)
-    tp_distance = abs(sig.tp_price - sig.entry)
-    if sl_distance <= 0 or tp_distance <= 0:
-        return False, "vp_bad_sl_tp"
-    spread_err = _spread_too_wide(
-        executor, symbol, sl_distance, settings.max_spread_risk_fraction
-    )
-    if spread_err:
-        return False, f"vp_skip:wide_spread({spread_err})"
-    lot = _position_lot(settings, symbol, sl_distance, settings.vp_lot_size)
-    # entry_price_hint — в координатах БРОКЕРА (spot XAUUSD), не фьючерса.
-    # Со sig.entry (GC=F) slippage-guard видел базис фьючерс-спот ($15-40 ≈
-    # 150-400 pip) как «slippage» и резал 8/9 валидных входов с уплатой
-    # spread+commission (BUILDLOG 2026-06-10). Дистанции SL/TP — относительные,
-    # базис на них не влияет.
-    entry_hint = _broker_price(executor, symbol) or sig.entry
-    result = executor.open_position(
-        yf_symbol=symbol,
-        direction=sig.direction,
-        sl_distance=sl_distance,
-        tp_distance=tp_distance,
-        lot_size=lot,
-        comment=settings.vp_order_label,
-        entry_price_hint=entry_hint,
-        label=settings.position_label,
-    )
-    if not result.success:
-        return False, f"vp_open:{result.error}"
-    if result.broker_position_id > 0 and sl_distance > 0:
-        store.upsert_position_state(
-            broker_position_id=result.broker_position_id,
-            symbol=symbol,
-            entry_price=result.fill_price if result.fill_price > 0 else entry_hint,
-            initial_volume=(
-                result.volume if result.volume > 0 else lots_to_volume(lot)
-            ),
-            risk_price=sl_distance,
-        )
-    log.info(
-        "VP OPEN %s %s %s lot=%.2f entry=%.5f sl=%.5f tp=%.5f | %s",
-        symbol,
-        sig.setup,
-        sig.direction,
-        lot,
-        sig.entry,
-        sig.sl_price,
-        sig.tp_price,
-        sig.reason,
-    )
-    return True, "vp_open:ok"
-
-
-def _process_vp_symbol(
-    *,
-    symbol: str,
-    sig: VolumeProfileSignal,
-    executor: TradeExecutor | None,
-    store: MomentumStore,
-    settings: MomentumBotSettings,
-    positions_by_symbol: dict[str, list[ManagedPosition]],
-    news_block: str | None = None,
-    session_ok: bool = True,
-) -> bool:
-    """Гейтинг + открытие VP-сделки. Возврат True если позиция открыта.
-
-    Лимиты VP НЕЗАВИСИМЫ от momentum (раздельные с 2026-06-10): 1 позиция
-    на VP-символ (already_open) + дневной лимит 2/сторону. Глобальный
-    max_open_positions сюда не входит — momentum-позиции не блокируют VP.
-
-    news_block — event-guard (2026-06-10): релиз сбрасывает аукцион
-    (Dalton 2007), профиль до релиза невалиден → входы в окне блокируем.
-    session_ok — окно VP-входов (_vp_entry_window_open): овернайт не входим.
-    """
-    executed = False
-    note = "no_setup"
-    already_open = len(positions_by_symbol.get(symbol, [])) > 0
-    day_count = store.count_executed_today(symbol, sig.direction) if sig.direction in {"long", "short"} else 0
-
-    can_open = (
-        sig.direction in {"long", "short"}
-        and sig.setup != "none"
-        and executor is not None
-        and not already_open
-        and news_block is None
-        and session_ok
-        and day_count < settings.vp_max_trades_per_dir_per_day
-    )
-    if can_open and executor is not None:
-        executed, note = _open_vp_position(
-            executor=executor, store=store, settings=settings, symbol=symbol, sig=sig
-        )
-    elif sig.direction in {"long", "short"} and sig.setup != "none":
-        # сетап есть, но не открываем — зафиксируем причину
-        if already_open:
-            note = "vp_skip:position_open"
-        elif news_block is not None:
-            note = f"vp_skip:news_window({news_block})"
-        elif not session_ok:
-            note = "vp_skip:off_session"
-        elif day_count >= settings.vp_max_trades_per_dir_per_day:
-            note = "vp_skip:daily_limit"
-        elif executor is None:
-            note = "paper_mode"
-
-    store.add_decision(
-        symbol=symbol,
-        direction=sig.direction,
-        momentum_value=0.0,
-        atr=sig.atr,
-        close_price=sig.last_close,
-        executed=executed,
-        note=note,
-    )
-    log.info(
-        "%s VP setup=%s dir=%s close=%.5f atr=%.6f executed=%s note=%s",
-        symbol, sig.setup, sig.direction, sig.last_close, sig.atr, executed, note,
-    )
-    return executed
-
-
 def run() -> None:
     settings = MomentumBotSettings()
     logging.basicConfig(
@@ -784,22 +601,20 @@ def run() -> None:
     store = MomentumStore(settings.db_path)
     executor = _build_executor(settings)
     if executor is not None:
-        _subscribe_spots(executor, settings.all_symbols)
+        _subscribe_spots(executor, settings.symbols)
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    vp_symbols = set(settings.vp_symbols)
-    # Дедуп логов «рынок закрыт»: sign-decay/friday-flat хотят закрыть
-    # позицию, но рынок закрыт (выходные) — попытки повторяются каждый
-    # цикл (чтобы исполнить сразу на открытии), но логируем один раз на
-    # переходе, иначе 569 ERROR-строк за выходные (BUILDLOG 2026-06-15).
+    # Дедуп логов «рынок закрыт»: sign-decay хочет закрыть позицию, но рынок
+    # закрыт (выходные) — попытки повторяются каждый цикл (чтобы исполнить
+    # сразу на открытии), но логируем один раз на переходе, иначе 569
+    # ERROR-строк за выходные (BUILDLOG 2026-06-15).
     market_closed_pids: set[int] = set()
     log.info(
-        "Momentum bot started | mode=%s | momentum=%s | vp=%s | interval=%s/%s | db=%s",
+        "Momentum bot started | mode=%s | momentum=%s | interval=%s/%s | db=%s",
         "LIVE" if (settings.trading_enabled and executor is not None) else "PAPER",
-        ",".join(s for s in settings.symbols if s not in vp_symbols) or "-",
-        ",".join(settings.vp_symbols) or "-",
+        ",".join(settings.symbols) or "-",
         settings.yfinance_interval,
         settings.yfinance_period,
         settings.db_path,
@@ -807,49 +622,27 @@ def run() -> None:
 
     while not _shutdown:
         try:
-            signal_by_symbol: dict[str, MomentumSignal | VolumeProfileSignal] = {}
+            signal_by_symbol: dict[str, MomentumSignal] = {}
             positions_by_symbol: dict[str, list[ManagedPosition]] = {}
             if executor is not None:
                 # Позиции нужны не только management'у: exit-on-flip у momentum
-                # и гейт already_open у VP читают их независимо от флага
-                # position_management_enabled.
+                # читает их независимо от флага position_management_enabled.
                 positions_by_symbol = _collect_managed_positions(
-                    executor, settings.all_symbols, labels=settings.managed_labels
+                    executor, settings.symbols, labels=settings.managed_labels
                 )
-            for symbol in settings.all_symbols:
-                is_vp = symbol in vp_symbols
-                if is_vp:
-                    candles = _drop_forming_bar(
-                        _fetch_candles(
-                            symbol, settings.vp_yfinance_interval, settings.vp_yfinance_period
-                        ),
-                        settings.vp_yfinance_interval,
-                    )
-                    signal_data: MomentumSignal | VolumeProfileSignal | None = build_vp_signal(
-                        candles,
-                        tz=settings.vp_session_tz,
-                        session_start=settings.vp_session_start,
-                        session_end=settings.vp_session_end,
-                        value_area_pct=settings.vp_value_area_pct,
-                        num_bins=settings.vp_num_bins,
-                        atr_period=settings.vp_atr_period,
-                        min_rr=settings.vp_min_rr,
-                        breach_lookback=settings.vp_breach_lookback,
-                        consolidation_bars=settings.vp_consolidation_bars,
-                    )
-                else:
-                    candles = _drop_forming_bar(
-                        _fetch_candles(
-                            symbol, settings.yfinance_interval, settings.yfinance_period
-                        ),
-                        settings.yfinance_interval,
-                    )
-                    signal_data = build_signal(
-                        candles,
-                        lookback_bars=settings.momentum_lookback_bars,
-                        atr_period=settings.atr_period,
-                        threshold=settings.signal_threshold,
-                    )
+            for symbol in settings.symbols:
+                candles = _drop_forming_bar(
+                    _fetch_candles(
+                        symbol, settings.yfinance_interval, settings.yfinance_period
+                    ),
+                    settings.yfinance_interval,
+                )
+                signal_data = build_signal(
+                    candles,
+                    lookback_bars=settings.momentum_lookback_bars,
+                    atr_period=settings.atr_period,
+                    threshold=settings.signal_threshold,
+                )
                 if signal_data is None:
                     store.add_decision(
                         symbol=symbol,
@@ -871,28 +664,21 @@ def run() -> None:
                     signal_by_symbol=signal_by_symbol,
                     positions_by_symbol=positions_by_symbol,
                 )
-            # Лимит max_open_positions — только для momentum-стратегии:
-            # считаем позиции по momentum-символам, VP-позиции (золото) в
-            # счёт не входят и наоборот (раздельные лимиты стратегий).
-            momentum_symbols = tuple(
-                s for s in settings.all_symbols if s not in vp_symbols
-            )
             if executor is not None:
                 open_count = _count_open_positions_for_symbols(
-                    executor, momentum_symbols, labels=settings.managed_labels
+                    executor, settings.symbols, labels=settings.managed_labels
                 )
             else:
                 open_count = 0
 
             # Event-guard: HIGH-impact релиз в окне ±N минут → новые входы
-            # (momentum + VP) блокируются; сопровождение и выходы работают.
+            # блокируются; сопровождение и выходы работают.
             # Per-symbol scoping: US-релизы (CPI/FOMC/NFP) блокируют всё,
             # ECB — только EUR-пары, BoJ — только JPY-пары.
-            # Кейс 2026-06-10: VP-шорт золота за 8 мин до CPI (−$24.70) +
-            # ре-вход после релиза (−$32.61). Andersen et al. 2003; Dalton.
+            # Andersen et al. 2003: вход в момент релиза ловит шип/фейкаут.
             news_blocks: dict[str, str] = {}
             if settings.news_block_enabled:
-                for symbol in settings.all_symbols:
+                for symbol in settings.symbols:
                     reason = high_impact_event_near(
                         symbol=symbol,
                         before_min=settings.news_block_before_min,
@@ -905,66 +691,13 @@ def run() -> None:
                         "EVENT-GUARD: входы заблокированы — %s",
                         "; ".join(f"{s}: {r}" for s, r in news_blocks.items()),
                     )
-            # Окно VP-входов (ликвидная сессия): овернайт не входим.
-            vp_window_ok = _vp_entry_window_open(settings)
 
-            # Friday-flat: VP-позиции (day-timeframe) закрываются перед
-            # выходными — пятница 16:45–17:30 NY, до закрытия рынка.
-            # Не зависит от сигналов (закрываем по факту наличия позиции).
-            if executor is not None and _vp_friday_flat_due(settings):
-                for vp_sym in settings.vp_symbols:
-                    remaining: list[ManagedPosition] = []
-                    for pos in positions_by_symbol.get(vp_sym, []):
-                        close_res = executor.close_position(
-                            pos.position_id, pos.volume
-                        )
-                        if close_res.success:
-                            market_closed_pids.discard(pos.position_id)
-                            log.info(
-                                "VP FRIDAY FLAT %s #%d %s vol=%d closed "
-                                "(day-timeframe: не несём через выходные)",
-                                vp_sym, pos.position_id, pos.side, pos.volume,
-                            )
-                        elif _is_market_closed_error(close_res.error):
-                            remaining.append(pos)
-                            if pos.position_id not in market_closed_pids:
-                                market_closed_pids.add(pos.position_id)
-                                log.info(
-                                    "VP FRIDAY FLAT отложен %s #%d: рынок "
-                                    "уже закрыт",
-                                    vp_sym, pos.position_id,
-                                )
-                        else:
-                            remaining.append(pos)
-                            log.error(
-                                "VP FRIDAY FLAT failed %s #%d: %s "
-                                "(повтор в следующем цикле)",
-                                vp_sym, pos.position_id, close_res.error,
-                            )
-                    if vp_sym in positions_by_symbol:
-                        positions_by_symbol[vp_sym] = remaining
-
-            for symbol in settings.all_symbols:
+            for symbol in settings.symbols:
                 signal_data = signal_by_symbol.get(symbol)
                 if signal_data is None:
                     continue
 
                 sym_news_block = news_blocks.get(symbol)
-
-                if symbol in vp_symbols and isinstance(signal_data, VolumeProfileSignal):
-                    # VP-позиция momentum-лимит не занимает (open_count
-                    # считает только momentum-символы).
-                    _process_vp_symbol(
-                        symbol=symbol,
-                        sig=signal_data,
-                        executor=executor,
-                        store=store,
-                        settings=settings,
-                        positions_by_symbol=positions_by_symbol,
-                        news_block=sym_news_block,
-                        session_ok=vp_window_ok,
-                    )
-                    continue
 
                 last_direction = store.get_last_direction(symbol)
                 # Edge-trigger: входим только на СМЕНЕ направления сигнала.

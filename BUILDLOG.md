@@ -4,6 +4,107 @@
 
 ---
 
+## 2026-06-18
+
+### feat(momentum-bot): полностью удалена Volume Profile (VP) стратегия по золоту
+
+`<pending>`
+
+**Запрос пользователя:** «убери вообще VP, она работает плохо, мне не нравится.
+Сотри её навсегда». Решение пользователя (не data-driven disable по `sample-size.mdc`,
+а явное product-решение убрать модуль из бота).
+
+**Триггер:** разбор крупного минуса по золоту 06-17 — VP сделал breakout-short
+`pid 151753347` в пост-FOMC качели (вход после истечения ±60-мин event-guard,
+профиль построен вокруг релиза → невалиден по Dalton), золото V-развернулось,
+−$81.12 за одну сделку. На фоне общей VP-золото статистики ≈ −$88 за 5 сделок.
+
+**Что удалено (только `fx_momentum_bot`, flowzone_bot VP не тронут — это другой бот):**
+- `src/fx_momentum_bot/strategy/volume_profile.py` (модуль целиком)
+- `tests/test_fx_momentum_volume_profile.py`
+- В `main.py`: `_open_vp_position`, `_process_vp_symbol`, `_vp_entry_window_open`,
+  `_vp_friday_flat_due`, `_parse_hhmm`, VP-ветка fetch (5m), friday-flat блок,
+  раздельный подсчёт momentum/VP лимитов. Бот теперь торгует только momentum
+  по `settings.symbols`; `all_symbols`/`vp_symbols` убраны.
+- В `settings.py`: все `vp_*` поля (16 шт.) + `vp_symbols`/`all_symbols` properties.
+- VP-тесты окна входов и friday-flat из `test_fx_momentum_bot.py`.
+- VP-блок из `.env.example`; правка docstring/атрибуции в `momentum_pnl_audit.py`.
+
+**Что НЕ тронуто:** event-guard (generic, защищает momentum-входы вокруг
+US/ECB/BoJ релизов), ATR-sizing, BE/partial/trailing, sign-decay — momentum-логика.
+
+**Деплой-замечания:** (1) на VPS `.env` может остаться `MOMENTUM_BOT_VP_SYMBOLS=GC=F` —
+после удаления из кода переменная игнорируется (`extra="ignore"`), золото
+больше не качается/не торгуется; стоит убрать ради чистоты. (2) Если на брокере
+висит открытая VP-золото позиция (label `momentum-bot`) — после деплоя бот её
+НЕ сопровождает (GC=F вне `symbols`); закрыть вручную в cTrader.
+
+**Тесты:** `pytest tests/` — 1310 passed.
+
+**Файлы:** `src/fx_momentum_bot/strategy/volume_profile.py` (удалён),
+`src/fx_momentum_bot/app/main.py`, `src/fx_momentum_bot/config/settings.py`,
+`tests/test_fx_momentum_bot.py`, `tests/test_fx_momentum_volume_profile.py` (удалён),
+`.env.example`, `scripts/momentum_pnl_audit.py`
+
+---
+
+## 2026-06-16
+
+### analysis(momentum-bot): гипотеза «ранний BE / фикс +$5-6» — опровергнута на OOS, стратегию НЕ трогаем
+
+`<pending>` (только анализ, без правки кода стратегии)
+
+**Запрос пользователя:** «momentum FX ждёт слишком большую прибыль и теряет
+деньги — сделка набирает +$5-6 и уходит в минус; если бы фиксировали мелкую
+прибыль/видели разворот раньше — сохранили бы плюс».
+
+**Контекст (broker-truth, `momentum_pnl_audit.py`, с 2026-06-11 — после
+последних правок 06-10/06-11):** momentum-FX+VP-золото 25 закрытых сделок,
+net −$56 (XAUUSD очищен от сделки fx_ai_trader +$32.37, атрибутированной по
+символу). WR 28%, payoff 1.45 при безубыточном 2.57. **n<100 → ниже порога
+`sample-size.mdc`, вывод о поломке делать нельзя.**
+
+**Проверка гипотезы (3 артефакта, no-data-fitting — измеряем реальность):**
+
+1. **MFE по реальным сделкам** (`_momentum_mfe_local.py`, 5m yfinance,
+   $/пункт калиброван из gross): 9/16 убыточных сделок добегали до +$5
+   (8 до +$6) и разворачивались, средний лосс плавал до +$5.84 (0.39R).
+   **0/16 лоссов доходили до +1R** — текущий BE@1R не срабатывал НИКОГДА.
+   Наблюдение пользователя по факту верно: дыра — мёртвая зона 0→1R.
+
+2. **Path-контрфакт на живых сделках** (`_momentum_be_counterfactual.py`,
+   `_momentum_exit_levers.py`): ранний BE@+$6→стоп-в-БУ улучшал живую
+   выборку (net −61 → −33), НО выигрыш держался на 1-2 золотых сделках
+   (сверхчувствительность $5→$6: Δ +$10 → +$28 = оверфит на 23 сделках).
+   Тесный стоп −$10 САМ ПО СЕБЕ делал ХУЖЕ (−61 → −83, whipsaw): «резать
+   крупные лузы» не бесплатно. BE ловит только give-back'и, не straight-down
+   лузы.
+
+3. **OOS-бэктест** (`scripts/momentum_exit_backtest.py`, 3 мес 03-25→06-16,
+   реплика 1h-momentum-входов, 4 FX-мажора, IS/OOS-сплит 05-05, mid-цены):
+   - **BE@1.0R (текущий): netR +80.6, PF 2.04, avgR +0.32, WR 47%, n=252;
+     IS +39.2 / OOS +41.4 — плюс в ОБЕИХ половинах.**
+   - BE@0.5R: netR +81.4 (n=301); BE@0.4R: netR +84.6 (n=310).
+   - Ранний BE netR-нейтрален (+1…+4R за 3 мес = шум), но роняет WR 47%→32%
+     и плодит сделки (252→310): с реальными спред/комиссией (нет в yfinance)
+     +23% сделок = больше издержек → ранний BE скорее ПРОИГРАЕТ базе.
+
+**Вывод:** (1) momentum-FX на большой выборке **плюсовая** (PF 2.0, IS+OOS оба
+положительны) → живые −$56 за неделю = **шум**, не поломка. (2) Ранний BE /
+фикс-TP +$5-6 **не улучшает** netR на нормальной выборке — это small-sample
+мираж, обрезающий правый хвост (вины с MFE +$23/+$36/+$78). Менять
+`break_even_r`/стоп **нет оснований**. Действие: ничего в стратегии не
+трогаем, копим живую выборку до ≥100 сделок.
+
+**Оговорки бэктеста:** mid-цены (без costs — одинаково для всех вариантов,
+A/B валиден), без event/spread-guard (входы идеализированы, консистентны),
+золото-VP исключено (отдельная страта), 5m intrabar-гранулярность.
+
+**Файлы:** только артефакты анализа — `scripts/momentum_exit_backtest.py`,
+`scripts/_momentum_mfe_local.py`, `scripts/_momentum_be_counterfactual.py`,
+`scripts/_momentum_exit_levers.py`, `scripts/_momentum_trade_dump.py`,
+`data/_momentum_trades_0611.json`. Код стратегии НЕ изменён.
+
 ## 2026-06-15
 
 ### fix(momentum-bot): глушим спам DECAY CLOSE при закрытом рынке + чиним атрибуцию аудита
