@@ -32,10 +32,10 @@ token-service = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 fx-pro-bot = "fx_pro_bot.app.main:main"
 fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
 fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
-ai-trader = "ai_trader.app.main:run"
 fx-ai-trader = "fx_ai_trader.app.main:run"
 scalp-bot = "scalp_bot.app.main:run"
 flowzone-bot = "flowzone_bot.app.main:run"
+tradecard-bybit = "tradecard_bybit.app.main:run"
 fx-momentum-bot = "fx_momentum_bot.app.main:run"
 ru-stocks-analyst = "ru_stocks_analyst.app.main:run"
 ru-stocks-discover = "ru_stocks_analyst.app.discover_accounts:main"
@@ -45,10 +45,10 @@ ctrader-token-service = "ctrader_token_service.__main__:main"
 [tool.hatch.build.targets.wheel]
 packages = [
   "src/fx_pro_bot",
-  "src/ai_trader",
   "src/fx_ai_trader",
   "src/scalp_bot",
   "src/flowzone_bot",
+  "src/tradecard_bybit",
   "src/fx_momentum_bot",
   "src/ru_stocks_analyst",
   "src/shared_oauth",

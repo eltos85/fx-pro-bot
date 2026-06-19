@@ -1,8 +1,8 @@
-"""Технические индикаторы для FX AI Trader.
+"""Технические индикаторы для RU Stocks Analyst.
 
 Реализации без внешних зависимостей (только Python stdlib) — RSI/MACD/ATR/EMA/
-Bollinger. Изолированная копия внутри fx_ai_trader (ранее переиспользовалась из
-удалённого ai_trader; теперь живёт здесь, чтобы бот был самодостаточен).
+Bollinger. Изолированная копия внутри ru_stocks_analyst (ранее переиспользовалась
+из удалённого ai_trader; теперь живёт здесь, чтобы скринер был самодостаточен).
 
 ─── Research basis ───
 - RSI: J. Welles Wilder Jr. «New Concepts in Technical Trading Systems» (1978).
@@ -211,7 +211,7 @@ def compute_snapshot(
 
 
 def format_snapshot(s: IndicatorSnapshot) -> str:
-    """Компактная человекочитаемая строка для вкладывания в LLM-context."""
+    """Компактная человекочитаемая строка."""
 
     def fmt(x: float | None, pattern: str) -> str:
         return pattern.format(x) if x is not None else "n/a"

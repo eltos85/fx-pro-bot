@@ -1,12 +1,12 @@
 ---
-description: Методология сбора статистики ботов (ai-trader, fx_ai_trader, advisor). Иерархия источников + запрет на ad-hoc API без pagination.
+description: Методология сбора статистики ботов (fx_ai_trader, advisor, Bybit-боты). Иерархия источников + запрет на ad-hoc API без pagination.
 alwaysApply: true
 ---
 
 # Сбор статистики: иерархия источников и обязательная сверка
 
 Правило обязательно для любых stat-сводок (последние 24h, неделя, месяц)
-по любому боту: `ai-trader`, `fx_ai_trader`, `fx_pro_bot/advisor`.
+по любому боту: `fx_ai_trader`, `fx_pro_bot/advisor`, Bybit-боты.
 Цель — устранить путаницу когда разные источники дают
 разные числа (был случай 2026-05-25: БД +$14.92, my API call +$2.35,
 выписка показала net +$14.4 — БД была близка к истине, но мой быстрый
@@ -64,11 +64,11 @@ API call пропустил половину trades).
 
 ## Готовые источники в проекте
 
-- `scripts/collect_bybit_3bots_stats.py` — full pagination для Bybit
-  (ai_trader), split shared subaccount по `orderLinkId starts with "ai_"`.
+- `scripts/collect_bybit_3bots_stats.py` — full pagination для Bybit,
+  split shared subaccount по `orderLinkId` префиксу.
   Запуск см. docstring скрипта (через `docker run` с volume-mounts).
 - Bybit `get_closed_pnl` отдаёт `closedPnl` уже **net** (с учётом fees и
-  funding) — это ground truth для ai_trader, приоритетнее локальной БД.
+  funding) — это ground truth для Bybit-ботов, приоритетнее локальной БД.
 
 ## Связь с другими правилами
 

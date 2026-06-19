@@ -110,86 +110,6 @@ services:
     volumes:
       - ./data:/data
 
-  # ai_trader (DeepSeek-V4 + Bybit demo) — LLM-крипто-трейдер.
-  #
-  # 2026-06-05: ОТКЛЮЧЁН по решению пользователя («полностью неправильный,
-  # не нужен»). Контейнер остановлен и выведен из авто-деплоя через
-  # profiles: [disabled] — ни ручной `docker compose up -d`, ни GH Actions
-  # деплой его больше не поднимут. Открытая на момент остановки позиция
-  # ATOMUSDT Sell (id=15, opened 2026-06-05 12:32 UTC) оставлена закрыться
-  # биржевым SL/TP (Bybit demo, риска нет).
-  #
-  # Данные сохранены в volume fx-pro-bot_ai_trader_data (БД с историей
-  # decisions/positions/PnL — НЕ удалять). Чтобы вернуть: убрать profiles
-  # или `docker compose --profile disabled up -d ai-trader`.
-  ai-trader:
-    profiles:
-      - disabled
-    build:
-      context: .
-      dockerfile: Dockerfile.ai-trader
-    image: ai-trader:local
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    env_file:
-      - .env
-    environment:
-      AI_TRADER_DATA_DIR: /data
-      AI_TRADER_LOG_LEVEL: ${AI_TRADER_LOG_LEVEL:-INFO}
-      # Эксперимент 14 дней. ВСЕ параметры заморожены — менять = curve-fitting.
-      AI_TRADER_POLL_INTERVAL_SEC: ${AI_TRADER_POLL_INTERVAL_SEC:-900}
-      AI_TRADER_VIRTUAL_CAPITAL: ${AI_TRADER_VIRTUAL_CAPITAL:-500}
-      # 2026-05-20: whitelist пар обновлён по результатам 30д API stats.
-      # SYSTEM_PROMPT теперь template-driven — список монет берётся из
-      # settings.symbols (build_system_prompt(settings)), single source
-      # of truth = .env (AI_TRADER_SYMBOLS). Fallback ниже совпадает с
-      # текущим .env.
-      AI_TRADER_SYMBOLS: ${AI_TRADER_SYMBOLS:-LTCUSDT,ATOMUSDT,BTCUSDT,SUIUSDT,LINKUSDT}
-      # Killswitch (v0.3, 2%-риск): согласно AUDIT_2026.md P1, переход на
-      # mainstream 2026 risk per trade 1–2% (KuCoin Risk Mgmt 2026, Atlas Peak
-      # Research, Hyper-Quant). При 2% риска = $10 макс на сделку × 5 = $50/день.
-      # Total $200 = 40% virtual capital, ранняя остановка эксперимента.
-      AI_TRADER_MAX_DAILY_LOSS: ${AI_TRADER_MAX_DAILY_LOSS:-50}
-      AI_TRADER_MAX_TOTAL_LOSS: ${AI_TRADER_MAX_TOTAL_LOSS:-200}
-      AI_TRADER_MAX_POSITIONS: ${AI_TRADER_MAX_POSITIONS:-3}
-      AI_TRADER_MAX_LEVERAGE: ${AI_TRADER_MAX_LEVERAGE:-5}
-      AI_TRADER_RISK_PER_TRADE: ${AI_TRADER_RISK_PER_TRADE:-0.02}
-      # Bybit — ОТДЕЛЬНЫЕ ключи от bybit-bot (см. .env: AI_TRADER_BYBIT_API_KEY).
-      # Можно использовать те же что у bybit-bot, но рекомендуется завести
-      # отдельные subaccount или хотя бы переменные с другим именем для аудита.
-      AI_TRADER_BYBIT_DEMO: ${AI_TRADER_BYBIT_DEMO:-true}
-      AI_TRADER_BYBIT_CATEGORY: ${AI_TRADER_BYBIT_CATEGORY:-linear}
-      # DeepSeek-V4 через Anthropic-compatible endpoint.
-      # Free tier даёт 5M входных + 5M выходных tokens.
-      AI_TRADER_DEEPSEEK_MODEL: ${AI_TRADER_DEEPSEEK_MODEL:-deepseek-v4-flash}
-      AI_TRADER_DEEPSEEK_BASE_URL: ${AI_TRADER_DEEPSEEK_BASE_URL:-https://api.deepseek.com/anthropic}
-      AI_TRADER_DEEPSEEK_THINKING: ${AI_TRADER_DEEPSEEK_THINKING:-true}
-      # 4096 чтобы thinking-блоки не съедали весь бюджет до пустого
-      # text (см. BUILDLOG_AI_TRADER 2026-05-06 «fix(empty response)»).
-      AI_TRADER_DEEPSEEK_MAX_TOKENS: ${AI_TRADER_DEEPSEEK_MAX_TOKENS:-4096}
-      # PAPER mode по умолчанию: ставки НЕ ставятся на биржу, только логируются.
-      # Включать в LIVE только после проверки первых 1-2 циклов под наблюдением.
-      AI_TRADER_TRADING_ENABLED: ${AI_TRADER_TRADING_ENABLED:-false}
-      # News (Wave 3): RSS-агрегатор CoinDesk/CoinTelegraph/Decrypt, без auth.
-      # Кэш в памяти 10 мин, фильтр по символам (см. SYMBOL_KEYWORDS в
-      # src/ai_trader/news/rss.py) + generic-keywords (ETF, Fed, regulation).
-      # Top-N свежих за last_age_hours.
-      AI_TRADER_NEWS_ENABLED: ${AI_TRADER_NEWS_ENABLED:-true}
-      AI_TRADER_NEWS_MAX_AGE_HOURS: ${AI_TRADER_NEWS_MAX_AGE_HOURS:-6}
-      AI_TRADER_NEWS_MAX_ITEMS: ${AI_TRADER_NEWS_MAX_ITEMS:-8}
-      # Telegram (Wave 4): если TELEGRAM_BOT_TOKEN пустой — TG-модуль молчит.
-      # TELEGRAM_CHAT_ID опционален (auto-detect при первой команде /start),
-      # но если задан — отключает auto-bind для безопасности.
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-      AI_TRADER_TELEGRAM_ENABLED: ${AI_TRADER_TELEGRAM_ENABLED:-true}
-    volumes:
-      - ai_trader_data:/data
-
   fx-ai-trader:
     build:
       context: .
@@ -614,6 +534,65 @@ services:
     volumes:
       - flowzone_data:/data
 
+  # ─── tradecard-bybit: advisory-ревьюер scalp_bot + flowzone_bot ──────────
+  # АНАЛИТИКА (не торговый бот, не автотюнер). Читает БД ботов read-only,
+  # считает SMB report card, грейдит по score, гоняет 5 Why через DeepSeek,
+  # отдаёт рекомендации человеку. НЕ меняет конфиг/правила ботов и НЕ пишет в
+  # их БД (TASKSPEC_TRADECARD_BYBIT.md, STRATEGY_TRADECARD_BYBIT.md). Запуск —
+  # периодический (cron/scheduler), не realtime: командой не задаётся CMD,
+  # планировщик дёргает `tradecard-bybit daily|weekly --bot scalp|flowzone`.
+  tradecard-bybit:
+    build:
+      context: .
+      dockerfile: Dockerfile.tradecard-bybit
+    image: tradecard-bybit:local
+    restart: "no"
+    profiles:
+      # Сервис не крутится постоянно — запускается планировщиком/вручную.
+      # `docker compose run --rm tradecard-bybit tradecard-bybit daily --bot scalp`
+      - tools
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      TRADECARD_BYBIT_DATA_DIR: /data
+      # БД ботов монтируются read-only по своим путям (раздельные volume'а).
+      TRADECARD_BYBIT_SCALP_DB_DIR: /bots/scalp
+      TRADECARD_BYBIT_FLOWZONE_DB_DIR: /bots/flowzone
+      TRADECARD_BYBIT_REPORTS_DIR: /data/tradecard
+      TRADECARD_BYBIT_LOG_LEVEL: ${TRADECARD_BYBIT_LOG_LEVEL:-INFO}
+      # DeepSeek (5 Why, read-only аналитика) — общий ключ.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      TRADECARD_BYBIT_DEEPSEEK_API_KEY: ${TRADECARD_BYBIT_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}
+      TRADECARD_BYBIT_DEEPSEEK_MODEL: ${TRADECARD_BYBIT_DEEPSEEK_MODEL:-deepseek-v4-flash}
+      TRADECARD_BYBIT_FIVE_WHY_ENABLED: ${TRADECARD_BYBIT_FIVE_WHY_ENABLED:-true}
+      # Bybit read-only (closedPnl ground truth) — свои ключи с дефолтом на
+      # ключи ботов, чтобы аудит был раздельным (TASKSPEC §10).
+      TRADECARD_BYBIT_SCALP_BYBIT_API_KEY: ${TRADECARD_BYBIT_SCALP_BYBIT_API_KEY:-${SCALP_BYBIT_API_KEY:-}}
+      TRADECARD_BYBIT_SCALP_BYBIT_API_SECRET: ${TRADECARD_BYBIT_SCALP_BYBIT_API_SECRET:-${SCALP_BYBIT_API_SECRET:-}}
+      TRADECARD_BYBIT_FLOWZONE_BYBIT_API_KEY: ${TRADECARD_BYBIT_FLOWZONE_BYBIT_API_KEY:-${FLOWZONE_BYBIT_API_KEY:-${AI_TRADER_BYBIT_API_KEY:-}}}
+      TRADECARD_BYBIT_FLOWZONE_BYBIT_API_SECRET: ${TRADECARD_BYBIT_FLOWZONE_BYBIT_API_SECRET:-${FLOWZONE_BYBIT_API_SECRET:-${AI_TRADER_BYBIT_API_SECRET:-}}}
+      TRADECARD_BYBIT_BYBIT_DEMO: ${TRADECARD_BYBIT_BYBIT_DEMO:-true}
+      TRADECARD_BYBIT_CLOSED_PNL_ENABLED: ${TRADECARD_BYBIT_CLOSED_PNL_ENABLED:-true}
+      TRADECARD_BYBIT_MFE_ENABLED: ${TRADECARD_BYBIT_MFE_ENABLED:-false}
+      # Telegram: раздельные конфиги ботов, префиксы [tradecard-scalp]/[tradecard-flowzone].
+      TRADECARD_BYBIT_SCALP_TELEGRAM_ENABLED: ${TRADECARD_BYBIT_SCALP_TELEGRAM_ENABLED:-false}
+      TRADECARD_BYBIT_SCALP_TELEGRAM_BOT_TOKEN: ${TRADECARD_BYBIT_SCALP_TELEGRAM_BOT_TOKEN:-${SCALP_TELEGRAM_BOT_TOKEN:-}}
+      TRADECARD_BYBIT_SCALP_TELEGRAM_CHAT_ID: ${TRADECARD_BYBIT_SCALP_TELEGRAM_CHAT_ID:-${SCALP_TELEGRAM_CHAT_ID:-}}
+      TRADECARD_BYBIT_FLOWZONE_TELEGRAM_ENABLED: ${TRADECARD_BYBIT_FLOWZONE_TELEGRAM_ENABLED:-false}
+      TRADECARD_BYBIT_FLOWZONE_TELEGRAM_BOT_TOKEN: ${TRADECARD_BYBIT_FLOWZONE_TELEGRAM_BOT_TOKEN:-${FLOWZONE_TELEGRAM_BOT_TOKEN:-}}
+      TRADECARD_BYBIT_FLOWZONE_TELEGRAM_CHAT_ID: ${TRADECARD_BYBIT_FLOWZONE_TELEGRAM_CHAT_ID:-${FLOWZONE_TELEGRAM_CHAT_ID:-}}
+    volumes:
+      # БД ботов — STRICTLY read-only (read-only инвариант §11).
+      - scalp_bot_data:/bots/scalp:ro
+      - flowzone_data:/bots/flowzone:ro
+      # Свой volume: SQLite tradecard + markdown report card.
+      - tradecard_bybit_data:/data
+
   # ─── fx-momentum-bot: isolated FX momentum bot ───────────────────────────
   # Полностью отдельный runtime: свои MOMENTUM_BOT_* env, своя БД/токены в
   # отдельном volume, без использования legacy переменных advisor/scalp/ai.
@@ -682,7 +661,7 @@ services:
       - momentum_bot_data:/data
 
 volumes:
-  ai_trader_data:
   scalp_bot_data:
   flowzone_data:
   momentum_bot_data:
+  tradecard_bybit_data:

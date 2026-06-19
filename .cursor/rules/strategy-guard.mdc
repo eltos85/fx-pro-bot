@@ -69,11 +69,13 @@ alwaysApply: true
 
 ## Изоляция кодовых баз
 
-- В проекте живут боты `fx_pro_bot` (advisor, cTrader), `ai_trader`
-  (DeepSeek + Bybit) и `fx_ai_trader` (DeepSeek + cTrader).
+- В проекте живут боты `fx_pro_bot` (advisor, cTrader) и `fx_ai_trader`
+  (DeepSeek + cTrader), плюс Bybit-боты `scalp_bot` / `flowzone_bot`.
 - `fx_ai_trader` **намеренно** переиспользует cTrader-движок
-  `fx_pro_bot.trading.{client,symbols,auth}` и LLM/indicators из
-  `ai_trader` — это shared-инфраструктура, не нарушение изоляции.
+  `fx_pro_bot.trading.{client,symbols,auth}` — это shared-инфраструктура,
+  не нарушение изоляции. LLM-клиент и technical-indicators живут
+  изолированно **внутри** `fx_ai_trader` (перенесены из удалённого
+  `ai_trader`).
 - В остальном торговая логика ботов независима: не тащи стратегические
   параметры одного бота в другой, сверяйся с research-каноном
   (а не с соседним ботом).

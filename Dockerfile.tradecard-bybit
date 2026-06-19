@@ -1,0 +1,21 @@
+FROM python:3.12-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN pip install --upgrade pip
+
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+
+RUN pip install --no-cache-dir .
+
+ENV TRADECARD_BYBIT_DATA_DIR=/data
+VOLUME ["/data"]
+
+# Advisory-ревьюер: периодический запуск (cron/scheduler передаёт команду).
+# По умолчанию печатает help — реальный прогон: `tradecard-bybit daily --bot scalp`.
+CMD ["tradecard-bybit", "--help"]

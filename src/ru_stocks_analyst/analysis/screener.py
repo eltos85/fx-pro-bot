@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ai_trader.analysis.indicators import compute_snapshot
+from ru_stocks_analyst.analysis.indicators import compute_snapshot
 from ru_stocks_analyst.data.universe import ShareInstrument
 from ru_stocks_analyst.tinkoff.rest_client import TinkoffRestClient, quotation_to_float
 

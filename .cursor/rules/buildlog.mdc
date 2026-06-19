@@ -1,5 +1,5 @@
 ---
-description: Ведение BUILDLOG при каждом коммите и деплое. Для fx_pro_bot/advisor — BUILDLOG.md, для ai_trader — BUILDLOG_AI_TRADER.md, для fx_ai_trader — BUILDLOG_AI_FX_TRADER.md.
+description: Ведение BUILDLOG при каждом коммите и деплое. Для fx_pro_bot/advisor — BUILDLOG.md, для fx_ai_trader — BUILDLOG_AI_FX_TRADER.md.
 alwaysApply: true
 ---
 
@@ -11,7 +11,6 @@ alwaysApply: true
 | Бот | Лог | Когда писать |
 |---|---|---|
 | `fx_pro_bot` / advisor (cTrader) | `BUILDLOG.md` | правки в `src/fx_pro_bot/`, FxPro-стратегии, advisor-деплой |
-| `ai_trader` (DeepSeek + Bybit) | `BUILDLOG_AI_TRADER.md` | правки в `src/ai_trader/`, ai_trader-тесты/скрипты |
 | `fx_ai_trader` (DeepSeek + cTrader) | `BUILDLOG_AI_FX_TRADER.md` | правки в `src/fx_ai_trader/`, fx_ai_trader-тесты/скрипты |
 
 Если коммит затрагивает **несколько** ботов (кросс-cutting, например правка

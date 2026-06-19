@@ -27,9 +27,6 @@ alwaysApply: true
    # Для fx_pro_bot / advisor (cTrader):
    ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-advisor-1 --tail 20"
 
-   # Для ai_trader:
-   ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-ai-trader-1 --tail 20"
-
    # Для fx_ai_trader:
    ssh root@204.168.149.140 "cd /root/fx-pro-bot && docker compose ps && docker logs fx-pro-bot-fx-ai-trader-1 --tail 20"
 
@@ -45,12 +42,9 @@ alwaysApply: true
 - **fx_pro_bot / advisor**: in-flight ордера/позиции переподтягиваются из
  SQLite `advisor_data` при старте — рестарт безопасен, но возможна
  миллисекундная пауза.
-- **ai_trader**: БД `ai_trader_data` сохраняется, открытые позиции
- reconcile-ятся с биржей при следующем цикле, **но in-memory cycle
- counter сбрасывается на 1** (используй `decisions.id` из БД для
- monotonic-нумерации в анализе). Эксперимент `n=14 дней forward-test`
- НЕ сбрасывается рестартом — только правкой кода/промпта/параметров
- (см. `BUILDLOG_AI_TRADER.md`).
+- **fx_ai_trader**: SQLite (bind `./data`) сохраняется, открытые позиции
+ reconcile-ятся с брокером при следующем цикле; in-memory cycle counter
+ сбрасывается — используй `decisions.id` из БД для monotonic-нумерации.
 
 ### Когда использовать селективный rebuild
 
@@ -60,9 +54,6 @@ alwaysApply: true
 ```bash
 # Только advisor:
 ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -d --no-deps --build advisor"
-
-# Только ai-trader:
-ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -d --no-deps --build ai-trader"
 
 # Только fx-ai-trader:
 ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -d --no-deps --build fx-ai-trader"
@@ -76,7 +67,6 @@ ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -
 - Правка затронула **несколько ботов** или общие модули.
 - Изменился `docker-compose.yml`, общие env vars, volumes.
 - Нужна гарантия чистого старта (после рефакторинга, миграций).
-- Не критично если ai-trader сбросит in-memory cycle counter.
 
 В остальных случаях — селективный rebuild по SSH экономит downtime
 других ботов.
@@ -89,10 +79,8 @@ ssh root@204.168.149.140 "cd /root/fx-pro-bot && git pull && docker compose up -
 - Контейнеры:
   - `fx-pro-bot-ctrader-token-service-1` — OAuth refresh-сервис (cTrader)
   - `fx-pro-bot-advisor-1` — fx_pro_bot (cTrader, profile `disabled`)
-  - `fx-pro-bot-ai-trader-1` — ai_trader (DeepSeek + Bybit demo)
   - `fx-pro-bot-fx-ai-trader-1` — fx_ai_trader (DeepSeek + cTrader demo)
 - Docker volumes:
-  - `ai_trader_data` — SQLite ai_trader'а с историей decisions/positions/PnL (не удалять — сброс = потеря эксперимента)
   - bind `./data:/data` — SQLite advisor + fx_ai_trader + cTrader-токены
 
 ## Секреты GitHub Actions

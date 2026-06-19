@@ -1,0 +1,1 @@
+"""Конфиг tradecard_bybit."""

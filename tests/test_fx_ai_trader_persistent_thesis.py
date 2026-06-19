@@ -30,7 +30,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ai_trader.llm.client import DeepSeekClient
+from fx_ai_trader.llm.client import DeepSeekClient
 from fx_ai_trader.app.main import _extract_thesis
 from fx_ai_trader.llm.prompts import (
     SYSTEM_PROMPT,
