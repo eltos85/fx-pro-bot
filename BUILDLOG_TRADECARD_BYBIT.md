@@ -17,6 +17,36 @@ report card, грейдит сделки по `score`, гоняет 5 Why (DeepS
 
 ## 2026-06-19
 
+### feat(tradecard-bybit): per-strategy разрез (baseline / P&L / детекторы)
+`<pending commit>`
+
+Запрос пользователя: у scalp 3 основные страты (sweep_fade, density_break,
+density_bounce; sweep_fade_canon — A/B-вариант, остаётся отдельной линией) —
+изучать их раздельно, и baseline (точка отсчёта правки логики) у страт разный.
+
+Что добавлено:
+- **Per-strategy baseline:** env `TRADECARD_BYBIT_{SCALP,FLOWZONE}_BASELINE_DATES`
+  формата `strat=YYYY-MM-DD,strat2=YYYY-MM-DD` (приоритетнее bot-wide
+  `*_BASELINE_DATE`-fallback). `baseline_ts(bot, strategy)`,
+  `min_baseline_ts(bot)`. CLI грузит от min-baseline и режет per-trade по дате
+  правки логики конкретной страты (`_load_floor` + `_filter_baseline`); отчёт
+  пишет список активных baseline. До правки логики — «другая стратегия»,
+  смешивать нельзя (no-data-fitting + sample-size).
+- **P&L по стратегиям:** `summarize_by_strategy` (per-trade verified, сорт по
+  net — худшие сверху) + секция в weekly report card.
+- **Детекторы per-strategy:** `overtrading` и `big_game_hunting` теперь гоняются
+  раздельно по стратам в движке (scope.strategy); `paper_live_divergence` уже
+  бинил по `(strategy, symbol)`; остальные (grade/regime/sl_cluster/factor_noise/
+  exit_left_money) и так per-strategy.
+
+Тесты: +4 (`test_baseline_ts_botwide_and_per_strategy`,
+`test_filter_baseline_per_strategy`, `test_summarize_by_strategy`,
+`test_overtrading_per_strategy_in_engine`). 35 пакета / 1018 общий — зелёные.
+
+**Файлы:** `src/tradecard_bybit/config/settings.py`, `app/main.py`,
+`analysis/{pnl,engine,detectors}.py`, `report/weekly.py`, `docker-compose.yml`,
+`.env.example`, `tests/test_tradecard_bybit.py`
+
 ### fix(tradecard-bybit): R-multiple взрывается при SL≈entry (float-эпсилон)
 `<pending commit>`
 

@@ -62,14 +62,20 @@ class TradecardBybitSettings(BaseSettings):
     flowzone_telegram_bot_token: str = Field(default="")
     flowzone_telegram_chat_id: str = Field(default="")
 
-    # ─── Baseline анализа (точка отсчёта = последняя правка логики бота) ──
-    # Сделки ДО этой даты (UTC, YYYY-MM-DD) не анализируются: до правки логики
-    # это «другая стратегия», смешивать через границу нельзя (no-data-fitting +
-    # sample-size — разные режимы). Пусто = без нижней границы (вся история).
-    # Дата обоснована артефактом: дата выката коммита, сменившего логику
-    # (BUILDLOG_SCALP / BUILDLOG_FLOWZONE), а не подбором.
+    # ─── Baseline анализа (точка отсчёта = последняя правка логики) ───────
+    # Сделки ДО baseline не анализируются: до правки логики это «другая
+    # стратегия», смешивать через границу нельзя (no-data-fitting + sample-size).
+    # Пусто = без нижней границы. Дата обоснована артефактом (дата выката
+    # коммита, сменившего логику — BUILDLOG_SCALP/FLOWZONE), а не подбором.
+    #
+    # Bot-wide дата (UTC YYYY-MM-DD) — fallback для стратегий без своей даты:
     scalp_baseline_date: str = Field(default="")
     flowzone_baseline_date: str = Field(default="")
+    # Per-strategy даты (у страт scalp разные даты правок логики). Формат:
+    # "strategy=YYYY-MM-DD,strategy2=YYYY-MM-DD" (напр.
+    # "sweep_fade=2026-06-17,density_break=2026-06-15"). Приоритетнее bot-wide.
+    scalp_baseline_dates: str = Field(default="")
+    flowzone_baseline_dates: str = Field(default="")
 
     # ─── Пороги наблюдения (НЕ торговые; нейтральные/относительные) ───────
     # sample-size.mdc: «тема»/«победа» только при выборке ≥ этих порогов.
@@ -128,10 +134,9 @@ class TradecardBybitSettings(BaseSettings):
             return os.path.join(self.scalp_db_dir, "scalp_bot.sqlite")
         return os.path.join(self.flowzone_db_dir, "flowzone_bot.sqlite")
 
-    def baseline_ts(self, bot: str) -> float | None:
-        """Epoch-нижняя граница анализа для бота (None если не задана)."""
+    @staticmethod
+    def _parse_date(raw: str) -> float | None:
         from datetime import UTC, datetime
-        raw = self.scalp_baseline_date if bot == "scalp" else self.flowzone_baseline_date
         raw = (raw or "").strip()
         if not raw:
             return None
@@ -139,6 +144,41 @@ class TradecardBybitSettings(BaseSettings):
             return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
         except ValueError:
             return None
+
+    def _baseline_map(self, bot: str) -> dict[str, float]:
+        """Per-strategy baseline-даты бота: {strategy: epoch}."""
+        raw = self.scalp_baseline_dates if bot == "scalp" else self.flowzone_baseline_dates
+        out: dict[str, float] = {}
+        for part in (raw or "").split(","):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            strat, _, date = part.partition("=")
+            ts = self._parse_date(date)
+            if ts is not None:
+                out[strat.strip()] = ts
+        return out
+
+    def baseline_ts(self, bot: str, strategy: str | None = None) -> float | None:
+        """Epoch-нижняя граница анализа: per-strategy дата (если есть) →
+        bot-wide дата → None. Per-strategy приоритетнее (у страт scalp разные
+        даты правок логики)."""
+        if strategy is not None:
+            ps = self._baseline_map(bot).get(strategy)
+            if ps is not None:
+                return ps
+        bot_wide = (self.scalp_baseline_date if bot == "scalp"
+                    else self.flowzone_baseline_date)
+        return self._parse_date(bot_wide)
+
+    def min_baseline_ts(self, bot: str) -> float | None:
+        """Наименьшая из всех baseline-дат бота (для нижней границы загрузки)."""
+        candidates = list(self._baseline_map(bot).values())
+        bw = self._parse_date(self.scalp_baseline_date if bot == "scalp"
+                              else self.flowzone_baseline_date)
+        if bw is not None:
+            candidates.append(bw)
+        return min(candidates) if candidates else None
 
     def bybit_keys(self, bot: str) -> tuple[str, str]:
         if bot == "scalp":

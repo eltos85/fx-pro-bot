@@ -18,7 +18,9 @@ from datetime import UTC, datetime
 
 from tradecard_bybit.analysis import grading
 from tradecard_bybit.analysis.engine import run_detection
-from tradecard_bybit.analysis.pnl import ModePnl, bybit_net, summarize_mode
+from tradecard_bybit.analysis.pnl import (ModePnl, bybit_net,
+                                          summarize_by_strategy,
+                                          summarize_mode)
 from tradecard_bybit.analysis.small_wins import evaluate_small_win
 from tradecard_bybit.analysis.trade import Trade
 from tradecard_bybit.config.settings import (TradecardBybitSettings,
@@ -45,21 +47,41 @@ def _since_ts(since: str | None, default_back_sec: float) -> float:
     return time.time() - default_back_sec
 
 
-def _apply_baseline(since_ts: float, cfg: TradecardBybitSettings, bot: str,
-                    ) -> tuple[float, str | None]:
-    """Поднять нижнюю границу анализа до baseline бота (последняя правка логики).
+def _load_floor(since_ts: float, cfg: TradecardBybitSettings, bot: str) -> float:
+    """Нижняя граница загрузки = max(окно, минимальный baseline бота).
 
-    Сделки до baseline — «другая стратегия» (разные режимы через границу
-    правки нельзя смешивать, no-data-fitting + sample-size). Возвращает
-    (effective_since_ts, note для отчёта)."""
-    base = cfg.baseline_ts(bot)
-    if base is None:
-        return since_ts, None
-    eff = max(since_ts, base)
-    label = datetime.fromtimestamp(base, tz=UTC).strftime("%Y-%m-%d")
-    note = (f"Точка отсчёта анализа: {label} (UTC) — baseline последней правки "
-            f"логики {bot}; более ранние сделки исключены.")
-    return eff, note
+    Грузим от самого раннего baseline, чтобы не потерять сделки страт с поздней
+    датой; пер-страту дальше отрезаем в ``_filter_baseline``."""
+    mb = cfg.min_baseline_ts(bot)
+    return max(since_ts, mb) if mb is not None else since_ts
+
+
+def _filter_baseline(trades: list[Trade], cfg: TradecardBybitSettings, bot: str,
+                     ) -> tuple[list[Trade], str | None]:
+    """Per-strategy baseline-фильтр: выкидываем сделки страты ДО её даты правки
+    логики (no-data-fitting + sample-size — не мешаем режимы через границу).
+
+    Возвращает (отфильтрованные сделки, note для отчёта со списком baseline)."""
+    has_any = bool(cfg._baseline_map(bot)) or cfg.baseline_ts(bot) is not None
+    if not has_any:
+        return trades, None
+    kept: list[Trade] = []
+    used: dict[str, float] = {}
+    for t in trades:
+        base = cfg.baseline_ts(bot, t.strategy)
+        if base is not None and t.ts_open < base:
+            continue
+        if base is not None:
+            used[t.strategy] = base
+        kept.append(t)
+    if not used:
+        return kept, None
+    parts = ", ".join(
+        f"{s}={datetime.fromtimestamp(ts, tz=UTC).strftime('%Y-%m-%d')}"
+        for s, ts in sorted(used.items()))
+    note = (f"Точка отсчёта (baseline последней правки логики, UTC): {parts}. "
+            f"Более ранние сделки этих страт исключены из анализа.")
+    return kept, note
 
 
 def _iso_week(ts: float) -> str:
@@ -132,11 +154,11 @@ def _grade_by_strategy(trades: list[Trade], cfg: TradecardBybitSettings,
 def cmd_daily(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
               dry_run: bool, mode: str | None = None) -> int:
     until = time.time()
-    since_ts = _since_ts(since, 24 * 3600)
-    since_ts, baseline_note = _apply_baseline(since_ts, cfg, bot)
+    since_ts = _load_floor(_since_ts(since, 24 * 3600), cfg, bot)
     trades = _load_trades(cfg, bot, since_ts=since_ts, until_ts=until)
     if mode:
         trades = [t for t in trades if t.mode == mode]
+    trades, baseline_note = _filter_baseline(trades, cfg, bot)
     client = _maybe_bybit_client(cfg, bot)
     paper, live = _pnl_summaries(trades, cfg, bot, since_ts=since_ts,
                                  until_ts=until, client=client)
@@ -159,12 +181,12 @@ def cmd_daily(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
 def cmd_weekly(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
                dry_run: bool, mode: str | None = None) -> int:
     until = time.time()
-    since_ts = _since_ts(since, 7 * 24 * 3600)
-    since_ts, baseline_note = _apply_baseline(since_ts, cfg, bot)
+    since_ts = _load_floor(_since_ts(since, 7 * 24 * 3600), cfg, bot)
     week = _iso_week(until)
     trades = _load_trades(cfg, bot, since_ts=since_ts, until_ts=until)
     if mode:
         trades = [t for t in trades if t.mode == mode]
+    trades, baseline_note = _filter_baseline(trades, cfg, bot)
     client = _maybe_bybit_client(cfg, bot)
     paper, live = _pnl_summaries(trades, cfg, bot, since_ts=since_ts,
                                  until_ts=until, client=client)
@@ -194,7 +216,9 @@ def cmd_weekly(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
             findings=result.findings, top_theme=result.top_theme,
             five_why=five_why, grade_by_strategy=grades,
             small_win_count=small_win_count, momentum_lines=momentum_lines,
-            baseline_note=baseline_note)
+            baseline_note=baseline_note,
+            strat_pnl_live=summarize_by_strategy(trades, "live"),
+            strat_pnl_paper=summarize_by_strategy(trades, "paper"))
 
         os.makedirs(cfg.reports_dir, exist_ok=True)
         path = os.path.join(cfg.reports_dir, f"{bot}_{week}.md")

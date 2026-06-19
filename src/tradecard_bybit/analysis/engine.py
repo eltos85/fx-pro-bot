@@ -47,12 +47,19 @@ def _findings_for_mode(trades: list[Trade], *, bot: str, mode: str,
     out += detect_factor_noise(
         trades, bot=bot, mode=mode, max_exp_frac=cfg.factor_noise_max_exp_frac,
         min_trades=cfg.factor_noise_min_trades)
-    out += detect_overtrading(
-        trades, bot=bot, mode=mode, spike_factor=cfg.overtrading_spike_factor,
-        min_trades=cfg.overtrading_min_trades)
-    out += detect_big_game_hunting(
-        trades, bot=bot, mode=mode, max_top_share=cfg.big_game_max_top_share,
-        min_trades=cfg.big_game_min_trades, buckets=cfg.grade_buckets)
+    # overtrading / big_game — per-strategy (TASKSPEC: страты scalp изучаем
+    # раздельно; срез по часам/грейду осмыслен внутри одной страты).
+    strats: dict[str, list[Trade]] = {}
+    for t in trades:
+        strats.setdefault(t.strategy, []).append(t)
+    for strat, grp in strats.items():
+        out += detect_overtrading(
+            grp, bot=bot, mode=mode, spike_factor=cfg.overtrading_spike_factor,
+            min_trades=cfg.overtrading_min_trades, strategy=strat)
+        out += detect_big_game_hunting(
+            grp, bot=bot, mode=mode, max_top_share=cfg.big_game_max_top_share,
+            min_trades=cfg.big_game_min_trades, buckets=cfg.grade_buckets,
+            strategy=strat)
     return out
 
 

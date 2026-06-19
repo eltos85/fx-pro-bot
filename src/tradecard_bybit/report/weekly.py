@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from tradecard_bybit.analysis.detectors import PatternFinding
 from tradecard_bybit.analysis.grading import GRADE_RISK_REF, GradeCurve
-from tradecard_bybit.analysis.pnl import ModePnl
+from tradecard_bybit.analysis.pnl import ModePnl, StrategyPnl
 from tradecard_bybit.llm.five_why import FiveWhyResult
 
 
@@ -27,7 +27,9 @@ def build_weekly_report(*, bot: str, week: str,
                         grade_by_strategy: dict[str, GradeCurve],
                         small_win_count: int,
                         momentum_lines: list[str],
-                        baseline_note: str | None = None) -> str:
+                        baseline_note: str | None = None,
+                        strat_pnl_live: list[StrategyPnl] | None = None,
+                        strat_pnl_paper: list[StrategyPnl] | None = None) -> str:
     L: list[str] = []
     L.append(f"# tradecard {bot} — weekly report card {week}")
     L.append("")
@@ -49,6 +51,24 @@ def build_weekly_report(*, bot: str, week: str,
         dd = _money(p.discrepancy) if p.discrepancy is not None else "—"
         L.append(f"| {p.mode} | {p.n_decided} | {p.wr:.0%} | {_money(p.net_db)} "
                  f"| {p.n_verified}/{p.n_decided} | {bn} | {dd} |")
+    L.append("")
+
+    # ─── P&L по стратегиям (разрез внутри бота) ─────────────────────────
+    L.append("### P&L по стратегиям (per-trade verified, источник scope=strategy)")
+    L.append("")
+    rows_ps = [(p.mode, sp) for p, lst in
+               ((pnl_live, strat_pnl_live), (pnl_paper, strat_pnl_paper))
+               for sp in (lst or [])]
+    if rows_ps:
+        L.append("| mode | страта | n | WR | net (БД) | EXP(avgR) | verified |")
+        L.append("|---|---|---|---|---|---|---|")
+        for md, sp in rows_ps:
+            exp = f"{sp.exp_r:.2f}" if sp.exp_r is not None else "—"
+            L.append(f"| {md} | {sp.strategy} | {sp.n_decided} | {sp.wr:.0%} | "
+                     f"{_money(sp.net_db)} | {exp} | "
+                     f"{sp.n_verified}/{sp.n_decided} |")
+    else:
+        L.append("_нет decided-сделок для разреза по стратегиям_")
     L.append("")
 
     # ─── Тема №1 + 5 Why ────────────────────────────────────────────────

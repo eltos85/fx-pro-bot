@@ -227,13 +227,14 @@ def detect_factor_noise(trades: list[Trade], *, bot: str, mode: str,
 
 def detect_overtrading(trades: list[Trade], *, bot: str, mode: str,
                        spike_factor: float, min_trades: int,
+                       strategy: str | None = None,
                        ) -> list[PatternFinding]:
     """Всплеск числа сделок при падении EXP («горячие» часы хуже спокойных).
 
     Группируем по календарному часу (ts_open//3600). «Горячий» час = число
     сделок ≥ spike_factor × медианы по активным часам (self-нормировка). Если
-    EXP горячих < EXP спокойных и горячих ≥ min — наблюдение.
-    """
+    EXP горячих < EXP спокойных и горячих ≥ min — наблюдение. ``strategy`` —
+    метка среза (движок зовёт per-strategy; trades уже отфильтрованы)."""
     dd = decided(trades)
     if len(dd) < min_trades:
         return []
@@ -256,9 +257,12 @@ def detect_overtrading(trades: list[Trade], *, bot: str, mode: str,
     calm_exp = expectancy_r(calm)
     if hot_exp is None or calm_exp is None or hot_exp >= calm_exp:
         return []
+    scope = {"spike_factor": spike_factor}
+    if strategy is not None:
+        scope["strategy"] = strategy
     return [PatternFinding(
-        code="overtrading", bot=bot, mode=mode, strategy=None,
-        scope={"spike_factor": spike_factor},
+        code="overtrading", bot=bot, mode=mode, strategy=strategy,
+        scope=scope,
         n=len(hot), wr=win_rate(hot), exp_r=hot_exp, net=net_pnl(hot),
         detail=(f"перегретые часы (≥{spike_factor}× медианы {med:.0f} сделок/ч): "
                 f"EXP={hot_exp:.2f} хуже спокойных EXP={calm_exp:.2f}"),
@@ -269,12 +273,14 @@ def detect_overtrading(trades: list[Trade], *, bot: str, mode: str,
 
 def detect_big_game_hunting(trades: list[Trade], *, bot: str, mode: str,
                             max_top_share: float, min_trades: int,
-                            buckets: int) -> list[PatternFinding]:
+                            buckets: int, strategy: str | None = None,
+                            ) -> list[PatternFinding]:
     """Дрейф к редкому high-score (A+) при том, что baseline даёт momentum (§8).
 
     Наблюдение: top-грейд РЕДОК (доля < max_top_share) И не превосходит baseline
     по EXP — значит гнаться за A+ в ущерб baseline-страте = big-game-hunting
-    (канон §8: «вернись к baseline»). Структурный, без подгонки P&L.
+    (канон §8: «вернись к baseline»). Структурный, без подгонки P&L. ``strategy``
+    — метка среза (движок зовёт per-strategy; trades уже отфильтрованы).
     """
     dd = decided(trades)
     if len(dd) < min_trades:
@@ -291,9 +297,12 @@ def detect_big_game_hunting(trades: list[Trade], *, bot: str, mode: str,
     if (top_share < max_top_share and top.exp_r is not None
             and base_exp is not None and base_exp > 0
             and top.exp_r <= base_exp):
+        scope = {"top_grade": top.label}
+        if strategy is not None:
+            scope["strategy"] = strategy
         return [PatternFinding(
-            code="big_game_hunting", bot=bot, mode=mode, strategy=None,
-            scope={"top_grade": top.label},
+            code="big_game_hunting", bot=bot, mode=mode, strategy=strategy,
+            scope=scope,
             n=top.n, wr=top.wr, exp_r=top.exp_r, net=top.net,
             detail=(f"top-грейд {top.label} редок (доля {top_share:.0%}) и не "
                     f"бьёт baseline по EXP ({top.exp_r:.2f} ≤ {base_exp:.2f}) — "

@@ -93,26 +93,77 @@ def test_r_multiple_none_when_sl_equals_entry():
     assert mk(3, score=4, pnl=1.0, entry=0.2354, sl=0.23446).r_multiple is not None
 
 
-def test_baseline_ts_and_clamp():
+def test_baseline_ts_botwide_and_per_strategy():
     from datetime import UTC, datetime
-    cfg = TradecardBybitSettings(scalp_baseline_date="2026-06-17")
-    base = cfg.baseline_ts("scalp")
-    assert base == datetime(2026, 6, 17, tzinfo=UTC).timestamp()
-    # flowzone без baseline → None; некорректная дата → None
-    assert cfg.baseline_ts("flowzone") is None
+    cfg = TradecardBybitSettings(
+        scalp_baseline_date="2026-06-10",
+        scalp_baseline_dates="sweep_fade=2026-06-17,density_break=2026-06-15")
+    d = lambda s: datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+    # per-strategy дата приоритетнее bot-wide
+    assert cfg.baseline_ts("scalp", "sweep_fade") == d("2026-06-17")
+    assert cfg.baseline_ts("scalp", "density_break") == d("2026-06-15")
+    # страта без своей даты → bot-wide fallback
+    assert cfg.baseline_ts("scalp", "density_bounce") == d("2026-06-10")
+    # min по всем датам бота
+    assert cfg.min_baseline_ts("scalp") == d("2026-06-10")
+    # некорректная дата игнорируется
     assert TradecardBybitSettings(scalp_baseline_date="bad").baseline_ts("scalp") is None
-    # клэмп: запрошенный since раньше baseline поднимается до baseline
-    from tradecard_bybit.app.main import _apply_baseline
-    early = datetime(2026, 1, 1, tzinfo=UTC).timestamp()
-    eff, note = _apply_baseline(early, cfg, "scalp")
-    assert eff == base and note is not None and "2026-06-17" in note
-    # since позже baseline — не трогаем
-    late = datetime(2026, 6, 20, tzinfo=UTC).timestamp()
-    eff2, _ = _apply_baseline(late, cfg, "scalp")
-    assert eff2 == late
-    # без baseline — since без изменений, note None
-    eff3, note3 = _apply_baseline(early, cfg, "flowzone")
-    assert eff3 == early and note3 is None
+    assert cfg.baseline_ts("flowzone") is None
+
+
+def test_filter_baseline_per_strategy():
+    from datetime import UTC, datetime
+    from tradecard_bybit.app.main import _filter_baseline, _load_floor
+    cfg = TradecardBybitSettings(
+        scalp_baseline_dates="sweep_fade=2026-06-17,density_break=2026-06-15")
+    d = lambda s: datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+    trades = [
+        mk(1, score=4, pnl=1.0, strategy="sweep_fade", ts_open=d("2026-06-16")),
+        mk(2, score=4, pnl=1.0, strategy="sweep_fade", ts_open=d("2026-06-18")),
+        mk(3, score=4, pnl=1.0, strategy="density_break", ts_open=d("2026-06-16")),
+        mk(4, score=4, pnl=1.0, strategy="density_bounce", ts_open=d("2026-06-01")),
+    ]
+    kept, note = _filter_baseline(trades, cfg, "scalp")
+    ids = {t.id for t in kept}
+    # sweep_fade до 06-17 (id1) выкинут; 06-18 (id2) оставлен
+    assert 1 not in ids and 2 in ids
+    # density_break 06-16 ≥ 06-15 → оставлен
+    assert 3 in ids
+    # density_bounce без baseline → не трогаем (оставлен)
+    assert 4 in ids
+    assert note is not None and "sweep_fade=2026-06-17" in note
+    # load floor = min baseline (06-15)
+    assert _load_floor(0.0, cfg, "scalp") == d("2026-06-15")
+
+
+def test_summarize_by_strategy():
+    from tradecard_bybit.analysis.pnl import summarize_by_strategy
+    trades = ([mk(i, score=4, pnl=1.0, strategy="sweep_fade") for i in range(5)]
+              + [mk(50 + i, score=4, pnl=-2.0, strategy="density_break",
+                    close_reason="sl_hit") for i in range(3)])
+    rows = summarize_by_strategy(trades, "live")
+    by = {r.strategy: r for r in rows}
+    assert by["sweep_fade"].n_decided == 5 and by["sweep_fade"].net_db == 5.0
+    assert by["density_break"].net_db == -6.0
+    # худшая страта сверху (сортировка по net)
+    assert rows[0].strategy == "density_break"
+
+
+def test_overtrading_per_strategy_in_engine():
+    # перегретая страта sweep_fade, спокойная density_break — overtrading
+    # должен пометить именно sweep_fade (scope.strategy)
+    day = _BASE_TS - (_BASE_TS % 86400.0)
+    calm = [mk(h, score=4, pnl=1.0, strategy="sweep_fade",
+               ts_open=day + h * 3600) for h in range(10)]
+    hot = [mk(1000 + i, score=4, pnl=-0.5, strategy="sweep_fade",
+              close_reason="sl_hit", ts_open=day + 20 * 3600 + i)
+           for i in range(30)]
+    other = [mk(2000 + i, score=4, pnl=1.0, strategy="density_break",
+                ts_open=day + i * 3600) for i in range(5)]
+    cfg = TradecardBybitSettings()
+    res = run_detection(calm + hot + other, bot="scalp", cfg=cfg)
+    ot = [f for f in res.findings if f.code == "overtrading"]
+    assert ot and all(f.scope.get("strategy") == "sweep_fade" for f in ot)
 
 
 def test_non_trade_excluded_from_decided():
