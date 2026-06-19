@@ -244,12 +244,13 @@ services:
       SCALP_AUTO_UNIVERSE_ENABLED: ${SCALP_AUTO_UNIVERSE_ENABLED:-true}
       # Метод отбора монет: "rvol" (штатный) | "momentum" (ТОП по 24h росту/
       # падению + оборот, как в ролике SerCrypto https://youtu.be/gCgYS-CsGWc).
-      # 2026-06-17: ПЕРЕКЛЮЧЕНО на momentum для форвард-A/B отбора монет на
-      # активной sweep_fade (по запросу пользователя). Применяется к авто-
-      # вселенной (sweep_fade/density_bounce/density_break); sweep_fade_canon
-      # на своих мейджорах (symbol_scope) — НЕ затронут. Сама торговая логика не
-      # меняется. Откат: SCALP_UNIVERSE_METHOD=rvol.
-      SCALP_UNIVERSE_METHOD: ${SCALP_UNIVERSE_METHOD:-momentum}
+      # 2026-06-17: ПЕРЕКЛЮЧАЛИ на momentum (форвард-A/B). 2026-06-19: ОТКАТ на
+      # rvol — наблюдаемый регресс sweep_fade на momentum-вселенной (по запросу
+      # пользователя; прецедент — аналогичный откат flowzone f0ef960). Применяется
+      # к авто-вселенной (sweep_fade/density_bounce/density_break); sweep_fade_canon
+      # на своих мейджорах (symbol_scope) — НЕ затронут. Торговая логика страт не
+      # меняется (меняется только пул монет). A/B momentum: SCALP_UNIVERSE_METHOD=momentum.
+      SCALP_UNIVERSE_METHOD: ${SCALP_UNIVERSE_METHOD:-rvol}
       # momentum-параметры (действуют при METHOD=momentum). Ролик: оборот «от
       # 50 млн можно, 100+ идеал»; анти-памп range-cap НЕТ (берём «то что стреляет»).
       SCALP_MOMENTUM_MIN_TURNOVER_USD: ${SCALP_MOMENTUM_MIN_TURNOVER_USD:-50000000}

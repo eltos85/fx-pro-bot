@@ -4,6 +4,33 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-19
+
+### revert(universe): откат отбора монет momentum→rvol (наблюдаемый регресс)
+`<pending commit>`
+
+Откат A/B-эксперимента отбора монет: дефолт `SCALP_UNIVERSE_METHOD` в
+docker-compose возвращён `momentum`→`rvol` (штатный селектор `data/universe.py`:
+24h ликвидность/спред + анти-памп range-cap + intraday RVOL). Эксперимент с
+momentum-вселенной включали 2026-06-17 (171d1da); пользователь наблюдает
+выраженный регресс P&L `sweep_fade` на momentum-пуле монет.
+
+Применяется к авто-вселенной — `sweep_fade`, `density_bounce`, `density_break`;
+`sweep_fade_canon` торгует фиксированные мейджоры (`symbol_scope`) и momentum'ом
+НЕ затрагивался. Торговая логика самих страт не меняется — меняется только пул
+монет (возврат к rvol-дефолту).
+
+Прецедент: аналогичный откат flowzone `f0ef960` (momentum→rvol по наблюдаемому
+регрессу). Sample-size: эксперимент шёл ~2 дня (<100 сделок, <2 нед) — это НЕ
+статвывод «rvol>momentum», а **остановка эксперимента** и возврат к
+валидированному дефолту (sample-size.mdc: не ужесточаем/не тюним на малой
+выборке; откат к baseline — консервативное действие, не подгонка).
+
+Только конфиг (env-дефолт в compose), код-дефолт `universe_method` и так был
+`rvol`. Деплой: recreate `scalp-bot`.
+
+**Файлы:** `docker-compose.yml`
+
 ## 2026-06-17
 
 ### fix(pnl): универсальный REST true-up закрытых сделок против closedPnl
