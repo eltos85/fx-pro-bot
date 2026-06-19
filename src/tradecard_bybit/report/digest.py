@@ -18,8 +18,11 @@ def _fmt_money(x: float) -> str:
 def build_daily_digest(*, bot: str, date_label: str,
                        pnl_paper: ModePnl, pnl_live: ModePnl,
                        findings: list[PatternFinding],
-                       grade: GradeCurve | None) -> str:
+                       grade: GradeCurve | None,
+                       baseline_note: str | None = None) -> str:
     lines = [f"<b>tradecard {bot}</b> — daily {date_label} (UTC)"]
+    if baseline_note:
+        lines.append(baseline_note)
 
     for p in (pnl_live, pnl_paper):
         if p.n_decided == 0:

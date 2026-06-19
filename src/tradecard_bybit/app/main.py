@@ -45,6 +45,23 @@ def _since_ts(since: str | None, default_back_sec: float) -> float:
     return time.time() - default_back_sec
 
 
+def _apply_baseline(since_ts: float, cfg: TradecardBybitSettings, bot: str,
+                    ) -> tuple[float, str | None]:
+    """Поднять нижнюю границу анализа до baseline бота (последняя правка логики).
+
+    Сделки до baseline — «другая стратегия» (разные режимы через границу
+    правки нельзя смешивать, no-data-fitting + sample-size). Возвращает
+    (effective_since_ts, note для отчёта)."""
+    base = cfg.baseline_ts(bot)
+    if base is None:
+        return since_ts, None
+    eff = max(since_ts, base)
+    label = datetime.fromtimestamp(base, tz=UTC).strftime("%Y-%m-%d")
+    note = (f"Точка отсчёта анализа: {label} (UTC) — baseline последней правки "
+            f"логики {bot}; более ранние сделки исключены.")
+    return eff, note
+
+
 def _iso_week(ts: float) -> str:
     y, w, _ = datetime.fromtimestamp(ts, tz=UTC).isocalendar()
     return f"{y}-{w:02d}"
@@ -116,6 +133,7 @@ def cmd_daily(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
               dry_run: bool, mode: str | None = None) -> int:
     until = time.time()
     since_ts = _since_ts(since, 24 * 3600)
+    since_ts, baseline_note = _apply_baseline(since_ts, cfg, bot)
     trades = _load_trades(cfg, bot, since_ts=since_ts, until_ts=until)
     if mode:
         trades = [t for t in trades if t.mode == mode]
@@ -131,7 +149,7 @@ def cmd_daily(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
     date_label = datetime.fromtimestamp(until, tz=UTC).strftime("%Y-%m-%d")
     digest = build_daily_digest(bot=bot, date_label=date_label, pnl_paper=paper,
                                 pnl_live=live, findings=result.findings,
-                                grade=grade)
+                                grade=grade, baseline_note=baseline_note)
     print(digest)
     if not dry_run:
         _send_telegram(cfg, bot, digest)
@@ -142,6 +160,7 @@ def cmd_weekly(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
                dry_run: bool, mode: str | None = None) -> int:
     until = time.time()
     since_ts = _since_ts(since, 7 * 24 * 3600)
+    since_ts, baseline_note = _apply_baseline(since_ts, cfg, bot)
     week = _iso_week(until)
     trades = _load_trades(cfg, bot, since_ts=since_ts, until_ts=until)
     if mode:
@@ -174,7 +193,8 @@ def cmd_weekly(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
             bot=bot, week=week, pnl_paper=paper, pnl_live=live,
             findings=result.findings, top_theme=result.top_theme,
             five_why=five_why, grade_by_strategy=grades,
-            small_win_count=small_win_count, momentum_lines=momentum_lines)
+            small_win_count=small_win_count, momentum_lines=momentum_lines,
+            baseline_note=baseline_note)
 
         os.makedirs(cfg.reports_dir, exist_ok=True)
         path = os.path.join(cfg.reports_dir, f"{bot}_{week}.md")

@@ -62,6 +62,15 @@ class TradecardBybitSettings(BaseSettings):
     flowzone_telegram_bot_token: str = Field(default="")
     flowzone_telegram_chat_id: str = Field(default="")
 
+    # ─── Baseline анализа (точка отсчёта = последняя правка логики бота) ──
+    # Сделки ДО этой даты (UTC, YYYY-MM-DD) не анализируются: до правки логики
+    # это «другая стратегия», смешивать через границу нельзя (no-data-fitting +
+    # sample-size — разные режимы). Пусто = без нижней границы (вся история).
+    # Дата обоснована артефактом: дата выката коммита, сменившего логику
+    # (BUILDLOG_SCALP / BUILDLOG_FLOWZONE), а не подбором.
+    scalp_baseline_date: str = Field(default="")
+    flowzone_baseline_date: str = Field(default="")
+
     # ─── Пороги наблюдения (НЕ торговые; нейтральные/относительные) ───────
     # sample-size.mdc: «тема»/«победа» только при выборке ≥ этих порогов.
     min_trades_for_theme: int = Field(default=100)
@@ -118,6 +127,18 @@ class TradecardBybitSettings(BaseSettings):
         if bot == "scalp":
             return os.path.join(self.scalp_db_dir, "scalp_bot.sqlite")
         return os.path.join(self.flowzone_db_dir, "flowzone_bot.sqlite")
+
+    def baseline_ts(self, bot: str) -> float | None:
+        """Epoch-нижняя граница анализа для бота (None если не задана)."""
+        from datetime import UTC, datetime
+        raw = self.scalp_baseline_date if bot == "scalp" else self.flowzone_baseline_date
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+        except ValueError:
+            return None
 
     def bybit_keys(self, bot: str) -> tuple[str, str]:
         if bot == "scalp":

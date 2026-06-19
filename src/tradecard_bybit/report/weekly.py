@@ -26,13 +26,17 @@ def build_weekly_report(*, bot: str, week: str,
                         five_why: FiveWhyResult | None,
                         grade_by_strategy: dict[str, GradeCurve],
                         small_win_count: int,
-                        momentum_lines: list[str]) -> str:
+                        momentum_lines: list[str],
+                        baseline_note: str | None = None) -> str:
     L: list[str] = []
     L.append(f"# tradecard {bot} — weekly report card {week}")
     L.append("")
     L.append("> Advisory-ревью детерминированного бота (SMB Momentum Model). "
              "tradecard НЕ меняет конфиг/правила; любые гипотезы — кандидаты на "
              "ручную проверку человеком (strategy-guard.mdc).")
+    if baseline_note:
+        L.append("")
+        L.append(f"> {baseline_note}")
     L.append("")
 
     # ─── P&L ────────────────────────────────────────────────────────────

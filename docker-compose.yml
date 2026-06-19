@@ -565,6 +565,10 @@ services:
       TRADECARD_BYBIT_FLOWZONE_DB_DIR: /bots/flowzone
       TRADECARD_BYBIT_REPORTS_DIR: /data/tradecard
       TRADECARD_BYBIT_LOG_LEVEL: ${TRADECARD_BYBIT_LOG_LEVEL:-INFO}
+      # Baseline анализа = дата последней правки логики бота (UTC, YYYY-MM-DD).
+      # Сделки до неё не анализируются (разные стратегии нельзя смешивать).
+      TRADECARD_BYBIT_SCALP_BASELINE_DATE: ${TRADECARD_BYBIT_SCALP_BASELINE_DATE:-}
+      TRADECARD_BYBIT_FLOWZONE_BASELINE_DATE: ${TRADECARD_BYBIT_FLOWZONE_BASELINE_DATE:-}
       # DeepSeek (5 Why, read-only аналитика) — общий ключ.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       TRADECARD_BYBIT_DEEPSEEK_API_KEY: ${TRADECARD_BYBIT_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}

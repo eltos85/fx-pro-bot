@@ -93,6 +93,28 @@ def test_r_multiple_none_when_sl_equals_entry():
     assert mk(3, score=4, pnl=1.0, entry=0.2354, sl=0.23446).r_multiple is not None
 
 
+def test_baseline_ts_and_clamp():
+    from datetime import UTC, datetime
+    cfg = TradecardBybitSettings(scalp_baseline_date="2026-06-17")
+    base = cfg.baseline_ts("scalp")
+    assert base == datetime(2026, 6, 17, tzinfo=UTC).timestamp()
+    # flowzone без baseline → None; некорректная дата → None
+    assert cfg.baseline_ts("flowzone") is None
+    assert TradecardBybitSettings(scalp_baseline_date="bad").baseline_ts("scalp") is None
+    # клэмп: запрошенный since раньше baseline поднимается до baseline
+    from tradecard_bybit.app.main import _apply_baseline
+    early = datetime(2026, 1, 1, tzinfo=UTC).timestamp()
+    eff, note = _apply_baseline(early, cfg, "scalp")
+    assert eff == base and note is not None and "2026-06-17" in note
+    # since позже baseline — не трогаем
+    late = datetime(2026, 6, 20, tzinfo=UTC).timestamp()
+    eff2, _ = _apply_baseline(late, cfg, "scalp")
+    assert eff2 == late
+    # без baseline — since без изменений, note None
+    eff3, note3 = _apply_baseline(early, cfg, "flowzone")
+    assert eff3 == early and note3 is None
+
+
 def test_non_trade_excluded_from_decided():
     t = mk(1, score=4, pnl=0.0, close_reason="restart_flat")
     assert t.is_non_trade
