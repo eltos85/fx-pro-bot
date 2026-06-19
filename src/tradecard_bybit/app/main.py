@@ -116,10 +116,14 @@ def _maybe_bybit_client(cfg: TradecardBybitSettings, bot: str):
 
 def _pnl_summaries(trades: list[Trade], cfg: TradecardBybitSettings, bot: str,
                    *, since_ts: float, until_ts: float, client,
+                   baseline_active: bool = False,
                    ) -> tuple[ModePnl, ModePnl]:
     paper = summarize_mode(trades, "paper")
     live = summarize_mode(trades, "live")
-    if client is not None:
+    # При baseline-фильтре часть сделок окна исключена → bybit closedPnl за всё
+    # окно НЕсопоставим с net по оставшимся сделкам (Δ = выброшенные, не ошибка).
+    # Ground truth тогда = per-trade verified (бот уже сверил каждую с closedPnl).
+    if client is not None and not baseline_active:
         try:
             rows = client.fetch_closed_pnl(start_ms=int(since_ts * 1000),
                                            end_ms=int(until_ts * 1000))
@@ -161,7 +165,8 @@ def cmd_daily(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
     trades, baseline_note = _filter_baseline(trades, cfg, bot)
     client = _maybe_bybit_client(cfg, bot)
     paper, live = _pnl_summaries(trades, cfg, bot, since_ts=since_ts,
-                                 until_ts=until, client=client)
+                                 until_ts=until, client=client,
+                                 baseline_active=baseline_note is not None)
     result = run_detection(trades, bot=bot, cfg=cfg)
     grades = _grade_by_strategy(trades, cfg)
     # для digest берём грейд первой страты по объёму (или None)
@@ -189,7 +194,8 @@ def cmd_weekly(cfg: TradecardBybitSettings, bot: str, *, since: str | None,
     trades, baseline_note = _filter_baseline(trades, cfg, bot)
     client = _maybe_bybit_client(cfg, bot)
     paper, live = _pnl_summaries(trades, cfg, bot, since_ts=since_ts,
-                                 until_ts=until, client=client)
+                                 until_ts=until, client=client,
+                                 baseline_active=baseline_note is not None)
 
     mfe_fn = None
     if cfg.mfe_enabled and client is not None:
