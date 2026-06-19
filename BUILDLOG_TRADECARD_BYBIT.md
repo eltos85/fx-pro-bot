@@ -17,6 +17,31 @@ report card, грейдит сделки по `score`, гоняет 5 Why (DeepS
 
 ## 2026-06-19
 
+### fix(tradecard-bybit): R-multiple взрывается при SL≈entry (float-эпсилон)
+`<pending commit>`
+
+Симптом: в weekly report card flowzone EXP/avgR показывал мусор — триллионы
+(напр. `EXP=4069962070250.05`, бакет C), из-за чего грейд-кривая и тема №1
+строились на испорченных средних.
+
+Причина (проверено на реальных данных `/bots/flowzone/flowzone_bot.sqlite`,
+read-only): у части сделок `sl` практически равен `entry`, отличаясь лишь на
+float-эпсилон округления цены (напр. `entry=0.23430000000000004`,
+`sl=0.2343` → dist≈2.8e-17, risk≈9.5e-14). `r_multiple = pnl/risk` делил на
+почти-ноль → R≈−6.4e11. Случаи точного `dist==0` уже отсекались (R=None), а
+эпсилон-случаи проскакивали и доминировали в среднем EXP (mean чувствителен к
+выбросам). Это артефакт данных (трейл в безубыток / SL не пишется отдельно),
+не реальный риск-план.
+
+Решение: `planned_risk_usd` считает риск только если |entry−sl| > entry×1e-6
+(относительный структурный фильтр; наблюдаемые риск-дистанции ботов ≈0.4–1.3%
+entry — на порядки выше порога, подгонки P&L нет). Иначе R=None и сделка не
+входит в EXP/avgR (но остаётся в WR/net). Тест
+`test_r_multiple_none_when_sl_equals_entry`. 31 тест пакета зелёный.
+
+**Файлы:** `src/tradecard_bybit/analysis/trade.py`,
+`tests/test_tradecard_bybit.py`
+
 ### feat(tradecard-bybit): первичная реализация advisory-ревьюера (все 6 фаз)
 `<pending commit>`
 

@@ -82,6 +82,17 @@ def test_trade_r_multiple_and_decided():
     assert t.r_multiple == pytest.approx(2.5)
 
 
+def test_r_multiple_none_when_sl_equals_entry():
+    # точное равенство entry==sl → нет риск-дистанции → R не определён
+    assert mk(1, score=4, pnl=-0.06, entry=0.2343, sl=0.2343).r_multiple is None
+    # float-эпсилон (трейл в БЕ / округление цены) — тоже не риск-план,
+    # иначе деление на ~1e-17 даёт мусорный R≈1e12 (реальный баг в данных)
+    t = mk(2, score=4, pnl=-0.06, entry=0.23430000000000004, sl=0.2343)
+    assert t.r_multiple is None
+    # нормальная дистанция (≈0.4% цены) — R считается
+    assert mk(3, score=4, pnl=1.0, entry=0.2354, sl=0.23446).r_multiple is not None
+
+
 def test_non_trade_excluded_from_decided():
     t = mk(1, score=4, pnl=0.0, close_reason="restart_flat")
     assert t.is_non_trade

@@ -79,13 +79,24 @@ class Trade:
     def is_loss(self) -> bool:
         return self.is_decided and (self.pnl_usd or 0.0) < 0
 
+    # SL ближе этой доли entry = «нет риск-дистанции» (float-эпсилон округления
+    # цены / трейл в безубыток / SL не записан отдельно в БД). Любой реальный
+    # SL на порядки дальше (наблюдаемые риск-дистанции ботов ≈0.4–1.3% entry),
+    # поэтому 1e-6 — консервативный структурный фильтр данных, не подгонка P&L.
+    _MIN_RISK_REL = 1e-6
+
     @property
     def planned_risk_usd(self) -> float | None:
-        """$-риск до планового SL: qty × |entry − sl|. R-единица сделки."""
+        """$-риск до планового SL: qty × |entry − sl|. R-единица сделки.
+
+        Если SL совпадает с entry (точно или в пределах ``_MIN_RISK_REL`` от
+        цены) — это не реальный риск-план: R по такой сделке не определён (None)
+        и она не входит в EXP/avgR (иначе деление на ~0 даёт мусорные R≈1e12).
+        """
         if self.qty <= 0 or self.entry <= 0:
             return None
         dist = abs(self.entry - self.sl)
-        if dist <= 0:
+        if dist <= abs(self.entry) * self._MIN_RISK_REL:
             return None
         return self.qty * dist
 
