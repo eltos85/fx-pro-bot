@@ -68,7 +68,9 @@ class TradecardBybitSettings(BaseSettings):
     # Пусто = без нижней границы. Дата обоснована артефактом (дата выката
     # коммита, сменившего логику — BUILDLOG_SCALP/FLOWZONE), а не подбором.
     #
-    # Bot-wide дата (UTC YYYY-MM-DD) — fallback для стратегий без своей даты:
+    # Bot-wide точка отсчёта (UTC) — fallback для стратегий без своей даты.
+    # Формат: "YYYY-MM-DD" (полночь) ИЛИ "YYYY-MM-DD HH:MM" (если логика выкатилась
+    # в середине дня — отсекаем сделки ДО выката того же дня):
     scalp_baseline_date: str = Field(default="")
     flowzone_baseline_date: str = Field(default="")
     # Per-strategy даты (у страт scalp разные даты правок логики). Формат:
@@ -136,14 +138,19 @@ class TradecardBybitSettings(BaseSettings):
 
     @staticmethod
     def _parse_date(raw: str) -> float | None:
+        """Baseline в UTC. Принимает дату (``YYYY-MM-DD`` = полночь) ИЛИ дату+время
+        (``YYYY-MM-DD HH:MM`` / ``YYYY-MM-DDTHH:MM`` [:SS]) — время нужно, когда
+        логика выкатилась в середине дня и сделки ДО выката надо отсечь."""
         from datetime import UTC, datetime
-        raw = (raw or "").strip()
+        raw = (raw or "").strip().replace("T", " ")
         if not raw:
             return None
-        try:
-            return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
-        except ValueError:
-            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(raw, fmt).replace(tzinfo=UTC).timestamp()
+            except ValueError:
+                continue
+        return None
 
     def _baseline_map(self, bot: str) -> dict[str, float]:
         """Per-strategy baseline-даты бота: {strategy: epoch}."""

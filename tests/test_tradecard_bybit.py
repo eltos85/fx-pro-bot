@@ -111,6 +111,21 @@ def test_baseline_ts_botwide_and_per_strategy():
     assert cfg.baseline_ts("flowzone") is None
 
 
+def test_baseline_ts_accepts_time():
+    from datetime import UTC, datetime
+    # дата+время (логика выкатилась в середине дня) — отсекаем по моменту выката
+    cfg = TradecardBybitSettings(flowzone_baseline_date="2026-06-22 13:55")
+    want = datetime(2026, 6, 22, 13, 55, tzinfo=UTC).timestamp()
+    assert cfg.baseline_ts("flowzone") == want
+    # ISO-форма с T тоже принимается
+    cfg2 = TradecardBybitSettings(flowzone_baseline_date="2026-06-22T13:55:00")
+    assert cfg2.baseline_ts("flowzone") == want
+    # чистая дата = полночь UTC
+    midnight = datetime(2026, 6, 22, tzinfo=UTC).timestamp()
+    assert TradecardBybitSettings(
+        flowzone_baseline_date="2026-06-22").baseline_ts("flowzone") == midnight
+
+
 def test_filter_baseline_per_strategy():
     from datetime import UTC, datetime
     from tradecard_bybit.app.main import _filter_baseline, _load_floor

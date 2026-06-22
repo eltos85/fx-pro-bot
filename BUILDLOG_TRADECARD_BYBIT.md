@@ -15,6 +15,23 @@ report card, грейдит сделки по `score`, гоняет 5 Why (DeepS
 
 ---
 
+## 2026-06-22
+
+### feat(baseline): baseline принимает ВРЕМЯ (YYYY-MM-DD HH:MM), не только дату
+`<pending commit>`
+
+Логика flowzone выкатилась в середине дня (deploy ~13:55 UTC), а baseline был
+датой = полночь → сделки 00:00–13:55 (старая логика) попадали бы в анализ нового
+режима. `_parse_date` теперь принимает `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS]` и
+ISO `YYYY-MM-DDTHH:MM` (всё UTC); чистая дата = полночь как раньше.
+
+VPS .env: `TRADECARD_BYBIT_FLOWZONE_BASELINE_DATE=2026-06-22 13:55` (момент выката
+v0.2.0 канон-правки flowzone).
+
+**Файлы:** `config/settings.py` (`_parse_date`), `tests/test_tradecard_bybit.py`.
+
+---
+
 ## 2026-06-19
 
 ### feat(tradecard-bybit): per-strategy разрез (baseline / P&L / детекторы)
