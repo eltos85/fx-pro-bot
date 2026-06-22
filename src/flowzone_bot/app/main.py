@@ -249,16 +249,14 @@ def _swings_for(client, cfg, symbol: str,
 
 
 def _context_for(snap, cfg):
-    """Контекст аукциона по символу: дневной footprint-профиль (VAH/VAL) +
-    acceptance свежего потока за окно. None если профиль ещё не накоплен."""
+    """Контекст аукциона по символу: режим по ФОРМЕ дневного footprint-профиля
+    (направленный acceptance вне value area, STRATEGY §2). None если профиль ещё
+    не накоплен."""
     profile = build_profile(snap.vp_buckets, snap.vp_bucket_size,
                             value_area_pct=cfg.value_area_pct)
     if profile is None:
         return None, None
-    cut = snap.ts - cfg.context_accept_window_sec
-    recent = [t for t in snap.trades if t.ts >= cut]
-    ctx = classify(profile, recent, snap.last_price,
-                   accept_frac=cfg.context_accept_frac)
+    ctx = classify(profile, snap.last_price, accept_frac=cfg.context_accept_frac)
     return profile, ctx
 
 

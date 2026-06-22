@@ -489,8 +489,11 @@ services:
       # Фаза 1: observe. trading_enabled включать только после проверки циклов
       # (TASKSPEC §1 «Демо сначала»).
       FLOWZONE_TRADING_ENABLED: ${FLOWZONE_TRADING_ENABLED:-false}
-      # Авто-селектор вселенной (переиспользуем методику scalp; §4 TASKSPEC).
-      FLOWZONE_AUTO_UNIVERSE_ENABLED: ${FLOWZONE_AUTO_UNIVERSE_ENABLED:-true}
+      # Канон STRATEGY §6.1/§6.3: footprint/absorption читаемы ТОЛЬКО на ликвидности
+      # (канон = NQ). По умолчанию авто-ротация ВЫКЛЮЧЕНА — торгуем глубочайшие
+      # перпы из FLOWZONE_SYMBOLS (BTC/ETH/SOL) как аналог NQ-глубины. Ротация
+      # памп-альтов — только опциональный форвард-эксперимент (=true).
+      FLOWZONE_AUTO_UNIVERSE_ENABLED: ${FLOWZONE_AUTO_UNIVERSE_ENABLED:-false}
       # Метод отбора монет: "rvol" (штатный) | "momentum" (ТОП по 24h росту/
       # падению + оборот, как в ролике SerCrypto https://youtu.be/gCgYS-CsGWc).
       # 2026-06-17: тестово включали momentum, ОТКАЧЕНО на rvol по наблюдению

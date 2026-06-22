@@ -33,11 +33,14 @@ class FlowzoneSettings(BaseSettings):
     symbols: str = Field(default="BTCUSDT,ETHUSDT,SOLUSDT")
 
     # ─── Авто-селектор вселенной (переиспользуем scalp_bot/data/universe.py) ─
-    # Канон демонстрировался на NQ — глубоко-ликвидном рынке; absorption/
-    # footprint читаемы только на ликвидности (STRATEGY §6.1, §6.3). Селектор
-    # отбирает по 24h turnover/range/spread + intraday RVOL. Калибровка
-    # ликвидности (§4 TASKSPEC) — по факту форвард-теста, через env, не кодом.
-    auto_universe_enabled: bool = Field(default=True)
+    # Канон демонстрировался на NQ — глубоко-ликвидном рынке; absorption/delta
+    # print/big-trades ЧИТАЕМЫ ТОЛЬКО на ликвидности (STRATEGY §6.1, §6.3). Метод
+    # range/RVOL-ротации тянет тонкие памп-альты, где footprint шумит и сигнал
+    # деградирует. Поэтому по умолчанию авто-ротация ВЫКЛЮЧЕНА — торгуем
+    # фиксированный список глубочайших перпов (BTC/ETH/SOL, поле ``symbols``) как
+    # ближайший аналог NQ-глубины. Включить ротацию: FLOWZONE_AUTO_UNIVERSE_ENABLED
+    # =true (форвард-эксперимент отбора, не канон).
+    auto_universe_enabled: bool = Field(default=False)
     # Метод авто-отбора монет: "rvol" (штатный selector data/universe.py) |
     # "momentum" (ТОП по 24h росту/падению + оборот, БЕЗ анти-памп кэпа — метод
     # из ролика SerCrypto https://youtu.be/gCgYS-CsGWc, data/momentum_universe.py).
@@ -110,16 +113,15 @@ class FlowzoneSettings(BaseSettings):
     # мелко = шум по корзинам, слишком крупно = размытый POC. 10 тиков —
     # умеренное разрешение; не подгонка под результат.
     vp_bucket_ticks: int = Field(default=10)
-    # Контекст аукциона: «acceptance за value area» (Dalton «Mind Over Markets»:
-    # value принят вне прошлой value area). Контекст — РЕЖИМ, не мгновенная цена:
-    # большинство (≥ accept_frac) объёма окна accept_window напечатано ниже VAL →
-    # аукцион вниз (шорт), выше VAH → вверх. При откате к зоне reload объём окна
-    # ещё за прошлой границей → направление сохраняется. 0.5 = нейтральное
-    # «большинство» (не тюнинг под P&L; reversible через env, форвард-тест).
-    context_accept_frac: float = Field(default=0.5)
-    # Окно (сек) для оценки acceptance по свежему потоку. Совпадает с footprint-
-    # окном (trade_window_sec) по умолчанию — отдельная ручка для гибкости.
-    context_accept_window_sec: float = Field(default=300.0)
+    # Контекст аукциона по ФОРМЕ профиля (STRATEGY §2; Steidlmayer/Dalton): тренд
+    # = направленный acceptance ВНЕ value area — из объёма в хвостах профиля (ниже
+    # VAL / выше VAH) доля ≥ accept_frac на одной стороне → аукцион в эту сторону;
+    # симметрия → баланс (не торгуем). Режим читается по самому профилю (дневной
+    # footprint), поэтому СТАБИЛЕН на откате к зоне reload (канон «второе движение»).
+    # 0.70 = каноничная Value-Area-константа (value area ≈70% принятого объёма;
+    # acceptance вне VA = направленное принятие той же грейд-доли). Не тюнинг под
+    # P&L; reversible через env (no-data-fitting.mdc).
+    context_accept_frac: float = Field(default=0.70)
 
     # ─── Поток: big-trades + absorption-триггер (фаза 3, канон STRATEGY §3-4) ─
     # Big trade = крупный исполненный принт (STRATEGY §3.3 «volume got support by
@@ -133,22 +135,22 @@ class FlowzoneSettings(BaseSettings):
     big_trade_min_samples: int = Field(default=20)
     # Absorption (STRATEGY §4): контр-сторона агрессирует, но поглощается и НЕ
     # двигает цену в свою сторону («failed buyers/sellers», deep trades в теле
-    # свечи). Окно — недавний БЁРСТ агрессии у зоны (подмножество footprint-окна,
-    # короче окна контекста, чтобы отделить триггер от режима тренда). Триггер
-    # требует: (1) контр-сторона ≥ absorption_min_counter_frac объёма окна (она
-    # реально давила), (2) ≥1 крупная сделка контр-стороны (deep trade), (3) цена
-    # НЕ прошла в сторону контр-агрессии (поглощена). 0.5 = «большинство» —
-    # нейтральный порог. Полное чтение тела M5-свечи — уточнение фазы 5 на
-    # форвард-тесте (no-data-fitting.mdc: не подгонка, структурный выбор окна).
-    absorption_window_sec: float = Field(default=120.0)
+    # свечи). Триггер требует: (1) контр-сторона ≥ absorption_min_counter_frac
+    # объёма окна (она реально давила), (2) ≥1 крупная сделка контр-стороны (deep
+    # trade), (3) цена НЕ прошла в сторону контр-агрессии (поглощена). 0.5 =
+    # «большинство» — нейтральный порог. Окно = ТЕЛО M5-свечи: канон §4 «deep
+    # trades in the body of the candle» + §6.3 (ТФ входа = M5). M5-бар = 300с →
+    # absorption читается на масштабе свечи входа (канон-привязка, не подгонка P&L).
+    absorption_window_sec: float = Field(default=300.0)
     absorption_min_counter_frac: float = Field(default=0.5)
 
     # ─── Зоны (confluence) + вход (фаза 4, канон STRATEGY §3.4, §4-5, §7) ─
-    # Confluence ≥2 факторов = зона (STRATEGY §3.4 «confluence of value area high,
-    # big trades and delta level… super strong area»; §7 чеклист п.3 «Конфлюэнс
-    # ≥2 факторов = зона»). Факторы: value_area (VAH/VAL), POC, ledge, delta,
-    # big_trades. Инвариант канона — не тюним вниз без обсуждения.
-    zone_min_confluence: int = Field(default=2)
+    # Confluence «super strong area» = совпадение НЕСКОЛЬКИХ факторов. Канон §3.4
+    # называет ровно ТРИ: *«confluence of value area high, big trades and delta
+    # level. This one is a super strong area»*. Берём только такие сильные зоны →
+    # порог = 3. Факторы: value_area (VAH/VAL), POC, ledge, delta, big_trades.
+    # Инвариант канона — не тюним вниз без обсуждения.
+    zone_min_confluence: int = Field(default=3)
     # Кластеризация близких уровней в одну зону: tolerance = bucket_size × N
     # тиков-корзин. Технический параметр близости (не торговый порог).
     zone_cluster_ticks: int = Field(default=5)

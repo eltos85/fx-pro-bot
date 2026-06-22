@@ -9,6 +9,43 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-06-22
+
+### feat(strategy): приведение реализации СТРОГО к канону ролика (v0.2.0)
+`<pending commit>`
+
+Наблюдение (tradecard weekly 2026-26, baseline flowzone=2026-06-17): live n=266,
+WR 35%, net **−$606.48**, EXP −0.53. Детекторы: `factor_noise` по `ctx:trend_down`
+И `ctx:trend_up` одновременно (оба не предиктивны — контекст-фильтр = шум); грейд
+монотонна (ρ=0.80), но низ score=2 (n=64, EXP −0.72) = ~75% убытка. Это симптомы
+расхождения РЕАЛИЗАЦИИ с каноном ролика (<https://youtu.be/06R-ebyOhDI>), а не
+шум выборки. По запросу пользователя — пересмотр ролика и приведение строго к
+канону одной правкой (research = источник правды, strategy-guard.mdc).
+
+Расхождения канон↔код и фиксы (каждый со ссылкой на ролик/Market Profile):
+1. **Ликвидность (§6.1/§6.3, канон=NQ).** Авто-ротация range/RVOL тянула тонкие
+   памп-альты, где footprint/absorption шумят. → `auto_universe_enabled` default
+   **False**; торгуем глубочайшие перпы (BTC/ETH/SOL) как аналог NQ-глубины.
+2. **Контекст (§2, Steidlmayer/Dalton).** Было: тренд = ≥50% объёма ОКНА за
+   границей VA (шумит, флипает на откате, срабатывает в обе стороны). → `classify`
+   v2: режим по ФОРМЕ дневного профиля — направленный acceptance ВНЕ value area
+   (доля хвоста ≥ **0.70**, каноничная VA-константа). Устойчив к откату к зоне
+   reload (канон «второе движение»). Убран `context_accept_window_sec`.
+3. **Confluence (§3.4 «super strong area»).** Было `zone_min_confluence=2`. Канон
+   называет три фактора (VAH + big trades + delta) → **3**.
+4. **Absorption (§4 + §6.3).** Было окно 120с. Канон «deep trades in the body of
+   the candle», ТФ входа M5 → окно = **тело M5-свечи (300с)**.
+
+**Файлы:** `analysis/context.py` (classify по форме профиля), `config/settings.py`
+(дефолты + докстринги), `app/main.py` (`_context_for`), `docker-compose.yml`
+(`FLOWZONE_AUTO_UNIVERSE_ENABLED=false`), `__init__.py` (0.1.0→0.2.0),
+`STRATEGY_FLOWZONE.md` §10, `tests/test_flowzone_bot.py`.
+
+**Стата:** baseline tradecard flowzone сдвинут на 2026-06-22 (логика сменилась —
+старые сделки не смешиваем; sample-size.mdc). Вывод «лучше/хуже» — по n≥100 OOS.
+
+---
+
 ## 2026-06-17
 
 ### fix(stats): REST closedPnl — источник правды для ВСЕХ закрытых live (true-up)

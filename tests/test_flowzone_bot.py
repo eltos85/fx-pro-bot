@@ -119,42 +119,58 @@ def test_find_ledges_sharp_drop():
 
 
 # ─── Фаза 2: контекст аукциона (тренд vs баланс) ─────────────────────────
+# classify v2 (STRATEGY §2, Steidlmayer/Dalton): режим по ФОРМЕ профиля —
+# направленный acceptance ВНЕ value area (объём в хвостах за границами VA).
+# Честная синтетика: ядро (≈80% объёма) даёт VA, дальний хвост = принятие вне VA.
+
+def _down_elongated_buckets() -> dict[int, tuple[float, float]]:
+    """Профиль, элонгированный ВНИЗ: тяжёлое ядро у idx20 + хвост ниже VAL."""
+    core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}           # ≈80% → value area
+    tail = {10: 15, 11: 15, 12: 15, 13: 15, 14: 15}            # принято НИЖЕ VAL
+    return {i: (float(v), 0.0) for i, v in {**core, **tail}.items()}
+
+
+def _up_elongated_buckets() -> dict[int, tuple[float, float]]:
+    """Профиль, элонгированный ВВЕРХ: ядро у idx20 + хвост выше VAH."""
+    core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}
+    tail = {26: 15, 27: 15, 28: 15, 29: 15, 30: 15}            # принято ВЫШЕ VAH
+    return {i: (float(v), 0.0) for i, v in {**core, **tail}.items()}
+
 
 def test_classify_trend_up_on_acceptance_above_vah():
-    prof = build_profile(_triangular_buckets(), bucket_size=1.0)  # VAH=13
-    trades = [TradePrint(ts=0, price=14.0, size=5.0, side="Buy"),
-              TradePrint(ts=1, price=14.5, size=5.0, side="Buy")]
-    ctx = classify(prof, trades, last_price=14.0, accept_frac=0.5)
+    prof = build_profile(_up_elongated_buckets(), bucket_size=1.0)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.70)
     assert ctx.state == TREND_UP
     assert ctx.trade_side == "long"
-    assert ctx.accept_above == 1.0
+    assert ctx.accept_above >= 0.70
 
 
 def test_classify_trend_down_on_acceptance_below_val():
-    prof = build_profile(_triangular_buckets(), bucket_size=1.0)  # VAL=8
-    trades = [TradePrint(ts=0, price=7.0, size=3.0, side="Sell"),
-              TradePrint(ts=1, price=6.5, size=3.0, side="Sell")]
-    ctx = classify(prof, trades, last_price=7.0, accept_frac=0.5)
+    prof = build_profile(_down_elongated_buckets(), bucket_size=1.0)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.70)
     assert ctx.state == TREND_DOWN
     assert ctx.trade_side == "short"
+    assert ctx.accept_below >= 0.70
 
 
-def test_classify_balance_inside_value_area():
+def test_classify_balance_symmetric_profile():
+    # симметричный треугольник: хвосты вне VA равны → нет направленного принятия.
     prof = build_profile(_triangular_buckets(), bucket_size=1.0)
-    trades = [TradePrint(ts=0, price=10.0, size=5.0, side="Buy")]
-    ctx = classify(prof, trades, last_price=10.0, accept_frac=0.5)
+    ctx = classify(prof, last_price=10.5, accept_frac=0.70)
     assert ctx.state == BALANCE
     assert ctx.trade_side is None
 
 
-def test_classify_balance_when_price_beyond_but_no_acceptance():
-    # цена за VAH, но объём за границей мал (один фитиль) → не acceptance.
-    prof = build_profile(_triangular_buckets(), bucket_size=1.0)  # VAH=13
-    trades = [TradePrint(ts=0, price=14.0, size=1.0, side="Buy"),
-              TradePrint(ts=1, price=10.0, size=9.0, side="Buy")]
-    ctx = classify(prof, trades, last_price=14.0, accept_frac=0.5)
-    assert ctx.accept_above == 0.1
+def test_classify_balance_when_acceptance_below_threshold():
+    # хвосты есть с обеих сторон, но перекос < 0.70 (60/40) → не acceptance.
+    core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}
+    buckets = {i: (float(v), 0.0) for i, v in core.items()}
+    buckets.update({12: (20.0, 0.0), 13: (20.0, 0.0), 14: (20.0, 0.0)})  # ↓ 60
+    buckets.update({26: (20.0, 0.0), 27: (20.0, 0.0)})                   # ↑ 40
+    prof = build_profile(buckets, bucket_size=1.0)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.70)
     assert ctx.state == BALANCE
+    assert 0.55 <= ctx.accept_below <= 0.65
 
 
 # ─── Фаза 3: order-flow (big trades + absorption) ────────────────────────
@@ -263,13 +279,13 @@ def test_build_zones_below_min_confluence_dropped():
 # ─── Фаза 4: strategy.evaluate (контекст → зона → absorption → Signal) ───
 
 class _Cfg:
-    """Минимальный cfg-стаб для evaluate (только нужные поля)."""
+    """Минимальный cfg-стаб для evaluate (только нужные поля; дефолты канона)."""
     big_trade_pct = 0.90
     big_trade_min_samples = 3
-    zone_min_confluence = 2
+    zone_min_confluence = 3          # «super strong area» (§3.4)
     zone_cluster_ticks = 5
     zone_delta_min_frac = 0.6
-    absorption_window_sec = 120.0
+    absorption_window_sec = 300.0    # тело M5-свечи (§4, §6.3)
     absorption_min_counter_frac = 0.5
     sl_buffer_bps = 8.0
     min_sl_bps = 10.0
@@ -283,44 +299,46 @@ def _evictless_state_snapshot(buckets, bucket_size, trades, last_price, ts):
         vp_bucket_size=bucket_size, vp_buckets=buckets)
 
 
+def _short_reload_profile() -> dict[int, tuple[float, float]]:
+    """Профиль элонгирован ВНИЗ (trend_down) + тяжёлое ядро idx118-122 как зона
+    reload-резистанса ВЫШЕ цены для шорта. Все корзины buy-only (delta=vol)."""
+    core = {120: 100, 121: 70, 119: 70, 122: 30, 118: 30}   # VA≈119-122, POC=120
+    tail = {100: 15, 102: 15, 104: 15, 106: 15, 108: 15}    # принято НИЖЕ VAL
+    return {i: (float(v), 0.0) for i, v in {**core, **tail}.items()}
+
+
+def _short_reload_trades(now: float) -> list[TradePrint]:
+    """Бёрст КРУПНЫХ покупателей у зоны (deep trades), поглощённых — цена не
+    выросла (price_move ≤ 0). Внутри окна тела M5-свечи (300с)."""
+    return [TradePrint(now - 100, 120.0, 8.0, "Buy"),
+            TradePrint(now - 60, 120.0, 8.0, "Buy"),
+            TradePrint(now - 10, 119.6, 2.0, "Sell")]
+
+
 def test_evaluate_short_continuation_full_checklist():
-    # Профиль: пик idx100, VA≈[99,102], VAH≈103, POC=100.5. Корзины с buy-only.
-    buckets = {100: (100.0, 0.0), 99: (60.0, 0.0), 101: (60.0, 0.0),
-               98: (30.0, 0.0), 102: (30.0, 0.0)}
-    prof = build_profile(buckets, bucket_size=1.0)
-    assert prof.poc_price == 100.5
-
-    # Поток (ts растёт): downtrend-объём НИЖЕ VAL множеством МЕЛКИХ сделок (вне
-    # absorption-окна 120с, формирует контекст trend_down) + недавний бёрст
-    # КРУПНЫХ покупателей у зоны, поглощённых (цена не выросла) — deep trades.
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
+    assert prof.poc_price == 120.5
     now = 1000.0
-    trades = [TradePrint(now - 200 + i, 97.0, 5.0, "Sell") for i in range(20)]
-    trades += [
-        TradePrint(now - 30, 100.0, 8.0, "Buy"),     # крупный buy у зоны (deep)
-        TradePrint(now - 20, 100.0, 8.0, "Buy"),
-        TradePrint(now - 5, 99.8, 2.0, "Sell"),      # цена НЕ выросла → поглощены
-    ]
-    snap = _evictless_state_snapshot(buckets, 1.0, trades, last_price=99.8, ts=now)
-
-    ctx = classify(prof, [t for t in trades if t.ts >= now - 300],
-                   snap.last_price, accept_frac=0.5)
-    assert ctx.state == TREND_DOWN  # объём окна доминирует ниже VAL
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
+                                     last_price=119.5, ts=now)
+    # контекст trend_down — по ФОРМЕ профиля (хвост ниже VAL), не по потоку.
+    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    assert ctx.state == TREND_DOWN
 
     from flowzone_bot.analysis.strategy import evaluate
     sig = evaluate(snap, prof, ctx, cfg=_Cfg())
     assert sig is not None
     assert sig.side == "short"
     assert sig.sl_level > sig.entry_ref > sig.tp_level  # геометрия шорта
-    assert sig.score >= 2
+    assert sig.score >= 3                               # super strong (§3.4)
 
 
 def test_evaluate_none_when_balance_context():
-    buckets = {100: (100.0, 0.0), 99: (60.0, 0.0), 101: (60.0, 0.0)}
-    prof = build_profile(buckets, bucket_size=1.0)
-    trades = [TradePrint(1000.0, 100.4, 5.0, "Buy")]  # внутри VA
-    snap = _evictless_state_snapshot(buckets, 1.0, trades, 100.4, 1000.0)
-    from flowzone_bot.analysis.context import classify as _cl
-    ctx = _cl(prof, trades, snap.last_price, accept_frac=0.5)
+    # симметричный профиль → BALANCE → нет входа.
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, [], 10.5, 1000.0)
+    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    assert ctx.state == BALANCE
     from flowzone_bot.analysis.strategy import evaluate
     assert evaluate(snap, prof, ctx, cfg=_Cfg()) is None
 
@@ -363,25 +381,19 @@ def test_nearest_and_list_swing_targets():
 
 
 def test_evaluate_uses_swing_target_over_structural():
-    buckets = {100: (100.0, 0.0), 99: (60.0, 0.0), 101: (60.0, 0.0),
-               98: (30.0, 0.0), 102: (30.0, 0.0)}
-    prof = build_profile(buckets, bucket_size=1.0)
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
     now = 1000.0
-    trades = [TradePrint(now - 200 + i, 97.0, 5.0, "Sell") for i in range(20)]
-    trades += [TradePrint(now - 30, 100.0, 8.0, "Buy"),
-               TradePrint(now - 20, 100.0, 8.0, "Buy"),
-               TradePrint(now - 5, 99.8, 2.0, "Sell")]
-    snap = _evictless_state_snapshot(buckets, 1.0, trades, 99.8, now)
-    ctx = classify(prof, [t for t in trades if t.ts >= now - 300], 99.8,
-                   accept_frac=0.5)
-    # swing lows ниже входа: 98.5 (ближняя) и 96.0 (дальняя)
-    swings = [type("S", (), {"kind": "low", "price": 98.5})(),
-              type("S", (), {"kind": "low", "price": 96.0})()]
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
+                                     last_price=119.5, ts=now)
+    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    # swing lows ниже входа: 110.0 (ближняя) и 106.0 (дальняя)
+    swings = [type("S", (), {"kind": "low", "price": 110.0})(),
+              type("S", (), {"kind": "low", "price": 106.0})()]
     from flowzone_bot.analysis.strategy import evaluate
     sig = evaluate(snap, prof, ctx, cfg=_Cfg(), swings=swings)
     assert sig is not None
-    assert sig.tp_level == 98.5      # ближайший swing, не VP-структура
-    assert sig.tp2_level == 96.0     # цель 2 для частичной фиксации
+    assert sig.tp_level == 110.0     # ближайший swing, не VP-структура
+    assert sig.tp2_level == 106.0    # цель 2 для частичной фиксации
     assert "tp=swing" in sig.reasons
 
 
@@ -739,3 +751,18 @@ def test_flowzone_universe_method_default_is_rvol():
     assert cfg.universe_method == "rvol"
     assert cfg.momentum_min_turnover_usd == 50_000_000.0
     assert cfg.momentum_direction == "both"
+
+
+def test_flowzone_canon_defaults():
+    """Дефолты приведены строго к канону ролика (2026-06-22, v0.2.0)."""
+    from flowzone_bot.config.settings import FlowzoneSettings
+    cfg = FlowzoneSettings()
+    # §6.1/§6.3: ликвидность — авто-ротация альтов выкл, торгуем глубокие перпы.
+    assert cfg.auto_universe_enabled is False
+    assert cfg.symbol_list == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    # §3.4 «super strong area» = конфлюэнс 3 факторов.
+    assert cfg.zone_min_confluence == 3
+    # §4 + §6.3: absorption на теле M5-свечи (300с).
+    assert cfg.absorption_window_sec == 300.0
+    # §2: acceptance вне VA = каноничная Value-Area-доля 0.70.
+    assert cfg.context_accept_frac == 0.70
