@@ -76,9 +76,13 @@ def _filter_baseline(trades: list[Trade], cfg: TradecardBybitSettings, bot: str,
         kept.append(t)
     if not used:
         return kept, None
-    parts = ", ".join(
-        f"{s}={datetime.fromtimestamp(ts, tz=UTC).strftime('%Y-%m-%d')}"
-        for s, ts in sorted(used.items()))
+    def _fmt(ts: float) -> str:
+        dt = datetime.fromtimestamp(ts, tz=UTC)
+        # время показываем только если baseline не на полночь (выкат в середине дня)
+        fmt = "%Y-%m-%d" if (dt.hour, dt.minute, dt.second) == (0, 0, 0) \
+            else "%Y-%m-%d %H:%M"
+        return dt.strftime(fmt)
+    parts = ", ".join(f"{s}={_fmt(ts)}" for s, ts in sorted(used.items()))
     note = (f"Точка отсчёта (baseline последней правки логики, UTC): {parts}. "
             f"Более ранние сделки этих страт исключены из анализа.")
     return kept, note
