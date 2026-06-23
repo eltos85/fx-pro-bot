@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-06-23
+
+### feat(tradecard-momentum): advisory-ревьюер над fx_momentum_bot (новый пакет)
+`<pending commit>`
+
+Добавлен read-only аналитик `tradecard-momentum` (отдельный пакет
+`src/tradecard_momentum/`) над данными momentum-бота: P&L ground truth из cTrader
+deal-list, грейдинг по силе сигнала, детекторы паттернов (вкл. momentum-специфичный
+`swap_drag`), 5 Why, small-wins OOS-гейт. Сам momentum-бот НЕ изменён (advisory-only).
+Подробности — в `BUILDLOG_TRADECARD_MOMENTUM.md` (этот лог — primary для ревьюера).
+
+**Файлы:** `src/tradecard_momentum/**`, `Dockerfile.tradecard-momentum`,
+`docker-compose.yml`, `pyproject.toml`, `tests/test_tradecard_momentum.py`.
+
+---
+
 ## 2026-06-18
 
 ### feat(momentum-bot): полностью удалена Volume Profile (VP) стратегия по золоту

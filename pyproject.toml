@@ -36,6 +36,7 @@ fx-ai-trader = "fx_ai_trader.app.main:run"
 scalp-bot = "scalp_bot.app.main:run"
 flowzone-bot = "flowzone_bot.app.main:run"
 tradecard-bybit = "tradecard_bybit.app.main:run"
+tradecard-momentum = "tradecard_momentum.app.main:run"
 fx-momentum-bot = "fx_momentum_bot.app.main:run"
 ru-stocks-analyst = "ru_stocks_analyst.app.main:run"
 ru-stocks-discover = "ru_stocks_analyst.app.discover_accounts:main"
@@ -49,6 +50,7 @@ packages = [
   "src/scalp_bot",
   "src/flowzone_bot",
   "src/tradecard_bybit",
+  "src/tradecard_momentum",
   "src/fx_momentum_bot",
   "src/ru_stocks_analyst",
   "src/shared_oauth",

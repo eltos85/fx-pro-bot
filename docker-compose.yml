@@ -668,8 +668,76 @@ services:
     volumes:
       - momentum_bot_data:/data
 
+  # ─── tradecard-momentum: advisory-ревьюер fx_momentum_bot ────────────────
+  # АНАЛИТИКА (не торговый бот, не автотюнер). Читает БД momentum read-only
+  # (контекст входа) + cTrader deal-list (ground truth по P&L), считает SMB
+  # report card, грейдит по силе сигнала, гоняет 5 Why через DeepSeek, отдаёт
+  # рекомендации человеку. НЕ меняет конфиг/правила бота и НЕ пишет в его БД
+  # (TASKSPEC_TRADECARD_FX.md адаптирован под rule-based momentum). Запуск —
+  # периодический (cron/scheduler), не realtime.
+  #
+  # ⚠️ cTrader-лимит 2 connections per application: momentum + fx-ai-trader уже
+  # держат 2 коннекта на общем app (client_id). Для конкурентного запуска
+  # tradecard нужен ОТДЕЛЬНЫЙ cTrader-app (TRADECARD_MOMENTUM_CTRADER_CLIENT_ID),
+  # иначе запускать в окно, когда слот свободен (api-docs.mdc).
+  #   docker compose run --rm tradecard-momentum tradecard-momentum daily
+  tradecard-momentum:
+    build:
+      context: .
+      dockerfile: Dockerfile.tradecard-momentum
+    image: tradecard-momentum:local
+    restart: "no"
+    profiles:
+      - tools
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      TRADECARD_MOMENTUM_DATA_DIR: /data
+      # БД momentum монтируется read-only (свой volume momentum_bot_data).
+      TRADECARD_MOMENTUM_MOMENTUM_DB_DIR: /bots/momentum
+      TRADECARD_MOMENTUM_REPORTS_DIR: /data/tradecard
+      TRADECARD_MOMENTUM_LOG_LEVEL: ${TRADECARD_MOMENTUM_LOG_LEVEL:-INFO}
+      # Baseline анализа = дата последней правки логики бота (UTC, YYYY-MM-DD).
+      TRADECARD_MOMENTUM_BASELINE_DATE: ${TRADECARD_MOMENTUM_BASELINE_DATE:-}
+      # DeepSeek (5 Why) — общий ключ.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      TRADECARD_MOMENTUM_DEEPSEEK_API_KEY: ${TRADECARD_MOMENTUM_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}
+      TRADECARD_MOMENTUM_DEEPSEEK_MODEL: ${TRADECARD_MOMENTUM_DEEPSEEK_MODEL:-deepseek-v4-flash}
+      TRADECARD_MOMENTUM_FIVE_WHY_ENABLED: ${TRADECARD_MOMENTUM_FIVE_WHY_ENABLED:-true}
+      # cTrader read-only (deal-list ground truth). Свои creds с дефолтами на
+      # momentum-бота. Для отдельного connection-budget задать собственный app.
+      TRADECARD_MOMENTUM_BROKER_PNL_ENABLED: ${TRADECARD_MOMENTUM_BROKER_PNL_ENABLED:-true}
+      TRADECARD_MOMENTUM_CTRADER_HOST_TYPE: ${TRADECARD_MOMENTUM_CTRADER_HOST_TYPE:-${MOMENTUM_BOT_CTRADER_HOST_TYPE:-demo}}
+      TRADECARD_MOMENTUM_CTRADER_CLIENT_ID: ${TRADECARD_MOMENTUM_CTRADER_CLIENT_ID:-${MOMENTUM_BOT_CTRADER_CLIENT_ID:-}}
+      TRADECARD_MOMENTUM_CTRADER_CLIENT_SECRET: ${TRADECARD_MOMENTUM_CTRADER_CLIENT_SECRET:-${MOMENTUM_BOT_CTRADER_CLIENT_SECRET:-}}
+      TRADECARD_MOMENTUM_CTRADER_ACCOUNT_ID: ${TRADECARD_MOMENTUM_CTRADER_ACCOUNT_ID:-${MOMENTUM_BOT_CTRADER_ACCOUNT_ID:-0}}
+      TRADECARD_MOMENTUM_TOKEN_SERVICE_URL: ${TRADECARD_MOMENTUM_TOKEN_SERVICE_URL:-${MOMENTUM_BOT_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}}
+      TRADECARD_MOMENTUM_TOKEN_SERVICE_SECRET: ${TRADECARD_MOMENTUM_TOKEN_SERVICE_SECRET:-${MOMENTUM_BOT_TOKEN_SERVICE_SECRET:-}}
+      TRADECARD_MOMENTUM_TOKEN_SERVICE_LABEL: ${TRADECARD_MOMENTUM_TOKEN_SERVICE_LABEL:-tradecard_momentum}
+      # Generic CTRADER_TOKEN_SERVICE_* нужны внутреннему CTraderClient (авто-refresh).
+      CTRADER_TOKEN_SERVICE_URL: ${CTRADER_TOKEN_SERVICE_URL:-http://ctrader-token-service:8080}
+      CTRADER_TOKEN_SERVICE_SECRET: ${CTRADER_TOKEN_SERVICE_SECRET:-}
+      # Торговая вселенная momentum (атрибуция deal'ов) + SL-множитель ATR (R).
+      TRADECARD_MOMENTUM_MOMENTUM_SYMBOLS_RAW: ${MOMENTUM_BOT_SYMBOLS:-EURUSD=X,GBPUSD=X,USDJPY=X,AUDUSD=X}
+      TRADECARD_MOMENTUM_ATR_STOP_MULT: ${MOMENTUM_BOT_ATR_STOP_MULT:-2.5}
+      # Telegram (свой префикс [tradecard-momentum]).
+      TRADECARD_MOMENTUM_TELEGRAM_ENABLED: ${TRADECARD_MOMENTUM_TELEGRAM_ENABLED:-false}
+      TRADECARD_MOMENTUM_TELEGRAM_BOT_TOKEN: ${TRADECARD_MOMENTUM_TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}
+      TRADECARD_MOMENTUM_TELEGRAM_CHAT_ID: ${TRADECARD_MOMENTUM_TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}
+    volumes:
+      # БД momentum — STRICTLY read-only (read-only инвариант).
+      - momentum_bot_data:/bots/momentum:ro
+      # Свой volume: SQLite tradecard + markdown report card.
+      - tradecard_momentum_data:/data
+
 volumes:
   scalp_bot_data:
   flowzone_data:
   momentum_bot_data:
   tradecard_bybit_data:
+  tradecard_momentum_data:
