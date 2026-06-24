@@ -92,6 +92,17 @@ Natural Gas (NG=F):
   carry). Pip = $0.001/MMBtu, pip-value = $10/pip/lot (same magnitude
   as BRENT, but pip is 10× smaller in price terms).
 
+Consistency rules (anti-flip, 2026-06-24): formalize the canon already
+cited above into deterministic sign-priority, mirroring the NG SEASONAL
+SIGN RULE (2026-06-03) that fixed weather-sign inversions. No new
+thresholds — pure logic consistency (no-data-fitting.mdc), symbol-scoped:
+- BRENT/BZ=F CHANNEL-PRIORITY: derive oil-vs-DXY sign from the dominant
+  channel (KenMacro oil: supply-led can be +DXY, demand-led inverse-DXY);
+  do not assume inverse-DXY by default, do not self-flip mid-position.
+- NG=F STORAGE-ANCHOR vs WEATHER-CATALYST priority (EIA: storage vs 5y
+  avg is the headline structural gauge; weather modulates timing).
+XAUUSD (gold) prompt logic is UNCHANGED by both rules.
+
 Psychology & Position Sizing:
 - Mark Douglas «Trading in the Zone» (2000, Penguin/Prentice Hall):
   probabilistic mindset, 5 fundamental truths, accept-risk-emotionally
@@ -305,6 +316,26 @@ classic retail failure mode.
 - MIXED moves are messiest but produce the largest extensions when
   both channels reinforce.
 
+CHANNEL-PRIORITY / DXY-SIGN RULE (BRENT/BZ=F ONLY) — classify the
+DOMINANT channel FIRST, then DERIVE the dollar sign (do NOT assume
+inverse-DXY by default):
+1) Name the DOMINANT channel for THIS move before any DXY read:
+   supply-led / demand-led / dollar-led / geopolitical.
+2) The oil-vs-DXY sign FOLLOWS from the dominant channel:
+   - SUPPLY-led (OPEC, attack, sanctions) => oil can rise WITH DXY
+     (inflation impulse -> Fed hawkish). Do NOT trade it as inverse-DXY.
+   - DEMAND-led (China data / weak PMI / recession) => INVERSE to DXY
+     (textbook regime, ~60-70% of the time).
+   - DOLLAR-led (Fed/DXY is itself the driver) => trade the dollar
+     direction; oil is the passenger.
+   - GEOPOLITICAL => premium channel; DXY is secondary.
+3) HARD CHECK: do NOT flip your own DXY-sign read of the SAME move within
+   one position without NEW channel evidence — that is self-contradiction,
+   not new information.
+State the dominant channel explicitly, e.g. "supply-led, so oil-with-DXY
+is expected here". This rule applies to BRENT/BZ=F ONLY; XAUUSD and NG=F
+behavior is UNCHANGED.
+
 KEY OIL FACTS / 2026 CONTEXT:
 - EIA Weekly Petroleum Status Report — Wednesday 10:30 ET / 14:30 UTC.
   SINGLE biggest scheduled vol event. Watch headline (build vs draw)
@@ -380,6 +411,19 @@ oil despite both being "energy":
      violent than winter HDD events but a multi-day heatwave is real.
    - NOAA 6-10 day and 8-14 day outlooks are followed religiously by
      the NG complex. A forecast revision alone can move NG 5%.
+
+   DRIVER-PRIORITY RULE (NG=F ONLY) — STORAGE IS THE ANCHOR, WEATHER THE
+   CATALYST. Resolve conflicts, do NOT let them flip each other:
+   - Storage vs 5y-average sets the STRUCTURAL directional BIAS
+     (>+5% = bearish overhang; <-5% = bullish tightness).
+   - Weather is a CATALYST that modulates the TIMING/MAGNITUDE within
+     that bias — it does NOT by itself flip the structural bias.
+   - ON CONFLICT (e.g. bearish +5% storage overhang vs a bullish
+     heatwave): a weather catalyst may justify a SHORT-TERM tactical
+     trade WITH the catalyst, but size DOWN when trading AGAINST the
+     storage anchor, and do NOT call the structural bias reversed on
+     weather alone unless an EXTREME, sustained anomaly is cited.
+   This rule applies to NG=F ONLY; XAUUSD and BRENT behavior is UNCHANGED.
 
 3. LNG EXPORTS (the structural channel). The US is the largest LNG
    exporter (Sabine Pass, Corpus Christi, Cameron, Freeport, Cove

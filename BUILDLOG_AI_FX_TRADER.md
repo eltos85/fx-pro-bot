@@ -1,5 +1,58 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
 
+## 2026-06-24
+
+### feat(prompt): anti-flip правила приоритета для BZ=F и NG=F (golden-принцип)
+
+`<pending>`
+
+**Контекст / задача пользователя:** «золото настроено хорошо — донастрой BZ=F
+и NG=F по тому же принципу». Принцип золота = чёткая иерархия драйверов
+(real-yields → DXY) + анти-flip знака → консистентность, отсутствие
+самопротиворечий (BUILDLOG 06-03: «XAUUSD логика консистентна, инверсий нет»).
+Перенесли ИМЕННО этот принцип (не пороги).
+
+**Уточнения по ходу (новые факты переопределили исходный план):**
+1. Оба эксперимента (`BZ_BREAKOUT_MODE`, `NG_MODE_V2`) **уже включены** на VPS —
+   «включать forward-эксперимент» было нечего; это профили входа, не иерархия.
+2. `stats_window_start` — **глобальный** фильтр self-reflection; его сброс
+   обнулил бы выборку и по золоту (cold-start XAUUSD, мин. лот) → прямое
+   вмешательство в золото. Поэтому окно **НЕ трогаем**; OOS-атрибуцию BZ/NG
+   считаем внешне по дате деплоя (counterfactual/tradecard `--since`).
+
+**Что добавлено в `SYSTEM_PROMPT` (symbol-scoped, GOLD-секция не тронута):**
+- **BZ=F CHANNEL-PRIORITY / DXY-SIGN RULE:** классифицировать ДОМИНИРУЮЩИЙ
+  канал (supply/demand/dollar/geopolitical) ПЕРВЫМ, затем выводить знак
+  oil↔DXY из него. Закрывает задокументированную дыру канона («Assuming
+  inverse-DXY always — it flips in supply-led»): supply-led ⇒ oil может расти
+  ВМЕСТЕ с DXY, demand-led ⇒ inverse. HARD CHECK против само-флипа знака внутри
+  одной позиции (зеркалит NG SEASONAL SIGN RULE). Scope: BRENT/BZ=F only.
+- **NG=F DRIVER-PRIORITY RULE (storage anchor vs weather catalyst):** storage
+  vs 5y-avg задаёт СТРУКТУРНЫЙ bias; погода — катализатор тайминга/магнитуды,
+  сама по себе bias не переворачивает; при конфликте — size DOWN против
+  anchor, не объявлять разворот по погоде без экстремальной устойчивой
+  аномалии. Scope: NG=F only.
+
+**Обоснование (research, no-data-fitting.mdc):** обе правки — формализация
+УЖЕ процитированного канона (KenMacro oil four-channel: supply-led +DXY /
+demand-led −DXY; EIA: storage vs 5y avg = headline-гейдж), а НЕ новые пороги.
+Класс — логическая консистентность (bug-fix логики знака, как сезонный фикс
+NG 03.06), не подгонка thresholds. Обе правки явно декларируют «XAUUSD
+behavior UNCHANGED».
+
+**Sample-size (sample-size.mdc):** BZ n=16, NG n=27 (<100) — пороги тюнить
+нельзя и не тюнили; правка не трогает entry/exit-пороги, только дисциплину
+знака. stats_window НЕ двигаем (см. п.2). Оценка эффекта — forward по дате
+деплоя, минимум ≥100 сделок/символ + ≥2 недели.
+
+**Тесты:** `tests/test_fx_ai_trader_anti_flip.py` (13): наличие/формулировки
+обоих правил, symbol-scope (BRENT-only / NG-only), инвариант «золото не
+тронуто» (FIVE-DRIVER HIERARCHY на месте, оба правила декларируют XAUUSD
+UNCHANGED, ни одно правило не привязано к XAUUSD). Полный сьют **1056 passed**.
+
+**Файлы:** `src/fx_ai_trader/llm/prompts.py` (docstring research-блок +
+SYSTEM_PROMPT OIL/NG секции), `tests/test_fx_ai_trader_anti_flip.py`
+
 ## 2026-06-10
 
 ### feat(econ_calendar): + ECB и BoJ decision dates 2026 (symbol-scoped, для momentum-бота)
