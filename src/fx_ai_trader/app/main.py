@@ -116,9 +116,12 @@ def run() -> None:
         settings.max_lot_size,
     )
     log.info("Order label: %s", settings.order_label)
+    _eia_on = bool(settings.eia_api_key) and any(
+        s in settings.symbols for s in ("BZ=F", "NG=F")
+    )
     log.info("News (RSS): %s | EIA: %s",
              "ON" if settings.news_enabled else "OFF",
-             "ON" if settings.eia_api_key else "OFF")
+             "ON" if _eia_on else "OFF")
     log.info("=" * 60)
 
     if not settings.deepseek_api_key:
@@ -189,10 +192,15 @@ def run() -> None:
             max_items_per_symbol=settings.news_max_items_per_symbol,
             max_age_hours=settings.news_max_age_hours,
         )
-    eia_provider = EiaProvider(
-        api_key=settings.eia_api_key,
-        cache_ttl_sec=settings.eia_cache_ttl_sec,
-    )
+    # EIA inventories (нефть + газ) нужны ТОЛЬКО если в symbols есть BZ=F/NG=F.
+    # Gold-only → EIA не запрашиваем (экономим HTTP, не засоряем gold-контекст
+    # oil/gas-инвентори). Зеркалит логику NOAA-гейта ниже.
+    eia_provider: EiaProvider | None = None
+    if any(s in settings.symbols for s in ("BZ=F", "NG=F")):
+        eia_provider = EiaProvider(
+            api_key=settings.eia_api_key,
+            cache_ttl_sec=settings.eia_cache_ttl_sec,
+        )
     # NOAA CPC outlook нужен ТОЛЬКО если в symbols есть NG=F. Включаем
     # только в этом случае, чтобы не тратить HTTP-запросы.
     noaa_provider: NoaaOutlookProvider | None = None
@@ -504,7 +512,7 @@ def _run_full_cycle(
     llm: DeepSeekClient,
     killswitch: KillSwitch,
     news_provider: CommodityRssNewsProvider | None,
-    eia_provider: EiaProvider,
+    eia_provider: EiaProvider | None,
     noaa_provider: NoaaOutlookProvider | None,
     macro_rates_provider: MacroRatesProvider | None,
     *,

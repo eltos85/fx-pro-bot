@@ -136,9 +136,10 @@ services:
       # «weeks not hours»). Включать LIVE только после подтверждённой
       # стабильности парсера, sentiment-uncertainty calibration и ≥30 paper-trades.
       AI_FX_TRADER_TRADING_ENABLED: ${AI_FX_TRADER_TRADING_ENABLED:-false}
-      # 2026-05-18: добавлен NG=F (NAT.GAS, NYMEX Henry Hub). Research
-      # & verification — см. prompts.py v1.1, scripts/fx_ai_scout_gas_symbols.py.
-      AI_FX_TRADER_SYMBOLS: ${AI_FX_TRADER_SYMBOLS:-XAUUSD,BZ=F,NG=F}
+      # 2026-06-25: возврат к GOLD-ONLY (bot изначально gold-трейдер; нефть/газ
+      # сняты — см. settings.py DEFAULT_AI_FX_SYMBOLS и BUILDLOG_AI_FX_TRADER.md).
+      # Вернуть: AI_FX_TRADER_SYMBOLS=XAUUSD,BZ=F,NG=F в .env (без правки кода).
+      AI_FX_TRADER_SYMBOLS: ${AI_FX_TRADER_SYMBOLS:-XAUUSD}
       AI_FX_TRADER_ORDER_LABEL: ${AI_FX_TRADER_ORDER_LABEL:-ai-fx-trader}
       AI_FX_TRADER_POLL_INTERVAL_SEC: ${AI_FX_TRADER_POLL_INTERVAL_SEC:-900}
       AI_FX_TRADER_REVIEW_INTERVAL_SEC: ${AI_FX_TRADER_REVIEW_INTERVAL_SEC:-300}

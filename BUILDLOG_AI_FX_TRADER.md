@@ -1,4 +1,46 @@
-# BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: gold + Brent oil + Natural Gas)
+# BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: GOLD-only)
+
+## 2026-06-25
+
+### refactor(symbols): возврат к GOLD-ONLY — сняты нефть (BZ=F) и газ (NG=F)
+
+`<pending>`
+
+**Задача пользователя:** «удали газ и нефть, пусть торгует только золотом. он
+создавался как торговец золотом, а остальное мы ему добавили».
+
+**Обоснование (sample-size.mdc — disable по согласованию с пользователем):**
+нефть/газ были экспериментом Phase 1+ (2026-05-18) и за период наблюдения не
+дали систематической edge, сопоставимой с золотом:
+- NG=F: −$80 / 27 сделок (4W/25L). LLM пишет уроки (storage-overhang гасит
+  bullish weather), но они advisory — механически вход не блокируют, бот
+  продолжал брать те же лонги.
+- BZ=F: +$85 / 16 сделок (5W/11L) — формально в плюсе, но 4 разно-направленных
+  news-канала (supply/demand/dollar/geopolitical) плохо систематизируются;
+  выборка <100 → шум (sample-size.mdc).
+- XAUUSD: единственный инструмент с ОДНИМ доминантным измеримым драйвером
+  (real yields), под который бот изначально и затачивался.
+
+**Что изменено (gold-логика НЕ тронута):**
+- `settings.py` `DEFAULT_AI_FX_SYMBOLS` → `("XAUUSD",)` + комментарий с историей
+  и инструкцией возврата.
+- `docker-compose.yml` fallback `AI_FX_TRADER_SYMBOLS` → `XAUUSD` (VPS `.env`
+  символы не пинит → fallback рулит на проде).
+- `app/main.py`: EIA-провайдер (нефть/газ инвентори) теперь создаётся ТОЛЬКО
+  при наличии BZ=F/NG=F в symbols — зеркалит NOAA-гейт. Gold-only → EIA не
+  запрашивается (HTTP-экономия, чистый gold-контекст). EIA-ключ в `.env`
+  оставлен (безвреден, провайдер просто не инстанцируется). Тип
+  `_run_cycle(eia_provider: EiaProvider | None)`, лог EIA учитывает символы.
+- 0 открытых позиций на момент правки → сирот нет.
+
+**Что НЕ трогали (обратимость):** промпт-фреймворки по нефти/газу и флаги
+`NG_MODE_V2` / `BZ_BREAKOUT_MODE` оставлены спящими. Вернуть инструменты →
+`AI_FX_TRADER_SYMBOLS=XAUUSD,BZ=F,NG=F` в `.env`, без правки кода; EIA/NOAA
+авто-активируются.
+
+**Файлы:** `src/fx_ai_trader/config/settings.py`,
+`src/fx_ai_trader/app/main.py`, `docker-compose.yml`,
+`tests/test_fx_ai_trader_data_feeds.py` (+2 теста: gold-only default, EIA-гейт)
 
 ## 2026-06-24
 

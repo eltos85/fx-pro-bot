@@ -17,18 +17,29 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-# Дефолтные инструменты Phase 1+ (2026-05-18: добавлен газ NG=F).
+# Дефолтные инструменты.
+#
+# 2026-06-25: возврат к GOLD-ONLY. Бот создавался как gold-трейдер; нефть
+# (BZ=F) и газ (NG=F) были добавлены как эксперимент Phase 1+ (2026-05-18),
+# но за период наблюдения не показали систематической annotable edge,
+# сопоставимой с золотом: газ -$80 / 27 сделок (LLM пишет уроки, но не
+# следует им механически), нефть +$85 / 16 сделок (4 разно-направленных
+# news-канала, плохо систематизируется). По решению пользователя оставляем
+# ТОЛЬКО золото — единственный инструмент с одним доминантным измеримым
+# драйвером (real yields), под который бот изначально и затачивался.
+# Решение об отключении принято в обсуждении с пользователем
+# (sample-size.mdc: disable допустим по согласованию).
+#
+# Чтобы вернуть нефть/газ — задать AI_FX_TRADER_SYMBOLS=XAUUSD,BZ=F,NG=F
+# (env), без правки кода. Промпт-фреймворки и ng/bz-mode флаги для них
+# сохранены (спящие), EIA/NOAA-фиды авто-активируются при наличии символа.
 # - XAUUSD: spot gold CFD (от Advisor GC=F futures отделён на cTrader как
 #   разный symbolId → полная broker-side изоляция).
 # - BZ=F: Brent crude в yfinance-нотации; в SymbolCache маппится на cTrader
 #   "BRENT" (см. src/fx_pro_bot/trading/symbols.py).
-# - NG=F: Natural gas spot CFD (NYMEX Henry Hub Natural Gas Futures
-#   underlying); в SymbolCache маппится на cTrader "NAT.GAS"
-#   (id=1118 на FxPro demo, разведка через
-#   scripts/fx_ai_scout_gas_symbols.py 2026-05-18).
-#   TTF (Dutch front-month) на FxPro demo отсутствует — единственный
-#   доступный gas-инструмент NG/Henry Hub.
-DEFAULT_AI_FX_SYMBOLS: tuple[str, ...] = ("XAUUSD", "BZ=F", "NG=F")
+# - NG=F: Natural gas spot CFD; в SymbolCache маппится на cTrader "NAT.GAS"
+#   (id=1118 на FxPro demo, scripts/fx_ai_scout_gas_symbols.py 2026-05-18).
+DEFAULT_AI_FX_SYMBOLS: tuple[str, ...] = ("XAUUSD",)
 
 
 class AiFxTraderSettings(BaseSettings):

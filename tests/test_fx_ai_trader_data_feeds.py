@@ -428,3 +428,31 @@ class TestContextBlocks:
         assert "CFTC COT" not in out
         assert "GDELT NEWS TONE" not in out
         assert "ECONOMIC CALENDAR" not in out
+
+
+# ─── GOLD-ONLY refocus (2026-06-25) ────────────────────────────────────
+
+
+class TestGoldOnlyDefault:
+    """Бот вернулся к gold-only: нефть/газ сняты по решению пользователя
+    (sample-size.mdc: disable по согласованию). Регресс-гард + проверка
+    EIA-гейта (EIA нужен ТОЛЬКО при наличии нефти/газа — как NOAA)."""
+
+    def test_default_symbols_are_gold_only(self):
+        from fx_ai_trader.config.settings import (
+            DEFAULT_AI_FX_SYMBOLS,
+            AiFxTraderSettings,
+        )
+        assert DEFAULT_AI_FX_SYMBOLS == ("XAUUSD",)
+        # дефолтный парс symbols_raw → ровно одно золото
+        s = AiFxTraderSettings()
+        assert s.symbols == ("XAUUSD",)
+
+    def test_eia_gate_off_for_gold_only(self):
+        # Зеркалит main.py: EIA-провайдер создаётся ТОЛЬКО при наличии
+        # нефти/газа. Gold-only → EIA не запрашивается.
+        gold_only = ("XAUUSD",)
+        with_oilgas = ("XAUUSD", "BZ=F", "NG=F")
+        eia_needed = lambda syms: any(s in syms for s in ("BZ=F", "NG=F"))
+        assert eia_needed(gold_only) is False
+        assert eia_needed(with_oilgas) is True

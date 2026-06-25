@@ -617,9 +617,10 @@ class TestTokenLockRecheck:
 class TestSettings:
     def test_defaults(self):
         s = AiFxTraderSettings()
-        # NG=F (NAT.GAS) добавлен 2026-05-18. Это instrument-add, не
-        # стратегическое изменение (см. prompts.py v1.1 docstring).
-        assert s.symbols == ("XAUUSD", "BZ=F", "NG=F")
+        # 2026-06-25: возврат к GOLD-ONLY (нефть/газ сняты по решению
+        # пользователя, см. BUILDLOG_AI_FX_TRADER.md). Вернуть через
+        # AI_FX_TRADER_SYMBOLS env без правки кода.
+        assert s.symbols == ("XAUUSD",)
         assert s.order_label == "ai-fx-trader"
         assert s.trading_enabled is False  # paper по умолчанию
         assert s.poll_interval_sec == 900
