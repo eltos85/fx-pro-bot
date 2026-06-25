@@ -102,6 +102,16 @@ class FlowzoneSettings(BaseSettings):
     # Стакан: число уровней для ob_imbalance (доп-фактор, не главный триггер).
     ob_levels: int = Field(default=25)
 
+    # ─── Persist тиков (A2, канон §3 — per-swing профиль) ────────────────
+    # Принты persist-ятся в SQLite ``prints`` для построения per-swing профиля
+    # (окно [ts prev swing, now]). Background batched-flush из daemon-потока,
+    # чтобы не блокировать WS-callback. Технические параметры объёма/темпа,
+    # не торговые эджи.
+    print_flush_interval_sec: float = Field(default=2.0)
+    # Retention: принты старше порога удаляются (per-swing окно — часы внутри
+    # сессии; 6ч — с запасом). 0 = без pruning (рост БД).
+    print_prune_older_sec: float = Field(default=6 * 3600.0)
+
     # ─── Volume Profile + контекст аукциона (фаза 2, канон STRATEGY §2-3) ─
     # Value Area = ≈70% объёма вокруг POC. КАНОН Market Profile (Steidlmayer
     # «Markets & Market Logic» 1989; Dalton «Mind Over Markets» — value area =
@@ -158,14 +168,26 @@ class FlowzoneSettings(BaseSettings):
     # (одно-сторонний поток на уровне — STRATEGY §3.2). 0.6 = выраженный перекос
     # (нейтрально, не подгонка). Корзина с max |delta| ≥ порога → фактор delta.
     zone_delta_min_frac: float = Field(default=0.6)
-    # Буфер за зоной для стопа (STRATEGY §5.2 «стоп сразу ЗА зоной»). 8 б.п. —
-    # технический анти-фитиль буфер. Масштаб 1-2-3/4/5 — фаза 5.
+    # Буфер за зоной для стопа (STRATEGY §5.2 «стоп сразу ЗА зоной») —
+    # технический анти-фитиль буфер ПОВЕРХ канон-масштаба. Сам масштаб стопа =
+    # far_edge зоны + N × ширина зоны (канон «1-2-3 / 1-2-4 / 1-2-5», §5.2) —
+    # задаётся ``sl_zone_mult`` ниже. 8 б.п. — нейтральный микро-буфер, не
+    # торговый эдж; не заменяет канон-масштаб.
     sl_buffer_bps: float = Field(default=8.0)
-    # Резерв минимальной ширины стопа в б.п. (если зона очень узкая, стоп вплотную
-    # = шум). Технический пол, не торговый эдж.
-    min_sl_bps: float = Field(default=10.0)
 
-    # ─── Цели / swing / частичная фиксация / reload (фаза 5, канон §5.3, §8) ─
+    # ─── Масштаб стопа 1-2-3 / 1-2-4 / 1-2-5 (канон §5.2) ─────────────────
+    # Канон: *«1-2-3, 1-2-4, 1-2-5, it depends on how much you want to be safe on
+    # the stop-loss placement»*. Нотация автором численно не расшифрована; в
+    # order-flow/Al Brooks практике стоп = «just beyond the structural level»,
+    # масштабируется с размером структуры. Реализованная интерпретация (см.
+    # STRATEGY §11.5): стоп = far_edge зоны + N × ширина зоны, где N = кратное
+    # «безопасности»: 1 = «1-2-3» (минимум за зоной), 2 = «1-2-4», 3 = «1-2-5»
+    # (дальше за зоной = безопаснее, хуже R). Selectable через env. Default 1
+    # (ближайший к «стоп сразу за зоной»). Изменение = правка стратегии
+    # (strategy-guard.mdc).
+    sl_zone_mult: float = Field(default=1.0)
+
+    # ─── Цели / swing / re-entry (фаза 5, канон §5.3, §8) ─────────────────
     # Цель = ближайшая swing-точка (STRATEGY §5.3). Swing = фрактал Bill Williams
     # «Trading Chaos» 1995: бар-экстремум выше/ниже N баров с каждой стороны.
     # 2 бара (left=right=2) — канонический фрактал Уильямса (инвариант, не тюним).
@@ -178,14 +200,11 @@ class FlowzoneSettings(BaseSettings):
     # TTL кэша klines на символ (M5-бар обновляется раз в 5 мин — частый refetch
     # бессмыслен и жжёт rate-limit). Технический параметр, не торговый.
     swing_cache_sec: float = Field(default=60.0)
-    # Частичная фиксация (STRATEGY §8 «частичная фиксация»): доля позиции,
-    # закрываемая на цели 1 (ближайший swing); остаток едет на цель 2 (след. swing)
-    # со стопом в безубыток. 0 = выкл (полный выход на цели 1). 0.5 = половина —
-    # нейтральная доля (не подгонка под P&L).
-    partial_fraction: float = Field(default=0.5)
-    # Reload (STRATEGY §5.3): после ВЫИГРЫШНОГО закрытия — короткий cooldown, чтобы
-    # быстро перезарядиться на следующей зоне по тренду (вместо полного
-    # signal_cooldown_sec). Технический параметр темпа, не торговый эдж.
+    # Re-entry (STRATEGY §5.3 «re-entry… super strong swing point»): после
+    # ВЫИГРЫШНОГО закрытия — короткий cooldown, чтобы быстро перезарядиться на
+    # следующей зоне по тренду (вместо полного signal_cooldown_sec). Это отдельная
+    # новая сделка, а НЕ частичная фиксация (канон: полный выход на swing point,
+    # затем re-entry). Технический параметр темпа, не торговый эдж.
     reload_cooldown_sec: float = Field(default=10.0)
 
     # ─── Session gate (фаза 6, канон STRATEGY §6.1) ──────────────────────

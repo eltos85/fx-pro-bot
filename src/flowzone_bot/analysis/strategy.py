@@ -1,16 +1,23 @@
 """Пайплайн входа flowzone_bot: контекст → зона → absorption → Signal.
 
 Канон STRATEGY §7 (детерминированный чеклист входа):
-1. Контекст: трендовый сценарий (acceptance за VA). Нет → не торгуем.
-2. Зона: confluence ≥2 факторов VP по направлению аукциона.
+1. Контекст (§2): трендовый сценарий по ФОРМЕ per-SESSION профиля (acceptance
+   вне value area). Нет → не торгуем.
+2. Зона (§3): confluence факторов VP по направлению аукциона, построенных из
+   per-SWING профиля (профиль ПРЕДЫДУЩЕЙ swing-точки, §3.4 «super strong
+   area» = ≥3 факторов).
 3. Алерт на зону, ждём подхода цены.
 4. Подтверждение потоком в зоне: absorption контр-стороны (deep trades в теле
    свечи, «failed» контр-сторона).
-5. Вход: лимитка в зоне; стоп ЗА зоной; цель — ближайшая структура (swing —
-   фаза 5, сейчас ближайший POC / противоположная граница VA).
+5. Вход: лимитка в зоне; стоп ЗА зоной (масштаб 1-2-3/1-2-4/1-2-5 =
+   far_edge + N × ширина зоны, §5.2); цель — ближайшая swing-точка (§5.3).
+   Выход — полный на swing point; re-entry — отдельной сделкой на следующей
+   зоне (§5.3, §8). Никакой частичной фиксации и структурного фолбэка —
+   канон их не описывает (правило no-data-fitting.mdc).
 
 Только по направлению аукциона (continuation, §5.4) — контртренд не торгуем.
-``evaluate`` — чистая (по снапшоту + профилю + контексту), тестируется отдельно.
+``evaluate`` — чистая (по снапшоту + per-swing профилю + контексту), тестируется
+отдельно.
 """
 from __future__ import annotations
 
@@ -18,10 +25,10 @@ from dataclasses import dataclass, field
 
 from flowzone_bot.analysis.context import Context
 from flowzone_bot.analysis.orderflow import big_trade_threshold, detect_absorption
-from flowzone_bot.analysis.swings import Swing, swing_targets
+from flowzone_bot.analysis.swings import Swing, nearest_swing_target
 from flowzone_bot.analysis.volume_profile import VolumeProfile
 from flowzone_bot.analysis.zone import Zone, build_zones
-from flowzone_bot.data.aggregates import SymbolSnapshot, TradePrint
+from flowzone_bot.data.aggregates import SymbolSnapshot
 
 
 @dataclass
@@ -29,45 +36,33 @@ class Signal:
     symbol: str
     side: str                 # long | short (continuation)
     entry_ref: float          # цена лимитки в зоне
-    sl_level: float           # стоп ЗА зоной
-    tp_level: float           # цель 1 (ближайший swing; фолбэк — структура)
+    sl_level: float           # стоп ЗА зоной (far_edge + N × ширина зоны)
+    tp_level: float           # цель = ближайшая swing-точка (канон §5.3)
     score: int                # confluence-score зоны
     reasons: list[str] = field(default_factory=list)
     strategy: str = "flowzone"
     zone_low: float = 0.0
     zone_high: float = 0.0
     entry_order_type: str | None = None
-    tp2_level: float | None = None   # цель 2 (след. swing) для частичной фиксации
 
 
-def _structural_target(profile: VolumeProfile, side: str,
-                       entry: float) -> float | None:
-    """Фолбэк-цель из VP-структуры, когда подтверждённой swing-точки нет
-    (канон §5.3 «ближайший swing» — приоритет; structural — запасной вариант).
-
-    Шорт (вниз): ближайший уровень НИЖЕ entry из {poc, val}. Лонг (вверх):
-    ближайший ВЫШЕ entry из {poc, vah}. None если структуры в сторону цели нет.
-    """
-    if side == "short":
-        cands = [p for p in (profile.poc_price, profile.val) if p < entry]
-        return max(cands) if cands else None  # ближайшая снизу
-    cands = [p for p in (profile.poc_price, profile.vah) if p > entry]
-    return min(cands) if cands else None      # ближайшая сверху
-
-
-def evaluate(snap: SymbolSnapshot, profile: VolumeProfile | None,
-             context: Context, *, cfg,
+def evaluate(snap: SymbolSnapshot, context: Context,
+             zone_profile: VolumeProfile | None, *, cfg,
              swings: list[Swing] | None = None) -> Signal | None:
     """Прогнать чеклист входа. Возвращает Signal или None.
 
-    ``swings`` — подтверждённые swing-точки M5 (канон §5.3): цель 1 = ближайшая
-    swing по тренду, цель 2 = следующая (частичная фиксация). Если swing-целей
-    нет — фолбэк на структурную цель из VP.
+    ``context`` — залатченный контекст аукциона (per-SESSION профиль, §2).
+    ``zone_profile`` — per-swing профиль ПРЕДЫДУЩЕЙ swing-точки (канон §3:
+    исполненный поток в окне [ts prev swing, now]); из него строятся зоны.
+    ``swings`` — подтверждённые swing-точки M5 (канон §5.3): цель = ближайшая
+    swing по тренду. Если swing-цели нет — сделка НЕ берётся (канон: цель
+    всегда swing point, никаких структурных фолбэков).
     """
     side = context.trade_side
-    if side is None or profile is None or snap.last_price is None:
-        return None  # шаг 1: нет трендового контекста — не торгуем
+    if side is None or zone_profile is None or snap.last_price is None:
+        return None  # шаг 1: нет трендового контекста / нет per-swing профиля
     last = snap.last_price
+    profile = zone_profile
 
     big_thr = big_trade_threshold(snap.trades, pct=cfg.big_trade_pct,
                                   min_samples=cfg.big_trade_min_samples)
@@ -96,27 +91,29 @@ def evaluate(snap: SymbolSnapshot, profile: VolumeProfile | None,
     if not absorption.confirmed:
         return None  # зона без подтверждения потоком — не сигнал (§4, §8)
 
-    # шаг 5: стоп ЗА зоной (+буфер), цель — ближайшая структура
-    buf = max(cfg.sl_buffer_bps, cfg.min_sl_bps) / 10000.0 * last
+    # шаг 5: стоп ЗА зоной — канон «1-2-3 / 1-2-4 / 1-2-5» = far_edge зоны +
+    # N × ширина зоны (§5.2). N = cfg.sl_zone_mult (1/2/3 — selectable
+    # консервативность, «how much you want to be safe»). Небольшой анти-фитиль
+    # буфер sl_buffer_bps — технический, не масштаб стопа.
+    zone_width = zone.high - zone.low
+    buf = cfg.sl_buffer_bps / 10000.0 * last
+    beyond = max(zone_width * cfg.sl_zone_mult, buf)
     if side == "short":
-        sl = zone.high + buf
+        sl = zone.high + beyond
     else:
-        sl = zone.low - buf
-    # цель 1 = ближайший swing (канон §5.3); цель 2 = следующий swing (частичная
-    # фиксация/reload). Фолбэк на VP-структуру, если swing-целей нет.
-    targets = swing_targets(swings or [], side, last)
-    tp = targets[0] if targets else _structural_target(profile, side, last)
-    tp2 = targets[1] if len(targets) >= 2 else None
+        sl = zone.low - beyond
+    # цель = ближайший swing по тренду (канон §5.3 «targeting for a swing
+    # point»). Нет swing-цели → нет сделки (канон не предусматривает иного).
+    tp = nearest_swing_target(swings or [], side, last)
     if tp is None:
-        return None  # нет цели ни по swing, ни по структуре — пропускаем
+        return None
     if (side == "short" and not (sl > last > tp)) or \
        (side == "long" and not (sl < last < tp)):
         return None  # геометрия сделки невалидна (защита)
 
-    tgt_src = "swing" if targets else "vp"
     reasons = [f"ctx={context.state}", f"zone={'+'.join(zone.factors)}",
-               f"tp={tgt_src}"]
+               "tp=swing"]
     reasons += absorption.reasons
     return Signal(symbol=snap.symbol, side=side, entry_ref=last, sl_level=sl,
                   tp_level=tp, score=zone.score, reasons=reasons,
-                  zone_low=zone.low, zone_high=zone.high, tp2_level=tp2)
+                  zone_low=zone.low, zone_high=zone.high)

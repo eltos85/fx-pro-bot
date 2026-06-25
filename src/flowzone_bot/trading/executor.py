@@ -4,14 +4,17 @@
 - OBSERVE/PAPER (False): ордера НЕ ставятся, сделка симулируется на live-цене,
   TP/SL считаются локально (для наблюдения сигналов без риска).
 - LIVE (True, Bybit DEMO): LIMIT вход в зоне (канон §5.1 «put a limit order
-  here») с биржевыми SL/TP (стоп ЗА зоной, §5.2), reduce-only MARKET выход.
+  here») с биржевыми SL/TP (стоп ЗА зоной, §5.2, масштаб 1-2-3/4/5), reduce-only
+  MARKET выход.
+
+Канон §5.3: полный выход на swing point (TP=ближайший swing). Никакой частичной
+фиксации — канон её не описывает (правило no-data-fitting.mdc). Re-entry на
+следующей зоне — отдельной новой сделкой (см. reload_cooldown в main/scan).
 
 Размер позиции — риск-базированный: qty = risk_per_trade_usd / |entry−SL|
 (Van K. Tharp 2007 ch.11 — размер как следствие стопа). net сделки берём из
 приватного WS execution (Σ execPnl − Σ execFee = Bybit closedPnl), REST —
 фолбэк для restart-сирот.
-
-Цели/частичная фиксация/reload (канон §5.3) — фаза 5.
 """
 from __future__ import annotations
 
@@ -67,20 +70,6 @@ def taker_pnl(side: str, entry: float, exit_price: float, qty: float) -> float:
     return gross - fees
 
 
-def partial_exchange_tp(tp1: float, tp2: float | None, fraction: float
-                        ) -> tuple[float, bool]:
-    """Какой TP ставить на бирже и активна ли частичная фиксация в коде.
-
-    Частичная фиксация (STRATEGY §5.3, §8) включена, если ``fraction`` > 0 И есть
-    валидная цель 2 (следующий swing). Тогда биржевой TP = цель 2 (финал), а код
-    фиксирует ``fraction`` на цели 1 + двигает стоп в безубыток. Иначе биржевой
-    TP = цель 1 (полный выход), частичной фиксации нет. Биржа ВСЕГДА держит SL+TP
-    (безопасно при падении бота — позиция не остаётся без защиты)."""
-    if fraction > 0 and tp2 is not None:
-        return tp2, True
-    return tp1, False
-
-
 def bracket_exit_reason(side: str, entry: float, exit_price: float | None) -> str:
     """Расщепить биржевой bracket-выход на tp_hit / sl_hit по знаку хода цены."""
     if exit_price is None or entry <= 0:
@@ -114,11 +103,10 @@ class Executor:
         self._close_pending: dict[int, dict] = {}
         self._rest_recon_attempts: dict[int, float] = {}
         self._verify_fail: dict[int, int] = {}  # tid → счётчик неудачных REST-сверок
-        self._partial: dict[int, dict] = {}   # частичная фиксация: tid → состояние
-        self._last_win: dict[str, float] = {}  # символ → ts последнего профита (reload)
+        self._last_win: dict[str, float] = {}  # символ → ts последнего профита (re-entry)
 
     def last_win_ts(self, symbol: str) -> float | None:
-        """ts последнего ВЫИГРЫШНОГО закрытия по символу (для reload §5.3)."""
+        """ts последнего ВЫИГРЫШНОГО закрытия по символу (для re-entry §5.3)."""
         return self._last_win.get(symbol)
 
     def _note_close(self, symbol: str, pnl: float | None) -> None:
@@ -167,10 +155,10 @@ class Executor:
         cl.set_leverage(sig.symbol, cfg.max_leverage)
         link = f"flowzone_{sig.symbol}_{int(self._now() * 1000)}"
         limit_price = cl.round_price(sig.symbol, sig.entry_ref)
-        # биржевой TP = цель 2 (финал) при частичной фиксации, иначе цель 1
-        # (STRATEGY §5.3): биржа держит SL+TP всегда, код фиксирует долю на цели 1.
-        exch_tp, partial_active = partial_exchange_tp(
-            sig.tp_level, sig.tp2_level, getattr(cfg, "partial_fraction", 0.0))
+        # канон §5.3: полный выход на swing point → биржевой TP = sig.tp_level
+        # (единственная цель). SL+TP всегда на бирже — позиция защищена при
+        # падении бота. Никакой частичной фиксации.
+        exch_tp = sig.tp_level
         # write-ahead: строка БД ДО постановки ордера (детектируемый осиротевший
         # вход вместо «призрака»-позиции без строки).
         tid = self._db.insert_open(
@@ -181,10 +169,6 @@ class Executor:
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
                             "close_qty": 0.0, "open_val": 0.0, "open_qty": 0.0}
-        self._partial[tid] = {"tp1": sig.tp_level,
-                              "fraction": getattr(cfg, "partial_fraction", 0.0),
-                              "side": sig.side, "qty": qty,
-                              "done": not partial_active}
         otype = sig.entry_order_type or "limit"
         res = cl.place_entry(
             symbol=sig.symbol, side=side, qty=qty, order_link_id=link,
@@ -208,8 +192,8 @@ class Executor:
                  "tp=%.4f [%s]", tid, sig.symbol, side, qty, risk_usd,
                  limit_price, sig.sl_level, sig.tp_level, reasons)
         play.info("📤 [%s] лимитка %s в зоне @%.4f — стоп %.4f за зоной, цель "
-                  "%.4f; жду филл", sig.symbol, sig.side.upper(), limit_price,
-                  sig.sl_level, sig.tp_level)
+                  "%.4f (swing); жду филл", sig.symbol, sig.side.upper(),
+                  limit_price, sig.sl_level, sig.tp_level)
         self._notify(f"⏳ #{tid} {sig.symbol} {sig.side.upper()} лимитка @"
                      f"{limit_price:.4f} выставлена в зоне")
         return tid
@@ -322,7 +306,6 @@ class Executor:
     def _forget_trade(self, tid: int) -> None:
         self._fills.pop(tid, None)
         self._close_pending.pop(tid, None)
-        self._partial.pop(tid, None)
         for link in [k for k, v in self._link2trade.items() if v == tid]:
             self._link2trade.pop(link, None)
 
@@ -474,38 +457,6 @@ class Executor:
                      tr.id, tr.symbol, old, net, net - old)
         return True
 
-    def _maybe_partial(self, tr, price: float | None) -> None:
-        """Дойдя до цели 1 — закрыть долю reduce-only и перевести стоп в БУ.
-        Остаток едет на цель 2 (биржевой TP). Идемпотентно (флаг done)."""
-        pst = self._partial.get(tr.id)
-        if not pst or pst["done"] or price is None or self._client is None:
-            return
-        tp1 = pst["tp1"]
-        hit = price <= tp1 if tr.side == "short" else price >= tp1
-        if not hit:
-            return
-        cl = self._client
-        part_qty = cl.round_qty(tr.symbol, pst["qty"] * pst["fraction"])
-        pst["done"] = True  # один раз, даже при ошибке (не зацикливаться)
-        if part_qty <= 0:
-            return
-        link = f"flowzone_part_{tr.id}_{int(self._now() * 1000)}"
-        pos_side = "Buy" if tr.side == "long" else "Sell"
-        res = cl.close_market(tr.symbol, pos_side, part_qty, link)
-        if not res.get("ok"):
-            log.warning("partial #%d %s reduce отклонён: %s", tr.id, tr.symbol,
-                        res.get("error"))
-            return
-        # стоп в безубыток (защищаем остаток), TP остаётся на цели 2
-        be = cl.round_price(tr.symbol, tr.entry)
-        cl.set_trading_stop(tr.symbol, sl_price=be)
-        self._db.update_levels(tr.id, sl=be, tp=tr.tp)
-        play.info("🎯 [%s] частичная фиксация #%d: закрыл %.6f на цели 1 %.4f, "
-                  "стоп в БУ %.4f, остаток на цель 2 %.4f", tr.symbol, tr.id,
-                  part_qty, tp1, be, tr.tp)
-        self._notify(f"🎯 #{tr.id} {tr.symbol} частичная фиксация {pst['fraction']:.0%} "
-                     f"на {tp1:.4f}, стоп→БУ")
-
     def _manage_paper(self, tr, price: float | None) -> None:
         if price is None:
             return
@@ -571,8 +522,6 @@ class Executor:
                      pnl or 0.0, reason)
             self._on_close(tr, pnl, reason, is_real)
             return
-        # частичная фиксация на цели 1 + перевод стопа в безубыток (§5.3, §8)
-        self._maybe_partial(tr, price)
         # держим позицию — троттлим лог дистанций до TP/SL
         iv = 15.0
         if price is not None and self._now() - self._hold_log.get(tr.id, 0.0) >= iv:

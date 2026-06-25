@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import calendar
 import time
 
 
@@ -61,3 +62,41 @@ def in_session(ts: float, windows: list[tuple[float, float]]) -> bool:
             if hour >= start or hour < end:
                 return True
     return False
+
+
+def session_start_ts(ts: float, windows: list[tuple[float, float]]) -> float | None:
+    """Unix-старт текущего активного session-окна для ``ts`` (UTC).
+
+    Канон §2/§6.1: контекст = форма СЕССИОННОГО профиля (London/NY окно).
+    Якорь per-session профиля — момент старта текущего окна. Возвращает None,
+    если ``ts`` вне активной сессии (профиль не строим — не торгуем).
+
+    Окно через полночь (end ≤ start) корректно: если час ≥ start, старт сегодня;
+    если час < end, старт был вчера. date вычисляется от ``ts``."""
+    if not windows:
+        return None
+    tm = time.gmtime(ts)
+    today = tm.tm_yday
+    hour = tm.tm_hour + tm.tm_min / 60.0 + tm.tm_sec / 3600.0
+    for start, end in windows:
+        if start <= end:
+            if start <= hour < end:
+                h = int(start)
+                m = int(round((start - h) * 60))
+                return calendar.timegm((tm.tm_year, tm.tm_mon, tm.tm_mday,
+                                    h, m, 0, 0, 0, 0))
+            continue
+        # окно через полночь
+        if hour >= start:
+            h = int(start)
+            m = int(round((start - h) * 60))
+            return calendar.timegm((tm.tm_year, tm.tm_mon, tm.tm_mday,
+                                h, m, 0, 0, 0, 0))
+        if hour < end:
+            # старт был вчера
+            prev = time.gmtime(ts - 86400.0)
+            h = int(start)
+            m = int(round((start - h) * 60))
+            return calendar.timegm((prev.tm_year, prev.tm_mon, prev.tm_mday,
+                                h, m, 0, 0, 0, 0))
+    return None

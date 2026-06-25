@@ -46,10 +46,14 @@ def test_symbolstate_ob_imbalance():
     assert abs(snap.ob_imbalance - 5.0 / 7.0) < 1e-9
 
 
-def test_symbolstate_incremental_vp_day_anchored():
-    wall = {"t": 86400.0 * 100 + 10}  # внутри дня 100
+def test_symbolstate_incremental_vp_session_anchored():
+    """Per-SESSION профиль (A2, канон §2): якорь — старт London/NY окна.
+    Вне сессии профиль не строится; смена session-окна сбрасывает профиль."""
+    # day 100, 10:00 UTC — внутри London окна 07:00-16:00
+    wall = {"t": 86400.0 * 100 + 10 * 3600 + 10}
+    wins = [(7.0, 16.0), (12.0, 21.0)]
     st = SymbolState("BTCUSDT", trade_window_sec=999.0, vp_bucket_size=1.0,
-                     wall_now=lambda: wall["t"])
+                     session_windows=wins, wall_now=lambda: wall["t"])
     st.on_trade(100.4, 2.0, "Buy")   # idx 100
     st.on_trade(100.9, 1.0, "Sell")  # idx 100
     st.on_trade(102.1, 4.0, "Buy")   # idx 102
@@ -57,11 +61,19 @@ def test_symbolstate_incremental_vp_day_anchored():
     assert snap.vp_bucket_size == 1.0
     assert snap.vp_buckets[100] == (2.0, 1.0)
     assert snap.vp_buckets[102] == (4.0, 0.0)
-    # смена дня сбрасывает профиль
-    wall["t"] = 86400.0 * 101 + 5
+    assert snap.vp_session_start is not None
+    # вне сессии (04:00 UTC day 101) → профиль сбрасывается, якорь None
+    wall["t"] = 86400.0 * 101 + 4 * 3600
     st.on_trade(103.0, 1.0, "Buy")
     snap2 = st.snapshot()
-    assert set(snap2.vp_buckets) == {103}
+    assert snap2.vp_buckets == {}
+    assert snap2.vp_session_start is None
+    # возврат в сессию (08:00 UTC day 101) → новый якорь, профиль с нуля
+    wall["t"] = 86400.0 * 101 + 8 * 3600
+    st.on_trade(105.0, 1.0, "Buy")
+    snap3 = st.snapshot()
+    assert set(snap3.vp_buckets) == {105}
+    assert snap3.vp_session_start is not None
 
 
 # ─── Фаза 2: Volume Profile engine ───────────────────────────────────────
@@ -344,7 +356,7 @@ class _Cfg:
     absorption_window_sec = 300.0    # тело M5-свечи (§4, §6.3)
     absorption_min_counter_frac = 0.5
     sl_buffer_bps = 8.0
-    min_sl_bps = 10.0
+    sl_zone_mult = 1.0               # канон «1-2-3» (far_edge + 1× ширина зоны)
 
 
 def _evictless_state_snapshot(buckets, bucket_size, trades, last_price, ts):
@@ -380,13 +392,19 @@ def test_evaluate_short_continuation_full_checklist():
     # контекст trend_down — по ФОРМЕ профиля (хвост ниже VAL), не по потоку.
     ctx = classify(prof, snap.last_price, accept_frac=0.70)
     assert ctx.state == TREND_DOWN
+    # канон §5.3: цель = ближайший swing (без swing-цели сделки нет).
+    swings = [type("S", (), {"kind": "low", "price": 110.0})()]
 
     from flowzone_bot.analysis.strategy import evaluate
-    sig = evaluate(snap, prof, ctx, cfg=_Cfg())
+    sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swings)
     assert sig is not None
     assert sig.side == "short"
     assert sig.sl_level > sig.entry_ref > sig.tp_level  # геометрия шорта
-    assert sig.score >= 3                               # super strong (§3.4)
+    assert sig.tp_level == 110.0                          # ближайший swing
+    assert sig.score >= 3                                 # super strong (§3.4)
+    # канон §5.2 «1-2-3»: стоп = far_edge зоны + 1× ширина зоны (+буфер).
+    zone_width = sig.zone_high - sig.zone_low
+    assert sig.sl_level >= sig.zone_high + zone_width * _Cfg.sl_zone_mult
 
 
 def test_evaluate_none_when_balance_context():
@@ -396,7 +414,7 @@ def test_evaluate_none_when_balance_context():
     ctx = classify(prof, snap.last_price, accept_frac=0.70)
     assert ctx.state == BALANCE
     from flowzone_bot.analysis.strategy import evaluate
-    assert evaluate(snap, prof, ctx, cfg=_Cfg()) is None
+    assert evaluate(snap, ctx, prof, cfg=_Cfg()) is None
 
 
 # ─── Фаза 5: swing-точки (фракталы) + цели/частичная фиксация ────────────
@@ -436,31 +454,26 @@ def test_nearest_and_list_swing_targets():
     assert swing_targets(swings, "long", 100.0) == [105.0, 110.0]
 
 
-def test_evaluate_uses_swing_target_over_structural():
+def test_evaluate_uses_swing_target_only():
+    """Канон §5.3: цель = только swing point. Структурного фолбэка на POC/VAL
+    больше нет (A5 — не в ролике). Без swing-цели сделки НЕ будет."""
     prof = build_profile(_short_reload_profile(), bucket_size=1.0)
     now = 1000.0
     snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
                                      last_price=119.5, ts=now)
     ctx = classify(prof, snap.last_price, accept_frac=0.70)
-    # swing lows ниже входа: 110.0 (ближняя) и 106.0 (дальняя)
+    from flowzone_bot.analysis.strategy import evaluate
+    # без swings → нет swing-цели → сделка не берётся (канон: цель всегда swing)
+    assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=None) is None
+    # со swings → tp = ближайший swing, tp2 не существует (частичная фиксация
+    # удалена, A6)
     swings = [type("S", (), {"kind": "low", "price": 110.0})(),
               type("S", (), {"kind": "low", "price": 106.0})()]
-    from flowzone_bot.analysis.strategy import evaluate
-    sig = evaluate(snap, prof, ctx, cfg=_Cfg(), swings=swings)
+    sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swings)
     assert sig is not None
-    assert sig.tp_level == 110.0     # ближайший swing, не VP-структура
-    assert sig.tp2_level == 106.0    # цель 2 для частичной фиксации
+    assert sig.tp_level == 110.0     # ближайший swing
+    assert not hasattr(sig, "tp2_level")  # частичная фиксация удалена
     assert "tp=swing" in sig.reasons
-
-
-def test_partial_exchange_tp_decision():
-    from flowzone_bot.trading.executor import partial_exchange_tp
-    # частичная фиксация вкл (fraction>0) + есть цель 2 → биржевой TP = цель 2
-    assert partial_exchange_tp(98.5, 96.0, 0.5) == (96.0, True)
-    # нет цели 2 → биржевой TP = цель 1, частичной фиксации нет
-    assert partial_exchange_tp(98.5, None, 0.5) == (98.5, False)
-    # частичная фиксация выкл (fraction=0) → биржевой TP = цель 1
-    assert partial_exchange_tp(98.5, 96.0, 0.0) == (98.5, False)
 
 
 # ─── Фаза 6: session gate (London/NY, UTC-окна) ──────────────────────────
@@ -535,6 +548,130 @@ def test_in_session_overnight_window():
     assert in_session(ts_at(23), wins)
     assert in_session(ts_at(1), wins)
     assert not in_session(ts_at(12), wins)
+
+
+# ─── A2: per-session якорь профиля (session_start_ts) ────────────────────
+
+def test_session_start_ts_london_window():
+    import calendar
+    from flowzone_bot.analysis.session import session_start_ts
+
+    wins = [(7.0, 16.0), (12.0, 21.0)]
+    # 09:00 UTC — внутри London; старт = 07:00 того же дня
+    ts = calendar.timegm((2026, 6, 16, 9, 0, 0, 0, 0, 0))
+    expected_start = calendar.timegm((2026, 6, 16, 7, 0, 0, 0, 0, 0))
+    assert session_start_ts(ts, wins) == expected_start
+
+
+def test_session_start_ts_outside_session_returns_none():
+    import calendar
+    from flowzone_bot.analysis.session import session_start_ts
+    wins = [(7.0, 16.0), (12.0, 21.0)]
+    # 03:00 UTC — азиатская сессия, вне окон → None (профиль не строим)
+    ts = calendar.timegm((2026, 6, 16, 3, 0, 0, 0, 0, 0))
+    assert session_start_ts(ts, wins) is None
+
+
+def test_session_start_ts_overnight_window():
+    import calendar
+    from flowzone_bot.analysis.session import session_start_ts
+    wins = [(22.0, 2.0)]
+    # 01:00 → старт был вчера 22:00
+    ts = calendar.timegm((2026, 6, 16, 1, 0, 0, 0, 0, 0))
+    expected = calendar.timegm((2026, 6, 15, 22, 0, 0, 0, 0, 0))
+    assert session_start_ts(ts, wins) == expected
+    # 23:00 → старт сегодня 22:00
+    ts2 = calendar.timegm((2026, 6, 16, 23, 0, 0, 0, 0, 0))
+    expected2 = calendar.timegm((2026, 6, 16, 22, 0, 0, 0, 0, 0))
+    assert session_start_ts(ts2, wins) == expected2
+
+
+# ─── A2: per-swing профиль из принтов (build_profile_from_prints) ────────
+
+def test_build_profile_from_prints_aggregates_by_price():
+    from flowzone_bot.analysis.volume_profile import build_profile_from_prints
+    # принты на цене 120 (buy 8, sell 2) и 121 (buy 1, sell 5); bucket=1.
+    prints = [(1000.0, 120.0, 8.0, "Buy"), (1001.0, 120.0, 2.0, "Sell"),
+              (1002.0, 121.0, 1.0, "Buy"), (1003.0, 121.0, 5.0, "Sell")]
+    prof = build_profile_from_prints(prints, bucket_size=1.0)
+    assert prof is not None
+    assert prof.bucket_delta(120) == 6.0    # 8 buy − 2 sell
+    assert prof.bucket_delta(121) == -4.0   # 1 buy − 5 sell
+
+
+def test_build_profile_from_prints_empty_returns_none():
+    from flowzone_bot.analysis.volume_profile import build_profile_from_prints
+    assert build_profile_from_prints([], bucket_size=1.0) is None
+    assert build_profile_from_prints([(1, 100, 1, "Buy")], bucket_size=0.0) is None
+
+
+# ─── A2: persist принтов в SQLite + PrintStore batched flush ──────────────
+
+def test_db_insert_and_read_prints(tmp_path):
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    rows = [(1000.0, "BTCUSDT", 100.0, 1.5, "Buy"),
+            (1001.0, "BTCUSDT", 100.5, 2.0, "Sell"),
+            (1002.0, "ETHUSDT", 3000.0, 1.0, "Buy")]
+    assert db.insert_prints(rows) == 3
+    got = db.prints_since("BTCUSDT", 1000.0)
+    assert len(got) == 2
+    assert got[0] == (1000.0, 100.0, 1.5, "Buy")
+    # until-фильтр
+    got_until = db.prints_since("BTCUSDT", 1000.0, until_ts=1001.0)
+    assert len(got_until) == 1
+    db.close()
+
+
+def test_db_prune_prints(tmp_path):
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    db.insert_prints([(500.0, "X", 1.0, 1.0, "Buy"),
+                      (1500.0, "X", 2.0, 1.0, "Sell")])
+    # удаляем всё старше 1000
+    n = db.prune_prints_before(1000.0)
+    assert n == 1
+    assert db.prints_count() == 1
+    db.close()
+
+
+def test_print_store_flushes_buffer_to_db(tmp_path):
+    from flowzone_bot.data.print_store import PrintStore
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    store = PrintStore(db, flush_interval_sec=0.05, prune_older_than_sec=0.0)
+    store.ingest(1000.0, "BTCUSDT", 100.0, 1.5, "Buy")
+    store.ingest(1001.0, "BTCUSDT", 100.5, 2.0, "Sell")
+    store.start()
+    import time as _t
+    _t.sleep(0.2)
+    store.stop(timeout=2.0)
+    got = db.prints_since("BTCUSDT", 999.0)
+    assert len(got) == 2
+    db.close()
+
+
+def test_swing_profile_for_builds_from_db_prints(tmp_path):
+    """Per-swing профиль (A2, канон §3): окно [ts prev swing, now] из БД.
+    Принты старше swing-якоря НЕ попадают в профиль (окно от swing)."""
+    from flowzone_bot.analysis.swings import Swing
+    from flowzone_bot.app.main import _swing_profile_for
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    # принты: до swing-якоря (ts=900) и после (ts>=1000)
+    db.insert_prints([(900.0, "X", 100.0, 99.0, "Buy"),    # старее swing → выкинуть
+                      (1000.0, "X", 120.0, 8.0, "Buy"),
+                      (1001.0, "X", 120.0, 2.0, "Sell"),
+                      (1002.0, "X", 121.0, 1.0, "Buy")])
+    cfg = type("C", (), {"value_area_pct": 0.70})()
+    swings = [Swing(0, 122.0, "high", ts=1000.0)]  # предыдущий swing high (шорт)
+    prof = _swing_profile_for(db, cfg, "X", swings, "short", bucket_size=1.0,
+                              now=1100.0)
+    assert prof is not None
+    assert prof.bucket_delta(120) == 6.0     # 8 buy − 2 sell (после swing)
+    # принт 900 (старее swing-якоря 1000) не попал
+    assert prof.bucket_volume(int(100.0)) == 0.0
+    db.close()
 
 
 # ─── сведение P&L на партиалах (DB == Bybit closedPnl) ───────────────────

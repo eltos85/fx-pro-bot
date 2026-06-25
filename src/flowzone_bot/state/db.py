@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ts_close ON trades(ts_close);
 CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy);
+CREATE TABLE IF NOT EXISTS prints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    symbol TEXT NOT NULL,
+    price REAL NOT NULL,
+    size REAL NOT NULL,
+    side TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_prints_symbol_ts ON prints(symbol, ts);
 """
 
 
@@ -186,6 +195,51 @@ class FlowzoneDB:
         self._conn.execute(
             f"UPDATE trades SET {', '.join(sets)} WHERE id=?", tuple(args))
         self._conn.commit()
+
+    # ─── prints (footprint-тики для per-swing/per-session профилей, A2) ───
+    # Канон STRATEGY §3: зона = профиль ПРЕДЫДУЩЕЙ swing-точки; §2: контекст =
+    # форма СЕССИОННОГО профиля. Профиль строится из исполненного потока (footprint,
+    # не kline-volume). Принты persist-ятся сюда, чтобы per-swing окно (переменная
+    # длина — от ts предыдущего swing до now) можно было собрать в любой момент.
+
+    def insert_prints(self, rows: list[tuple]) -> int:
+        """Batch-insert принтов [(ts, symbol, price, size, side), ...].
+        Возвращает число вставленных строк. Пустой список — no-op (без commit)."""
+        if not rows:
+            return 0
+        self._conn.executemany(
+            "INSERT INTO prints (ts,symbol,price,size,side) "
+            "VALUES (?,?,?,?,?)", rows)
+        self._conn.commit()
+        return len(rows)
+
+    def prints_since(self, symbol: str, since_ts: float,
+                     until_ts: float | None = None) -> list[tuple]:
+        """Принты символа с ts>=since_ts (и опц. <until_ts) в порядке ts.
+        Возвращает [(ts, price, size, side), ...] — для построения VP окна."""
+        if until_ts is None:
+            rows = self._conn.execute(
+                "SELECT ts,price,size,side FROM prints "
+                "WHERE symbol=? AND ts>=? ORDER BY ts", (symbol, since_ts))
+        else:
+            rows = self._conn.execute(
+                "SELECT ts,price,size,side FROM prints "
+                "WHERE symbol=? AND ts>=? AND ts<? ORDER BY ts",
+                (symbol, since_ts, until_ts))
+        return [(r[0], r[1], r[2], r[3]) for r in rows]
+
+    def prune_prints_before(self, before_ts: float) -> int:
+        """Retention: удалить принты старше before_ts. Возвращает число удалённых.
+        Вызывается периодически (старые per-swing окна уже не нужны — swing-точка
+        подтверждена, её профиль собран)."""
+        cur = self._conn.execute(
+            "DELETE FROM prints WHERE ts<?", (before_ts,))
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
+    def prints_count(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) AS c FROM prints").fetchone()
+        return int(row["c"] or 0)
 
     # закрытия, не имеющие биржевого closedPnl (нечего сверять) — сразу verified
     _NON_TRADE_REASONS = ("restart_flat", "entry_Cancelled", "entry_Rejected",

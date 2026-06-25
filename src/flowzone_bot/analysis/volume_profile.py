@@ -55,6 +55,38 @@ class VolumeProfile:
         return self.bucket_delta(self.idx_of_price(price))
 
 
+def build_profile_from_prints(prints: list, bucket_size: float,
+                              value_area_pct: float = 0.70
+                              ) -> VolumeProfile | None:
+    """Собрать VolumeProfile из списка принтов (канон §3 — профиль ПРЕДЫДУЩЕЙ
+    swing-точки, A2). ``prints`` = [(ts, price, size, side), ...] (side =
+    "Buy"|"Sell"). Принты агрегируются в корзины цен (idx = price/bucket_size)
+    → (buy_vol, sell_vol), далее ``build_profile``.
+
+    Источник принтов — SQLite ``prints`` (state/db.py), окно = [ts предыдущего
+    swing, now] (переменная длина per-swing). Канон требует профиль из
+    исполненного потока (footprint), не из kline-volume (no-data-fitting.mdc)."""
+    if not prints or bucket_size <= 0:
+        return None
+    buckets: dict[int, list[float]] = {}
+    for _ts, price, size, side in prints:
+        if price <= 0 or size <= 0:
+            continue
+        idx = int(price / bucket_size)
+        b = buckets.get(idx)
+        if b is None:
+            b = [0.0, 0.0]
+            buckets[idx] = b
+        if str(side).upper() == "BUY":
+            b[0] += size
+        else:
+            b[1] += size
+    if not buckets:
+        return None
+    return build_profile({i: (b[0], b[1]) for i, b in buckets.items()},
+                         bucket_size, value_area_pct)
+
+
 def build_profile(buckets: dict[int, tuple[float, float]], bucket_size: float,
                   value_area_pct: float = 0.70) -> VolumeProfile | None:
     """Собрать VolumeProfile из карты корзин (idx → (buy, sell)).

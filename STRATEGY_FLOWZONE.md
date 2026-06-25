@@ -14,11 +14,12 @@ flowzone_bot сверяется с этим документом и с роли�
 
 Цену двигает **только объём** (исполненные сделки). Мы определяем **контекст
 аукциона** (тренд или баланс), находим **зоны высокой вероятности** через
-объёмный профиль + поток ордеров (delta, крупные сделки), и входим **по
-направлению аукциона** (продолжение), когда в зоне приходит **подтверждение
-потоком** — поглощение (absorption) противоположной стороны. Стоп — сразу за
-зоной, цели — ближайшие swing-точки, с частичной фиксацией и перезарядкой
-(reload) на следующей зоне.
+объёмный профиль + поток ордеров (delta print, крупные сделки), и входим **по
+направлению аукциона** (reversal area following the direction of the trend —
+зона отката для перезарядки в сторону тренда), когда в зоне приходит
+**подтверждение потоком** — поглощение (absorption) противоположной стороны.
+Стоп — сразу за зоной, цель — ближайшая swing-точка, и перезарядка (re-entry)
+на следующей сильной зоне.
 
 ---
 
@@ -28,9 +29,12 @@ flowzone_bot сверяется с этим документом и с роли�
   совершает направленные движения, когда баланс нарушается. Источник правды о
   происходящем — **исполненный объём**, а не свечи и не классические уровни
   поддержки/сопротивления.
-- **Торгуем ПО направлению аукциона** (continuation), а не против. Если рынок в
-  трендовом сценарии вниз — ищем точки для **перезарядки шорта**; если вверх —
-  для перезарядки лонга.
+- **Торгуем ПО направлению аукциона.** Канон называет это «sensitive high
+  probability **reversal area** following the direction of the trend» — зона
+  отката, где мы перезаряжаем позицию в сторону уже установленного тренда
+  (continuation), а не разворачиваемся против него. Если рынок в трендовом
+  сценарии вниз — ищем точки для **перезарядки шорта**; если вверх — для
+  перезарядки лонга.
 - **Никаких догадок.** Каждый вход подтверждается реальным потоком ордеров
   (delta / крупные сделки / поглощение), наблюдаемым **в реальном времени**, а
   не постфактум.
@@ -74,9 +78,12 @@ flowzone_bot сверяется с этим документом и с роли�
 перезарядки. Строится по объёмному профилю предыдущей swing-точки. Компоненты:
 
 ### 3.1 Объёмный профиль (Volume Profile)
-- **Value Area High / Low (VAH / VAL)** — границы зоны, где сосредоточено
-  основное (≈70%) принятие объёма.
-- **POC (Point of Control)** — цена с максимальным объёмом.
+- **Value Area High / Low (VAH / VAL)** — границы value area, зоны, где
+  сосредоточено основное принятие объёма. В ролике автор оперирует понятием
+  «value area low/high» без числового определения; каноничная константа ширины
+  value area **≈70%** общего объёма и термины POC/HVN/LVN — из Market Profile
+  (Steidlmayer / Dalton), это research-источник, не произнесённый в ролике.
+- **POC (Point of Control)** — цена с максимальным объёмом (термин Dalton).
 - **Volume ledge** — место, где объём **резко** переходит от high-volume node
   (пик) к low-volume node (провал). Это сильный ориентир зоны.
 
@@ -84,10 +91,13 @@ flowzone_bot сверяется с этим документом и с роли�
 > ledge is where the volume goes from really peak point to really low point…
 > from high volume node to low volume node really fast.»*
 
-### 3.2 Delta-профиль (delta print)
-- На swing-точке измеряем, **сколько было давления** через дельту (агрессивный
-  buy − sell), исполненную ИМЕННО на этом уровне. Это «delta print» — зона,
-  основанная на фактически исполненном потоке, а не на свечах.
+### 3.2 Delta print
+- «Delta print» — в ролике это **название конкретного индикатора** платформы
+  deep charts («one indicator that show you the exact area called delta
+  print»), а не универсальный термин литературы. На swing-точке он показывает,
+  **сколько было давления** через дельту (агрессивный buy − sell), исполненную
+  ИМЕННО на этом уровне. Это зона, основанная на фактически исполненном потоке,
+  а не на свечах или S/R.
 
 > Цитата канона: *«you can measure how much pressure there was in the market
 > during this swing point using the delta profile… this is not based on some
@@ -162,18 +172,22 @@ flowzone_bot сверяется с этим документом и с роли�
 > area that we already identified… this is a 1-2-3, 1-2-4, 1-2-5, it depends on
 > how much you want to be safe on the stop-loss placement.»*
 
-### 5.3 Цели и перезарядка (reload)
-- **Цель — ближайшая swing-точка.**
-- После взятия цели на первой сделке — ищем **следующую сильную зону** в том же
-  направлении (фрактальный анализ: новый dealing range, новая агрессия) и
-  **перезаряжаемся** (re-entry), снова защищаясь за новой зоной.
+### 5.3 Цели и перезарядка (re-entry)
+- **Цель — ближайшая swing-точка** («targeting for a swing point»). Канон не
+  уточняет долю снимаемого объёма; любой partial/масштаб фиксации — решение
+  реализации (см. §10), не часть канона.
+- После взятия цели на первой сделке — рынок создаёт **новый dealing range** и
+  **новую super strong swing point**; входим **re-entry** в ту же сторону,
+  защищаясь за новой зоной.
 
 > Цитата канона: *«you can take also a re-entry here, covering above the area,
 > targeting for a swing point… after you go to take profit on the first one,
 > you have a condition again of super strong swing point.»*
 
 ### 5.4 Направление
-- **Только по направлению аукциона/тренда** (continuation). Контртренд по этой
+- **Только по направлению аукциона/тренда.** Канон буквально: «sensitive high
+  probability **reversal area following the direction of the trend**» — зона
+  отката для входа в сторону уже установленного тренда. Контртренд по этой
   методике **не торгуем**.
 
 ---
@@ -209,7 +223,10 @@ flowzone_bot сверяется с этим документом и с роли�
 > another strong area»; «the market create again a new dealing range».*
 
 ### 6.3 Конкретика из ролика (скриншот графика)
-По кадру платформы в ролике видно фактические настройки канона:
+По кадру платформы в ролике видны фактические настройки. **Важно:** тайм-фрейм
+и инструмент ниже — это **визуальный вывод из кадра** экрана автора, в речи
+ролика они **не произносятся**; на случай переинтерпретации кадра orientируемся
+именно на скриншот.
 
 - **График / тайм-фрейм входа = `5 Minuti` (M5, 5 минут).**
 - **Инструмент канона = `NQ` (фьючерс Nasdaq-100)** — глубоко-ликвидный рынок
@@ -238,7 +255,7 @@ flowzone_bot сверяется с этим документом и с роли�
    контр-стороны (deep trades в теле свечи, «failed» контр-сторона).
 6. **Вход:** лимитка в зоне.
 7. **Стоп:** за зоной (1-2-3/4/5 по консервативности).
-8. **Цель:** ближайший swing-point; частичная фиксация.
+8. **Цель:** ближайший swing-point; фиксация на цели.
 9. **Reload:** следующая сильная зона по тренду → повтор с шага 3.
 
 ---
@@ -262,23 +279,27 @@ flowzone_bot сверяется с этим документом и с роли�
 | Только объём двигает цену; auction theory | «the only thing that move price is volume… auction market theory» | ✓ |
 | Контекст: пробой + acceptance за value area = тренд | «clear breakout… accepted below the value area low… we can expect direction» | ✓ |
 | Не брать первое движение, ждать второе | «I didn't took the first movement… the second movement was so clear» | ✓ |
-| Зона = профиль swing-точки (VAH/VAL, POC, ledge) | «area based on the profile of the previous swing point… volume ledge» | ✓ |
-| Delta print = исполненный поток на уровне | «delta profile… actual orderflow data that got executed previously» | ✓ |
+| Зона = профиль swing-точки (VAH/VAL, volume ledge) | «area based on the profile of the previous swing point… volume ledge» | ✓ |
+| POC, ≈70% VA-ширина — research (Steidlmayer/Dalton), не в ролике | не произносится; research-канон Market Profile | ⚠ атрибуция |
+| Delta print = индикатор deep charts, исполненный поток на уровне | «one indicator… called delta print… actual orderflow data that got executed previously» | ✓ |
 | Big trades маркируют уровень | «volume got support by these big trades» | ✓ |
 | Confluence (VAH + big trades + delta) = сильная зона | «confluence of value area high, big trades and delta level… super strong area» | ✓ |
 | Триггер = absorption контр-стороны (deep trades в теле) | «absorption of the aggressive buyers… deep trades in the body of the candle» | ✓ |
 | Подтверждение в реальном времени | «this information in real time… as a confirmation to execute» | ✓ |
 | Вход лимиткой после подтверждения | «you can already put a limit order here» | ✓ |
 | Стоп за зоной, масштаб 1-2-3/4/5 | «protecting yourself above the area… 1-2-3, 1-2-4, 1-2-5» | ✓ |
-| Цель swing-point, reload на след. зоне | «targeting for a swing point… re-entry… super strong swing point» | ✓ |
+| Цель swing-point, re-entry на след. super strong swing point | «targeting for a swing point… re-entry… super strong swing point» | ✓ |
+| Частичная фиксация — не в ролике (решение реализации, §10) | не упоминается; только «take profit on the first one» | ⚠ не канон |
 | Сессии London/NY | «one in London session and one in New York session» | ✓ |
 | Масштаб: сессионный fixed-профиль + свечной вход + фрактальность | «start with the profile shape»; «fixed profile volume analysis»; «deep trades in the body of the candle»; «fractal analysis»; «new dealing range» | ✓ |
-| ТФ входа = M5 (5 минут); инструмент NQ | скриншот графика: `5 Minuti`, `NQ-202512` | ✓ |
+| ТФ входа = M5; инструмент NQ — визуальный вывод из кадра | скриншот графика: `5 Minuti`, `NQ-202512` (в речи не произносятся) | ✓ (кадр) |
 | Профили — order-flow/footprint (tick), привязка день/неделя/композит | скриншот: `Order Flow - Vol. Profile`, `Dly/Wkly/Comp. Vol./Delta Profile` | ✓ |
-| Только по тренду (continuation) | «reversal area following the direction of the trend» | ✓ |
+| Только по тренду: «reversal area following the direction of the trend» | «sensitive high probability reversal area following the direction of the trend» | ✓ |
 
-Все пункты документа имеют прямое подтверждение в ролике. Расхождений с
-первоисточником при сверке не выявлено.
+Все пункты документа имеют прямое подтверждение в ролике. Пункты, помеченные
+`⚠`, — это research-канон Market Profile (Steidlmayer/Dalton) или решение
+реализации, явно отделённые от первоисточника; расхождений по торговой логике
+канона при сверке не выявлено.
 
 ---
 
@@ -321,7 +342,146 @@ flowzone_bot сверяется с этим документом и с роли�
   level»**. Реализовано в `auction.AuctionTracker`: направление ЛАТЧИТСЯ на символ
   (якорь UTC-день) и адоптируется/переворачивается ТОЛЬКО когда ОБА: (1)
   мгновенный `classify` = тренд в эту сторону (acceptance вне VA) И (2) цена
-  пробила последний подтверждённый **swing-экстремум** (Williams-фрактал §5.3 =
-  «previous level»). Откат/баланс/неподтверждённый встречный хвост направление НЕ
+  пробила последний подтверждённый **swing-экстремум**. Каноничный «previous
+  level» в ролике не детализируется методом; в реализации он определён как
+  Williams-фрактал (§5.3) — это наша конкретизация, не тождество с текстом
+  ролика. Откат/баланс/неподтверждённый встречный хвост направление НЕ
   сбрасывают — это и есть «не первое, а второе ясное движение» (§2). Без новых
   числовых порогов (используются существующие swing left/right и accept_frac).
+
+---
+
+## 11. Аудит кода vs первоисточник (2026-06-25)
+
+Сверка реализации `src/flowzone_bot/` с роликом-первоисточником. Цель — найти
+где мы **доработали / подогнали / сломали** логику и математику торговли бота
+относительно канона. Разметка: **[КАНОН]** = есть в ролике; **[RESEARCH]** =
+каноничная литература Market Profile (Steidlmayer/Dalton и т.п.), в ролике не
+звучит; **[НАШЕ]** = наше решение/конкретизация, в ролике нет.
+
+### 11.1 Точная стратегия канона (терминология автора + мировые термины)
+
+- **Auction Market Theory**: цену двигает только исполненный объём; рынок —
+  аукцион, ищущий balance; направленное движение = нарушение balance. Источник
+  правды — **order flow** (delta, big trades, absorption), не свечи/классические
+  S/R. [КАНОН]
+- **Шаг 1 — Profile shape.** Трендовый сценарий = **clear breakout of the
+  previous level** + **aggression** + **acceptance** вне value area (ниже
+  **Value Area Low** для шорта / выше **Value Area High** для лонга). Balanced =
+  цена внутри value area, акцепта за границами нет → входы НЕ берём. Термины
+  Value Area / VAH / VAL / acceptance / breakout — [RESEARCH] Market Profile.
+- **Шаг 2 — Не первое движение**: *«I didn't took the first movement… the second
+  movement was so clear»*. [КАНОН]
+- **Шаг 3 — Зона = профиль ПРЕДЫДУЩЕЙ swing-точки** (**fixed profile**, не
+  скользящее окно). Факторы: value area high/low [КАНОН/RESEARCH], **delta
+  print** (индикатор платформы deep charts — исполненный поток на уровне)
+  [КАНОН], **big trades** (крупные принты, поддержавшие объём) [КАНОН],
+  **volume ledge** (HVN→LVN обрыв) [КАНОН, термины HVN/LVN — RESEARCH].
+  **Confluence** факторов = «super strong area» [КАНОН]. На зону — alert.
+- **Шаг 4 — Триггер в зоне** (real-time): агрессоры в сторону сделки + **absorption**
+  контр-стороны (**deep trades in the body of the candle**, «control of buyers →
+  failed buyers»). Только после — **limit order** в зоне. [КАНОН]
+- **Шаг 5 — Стоп сразу за зоной** (above the area для шорта / below для лонга),
+  масштаб **1-2-3 / 1-2-4 / 1-2-5** = кратные единицы (selectable
+  консервативность, *«how much you want to be safe»*). **Цель — ближайший swing
+  point**. **Re-entry** на следующей «super strong swing point» / новом **dealing
+  range** (фрактальность). **Только continuation** по направлению тренда
+  («sensitive high probability reversal area following the direction of the
+  trend»). [КАНОН]
+- **Шаг 6 — Сессии London/NY**, ТФ входа **M5**, инструмент **NQ** (глубокая
+  ликвидность), профиль — **order-flow/footprint** (tick), привязка
+  день/неделя/композит/сессия. [КАНОН — сессии/M5/NQ/footprint; привязка
+  день/неделя/композит — со скриншота платформы, не из речи]
+
+В ролике **НЕТ**: частичной фиксации, POC, ≈70%, Williams-фрактал, confluence ≥3,
+структурной цели из POC/VAL. Любая реализация этих пунктов — [НАШЕ] и должна
+быть размечена как таковая.
+
+### 11.2 Расхождения (торговая логика и математика)
+
+| ID | Модуль | Что делает код | Канон | Тип |
+|---|---|---|---|---|
+| **A1** | `strategy.py:99-104`, `settings.py:163-166` | Стоп = граница зоны + фиксированный буфер `sl_buffer_bps=8` (+пол `min_sl_bps=10`) | Стоп = **зона × N (1-2-3/4/5)**, кратные единицы | **сломана математика** |
+| **A2** | `aggregates.py:127-130`, `main.py:267`, `context.py` | Профиль — один кумулятивный **ДНЕВНОЙ (UTC-день)** профиль; используется и для контекста, и для зоны | Зона = профиль **предыдущей swing-точки** (fixed profile по swing/dealing range); контекст = форма **сессионного** профиля | **подгонка инфры** |
+| **A6** | `executor.py:477-507`, `strategy.py:40,109`, `settings.py:185` | Частичная фиксация 50% на цели 1, остаток на цели 2 со стопом в БУ | Полный выход на swing point, затем **re-entry** на новой зоне | **доработка логики** |
+| A5 | `strategy.py:43-55,108` | Фолбэк-цель из POC/противоположной VA-границы при отсутствии swing | Цель = **только swing point** | доработка |
+| B1 | `settings.py:153`, `zone.py` | `min_confluence=3` жёстко | Канон называет 3 фактора как **пример** «super strong area», не инвариант; §7 чеклист — «≥2» | подгонка порога |
+| A3 | `context.py:89-105` | `classify` = тренд по хвостам вне VA ≥0.70, **без проверки breakout предыдущего уровня** | Тренд = breakout previous level + acceptance | доработка (частично закрыто в `auction.py`) |
+| A4 | `context.py:71`, `settings.py:124` | `accept_frac=0.70` для acceptance | Acceptance описан качественно | [НАШЕ] порог |
+| B2 | `orderflow.py:38-44`, `settings.py:132` | `big_trade_pct=0.90` (90-й перцентиль) | «big trades» качественно | [НАШЕ] порог |
+| B3 | `orderflow.py:80,114`, `settings.py:145` | `absorption_min_counter_frac=0.5` | absorption = «failed buyers» качественно | [НАШЕ] порог |
+| B5 | `settings.py:160,156,115` | `zone_delta_min_frac=0.6`, `ledge_drop_frac=0.5`, `cluster_ticks=5`, `vp_bucket_ticks=10` | Не в ролике | [НАШЕ] техпороги |
+
+### 11.3 Главное (требует правки для «как в первоисточнике»)
+
+- **A1 — сломана математика стопа.** Канон масштабирует стоп от ширины зоны
+  (1×/2×/3×/4×/5× зоны → selectable R), код — плоский 8 б.п. + пол 10 б.п. На
+  узкой зоне канон даёт tighter стоп (лучший R), код раздувает до `min_sl_bps`;
+  на широкой — код ставит ближе «1-2-5». Влияние: R:R и частота стопов.
+- **A2 — подгонка инфры.** Канон строит зону от **профиля предыдущей
+  swing-точки** и контекст от **сессионного** профиля; код использует один
+  дневной профиль для обоих. Это нарушает «fixed profile by swing» — суть
+  методики. Влияние: зоны и контекст считаются не от того объекта.
+- **A6 — доработка логики.** Канон: полный выход на swing point + re-entry на
+  новой зоне. Код: удержание 50% позиции с стопом в БУ. Это **другой trade
+  management**, не «take profit on the first one» + «condition again».
+
+### 11.4 Что соответствует канону
+
+- `orderflow.detect_absorption` (контр-агрессия + deep trade + цена не идёт в
+  сторону контр-стороны = «failed») — [КАНОН].
+- `volume_profile.find_ledges` (HVN→LVN) — [КАНОН] (термины — [RESEARCH]).
+- `auction.AuctionTracker` (sticky-направление, переворот по breakout+
+  acceptance, «не первое движение») — [КАНОН]-поведение.
+- `session` London/NY gate — [КАНОН].
+- `executor` LIMIT в зоне, стоп за зоной, риск per trade (Tharp) — [КАНОН]
+  (кроме A1, A6).
+- Профиль из исполненного потока (tick), M5 swings — [КАНОН] (кроме A2 —
+  привязка дня вместо swing/сессии).
+- `absorption_window_sec=300` = тело M5-свечи — [КАНОН].
+
+### 11.5 План приведения к канону (решается отдельно, не в этом коммите)
+
+A1, A2, A6 — изменения торговой логики/инфры, по `strategy-guard.mdc` требуют
+согласования и обоснования. A2 — инфраструктурное (per-swing重建 профиля),
+нетривиальное. A5, B1, A3 — вторичные. Числовые пороги A4/B2/B3/B5 — [НАШЕ]
+конкретизации, требуют обоснования данными, не «чтобы было».
+
+### 11.6 Приведено в исполнение (2026-06-25)
+
+В этом коммите исполнены A1, A5, A6, A2, A3 (согласовано с пользователем):
+
+- **A1 — стоп = зона × N (`sl_zone_mult`).** Стоп = far edge зоны + N × ширина
+  зоны (канон «1-2-3/1-2-4/1-2-5»), N configurable (`sl_zone_mult=1.0` по
+  умолчанию). Убраны `sl_buffer_bps` (как торговый множитель) и `min_sl_bps`.
+  `sl_buffer_bps` сохранён как технический анти-фильтр-буфер. Файлы:
+  `strategy.py`, `settings.py`.
+- **A5 — цель только swing point.** Удалён `_structural_target` (фолбэк на
+  POC/VAL/VAH). Без swing-цели сделка НЕ берётся (канон §5.3). Убран `tp2_level`.
+  Файлы: `strategy.py`.
+- **A6 — полный выход, без частичной фиксации.** Удалена `partial_exchange_tp`,
+  `_maybe_partial`, поле `_partial`. Выход = полный на `tp_level` (swing point);
+  re-entry — отдельной сделкой на следующей зоне (§8). Файлы: `executor.py`,
+  `strategy.py`, `settings.py` (убран `partial_fraction`).
+- **A2 — per-SESSION контекст + per-SWING зона.** Дневной `vp_buckets` удалён.
+  Контекст (`classify`) — по форме **per-session** профиля (якорь = старт
+  London/NY окна, `session.session_start_ts`). Зона — профиль **предыдущей
+  swing-точки**: исполненный поток (footprint) в окне `[ts prev swing, now]`,
+  собранный из persist-таблицы `prints` (SQLite). Принты persist-ятся через
+  background `PrintStore` (batched flush из daemon-потока, чтобы не блокировать
+  WS-callback; retention 6ч). `Swing.ts` добавлен для якоря окна. Файлы:
+  `state/db.py` (таблица `prints`), `data/print_store.py` (новый),
+  `data/aggregates.py`, `analysis/session.py`, `analysis/volume_profile.py`
+  (`build_profile_from_prints`), `analysis/swings.py`, `app/main.py`,
+  `config/settings.py`.
+- **A3 — breakout-гейт зафиксирован в docstring.** `classify` остаётся чистой
+  функцией формы профиля; breakout-гейт «clear breakout of the previous level»
+  (канон §2) выполняется в `auction.AuctionTracker.update` (swings-пробой).
+  Торговый путь всегда `auction.update(classify(...))` → вход требует
+  breakout+acceptance. Docstring `context.py` явно это фиксирует.
+
+Числовые пороги A4/B2/B3/B5/B1 — оставлены как [НАШЕ] (B1 `min_confluence=3` —
+согласовано с пользователем); изменение требует обоснования данными
+(`no-data-fitting.mdc`, `sample-size.mdc`), не выполнено в этом коммите.
+
+

@@ -20,29 +20,36 @@ class Swing:
     idx: int          # индекс бара в серии
     price: float      # цена swing-точки (high для 'high', low для 'low')
     kind: str         # 'high' | 'low'
+    ts: float = 0.0   # unix-время swing-бара (для per-swing профиля, A2; 0 если
+                      # series без ts — тогда per-swing окно брать нельзя)
 
 
 def find_swings(highs: list[float], lows: list[float], *, left: int = 2,
-                right: int = 2) -> list[Swing]:
+                right: int = 2,
+                ts: list[float] | None = None) -> list[Swing]:
     """Найти фракталы Уильямса в сериях highs/lows.
 
     Swing high на баре i: highs[i] строго > highs всех ``left`` баров слева и
     ``right`` баров справа. Swing low зеркально по lows. Края (без полного окна
     left/right) не классифицируем — экстремум не подтверждён.
-    """
+
+    ``ts`` — опц. unix-время баров; если передано, попадает в ``Swing.ts`` для
+    per-swing профиля (A2: окно = [ts предыдущего swing, now]). Без ts —
+    ``Swing.ts=0`` (per-swing окно собрать нельзя)."""
     n = min(len(highs), len(lows))
     if n == 0 or left < 1 or right < 1:
         return []
+    have_ts = ts is not None and len(ts) >= n
     out: list[Swing] = []
     for i in range(left, n - right):
         hi = highs[i]
         if all(hi > highs[j] for j in range(i - left, i)) and \
            all(hi > highs[j] for j in range(i + 1, i + right + 1)):
-            out.append(Swing(i, hi, "high"))
+            out.append(Swing(i, hi, "high", ts[i] if have_ts else 0.0))
         lo = lows[i]
         if all(lo < lows[j] for j in range(i - left, i)) and \
            all(lo < lows[j] for j in range(i + 1, i + right + 1)):
-            out.append(Swing(i, lo, "low"))
+            out.append(Swing(i, lo, "low", ts[i] if have_ts else 0.0))
     return out
 
 

@@ -23,6 +23,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from flowzone_bot.analysis.session import session_start_ts
+
 
 @dataclass
 class TradePrint:
@@ -50,11 +52,14 @@ class SymbolSnapshot:
     ob_imbalance: float | None  # bid_vol/(bid_vol+ask_vol), top-N
     trades: list[TradePrint]    # тиковые принты за trade_window_sec
     stale: bool                 # True если данных давно не было
-    # Дневной footprint-профиль (инкрементальный): idx корзины → (buy, sell)
-    # объём. Цена корзины = idx × vp_bucket_size. 0/{} = профиль выключен
-    # (vp_bucket_size не задан, напр. observe без REST-инструмента).
+    # Per-SESSION footprint-профиль (контекст аукциона, STRATEGY §2): якорь —
+    # старт текущего London/NY окна. idx корзины → (buy, sell). Цена корзины =
+    # idx × vp_bucket_size. 0/{} = профиль не активен (вне сессии / нет bucket).
     vp_bucket_size: float = 0.0
     vp_buckets: dict[int, tuple[float, float]] = field(default_factory=dict)
+    # Unix-якорь per-session профиля (старт текущего session-окна). None — вне
+    # активной сессии (профиль не строим, контекст = BALANCE/unknown).
+    vp_session_start: float | None = None
     # Top-N уровни стакана (цена, объём). bids убыв. по цене, asks возр.
     bids: list[tuple[float, float]] = field(default_factory=list)
     asks: list[tuple[float, float]] = field(default_factory=list)
@@ -71,6 +76,8 @@ class SymbolState:
         ob_levels: int = 25,
         max_age_sec: float = 30.0,
         vp_bucket_size: float = 0.0,
+        session_windows: list[tuple[float, float]] | None = None,
+        print_store=None,
         now: callable = time.monotonic,
         wall_now: callable = time.time,
     ) -> None:
@@ -79,6 +86,8 @@ class SymbolState:
         self._ob_levels = ob_levels
         self._max_age = max_age_sec
         self._vp_bucket_size = vp_bucket_size
+        self._session_windows = list(session_windows or [])
+        self._print_store = print_store
         self._now = now
         self._wall_now = wall_now
         self._lock = threading.Lock()
@@ -91,10 +100,11 @@ class SymbolState:
         self._bids: list[tuple[float, float]] = []
         self._asks: list[tuple[float, float]] = []
         self._last_update: float = -1e18
-        # Дневной footprint-профиль (idx → [buy, sell]), якорь — UTC-день
-        # (канон «Dly Vol. Profile», STRATEGY §6.3). Инкрементальный, чтобы не
-        # хранить миллионы тиков для сессионного VP.
-        self._vp_day: int = -1
+        # Per-SESSION footprint-профиль (контекст §2): якорь — старт текущего
+        # London/NY окна (session.session_start_ts). Инкрементальный, чтобы не
+        # хранить миллионы тиков. Сбрасывается при смене session-якоря (новое
+        # окно / выход из сессии).
+        self._vp_session_start: float | None = None
         self._vp: dict[int, list[float]] = {}
 
     def set_vp_bucket_size(self, size: float) -> None:
@@ -105,28 +115,54 @@ class SymbolState:
             if size != self._vp_bucket_size:
                 self._vp_bucket_size = size
                 self._vp = {}
-                self._vp_day = -1
+                self._vp_session_start = None
+
+    def set_session_windows(self, windows: list[tuple[float, float]]) -> None:
+        with self._lock:
+            self._session_windows = list(windows or [])
+            self._vp = {}
+            self._vp_session_start = None
 
     # ─── Writers (из ws-потока) ──────────────────────────────────────────
 
     def on_trade(self, price: float, size: float, side: str) -> None:
         """publicTrade: side = taker side. Сохраняем КАЖДЫЙ принт целиком
-        (footprint), не схлопывая — нужно для delta-by-price и big-trades."""
+        (footprint), не схлопывая — нужно для delta-by-price и big-trades.
+        Принт также persist-ится в БД (print_store) для per-swing профиля (A2)."""
         now = self._now()
+        wall = self._wall_now()
         with self._lock:
             self._trades.append(TradePrint(now, price, size, side))
             self._last_price = price
             self._last_update = now
-            self._accum_vp_locked(price, size, side)
+            self._accum_vp_locked(price, size, side, wall)
             self._evict_locked(now)
+        if self._print_store is not None:
+            try:
+                self._print_store.ingest(wall, self.symbol, price, size, side)
+            except Exception:
+                # print_store не должен ронять поток сделок; ошибка логируется
+                # в store. Здесь глушим — торговый поток важнее persist-а.
+                pass
 
-    def _accum_vp_locked(self, price: float, size: float, side: str) -> None:
-        """Инкрементально докинуть объём сделки в дневной footprint-профиль."""
-        if self._vp_bucket_size <= 0 or price <= 0:
+    def _accum_vp_locked(self, price: float, size: float, side: str,
+                         wall: float) -> None:
+        """Инкрементально докинуть объём сделки в per-SESSION footprint-профиль.
+
+        Якорь = старт текущего session-окна (London/NY). Вне сессии профиль НЕ
+        строим (контекст = BALANCE — не торгуем). При смене якоря профиль
+        сбрасывается (новое окно = новый аукцион)."""
+        if self._vp_bucket_size <= 0 or price <= 0 or not self._session_windows:
             return
-        day = int(self._wall_now() // 86400)
-        if day != self._vp_day:
-            self._vp_day = day
+        anchor = session_start_ts(wall, self._session_windows)
+        if anchor is None:
+            # вышли из сессии — сброс старого профиля
+            if self._vp:
+                self._vp = {}
+                self._vp_session_start = None
+            return
+        if anchor != self._vp_session_start:
+            self._vp_session_start = anchor
             self._vp = {}
         idx = int(price / self._vp_bucket_size)
         bucket = self._vp.get(idx)
@@ -171,6 +207,7 @@ class SymbolState:
                 stale=(now - self._last_update) > self._max_age,
                 vp_bucket_size=self._vp_bucket_size,
                 vp_buckets={i: (b[0], b[1]) for i, b in self._vp.items()},
+                vp_session_start=self._vp_session_start,
                 bids=list(self._bids),
                 asks=list(self._asks),
             )

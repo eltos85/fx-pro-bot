@@ -31,6 +31,7 @@ from flowzone_bot.data.aggregates import SymbolState
 from flowzone_bot.data.exec_stream import BybitExecStream
 from flowzone_bot.data.market_stream import BybitMarketStream
 from flowzone_bot.data.momentum_universe import select_momentum_universe
+from flowzone_bot.data.print_store import PrintStore
 from flowzone_bot.data.universe import (apply_pins, filter_tickers,
                                         hourly_range_rvol, pad_universe,
                                         rank_rows)
@@ -99,6 +100,18 @@ def run() -> None:
                        ob_levels=cfg.ob_levels)
         for s in symbols
     }
+    # session windows нужны SymbolState для per-session якоря VP (A2, канон §2)
+    session_windows = (parse_windows(cfg.session_windows_utc)
+                       if cfg.session_gate_enabled else [])
+    for st in states.values():
+        st.set_session_windows(session_windows)
+    # PrintStore: persist тиков в БД для per-swing профиля (A2, канон §3).
+    # Запускаем daemon-поток batched-flush; ingest вызывается из WS-callback.
+    print_store = PrintStore(db, flush_interval_sec=cfg.print_flush_interval_sec,
+                             prune_older_than_sec=cfg.print_prune_older_sec)
+    print_store.start()
+    for st in states.values():
+        st._print_store = print_store  # инъекция после construction
     # Размер корзины footprint-профиля = tick_size × vp_bucket_ticks (нужен
     # REST-инструмент). Без клиента VP не строится (канон требует REST/ликвидности).
     if client is not None:
@@ -127,8 +140,6 @@ def run() -> None:
     # Sticky-направление аукциона (канон §2: пробой+acceptance, держим до
     # встречного структурного пробоя — не переворачиваемся на откате).
     auction = AuctionTracker()
-    session_windows = (parse_windows(cfg.session_windows_utc)
-                       if cfg.session_gate_enabled else [])
     if cfg.session_gate_enabled:
         log.info("session gate: окна UTC %s", cfg.session_windows_utc)
     last_heartbeat = 0.0
@@ -145,7 +156,8 @@ def run() -> None:
                 last_universe = now
                 try:
                     stream, states, symbols = _rotate_universe(
-                        client, cfg, db, stream, states, symbols)
+                        client, cfg, db, stream, states, symbols,
+                        session_windows, print_store)
                     _apply_vp_buckets(client, cfg, states)
                 except Exception:
                     log.exception("rotate_universe failed")
@@ -185,6 +197,7 @@ def run() -> None:
         stream.stop()
         if exec_stream is not None:
             exec_stream.stop()
+        print_store.stop()
         db.close()
         log.info("flowzone_bot остановлен")
 
@@ -210,14 +223,22 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         if now - cooldown.get(sym, 0.0) < cd:
             continue
         snap = st.snapshot()
-        # swings нужны и для латча направления (структурный пробой), и для цели
+        # swings нужны и для латча направления (структурный пробой), и для цели,
+        # и для per-swing якоря профиля зоны (A2).
         swings = _swings_for(client, cfg, sym, swing_cache, now)
-        profile, ctx = _context_for(snap, cfg, auction=auction,
-                                    swings=swings, now=now)
+        _ctx_profile, ctx = _context_for(snap, cfg, auction=auction,
+                                         swings=swings, now=now)
         if ctx is None or not ctx.is_trend:
             continue
+        # per-swing профиль зоны (канон §3: профиль ПРЕДЫДУЩЕЙ swing-точки из
+        # исполненного потока, окно [ts prev swing, now]). None → нет зоны.
+        swing_profile = _swing_profile_for(db, cfg, sym, swings,
+                                           ctx.trade_side, snap.vp_bucket_size,
+                                           now)
+        if swing_profile is None:
+            continue
         try:
-            sig = evaluate(snap, profile, ctx, cfg=cfg, swings=swings)
+            sig = evaluate(snap, ctx, swing_profile, cfg=cfg, swings=swings)
         except Exception:
             log.exception("evaluate %s failed", sym)
             continue
@@ -236,7 +257,9 @@ def _swings_for(client, cfg, symbol: str,
                 cache: dict[str, tuple[float, list[Swing]]],
                 now: float) -> list[Swing]:
     """Swing-точки M5 по символу с TTL-кэшем (M5-бар обновляется раз в 5 мин).
-    Без клиента — пусто (цель упадёт на VP-структуру)."""
+    Возвращает Swing с ts (время swing-бара) — нужно для per-swing профиля (A2,
+    канон §3: окно = [ts предыдущего swing, now]). Без клиента — пусто (цель/
+    per-swing профиль недоступны → сделки нет)."""
     if client is None:
         return []
     cached = cache.get(symbol)
@@ -248,22 +271,53 @@ def _swings_for(client, cfg, symbol: str,
     except Exception:
         log.exception("swing get_kline %s failed", symbol)
         return cache.get(symbol, (0.0, []))[1]
+    # Bybit v5 kline row: [startTime(ms), open, high, low, close, volume, ...]
+    ts = [float(c[0]) / 1000.0 for c in kl]
     highs = [float(c[2]) for c in kl]
     lows = [float(c[3]) for c in kl]
-    swings = find_swings(highs, lows, left=cfg.swing_left, right=cfg.swing_right)
+    swings = find_swings(highs, lows, left=cfg.swing_left,
+                         right=cfg.swing_right, ts=ts)
     cache[symbol] = (now, swings)
     return swings
 
 
+def _swing_profile_for(db, cfg, symbol: str, swings: list[Swing],
+                       side: str, bucket_size: float, now: float):
+    """Per-swing профиль зоны (канон §3): профиль ПРЕДЫДУЩЕЙ swing-точки —
+    исполненный поток (footprint) в окне [ts предыдущего swing, now], собранный
+    из SQLite ``prints``. Окно = от ts последнего подтверждённого swing-экстремума
+    по направлению continuation до now (канон «previous swing point»).
+
+    Возвращает (VolumeProfile | None). None если нет swing-якоря / bucket / БД."""
+    from flowzone_bot.analysis.volume_profile import build_profile_from_prints
+    if db is None or bucket_size <= 0 or not swings:
+        return None
+    # предыдущий swing по направлению continuation: для шорта берём последний
+    # swing high (резистанс reload сверху), для лонга — последний swing low.
+    # Это «previous swing point» канона — куда цена откатится для reload.
+    kind = "high" if side == "short" else "low"
+    cands = [s for s in swings if s.kind == kind and s.ts > 0]
+    if not cands:
+        return None
+    anchor = max(cands, key=lambda s: s.ts).ts
+    prints = db.prints_since(symbol, anchor, now)
+    return build_profile_from_prints(prints, bucket_size,
+                                     value_area_pct=cfg.value_area_pct)
+
+
 def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
                  swings: list[Swing] | None = None, now: float | None = None):
-    """Контекст аукциона по символу: режим по ФОРМЕ дневного footprint-профиля
-    (направленный acceptance вне value area, STRATEGY §2). None если профиль ещё
-    не накоплен.
+    """Контекст аукциона по символу: режим по ФОРМЕ per-SESSION footprint-профиля
+    (направленный acceptance вне value area, STRATEGY §2). Якорь профиля — старт
+    текущего London/NY окна (snap.vp_session_start). None если вне сессии или
+    профиль ещё не накоплен (BALANCE → не торгуем).
 
     Если передан ``auction`` — мгновенный режим латчится (канон §2: держим
     направление, переворот только по встречному структурному пробою ``swings``).
     Без трекера возвращается мгновенный classify (для heartbeat-дисплея)."""
+    if snap.vp_session_start is None:
+        # вне активной сессии — per-session профиль не строим → не торгуем
+        return None, None
     profile = build_profile(snap.vp_buckets, snap.vp_bucket_size,
                             value_area_pct=cfg.value_area_pct)
     if profile is None:
@@ -375,7 +429,8 @@ def _select_universe(client, cfg) -> list[str]:
     return apply_pins(ranked, cfg.universe_pin_list, cfg.universe_top_n)
 
 
-def _rotate_universe(client, cfg, db, stream, states, symbols):
+def _rotate_universe(client, cfg, db, stream, states, symbols,
+                     session_windows, print_store):
     """Пересмотр вселенной. Символ с открытой позицией НЕ выкидываем. Существующие
     SymbolState переиспользуем (footprint-окно переживает рестарт WS)."""
     picked = _select_universe(client, cfg)
@@ -387,11 +442,15 @@ def _rotate_universe(client, cfg, db, stream, states, symbols):
     if set(target) == set(symbols):
         return stream, states, symbols
     log.info("ротация вселенной: %s → %s", ",".join(symbols), ",".join(target))
-    new_states = {
-        s: states.get(s) or SymbolState(
-            s, trade_window_sec=cfg.trade_window_sec, ob_levels=cfg.ob_levels)
-        for s in target
-    }
+    new_states: dict[str, SymbolState] = {}
+    for s in target:
+        st = states.get(s)
+        if st is None:
+            st = SymbolState(s, trade_window_sec=cfg.trade_window_sec,
+                             ob_levels=cfg.ob_levels)
+            st.set_session_windows(session_windows)
+            st._print_store = print_store
+        new_states[s] = st
     stream.stop()
     new_stream = BybitMarketStream(target, new_states, category=cfg.bybit_category,
                                    testnet=cfg.bybit_testnet)

@@ -11,6 +11,110 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-06-25
 
+### feat(strategy): приведение кода к канону — A1/A5/A6/A2/A3 исполнены
+`<pending commit>`
+
+Исполнены расхождения из §11 аудита кода (согласовано с пользователем). Все тесты
+зелёные (1071 passed). Канон = ролик Fabervaale (07:13); правки — возврат к
+каноничной торговле, не новая логика.
+
+- **A1 (стоп = зона × N).** Стоп = far edge зоны + `sl_zone_mult` × ширина зоны
+  (канон «1-2-3/1-2-4/1-2-5»). Убраны `sl_buffer_bps` (как торговый множитель) и
+  `min_sl_bps` — плоский буфер ломал R:R (на узкой зоне раздувал стоп, на широкой
+  ставил ближе «1-2-5»). `sl_buffer_bps` сохранён как технический анти-фильтр.
+- **A5 (цель только swing).** Удалён `_structural_target` — фолбэк TP на
+  POC/VAL/VAH при отсутствии swing. Канон §5.3: цель = только swing point; без
+  swing-цели сделка НЕ берётся. Убран `tp2_level`.
+- **A6 (полный выход, без partial).** Удалены `partial_exchange_tp`,
+  `_maybe_partial`, поле `_partial`, `partial_fraction`. Канон: полный выход на
+  swing point + re-entry отдельной сделкой на следующей зоне (§8). Это другой
+  trade management, не «take profit on the first one» + «condition again».
+- **A2 (per-session контекст + per-swing зона).** Дневной `vp_buckets` удалён.
+  Контекст `classify` — по форме **per-session** профиля (якорь = старт London/NY
+  окна, `session.session_start_ts`). Зона — профиль **предыдущей swing-точки**:
+  исполненный поток (footprint) в окне `[ts prev swing, now]` из новой таблицы
+  SQLite `prints`. Принты persist-ятся background `PrintStore` (batched flush из
+  daemon-потока, чтобы не блокировать WS-callback; retention 6ч). `Swing.ts`
+  добавлен для якоря окна. Канон требует профиль из исполненного потока (footprint),
+  не kline-volume (`no-data-fitting.mdc`).
+- **A3 (breakout-гейт в docstring).** `classify` — чистая функция формы профиля;
+  breakout-гейт «clear breakout of the previous level» (канон §2) выполняется в
+  `AuctionTracker.update` (swings-пробой). Торговый путь всегда
+  `auction.update(classify(...))` → вход требует breakout+acceptance. Docstring
+  `context.py` явно фиксирует разделение.
+
+Числовые пороги A4/B2/B3/B5/B1 оставлены как [НАШЕ] (B1 `min_confluence=3` —
+согласовано с пользователем); изменение требует обоснования данными
+(`no-data-fitting.mdc`, `sample-size.mdc`).
+
+**Файлы:** `analysis/strategy.py`, `analysis/context.py`, `analysis/swings.py`,
+`analysis/volume_profile.py`, `analysis/session.py`, `data/aggregates.py`,
+`data/print_store.py` (новый), `state/db.py`, `trading/executor.py`,
+`config/settings.py`, `app/main.py`, `tests/test_flowzone_bot.py`,
+`STRATEGY_FLOWZONE.md` (§11.6), `BUILDLOG_FLOWZONE.md`
+
+### docs(strategy): аудит КОДА flowzone vs первоисточник — разметка расхождений
+`<pending commit>`
+
+Повторный аудит — теперь **кода** `src/flowzone_bot/` против ролика-первоисточника
+(Fabervaale ENG, 07:13). В `STRATEGY_FLOWZONE.md` добавлен §11 «Аудит кода vs
+первоисточник»: точная стратегия канона с терминологией автора + мировыми
+терминами, и таблица расхождений с разметкой [КАНОН]/[RESEARCH]/[НАШЕ].
+
+Главные расхождения (где мы доработали/подогнали/сломали):
+- **A1** `strategy.py:99-104` / `settings.py:163-166` — стоп **сломана
+  математика**: канон масштабирует стоп от ширины зоны (1-2-3/4/5 = зона×N,
+  selectable R), код — плоский `sl_buffer_bps=8` + пол `min_sl_bps=10`. Влияет на
+  R:R и частоту стопов.
+- **A2** `aggregates.py:127-130` / `main.py:267` / `context.py` — **подгонка
+  инфры**: профиль один кумулятивный ДНЕВНОЙ (UTC), а канон строит зону от
+  профиля **предыдущей swing-точки** (fixed profile по swing/dealing range) и
+  контекст от **сессионного** профиля. Зоны/контекст считаются не от того объекта.
+- **A6** `executor.py:477-507` / `strategy.py:40,109` / `settings.py:185` —
+  **доработка логики**: частичная фиксация 50% + стоп в БУ вместо каноничного
+  полного выхода на swing point + re-entry на новой зоне.
+
+Вторичные: A5 (структурный TP-фолбэк на POC/VAL — не в ролике), B1
+(`min_confluence=3` жёстко — канон назвал 3 как пример, не инвариант; §7 «≥2»),
+A3 (`classify` без проверки breakout previous level — частично закрыто
+`AuctionTracker`). Числовые пороги A4/B2/B3/B5 (0.70, 0.90, 0.5, 0.6, 0.5, 5,
+10) — [НАШЕ] конкретизации, требуют обоснования данными.
+
+Код НЕ правился — только фиксация аудита в doc. План приведения к канону (A1/A2/
+A6 — изменения торговой логики/инфры, по `strategy-guard.mdc` требуют
+согласования) — в §11.5, отдельный коммит.
+
+**Файлы:** `STRATEGY_FLOWZONE.md` (§11)
+
+### docs(strategy): аудит STRATEGY_FLOWZONE к первоисточнику — фикс атрибуции канон vs research
+`<pending commit>`
+
+Аудит `STRATEGY_FLOWZONE.md` против расшифровки ролика-первоисточника (Fabervaale
+ENG, 07:13). Логика канона подтверждена полностью; исправлены места, где документ
+приписывал ролику то, чего в нём нет (нарушение `strategy-guard.mdc` /
+`no-data-fitting.mdc`):
+
+- §0/§1/§5.4: восстановлен буквальный термин канона «reversal area following the
+  direction of the trend» (в ролике слово «continuation» не звучит — это наша
+  интерпретация, теперь явно помечена).
+- §3.1: «≈70%» ширина value area и термины POC/HVN/LVN — это research Market
+  Profile (Steidlmayer/Dalton), не произносятся в ролике; добавлена атрибуция.
+- §3.2: «delta print» — название индикатора платформы deep charts, не
+  универсальный термин; уточнено.
+- §0/§5.3/§7/§9: убрана «частичная фиксация» (в ролике только «targeting for a
+  swing point» + «take profit on the first one»); partial перенесён в разряд
+  решения реализации (§10).
+- §6.3: M5/NQ — визуальный вывод из кадра экрана, в речи не произносятся;
+  добавлена оговорка.
+- §10: «Williams-фрактал = previous level» переписано как «previous level
+  реализован нами через Williams-фрактал» (метод не детализируется каноном).
+- §9: добавлены строки-атрибуции `⚠` для research/решений, не являющихся каноном.
+
+Торговая логика канона не менялась; правка — только корректность атрибуции
+источников (канон vs research vs наше решение).
+
+**Файлы:** `STRATEGY_FLOWZONE.md`
+
 ### feat(strategy): sticky-направление аукциона — фикс ложных переворотов (v0.3.0)
 `<pending commit>`
 
