@@ -92,7 +92,11 @@ class FlowzoneSettings(BaseSettings):
     # Анти-даблклик: пауза между входами по одному символу (сек).
     signal_cooldown_sec: float = Field(default=60.0)
     # Сколько ждать филлы выхода по WS перед close-уведомлением с оценкой (≈).
-    close_notify_fallback_sec: float = Field(default=10.0)
+    # Биржевой bracket (TP/SL) детерминирован, но WS-исполнения могут атрибути-
+    # роваться с задержкой → provisional-оценка (taker_pnl по mark_price) иногда
+    # расходится знаком с реальным closedPnl (был случай #462: ≈-0.25 при tp_hit
+    # → REST true-up +0.49). 30с дают REST-сверке время до fallback-уведомления.
+    close_notify_fallback_sec: float = Field(default=30.0)
 
     # ─── Окна агрегации микроструктуры (data/aggregates.py) ──────────────
     # Окно (сек) хранения тиковых принтов для триггера absorption и детекции

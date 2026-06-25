@@ -11,6 +11,25 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-06-25
 
+### fix(flowzone): close_notify_fallback 10→30с — убрать ложный знак provisional-уведомления
+`<pending commit>`
+
+Симптом: TG `🔴 close #462 SOLUSDT pnl=≈$-0.25 (tp_hit)` — закрытие по TP с
+отрицательной оценкой. Реальный исход по REST closedPnl +$0.49 (pnl_verified=1).
+
+Причина: биржевой bracket (TP/SL) детерминирован, но WS-исполнения атрибутируются
+с задержкой → закрытие уходило как provisional (is_real=False) с taker_pnl-оценкой
+по mark_price на остаток позиции. Через `close_notify_fallback_sec=10с` fallback
+отправлял TG с provisional `tr.pnl_usd` (≈), раньше чем REST давал точное число.
+Оценка по mark_price с taker-fee на остаток дала лжевой знак на малом ходе SOL.
+
+Решение: дефолт `close_notify_fallback_sec` 10→30с (`settings.py`) + fallback
+getattr-дефолт в `executor.py` синхронно. 30с дают REST-сверке время до
+fallback-уведомления — TG приходит уже с точным closedPnl (без ≈, без лжезнака).
+UX-тайминг, не торговая логика (`no-data-fitting.mdc` не применимо).
+
+**Файлы:** `config/settings.py`, `trading/executor.py`
+
 ### feat(strategy): приведение кода к канону — A1/A5/A6/A2/A3 исполнены
 `<pending commit>`
 

@@ -333,7 +333,7 @@ class Executor:
     def reconcile(self) -> None:
         now = self._now()
         ws_horizon = now - 600.0
-        fallback = getattr(self._cfg, "close_notify_fallback_sec", 10.0)
+        fallback = getattr(self._cfg, "close_notify_fallback_sec", 30.0)
         rest_horizon = 7 * 24 * 3600 - 3600
         rest_grace = 60.0
         rest_retry = 300.0
