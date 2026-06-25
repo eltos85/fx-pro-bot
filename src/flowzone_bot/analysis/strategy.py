@@ -10,10 +10,12 @@
 4. Подтверждение потоком в зоне: absorption контр-стороны (deep trades в теле
    свечи, «failed» контр-сторона).
 5. Вход: лимитка в зоне; стоп ЗА зоной (масштаб 1-2-3/1-2-4/1-2-5 =
-   far_edge + N × ширина зоны, §5.2); цель — ближайшая swing-точка (§5.3).
-   Выход — полный на swing point; re-entry — отдельной сделкой на следующей
-   зоне (§5.3, §8). Никакой частичной фиксации и структурного фолбэка —
-   канон их не описывает (правило no-data-fitting.mdc).
+   far_edge + N × ширина зоны, §5.2); цель — ближайшая swing-точка (§5.3);
+   R:R-фильтр ≥ 1:2.5 (канон Fabervaale: ролик cUTsoU-15Tc «1 to 2, 1 to 2.5»,
+   chartfanatics «1:2.5 to 1:5» — swing-цель должна окупать риск, иначе TP не
+   покрывает даже fees, кейс #468). Выход — полный на swing point; re-entry —
+   отдельной сделкой на следующей зоне (§5.3, §8). Никакой частичной фиксации
+   и структурного фолбэка — канон их не описывает (правило no-data-fitting.mdc).
 
 Только по направлению аукциона (continuation, §5.4) — контртренд не торгуем.
 ``evaluate`` — чистая (по снапшоту + per-swing профилю + контексту), тестируется
@@ -111,8 +113,19 @@ def evaluate(snap: SymbolSnapshot, context: Context,
        (side == "long" and not (sl < last < tp)):
         return None  # геометрия сделки невалидна (защита)
 
+    # шаг 5.1: R:R-фильтр (канон Fabervaale: «1 to 2, 1 to 2.5» / chartfanatics
+    # «Reward-to-Risk 1:2.5 to 1:5»). Если swing-цель слишком близко к entry
+    # относительно стопа — TP не окупает риск (и на малом ходе даже fees).
+    # reward = дистанция до swing-цели, risk = дистанция до стопа за зоной.
+    # Источник: ролик cUTsoU-15Tc «The Simplest Orderflow Trading Model» +
+    # chartfanatics AMT-strategy (Fabio). Не data-fitting — возврат к канону.
+    reward = abs(tp - last)
+    risk = abs(sl - last)
+    if risk <= 0 or reward / risk < cfg.min_rr:
+        return None
+
     reasons = [f"ctx={context.state}", f"zone={'+'.join(zone.factors)}",
-               "tp=swing"]
+               "tp=swing", f"rr={reward / risk:.1f}"]
     reasons += absorption.reasons
     return Signal(symbol=snap.symbol, side=side, entry_ref=last, sl_level=sl,
                   tp_level=tp, score=zone.score, reasons=reasons,

@@ -191,6 +191,16 @@ class FlowzoneSettings(BaseSettings):
     # (strategy-guard.mdc).
     sl_zone_mult: float = Field(default=1.0)
 
+    # ─── R:R-фильтр (канон Fabervaale, шаг 5.1) ──────────────────────────
+    # Минимальный reward/risk до входа. Канон: ролик cUTsoU-15Tc «The Simplest
+    # Orderflow Trading Model» — «our real risk-to-reward… maybe it's 1 to 2,
+    # 1 to 2.5»; chartfanatics AMT-strategy (Fabio) — «Reward-to-Risk 1:2.5 to
+    # 1:5». Если swing-цель ближе к entry чем risk × min_rr — TP не окупает
+    # риск (и при малом ходе даже round-trip fees, кейс #468: reward 0.47 /
+    # risk 6.35 = 0.07 → tp_hit с убытком −1.59). 2.5 = каноничная нижняя
+    # граница. Источник: research, не data-fitting (strategy-guard.mdc).
+    min_rr: float = Field(default=2.5)
+
     # ─── Цели / swing / re-entry (фаза 5, канон §5.3, §8) ─────────────────
     # Цель = ближайшая swing-точка (STRATEGY §5.3). Swing = фрактал Bill Williams
     # «Trading Chaos» 1995: бар-экстремум выше/ниже N баров с каждой стороны.

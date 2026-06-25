@@ -11,6 +11,29 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-06-25
 
+### feat(flowzone): R:R-фильтр ≥ 1:2.5 — канон Fabervaale (возврат, не data-fitting)
+`<pending commit>`
+
+Контекст: live-сделка #468 ETHUSDT — `tp_hit` с убытком −1.59 (reward 0.47 /
+risk 6.35 = rr 0.07; gross 0.24 < round-trip fees 1.83). swing-цель оказалась
+ближе entry, чем зона/стоп → TP математически не окупался.
+
+Канон: Fabervaale, ролик «The Simplest Orderflow Trading Model» (cUTsoU-15Tc) —
+«our real risk-to-reward… maybe it's 1 to 2, 1 to 2.5»; chartfanatics AMT-strategy
+(Fabio) — «Reward-to-Risk 1:2.5 to 1:5». Цель фильтра = не data-fitting, а
+возврат к канону: сделка берётся только если reward/risk ≥ 2.5.
+
+Реализация: в `evaluate` (после расчёта sl/tp) — `reward=|tp−last|`,
+`risk=|sl−last|`; если `risk<=0 or reward/risk < cfg.min_rr` → `None`.
+`min_rr=2.5` (settings.py, env-reversible). В `reasons` добавлен `rr=N.N`.
+Синтетические positive-тесты сдвинуты (swing 110→95), чтобы rr ≥ 2.5 —
+тест проверяет чеклист, не R:R (правило no-data-fitting.mdc: не подгонять
+тестовые данные под ожидание, но positive-сценарий требует валидной геометрии
+канона). Добавлен `test_evaluate_rr_filter_rejects_close_swing`.
+
+Файлы: `analysis/strategy.py`, `config/settings.py`, `tests/test_flowzone_bot.py`,
+`STRATEGY_FLOWZONE.md` (§11.6)
+
 ### fix(flowzone): close_notify_fallback 10→30с — убрать ложный знак provisional-уведомления
 `<pending commit>`
 

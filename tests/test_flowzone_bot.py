@@ -357,6 +357,7 @@ class _Cfg:
     absorption_min_counter_frac = 0.5
     sl_buffer_bps = 8.0
     sl_zone_mult = 1.0               # канон «1-2-3» (far_edge + 1× ширина зоны)
+    min_rr = 2.5                     # канон Fabervaale R:R ≥ 1:2.5
 
 
 def _evictless_state_snapshot(buckets, bucket_size, trades, last_price, ts):
@@ -393,18 +394,40 @@ def test_evaluate_short_continuation_full_checklist():
     ctx = classify(prof, snap.last_price, accept_frac=0.70)
     assert ctx.state == TREND_DOWN
     # канон §5.3: цель = ближайший swing (без swing-цели сделки нет).
-    swings = [type("S", (), {"kind": "low", "price": 110.0})()]
+    # swing low = 95.0 далеко от entry 119.5, чтобы R:R ≥ 2.5 (канон Fabervaale,
+    # sl≈127.5 → risk≈8, reward=24.5 → rr=3.06). Тест проверяет чеклист, не R:R.
+    swings = [type("S", (), {"kind": "low", "price": 95.0})()]
 
     from flowzone_bot.analysis.strategy import evaluate
     sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swings)
     assert sig is not None
     assert sig.side == "short"
     assert sig.sl_level > sig.entry_ref > sig.tp_level  # геометрия шорта
-    assert sig.tp_level == 110.0                          # ближайший swing
+    assert sig.tp_level == 95.0                           # ближайший swing
     assert sig.score >= 3                                 # super strong (§3.4)
     # канон §5.2 «1-2-3»: стоп = far_edge зоны + 1× ширина зоны (+буфер).
     zone_width = sig.zone_high - sig.zone_low
     assert sig.sl_level >= sig.zone_high + zone_width * _Cfg.sl_zone_mult
+
+
+def test_evaluate_rr_filter_rejects_close_swing():
+    """Канон Fabervaale R:R ≥ 1:2.5 (ролик cUTsoU-15Tc, chartfanatics). Если
+    swing-цель ближе к entry чем risk × min_rr — сделка не берётся (TP не
+    окупает риск/fees, кейс #468 live: tp_hit с убытком)."""
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
+    now = 1000.0
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
+                                     last_price=119.5, ts=now)
+    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    from flowzone_bot.analysis.strategy import evaluate
+    # swing low = 117 (близко: reward 2.5, risk ~8 → rr 0.31 < 2.5) → None
+    near = [type("S", (), {"kind": "low", "price": 117.0})()]
+    assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=near) is None
+    # swing low = 95 (далеко: rr ~3.06 ≥ 2.5) → сигнал
+    far = [type("S", (), {"kind": "low", "price": 95.0})()]
+    sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=far)
+    assert sig is not None
+    assert any(r.startswith("rr=") for r in sig.reasons)
 
 
 def test_evaluate_none_when_balance_context():
@@ -466,12 +489,12 @@ def test_evaluate_uses_swing_target_only():
     # без swings → нет swing-цели → сделка не берётся (канон: цель всегда swing)
     assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=None) is None
     # со swings → tp = ближайший swing, tp2 не существует (частичная фиксация
-    # удалена, A6)
-    swings = [type("S", (), {"kind": "low", "price": 110.0})(),
-              type("S", (), {"kind": "low", "price": 106.0})()]
+    # удалена, A6). swing low = 95.0 далеко, чтобы R:R ≥ 2.5 (канон Fabervaale).
+    swings = [type("S", (), {"kind": "low", "price": 95.0})(),
+              type("S", (), {"kind": "low", "price": 90.0})()]
     sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swings)
     assert sig is not None
-    assert sig.tp_level == 110.0     # ближайший swing
+    assert sig.tp_level == 95.0     # ближайший swing
     assert not hasattr(sig, "tp2_level")  # частичная фиксация удалена
     assert "tp=swing" in sig.reasons
 

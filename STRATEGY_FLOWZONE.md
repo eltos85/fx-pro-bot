@@ -479,6 +479,14 @@ A1, A2, A6 — изменения торговой логики/инфры, по
   (канон §2) выполняется в `auction.AuctionTracker.update` (swings-пробой).
   Торговый путь всегда `auction.update(classify(...))` → вход требует
   breakout+acceptance. Docstring `context.py` явно это фиксирует.
+- **R:R-фильтр ≥ 1:2.5 (канон Fabervaale, шаг 5.1).** После расчёта стопа/цели
+  бот отбрасывает сделку, если `reward/risk < min_rr` (reward = |tp−last|,
+  risk = |sl−last|). Канон: ролик cUTsoU-15Tc «The Simplest Orderflow Trading
+  Model» — «our real risk-to-reward… maybe it's 1 to 2, 1 to 2.5»;
+  chartfanatics AMT-strategy (Fabio) — «Reward-to-Risk 1:2.5 to 1:5». Источник:
+  research, не data-fitting. Кейс-мотивация live #468: tp_hit с убытком (swing
+  0.47 от entry, стоп 6.35 → rr 0.07; gross 0.24 < fees 1.83 → net −1.59). Файлы:
+  `strategy.py`, `settings.py` (`min_rr=2.5`).
 
 Числовые пороги A4/B2/B3/B5/B1 — оставлены как [НАШЕ] (B1 `min_confluence=3` —
 согласовано с пользователем); изменение требует обоснования данными
