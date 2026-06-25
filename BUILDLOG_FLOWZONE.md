@@ -9,6 +9,46 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-06-25
+
+### feat(strategy): sticky-направление аукциона — фикс ложных переворотов (v0.3.0)
+`<pending commit>`
+
+Наблюдение (forward на канон-логике v0.2.0, baseline flowzone=2026-06-22 13:55,
+n=84): net **−$84.96**, WR 23%, все 4 дня в минусе. Разрез по стороне —
+ключевой: **long 44 сделки, WR 16%, −$147.36**; **short 40, WR 30%, +$62.39**.
+Грейд анти-монотонен (tradecard Spearman ρ=−1.00): чем выше confluence-score, тем
+хуже. Симптом → причина: мгновенный `context.classify` читает форму ДНЕВНОГО
+footprint-профиля; при внутридневном откате value area мигрирует, встречный хвост
+перевешивает → ложный `trend_up` после нисходящего аукциона → бот берёт
+continuation-**лонг в контртренд/чоп** («первое движение», которое канон велит НЕ
+брать).
+
+Канон (ролик 00:33–06:00, <https://youtu.be/06R-ebyOhDI>): направление аукциона
+задаётся **«clear breakout of the previous level» + acceptance** и **держится**
+(автор перезаряжает шорт по новым dealing range, НЕ переворачивается в лонг внутри
+down-аукциона); *«I didn't take the first movement… the second movement was so
+clear»*.
+
+Решение — новый `analysis/auction.py::AuctionTracker`: направление ЛАТЧИТСЯ на
+символ (якорь UTC-день, как профиль §6.3) и адоптируется/переворачивается ТОЛЬКО
+когда ОБА: (1) мгновенный `classify` = тренд в эту сторону (acceptance вне VA) И
+(2) цена пробила последний подтверждённый **swing-экстремум** (Williams-фрактал
+§5.3 = «previous level»). Откат/баланс/неподтверждённый встречный хвост НЕ
+сбрасывают направление (sticky = «второе движение»). `classify` остаётся чистой
+функцией; латч-логика поверх. **Без новых числовых порогов** (swing left/right и
+accept_frac уже существуют) — research=источник правды (strategy-guard.mdc), не
+подгонка под P&L (n=84 < 100 — правка обоснована расхождением с каноном, данные —
+corroboration).
+
+**Файлы:** `analysis/auction.py` (new), `app/main.py` (латч в `_scan_signals`/
+`_context_for`/`_heartbeat`, swings до контекста), `analysis/context.py`
+(докстринг: classify = мгновенный), `__init__.py` (0.2.0→0.3.0),
+`STRATEGY_FLOWZONE.md` §10, `tests/test_flowzone_bot.py`. tradecard baseline
+flowzone → 2026-06-25 (новая граница логики).
+
+---
+
 ## 2026-06-22
 
 ### feat(strategy): приведение реализации СТРОГО к канону ролика (v0.2.0)

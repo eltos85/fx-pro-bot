@@ -6,13 +6,14 @@
 """
 from __future__ import annotations
 
+from flowzone_bot.analysis.auction import AuctionTracker
 from flowzone_bot.analysis.context import BALANCE, TREND_DOWN, TREND_UP, classify
 from flowzone_bot.analysis.orderflow import (big_trade_threshold,
                                              detect_absorption,
                                              detect_big_trades, size_percentile,
                                              zone_delta)
-from flowzone_bot.analysis.swings import (find_swings, nearest_swing_target,
-                                          swing_targets)
+from flowzone_bot.analysis.swings import (Swing, find_swings,
+                                          nearest_swing_target, swing_targets)
 from flowzone_bot.analysis.volume_profile import (build_profile, find_hvn_lvn,
                                                   find_ledges)
 from flowzone_bot.analysis.zone import build_zones
@@ -171,6 +172,61 @@ def test_classify_balance_when_acceptance_below_threshold():
     ctx = classify(prof, last_price=20.5, accept_frac=0.70)
     assert ctx.state == BALANCE
     assert 0.55 <= ctx.accept_below <= 0.65
+
+
+# ─── Sticky-направление аукциона (AuctionTracker, §2 «второе движение») ───
+
+# мгновенные контексты (state зависит только от формы профиля, не от цены):
+_DOWN_INST = classify(build_profile(_down_elongated_buckets(), bucket_size=1.0),
+                      last_price=100.0)
+_UP_INST = classify(build_profile(_up_elongated_buckets(), bucket_size=1.0),
+                    last_price=100.0)
+_BAL_INST = classify(build_profile(_triangular_buckets(), bucket_size=1.0),
+                     last_price=100.0)
+# «предыдущие уровни» (swing-экстремумы): low=95, high=105.
+_SW = [Swing(0, 95.0, "low"), Swing(1, 105.0, "high")]
+
+
+def test_auction_establish_requires_structural_breakout():
+    tr = AuctionTracker()
+    # acceptance вниз есть, но цена 96 НЕ пробила swing low 95 → не торгуем
+    assert tr.update("X", _DOWN_INST, 96.0, _SW, now=0.0).state == BALANCE
+    # цена 94 < 95 (пробой предыдущего уровня) + acceptance → устанавливаем down
+    assert tr.update("X", _DOWN_INST, 94.0, _SW, now=0.0).state == TREND_DOWN
+    assert tr.peek("X") == TREND_DOWN
+
+
+def test_auction_no_breakout_without_swings():
+    tr = AuctionTracker()
+    # нет swing-структуры → пробой не подтвердить → не устанавливаем
+    assert tr.update("Y", _DOWN_INST, 50.0, [], now=0.0).state == BALANCE
+
+
+def test_auction_sticky_through_pullback_and_balance():
+    tr = AuctionTracker()
+    tr.update("X", _DOWN_INST, 94.0, _SW, now=0.0)  # down латч
+    # встречный мгновенный trend_up, но цена 100 < swing high 105 (нет пробоя) → держим down
+    assert tr.update("X", _UP_INST, 100.0, _SW, now=0.0).state == TREND_DOWN
+    # баланс на откате тоже НЕ сбрасывает направление
+    assert tr.update("X", _BAL_INST, 100.0, _SW, now=0.0).state == TREND_DOWN
+
+
+def test_auction_flip_only_on_opposite_breakout():
+    tr = AuctionTracker()
+    tr.update("X", _DOWN_INST, 94.0, _SW, now=0.0)  # down латч
+    # trend_up + цена 106 > swing high 105 → встречный структурный пробой → flip
+    assert tr.update("X", _UP_INST, 106.0, _SW, now=0.0).state == TREND_UP
+    assert tr.peek("X") == TREND_UP
+
+
+def test_auction_resets_on_new_utc_day():
+    tr = AuctionTracker()
+    tr.update("X", _DOWN_INST, 94.0, _SW, now=0.0)  # day 0: down
+    assert tr.peek("X") == TREND_DOWN
+    # новый UTC-день (профиль сброшен) + без подтверждённого пробоя → латч сброшен
+    ctx = tr.update("X", _DOWN_INST, 96.0, _SW, now=86400.0)
+    assert ctx.state == BALANCE
+    assert tr.peek("X") is None
 
 
 # ─── Фаза 3: order-flow (big trades + absorption) ────────────────────────

@@ -20,6 +20,7 @@ import logging
 import signal
 import time
 
+from flowzone_bot.analysis.auction import AuctionTracker
 from flowzone_bot.analysis.context import classify
 from flowzone_bot.analysis.session import in_session, parse_windows
 from flowzone_bot.analysis.strategy import evaluate
@@ -123,6 +124,9 @@ def run() -> None:
 
     cooldown: dict[str, float] = {}
     swing_cache: dict[str, tuple[float, list[Swing]]] = {}
+    # Sticky-направление аукциона (канон §2: пробой+acceptance, держим до
+    # встречного структурного пробоя — не переворачиваемся на откате).
+    auction = AuctionTracker()
     session_windows = (parse_windows(cfg.session_windows_utc)
                        if cfg.session_gate_enabled else [])
     if cfg.session_gate_enabled:
@@ -166,13 +170,13 @@ def run() -> None:
             killed = killswitch.is_killed(db, cfg, now)
             if killed.allowed and in_active_session:
                 _scan_signals(states, db, cfg, executor, cooldown, now,
-                              client, swing_cache)
+                              client, swing_cache, auction)
             elif not killed.allowed and now - last_heartbeat >= 60:
                 log.warning("KILLSWITCH: %s — входы заблокированы", killed.reason)
 
             # heartbeat раз в 60с (+ контекст аукциона по символам)
             if now - last_heartbeat >= 60:
-                _heartbeat(states, db, stream, cfg, in_active_session)
+                _heartbeat(states, db, stream, cfg, in_active_session, auction)
                 last_heartbeat = now
 
             elapsed = time.monotonic() - loop_start
@@ -188,7 +192,8 @@ def run() -> None:
 def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
                   executor: Executor, cooldown: dict[str, float],
                   now: float, client,
-                  swing_cache: dict[str, tuple[float, list[Swing]]]) -> None:
+                  swing_cache: dict[str, tuple[float, list[Swing]]],
+                  auction: AuctionTracker) -> None:
     """Прогон чеклиста входа по символам: контекст → зона → absorption → Signal
     (цель = ближайший swing, §5.3). Один открытый сетап на символ; rate/позиции —
     killswitch.can_open."""
@@ -205,10 +210,12 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         if now - cooldown.get(sym, 0.0) < cd:
             continue
         snap = st.snapshot()
-        profile, ctx = _context_for(snap, cfg)
+        # swings нужны и для латча направления (структурный пробой), и для цели
+        swings = _swings_for(client, cfg, sym, swing_cache, now)
+        profile, ctx = _context_for(snap, cfg, auction=auction,
+                                    swings=swings, now=now)
         if ctx is None or not ctx.is_trend:
             continue
-        swings = _swings_for(client, cfg, sym, swing_cache, now)
         try:
             sig = evaluate(snap, profile, ctx, cfg=cfg, swings=swings)
         except Exception:
@@ -248,28 +255,41 @@ def _swings_for(client, cfg, symbol: str,
     return swings
 
 
-def _context_for(snap, cfg):
+def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
+                 swings: list[Swing] | None = None, now: float | None = None):
     """Контекст аукциона по символу: режим по ФОРМЕ дневного footprint-профиля
     (направленный acceptance вне value area, STRATEGY §2). None если профиль ещё
-    не накоплен."""
+    не накоплен.
+
+    Если передан ``auction`` — мгновенный режим латчится (канон §2: держим
+    направление, переворот только по встречному структурному пробою ``swings``).
+    Без трекера возвращается мгновенный classify (для heartbeat-дисплея)."""
     profile = build_profile(snap.vp_buckets, snap.vp_bucket_size,
                             value_area_pct=cfg.value_area_pct)
     if profile is None:
         return None, None
-    ctx = classify(profile, snap.last_price, accept_frac=cfg.context_accept_frac)
+    inst = classify(profile, snap.last_price, accept_frac=cfg.context_accept_frac)
+    if auction is None:
+        return profile, inst
+    ctx = auction.update(snap.symbol, inst, snap.last_price, swings or [], now=now)
     return profile, ctx
 
 
 def _heartbeat(states: dict[str, SymbolState], db: FlowzoneDB,
-               stream: BybitMarketStream, cfg, session_active: bool = True) -> None:
+               stream: BybitMarketStream, cfg, session_active: bool = True,
+               auction: AuctionTracker | None = None) -> None:
     parts = []
     for sym, st in states.items():
         s = st.snapshot()
         imb = f"{s.ob_imbalance:.2f}" if s.ob_imbalance is not None else "?"
         flag = "STALE" if s.stale else "ok"
-        _profile, ctx = _context_for(s, cfg)
+        _profile, ctx = _context_for(s, cfg)  # мгновенный (дисплей)
         if ctx is not None and ctx.vah is not None:
-            ctxs = (f" ctx={ctx.state} VA=[{ctx.val:.4g},{ctx.vah:.4g}] "
+            # показываем залатченное направление аукциона + мгновенный режим
+            latched = auction.peek(sym) if auction is not None else None
+            shown = latched or ctx.state
+            inst_tag = f"(inst={ctx.state})" if latched and latched != ctx.state else ""
+            ctxs = (f" ctx={shown}{inst_tag} VA=[{ctx.val:.4g},{ctx.vah:.4g}] "
                     f"acc↑{ctx.accept_above:.0%}↓{ctx.accept_below:.0%}")
         else:
             ctxs = " ctx=warming"
