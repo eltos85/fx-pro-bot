@@ -35,8 +35,14 @@ class ScalpSettings(BaseSettings):
     # sweep_fade_canon (v0.18.20) — параллельный КАНОН-вариант sweep_fade
     # (форвард-тест A/B, одобрено пользователем 2026-06-11): значимые уровни
     # (PDH/PDL + дневные экстремумы) + full reclaim + вселенная мейджоров.
+    # sweep_fade_run (v0.18.27, 2026-06-26) — изолированная гипотеза «дай
+    # winners бежать»: canon-вход + breakeven-lock@1.0R + TP 3.0R + scratch
+    # только лузеров (A/B против canon, одобрено пользователем 2026-06-26).
+    # sweep_fade_trend (v0.18.27, 2026-06-26) — canon + rolling-trend-day-gate
+    # входа: не фейдить в активном тренде дня (A/B против canon, одобрено).
     enabled_strategies: str = Field(
-        default="sweep_fade,density_bounce,density_break,sweep_fade_canon")
+        default="sweep_fade,density_bounce,density_break,sweep_fade_canon,"
+                "sweep_fade_run,sweep_fade_trend")
 
     # ─── sweep_fade_canon (v0.18.20): канон-вариант параллельным форвард-тестом ──
     # Базовый sweep_fade живёт ниже канонного WR 60%+ (live 899 сделок: WR 35%,
@@ -67,6 +73,51 @@ class ScalpSettings(BaseSettings):
     # Full reclaim (CAP Rule 2): цена должна ВЕРНУТЬСЯ за свипнутый уровень
     # (1.0 = весь путь), а не 50% как у базового.
     sweep_fade_canon_reclaim_frac: float = Field(default=1.0)
+
+    # ─── sweep_fade_run (v0.18.27, 2026-06-26): изолированная гипотеза ───────
+    # «дай winners бежать». Параллельный форвард-тест A/B против canon
+    # (одобрено пользователем 2026-06-26). Вход = canon (значимые уровни +
+    # full reclaim + мейджоры + taker). НОВОЕ — exit-контракт:
+    #   • breakeven-lock при favourable ≥ be_activate_r (1.0R) — перенос
+    #     биржевого SL к entry+буфер. Артефакт scalp_sf_study n=169: 98%
+    #     сделок на 1R — winners, 18% лузеров → чистая точка BE.
+    #   • flow_exit@1.5R УБРАН (главный убийца winners: MFE winners 3.11R,
+    #     а фикс на ~1.27R). Winners бегут к биржевому TP, защищённые BE-стопом.
+    #   • TP = 3.0R (по медиане winner-MFE 3.11R — data-driven, не интуиция).
+    #   • flow_scratch только на losing side (favorable<0 + разворот ленты).
+    # Источник: scripts/scalp_sf_study.py (cutoff 2026-06-17, verified 100%),
+    # Sweeney 1988 MFE, Schwager/Brooks «winners run». Изоляция: свой name,
+    # атрибуция в БД по strategy, не трогает base/canon. Копит n≥100.
+    # Вселенная run-страты (по умолчанию = canon-список → A/B чистый
+    # «canon vs canon+exit»). env SCALP_SWEEP_FADE_RUN_SYMBOLS.
+    sweep_fade_run_symbols: str = Field(default="")
+    # TP winners (R). 3.0 = медиана winner-MFE (ловит 52% полностью).
+    sweep_fade_run_take_profit_r: float = Field(default=3.0)
+    # Порог breakeven-lock (R favourable). 1.0 = MFE-разделение winners/losers.
+    sweep_fade_run_be_activate_r: float = Field(default=1.0)
+    # Losing-side scratch при развороте ленты (winners НЕ режем).
+    sweep_fade_run_scratch_on_flow_flip: bool = Field(default=True)
+
+    # ─── sweep_fade_trend (v0.18.27, 2026-06-26): canon + trend-day-gate ───
+    # Изолированная гипотеза «не фейдить в активном тренде дня». A/B против
+    # canon (одобрено 2026-06-26). Вход = canon (значимые уровни + full
+    # reclaim + мейджоры + taker + canon-exit flow_exit@1.5R). НОВОЕ — gate
+    # входа по rolling-режиму дня: |close−open| последних N 15m-баров / avgATR
+    # > trend_max → пропуск (в активном тренде свип = продолжение, не разворот).
+    # Источник: scripts/scalp_canon_study.py (n=105, cutoff 2026-06-14):
+    #   fade ПО тренду +$1.40/сделку WR 55% (прибыльно), fade ПРОТИВ тренда
+    #   −$2.56/сделку (весь минус). Направленный EMA-гейт снять нельзя
+    #   (canon v0.18.22 — свип PDH ⇒ EMA всегда long ⇒ 100% блок), поэтому
+    #   гейтим режим, не направление. Wilder 1978 ADX; Connors/Raschke.
+    # Изоляция: свой name, атрибуция по strategy, не трогает base/canon/run.
+    # Вселенная trend-страты: пусто → canon-список (чистый A/B). env
+    # SCALP_SWEEP_FADE_TREND_SYMBOLS.
+    sweep_fade_trend_symbols: str = Field(default="")
+    # Порог трендовости rolling-regime (> = тренд, пропуск). 1.5 — консистентно
+    # с day_regime в анализе (scripts/scalp_canon_study.py).
+    sweep_fade_trend_max: float = Field(default=1.5)
+    # Lookback rolling-regime (число закрытых 15m-баров). 8 = 2 часа.
+    sweep_fade_trend_lookback_bars: int = Field(default=8)
 
     # Per-symbol LONG-блок (CSV): на этих символах входы в ЛОНГ запрещены ВСЕМ
     # стратегиям, шорты разрешены. v0.18.17 (C-07) ставил ZECUSDT; v0.18.19
@@ -646,6 +697,24 @@ class ScalpSettings(BaseSettings):
     def sweep_fade_canon_symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.sweep_fade_canon_symbols.split(",")
                 if s.strip()]
+
+    @property
+    def sweep_fade_run_symbol_list(self) -> list[str]:
+        """Вселенная sweep_fade_run. Пусто → canon-список (A/B чистый:
+        canon vs canon+exit). env SCALP_SWEEP_FADE_RUN_SYMBOLS."""
+        if self.sweep_fade_run_symbols.strip():
+            return [s.strip().upper() for s in self.sweep_fade_run_symbols.split(",")
+                    if s.strip()]
+        return self.sweep_fade_canon_symbol_list
+
+    @property
+    def sweep_fade_trend_symbol_list(self) -> list[str]:
+        """Вселенная sweep_fade_trend. Пусто → canon-список (A/B чистый:
+        canon vs canon+trend-gate). env SCALP_SWEEP_FADE_TREND_SYMBOLS."""
+        if self.sweep_fade_trend_symbols.strip():
+            return [s.strip().upper() for s in self.sweep_fade_trend_symbols.split(",")
+                    if s.strip()]
+        return self.sweep_fade_canon_symbol_list
 
     @property
     def strategy_list(self) -> list[str]:

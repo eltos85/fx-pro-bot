@@ -4,6 +4,71 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-26
+
+### feat(strategy): sweep_fade_run + sweep_fade_trend — две изолированные гипотезы
+`<pending commit>`
+
+Две новые параллельные стратегии №5 `sweep_fade_run` и №6 `sweep_fade_trend`
+(A/B против `sweep_fade_canon`, обе одобрены пользователем 2026-06-26, деплой
+одновременный). ИЗОЛИРОВАНЫ: не трогают base/canon/density, атрибуция в БД по
+колонке `strategy`. Каждая изолирует ровно одну переменную на основе ОТДЕЛЬНОГО
+анализа base и canon (страты болеют разными болезнями).
+
+**Артефакты анализа (data-grounded):**
+- `scripts/scalp_sf_study.py` — `sweep_fade` base (cutoff 2026-06-17, n=169):
+  MFE winners медиана **3.11R**, но `flow_exit@1.5R` режет их на ~1.27R (TP
+  3.5R ловит только 5/168). 98% сделок на favourable 1.0R — winners, 18%
+  лузеров → точка breakeven-lock. MAE 0.59R — стоп адекватен.
+- `scripts/scalp_canon_study.py` — `sweep_fade_canon` (cutoff 2026-06-14,
+  n=105): ДРУГАЯ болезнь. Winners МЕЛКИЕ (MFE медиана 1.64R, R:R ≈ 1:1) →
+  flow_exit НЕ виноват (фиксит почти на пике хода). Зато ЧИСТАЯ тренд-
+  зависимость: fade ПО тренду n=22 WR 55% **+$1.40/сделку** (прибыльно!),
+  fade ПРОТИВ тренда n=83 WR 41% **−$2.56/сделку** (весь минус). Направленный
+  EMA-гейт снять нельзя (canon v0.18.22: свип PDH ⇒ EMA всегда long ⇒ 100%
+  блок шорт-фейда) → гейтим РЕЖИМ дня, не направление.
+
+**sweep_fade_run (canon-вход + НОВЫЙ exit):**
+1. Breakeven-lock при favourable ≥ 1.0R — перенос биржевого SL к entry+буфер
+   (`manage_levels`, duck-typing в executor; у base/canon метода нет →
+   изоляция). Sweeney 1988 MFE; Mark Douglas.
+2. `flow_exit@1.5R` УБРАН (главный убийца winners). Winners бегут к TP.
+3. TP = 3.0R (медиана winner-MFE).
+4. `flow_scratch` только losing side.
+
+**sweep_fade_trend (canon + НОВЫЙ gate входа):**
+- Rolling-regime gate: `|close−open|` последних 8×15m / avgATR > 1.5 →
+  пропуск (в активном тренде свип = продолжение, не разворот). НЕ look-ahead
+  (окно в прошлом). Считается в `KeyLevels` из тех же kline, что PDH/PDL
+  (`day_levels` расширен полем `regime_ratio`, `_rolling_regime`).
+- Fail-closed: нет regime-данных → не торгуем (как level_gate).
+- Exit canon без изменений (flow_exit не виноват — winners мелкие).
+- Wilder 1978 ADX; Connors/Raschke «MR в диапазоне, momentum в тренде».
+
+**Изоляция обеих:** классы `SweepFadeRunStrategy` / `SweepFadeTrendStrategy`
+(наследники `SweepFadeCanonStrategy`), имена `"sweep_fade_run"` /
+`"sweep_fade_trend"`, env `SCALP_SWEEP_FADE_RUN_*` / `SCALP_SWEEP_FADE_TREND_*`
+(symbols — пусто→canon-список для чистого A/B). `canon_syms` в main.py
+обобщён на объединение всех canon-like страт (WS-подписки + key_levels-
+прогрев). `KeyLevels(regime_lookback=...)`. Cutoff в perstrat = 2026-06-26.
+
+**Forward-test:** обе копят n≥100 параллельно с canon, решение через 2
+недели + p-value (sample-size.mdc). Demo-счёт. НЕ отключать canon/base.
+
+**Файлы:** `src/scalp_bot/analysis/strategies.py` (2 класса + registry),
+`src/scalp_bot/config/settings.py` (env + symbol_list свойства),
+`src/scalp_bot/app/main.py` (canon_syms обобщение + KeyLevels lookback),
+`src/scalp_bot/data/levels.py` (regime_ratio в day_levels + _rolling_regime),
+`src/scalp_bot/trading/executor.py` (manage_levels hook),
+`docker-compose.yml` (env defaults + enabled_strategies),
+`scripts/scalp_perstrat_since.py` (cutoff ×2),
+`scripts/scalp_sf_decomp.py`, `scalp_sf_study.py`, `scalp_canon_study.py`
+(артефакты анализа),
+`tests/test_scalp_bot.py` (20 тестов: вход≡canon, BE-lock long/short,
+no-flow_exit-for-winners, scratch losing/disabled, trend-gate block/allow/
+fail-closed/boundary, exit наследование, rolling-regime no-look-ahead,
+изоляция). Тесты: 1103 passed.
+
 ## 2026-06-19
 
 ### revert(universe): откат отбора монет momentum→rvol (наблюдаемый регресс)

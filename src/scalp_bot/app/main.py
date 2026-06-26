@@ -93,8 +93,17 @@ def run() -> None:
     # торгуется ТОЛЬКО sweep_fade_canon (symbol_scope); остальные стратегии
     # canon-only символы не трогают (canon_only-гейт ниже) — их vol-вселенная
     # не изменена, A/B чистый.
-    canon_syms: list[str] = (cfg.sweep_fade_canon_symbol_list
-                             if "sweep_fade_canon" in cfg.strategy_list else [])
+    # v0.18.27: sweep_fade_run наследует канон-вход → её вселенная тоже
+    # требует WS-подписок + key_levels-прогрева. Объединяем символы всех
+    # «canon-like» стратегий (атрибут symbol_scope), а не хардкодим имя.
+    canon_syms: list[str] = []
+    if "sweep_fade_canon" in cfg.strategy_list:
+        canon_syms += cfg.sweep_fade_canon_symbol_list
+    if "sweep_fade_run" in cfg.strategy_list:
+        canon_syms += cfg.sweep_fade_run_symbol_list
+    if "sweep_fade_trend" in cfg.strategy_list:
+        canon_syms += cfg.sweep_fade_trend_symbol_list
+    canon_syms = list(dict.fromkeys(canon_syms))  # dedup, preserve order
     universe_syms = set(symbols)
     if canon_syms:
         symbols = list(dict.fromkeys(symbols + canon_syms))
@@ -150,7 +159,10 @@ def run() -> None:
     levels_strats = [s for s in strategies if hasattr(s, "key_levels")]
     last_levels = 0.0
     if levels_strats:
-        key_levels = KeyLevels(cfg.htf_interval)
+        # v0.18.27: KeyLevels считает rolling-regime для sweep_fade_trend.
+        # lookback берём из env trend-страты (если она есть), иначе дефолт 8.
+        lookback = getattr(cfg, "sweep_fade_trend_lookback_bars", 8)
+        key_levels = KeyLevels(cfg.htf_interval, regime_lookback=int(lookback))
         for s in levels_strats:
             s.key_levels = key_levels
         if client is not None:

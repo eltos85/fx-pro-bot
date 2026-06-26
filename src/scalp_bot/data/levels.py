@@ -38,12 +38,16 @@ _DAY_SEC = 86_400
 
 
 def day_levels(kline: list[list], now: float) -> dict | None:
-    """(pdh, pdl, day_high, day_low) из Bybit get_kline 15m (DESC, новые сверху).
+    """(pdh, pdl, day_high, day_low, regime_ratio) из Bybit get_kline 15m (DESC).
 
     Элемент свечи: [startTime(ms), open, high, low, close, volume, turnover].
     Текущий день — только ЗАКРЫТЫЕ бары (start + 15м ≤ now). Если текущий день
     ещё без закрытых баров (первые минуты суток) — day_high/day_low = None.
     Нет полного покрытия предыдущего дня → None (уровни ненадёжны).
+
+    regime_ratio (v0.18.27, sweep_fade_trend) — rolling-трендовость ПОСЛЕДНИХ
+    `regime_lookback_bars` закрытых баров: |close−open|/avgATR. Не look-ahead:
+    смотрим в прошлое. >1.5 — активный тренд (не фейдим), <0.8 — range.
     """
     day_start = now - (now % _DAY_SEC)
     prev_start = day_start - _DAY_SEC
@@ -52,11 +56,15 @@ def day_levels(kline: list[list], now: float) -> dict | None:
     cur_hi: float | None = None
     cur_lo: float | None = None
     oldest_ts: float | None = None
+    # закрытые бары (по убыванию ts) для rolling-regime — последние N по времени
+    closed: list[tuple] = []  # (ts, open, high, low, close)
     for row in kline or []:
         try:
             ts = float(row[0]) / 1000.0
             hi = float(row[2])
             lo = float(row[3])
+            o = float(row[1])
+            c = float(row[4])
         except (IndexError, TypeError, ValueError):
             continue
         oldest_ts = ts if oldest_ts is None else min(oldest_ts, ts)
@@ -66,20 +74,45 @@ def day_levels(kline: list[list], now: float) -> dict | None:
         elif ts >= day_start and ts + 900.0 <= now:  # закрытый 15m-бар сегодня
             cur_hi = hi if cur_hi is None else max(cur_hi, hi)
             cur_lo = lo if cur_lo is None else min(cur_lo, lo)
+            closed.append((ts, o, hi, lo, c))
     # требуем, чтобы история доставала до начала предыдущего дня — иначе
     # PDH/PDL посчитаны по обрезку и врут (fail-closed)
     if prev_hi is None or prev_lo is None or oldest_ts is None \
             or oldest_ts > prev_start + 900.0:
         return None
+    # rolling regime по последним N закрытым барам (старые→новые)
+    closed.sort(key=lambda x: x[0])
+    regime_ratio = _rolling_regime(closed)
     return {"pdh": prev_hi, "pdl": prev_lo,
-            "day_high": cur_hi, "day_low": cur_lo}
+            "day_high": cur_hi, "day_low": cur_lo,
+            "regime_ratio": regime_ratio}
+
+
+def _rolling_regime(closed: list[tuple], lookback: int = 8) -> float | None:
+    """|close−open| за последние `lookback` закрытых баров / avgATR этих баров.
+    None если баров < 2. Не look-ahead: окно строго в прошлом."""
+    if len(closed) < 2:
+        return None
+    window = closed[-lookback:]
+    o = window[0][1]
+    c = window[-1][4]
+    move = abs(c - o)
+    atr = sum(abs(b[2] - b[3]) for b in window) / len(window)
+    if atr <= 0:
+        return None
+    return move / atr
 
 
 class KeyLevels:
-    """Кэш ключевых уровней по символу (refresh из get_kline 15m)."""
+    """Кэш ключевых уровней по символу (refresh из get_kline 15m).
 
-    def __init__(self, interval: str = "15") -> None:
+    v0.18.27: также хранит rolling-regime_ratio (трендовость последних N
+    закрытых 15m-баров) — источник для sweep_fade_trend gate. Считается из
+    тех же kline, что PDH/PDL (без доп. REST-запроса)."""
+
+    def __init__(self, interval: str = "15", regime_lookback: int = 8) -> None:
         self.interval = interval
+        self.regime_lookback = regime_lookback
         self._levels: dict[str, dict] = {}
 
     def refresh(self, client, symbols: list[str], now: float | None = None) -> None:
@@ -101,6 +134,14 @@ class KeyLevels:
 
     def levels(self, symbol: str) -> dict | None:
         return self._levels.get(symbol)
+
+    def regime_ratio(self, symbol: str) -> float | None:
+        """Rolling-трендовость последних N закрытых 15m-баров (v0.18.27).
+        >1.5 — активный тренд, <0.8 — range. None — нет данных (fail-closed)."""
+        lv = self._levels.get(symbol)
+        if lv is None:
+            return None
+        return lv.get("regime_ratio")
 
     def swept_key_level(self, symbol: str, side: str, swept: float) -> str | None:
         """Имя ключевого уровня, который took out свип-экстремум, или None.

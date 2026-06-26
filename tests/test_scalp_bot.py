@@ -3074,3 +3074,390 @@ def test_canon_strategy_in_registry_and_cooldown_family():
     s = ScalpSettings()
     assert s.sl_cooldown_for("sweep_fade_canon") == s.sweep_fade_sl_cooldown_sec
     assert "sweep_fade_canon" in s.strategy_list  # включён по умолчанию (A/B)
+
+
+# ─── v0.18.27: sweep_fade_run (изолированная гипотеза «дай winners бежать») ─
+
+def _run_cfg(**over):
+    """cfg для SweepFadeRunStrategy: canon-вход + run-exit параметры."""
+    base = _canon_cfg(
+        sweep_fade_run_symbol_list=["ETHUSDT"],
+        sweep_fade_run_take_profit_r=3.0,
+        sweep_fade_run_be_activate_r=1.0,
+        sweep_fade_run_scratch_on_flow_flip=True,
+        # should_exit опирается на active_exit_enabled + scratch_* + momentum
+        active_exit_enabled=True,
+        active_exit_min_age_sec=0.0,
+        scratch_min_adverse_r=0.7,
+        scratch_min_age_sec=0.0,
+        take_profit_r=3.0,
+    )
+    for k, v in over.items():
+        setattr(base, k, v)
+    return base
+
+
+class _FakeClient:
+    """Минимальный client-мок для manage_levels: round_price + set_trading_stop."""
+
+    def __init__(self, *, ok=True):
+        self._ok = ok
+        self.calls = []
+
+    def round_price(self, symbol, price):
+        return round(price, 4)
+
+    def set_trading_stop(self, symbol, *, sl_price=None, tp_price=None):
+        self.calls.append({"symbol": symbol, "sl": sl_price, "tp": tp_price})
+        return {"ok": self._ok, "error": "" if self._ok else "boom"}
+
+
+class _FakeLevelsDB:
+    def __init__(self):
+        self.updates = []
+
+    def update_levels(self, trade_id, *, sl, tp):
+        self.updates.append({"id": trade_id, "sl": sl, "tp": tp})
+
+
+def _tr(*, side="long", entry=100.0, sl=99.0, tp=103.0, ts_open=0.0,
+         strategy="sweep_fade_run"):
+    """Лёгкий trade-объект: атрибуты, которые читают should_exit/manage_levels.
+    side='long': entry=100, sl=99 → risk=1 (|entry-sl|); tp=103 → base_risk=1
+    при tpr=3. Проверяем favourable в R."""
+    t = SimpleNamespace(id=1, symbol="ETHUSDT", side=side, entry=entry,
+                        sl=sl, tp=tp, ts_open=ts_open, strategy=strategy)
+    return t
+
+
+def _snap_at(price, *, momentum_for="long"):
+    """snap с last_price и cvd_samples, дающими flow_invalidated по стороне.
+    momentum_for='long' → CVD растёт (flow_invalidated long=False, short=True).
+    'short' → CVD падает (flow_invalidated short=False, long=True).
+    'none' → плоский (ни одна сторона не инвалидирована)."""
+    if momentum_for == "long":
+        s = [CvdSample(1, price, -2), CvdSample(2, price, -1),
+             CvdSample(3, price, 0), CvdSample(4, price, 1), CvdSample(5, price, 2)]
+    elif momentum_for == "short":
+        s = [CvdSample(1, price, 2), CvdSample(2, price, 1),
+             CvdSample(3, price, 0), CvdSample(4, price, -1), CvdSample(5, price, -2)]
+    else:
+        s = [CvdSample(1, price, 0), CvdSample(2, price, 0),
+             CvdSample(3, price, 0), CvdSample(4, price, 0), CvdSample(5, price, 0)]
+    return _snap(s, symbol="ETHUSDT", last_price=price)
+
+
+def test_run_in_registry_and_defaults():
+    """sweep_fade_run зарегистрирован, в дефолтном strategy_list, наследует
+    canon-вход (htf_filtered=False, regime_gated=True, taker)."""
+    from scalp_bot.analysis.strategies import (build_strategies, SweepFadeRunStrategy,
+                                               SweepFadeCanonStrategy)
+    cfg = _run_cfg()
+    cfg.strategy_list = ["sweep_fade_run"]
+    out = build_strategies(cfg, ["ETHUSDT"])
+    assert [s.name for s in out] == ["sweep_fade_run"]
+    r = out[0]
+    assert isinstance(r, SweepFadeRunStrategy)
+    assert isinstance(r, SweepFadeCanonStrategy)  # наследует canon-вход
+    assert r.htf_filtered is False and r.regime_gated is True  # как canon
+    assert r.symbol_scope == {"ETHUSDT"}
+    # дефолтные settings включают run в strategy_list
+    from scalp_bot.config.settings import ScalpSettings
+    assert "sweep_fade_run" in ScalpSettings().strategy_list
+    # cooldown семейства fade распространяется на run
+    s = ScalpSettings()
+    assert s.sl_cooldown_for("sweep_fade_run") == s.sweep_fade_sl_cooldown_sec
+
+
+def test_run_symbol_scope_defaults_to_canon():
+    """Пустой SCALP_SWEEP_FADE_RUN_SYMBOLS → canon-список (чистый A/B)."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()  # sweep_fade_run_symbols="" по дефолту
+    assert s.sweep_fade_run_symbol_list == s.sweep_fade_canon_symbol_list
+
+
+def test_run_breakeven_lock_long_moves_sl_to_entry():
+    """manage_levels: long favourable≥1.0R → SL переносится к entry+буфер,
+    биржа амендится (set_trading_stop), БД обновляется, повторный перенос
+    запрещён (_be_locked). entry=100, sl=99 → risk=1, be_activate=1.0R →
+    favourable≥1.0 (price≥101) триггерит."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
+    cl = _FakeClient()
+    db = _FakeLevelsDB()
+    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
+    # favourable 0.5R — не достиг порога → SL не трогаем
+    st.manage_levels(tr, _snap_at(100.5), cl, db)
+    assert tr.sl == 99.0 and cl.calls == [] and db.updates == []
+    assert not getattr(tr, "_be_locked", False)
+    # favourable 1.0R (price=101) → перенос
+    st.manage_levels(tr, _snap_at(101.0), cl, db)
+    assert tr._be_locked is True
+    assert cl.calls and cl.calls[0]["sl"] > 100.0  # к entry+буфер (буфер 8bps)
+    assert tr.sl > 100.0 and tr.sl < 101.0  # буфер малый
+    assert db.updates and db.updates[0]["id"] == tr.id
+    # повторный вызов — no-op (защита уже стоит)
+    n_before = len(cl.calls)
+    st.manage_levels(tr, _snap_at(102.0), cl, db)
+    assert len(cl.calls) == n_before
+
+
+def test_run_breakeven_lock_short_moves_sl_down():
+    """short: entry=100, sl=101 → risk=1; favourable≥1.0R (price≤99) → SL
+    вниз к entry−буфер."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
+    cl = _FakeClient()
+    db = _FakeLevelsDB()
+    tr = _tr(side="short", entry=100.0, sl=101.0, tp=97.0)
+    st.manage_levels(tr, _snap_at(99.0), cl, db)  # favourable=1.0R
+    assert tr._be_locked is True
+    assert tr.sl < 100.0 and tr.sl > 99.0
+    assert cl.calls and cl.calls[0]["sl"] < 100.0
+
+
+def test_run_breakeven_not_weakening_sl():
+    """Если be-уровень НЕ уменьшает убыток (long: new_sl ≤ текущего SL) —
+    не ослабляем защиту, просто фиксируем _be_locked. Кейс: SL уже подтянут
+    выше entry вручную/предыдущим циклом."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
+    cl = _FakeClient()
+    tr = _tr(side="long", entry=100.0, sl=100.5, tp=103.0)  # SL уже выше entry
+    st.manage_levels(tr, _snap_at(101.0), cl, _FakeLevelsDB())
+    assert cl.calls == []  # не амендим (new_sl ≈ entry+buf < 100.5)
+    assert tr._be_locked is True  # но защиту не откатываем
+
+
+def test_run_should_exit_no_flow_exit_for_winners():
+    """ГЛАВНОЕ отличие от base: winner (favorable>0) при развороте ленты НЕ
+    режется flow_exit. base срезал бы на 1.5R; run держит — winner защищён
+    breakeven-стопом и бежит к TP. Должен вернуть None."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
+    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
+    # price=102 → favourable=2.0R, лента развернулась против (momentum short)
+    # → base срезал бы flow_exit; run возвращает None (winner бежит)
+    assert st.should_exit(tr, _snap_at(102.0, momentum_for="short"), now=10.0) is None
+
+
+def test_run_should_exit_scratch_losing_side():
+    """Losing-side scratch: favourable<0 (в минусе) + лента против + убыток
+    достиг scratch_min_adverse_r (0.7R) → режем. price=99.3 → favourable=-0.7R."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
+    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
+    # лента против long (momentum short), favourable=-0.7R
+    res = st.should_exit(tr, _snap_at(99.3, momentum_for="short"), now=10.0)
+    assert res is not None and res[0] == "flow_scratch"
+
+
+def test_run_should_exit_no_scratch_when_flow_still_with_position():
+    """Лента ещё за позицию (не инвалидирована) → держим, даже в минусе.
+    Полагаемся на биржевой SL."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
+    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
+    # momentum long → flow_invalidated(long)=False → держим
+    assert st.should_exit(tr, _snap_at(99.3, momentum_for="long"), now=10.0) is None
+
+
+def test_run_should_exit_scratch_disabled():
+    """sweep_fade_run_scratch_on_flow_flip=False → scratch выключен, держим до
+    биржевого SL (только breakeven + TP)."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(sweep_fade_run_scratch_on_flow_flip=False),
+                              ["ETHUSDT"])
+    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
+    assert st.should_exit(tr, _snap_at(99.3, momentum_for="short"), now=10.0) is None
+
+
+def test_run_entry_identical_to_canon():
+    """Вход — идентичен canon (изоляция exit-переменной): тот же signal side,
+    strategy name, key_pdl в reasons, taker-вход. Разница только name."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy, SweepFadeCanonStrategy
+    cfg = _run_cfg()
+    run = SweepFadeRunStrategy(cfg, ["ETHUSDT"])
+    run.key_levels = _FakeKeyLevels("pdl")
+    # взвод
+    assert run.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5),
+                      now=100.0) is None
+    assert run.armed("ETHUSDT") is True
+    # полный reclaim → выстрел, как у canon
+    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
+            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
+    sig = run.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
+    assert sig is not None and sig.side == "long"
+    assert sig.strategy == "sweep_fade_run"  # отличие только в имени
+    assert "key_pdl" in sig.reasons and sig.entry_order_type == "market"
+    # TP = 3.0R (run-override), не глобальный 2.0 из _cfg
+    assert abs(sig.tp_level - sig.entry_ref - 3.0 * abs(sig.entry_ref - sig.sl_level)) < 1e-9
+
+
+def test_run_isolated_from_base_and_canon():
+    """run-страта не трогает поведение base/canon: у них нет manage_levels,
+    их should_exit остался canon-контрактом (None для canon)."""
+    from scalp_bot.analysis.strategies import (SweepFadeStrategy,
+                                               SweepFadeCanonStrategy,
+                                               SweepFadeRunStrategy)
+    assert not hasattr(SweepFadeStrategy, "manage_levels")
+    assert not hasattr(SweepFadeCanonStrategy, "manage_levels")
+    assert hasattr(SweepFadeRunStrategy, "manage_levels")
+    # canon should_exit наследует base → None (run переопределён на scratch)
+    canon = SweepFadeCanonStrategy(_canon_cfg(), ["ETHUSDT"])
+    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0, strategy="sweep_fade_canon")
+    assert canon.should_exit(tr, _snap_at(102.0, momentum_for="short"), now=10.0) is None
+
+
+# ─── v0.18.27: sweep_fade_trend (canon + rolling-trend-day-gate) ──────────
+
+def _trend_cfg(**over):
+    """cfg для SweepFadeTrendStrategy: canon + trend-gate параметры."""
+    base = _canon_cfg(
+        sweep_fade_trend_symbol_list=["ETHUSDT"],
+        sweep_fade_trend_max=1.5,
+        sweep_fade_trend_lookback_bars=8,
+    )
+    for k, v in over.items():
+        setattr(base, k, v)
+    return base
+
+
+class _FakeKeyLevelsRegime:
+    """KeyLevels-мок с regime_ratio (для trend-gate)."""
+
+    def __init__(self, ratio=None, level_name="pdl"):
+        self._ratio = ratio  # dict symbol -> ratio, или scalar, или None
+        self.name = level_name
+
+    def regime_ratio(self, symbol):
+        if self._ratio is None:
+            return None
+        if isinstance(self._ratio, dict):
+            return self._ratio.get(symbol)
+        return self._ratio
+
+    def swept_key_level(self, symbol, side, swept):
+        return self.name
+
+
+def test_trend_in_registry_and_defaults():
+    """sweep_fade_trend зарегистрирован, в дефолтном strategy_list, наследует
+    canon-вход."""
+    from scalp_bot.analysis.strategies import (build_strategies, SweepFadeTrendStrategy,
+                                               SweepFadeCanonStrategy)
+    cfg = _trend_cfg()
+    cfg.strategy_list = ["sweep_fade_trend"]
+    out = build_strategies(cfg, ["ETHUSDT"])
+    assert [s.name for s in out] == ["sweep_fade_trend"]
+    t = out[0]
+    assert isinstance(t, SweepFadeTrendStrategy)
+    assert isinstance(t, SweepFadeCanonStrategy)  # наследует canon-вход
+    assert t.htf_filtered is False and t.regime_gated is True  # как canon
+    assert t.symbol_scope == {"ETHUSDT"}
+    from scalp_bot.config.settings import ScalpSettings
+    assert "sweep_fade_trend" in ScalpSettings().strategy_list
+    s = ScalpSettings()
+    assert s.sl_cooldown_for("sweep_fade_trend") == s.sweep_fade_sl_cooldown_sec
+
+
+def test_trend_symbol_scope_defaults_to_canon():
+    """Пустой SCALP_SWEEP_FADE_TREND_SYMBOLS → canon-список (чистый A/B)."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.sweep_fade_trend_symbol_list == s.sweep_fade_canon_symbol_list
+
+
+def test_trend_gate_blocks_signal_in_active_trend():
+    """regime_ratio > trend_max (активный тренд) → сигнал НЕ берётся, даже при
+    canon-валидном взводе+выстреле. Главная гипотеза: не фейдить в тренде."""
+    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
+    st = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
+    st.key_levels = _FakeKeyLevelsRegime(ratio=2.5)  # тренд
+    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st.armed("ETHUSDT") is False  # gate блокнул взвод
+    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
+            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
+    assert st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0) is None
+
+
+def test_trend_gate_allows_signal_in_range():
+    """regime_ratio ≤ trend_max (range/mix) → canon-вход работает, signal
+    берётся с strategy='sweep_fade_trend'. Доказательство: gate не ломает
+    canon-вход в не-тренде."""
+    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
+    st = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
+    st.key_levels = _FakeKeyLevelsRegime(ratio=0.6)  # range
+    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st.armed("ETHUSDT") is True  # canon-взвод прошёл
+    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
+            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
+    sig = st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
+    assert sig is not None and sig.side == "long"
+    assert sig.strategy == "sweep_fade_trend"
+    assert "key_pdl" in sig.reasons and sig.entry_order_type == "market"
+
+
+def test_trend_gate_fail_closed_without_regime_data():
+    """Нет key_levels / regime_ratio=None → fail-closed: не торгуем (как
+    canon level_gate). Не фейдим вслепую без regime-данных."""
+    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
+    st = SweepFadeTrendStrategy(_trend_cfg(), ["ETHUSDT"])
+    assert st.key_levels is None  # не инжектнут
+    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st.armed("ETHUSDT") is False
+    # с key_levels, но regime None (данные не прогреты)
+    st2 = SweepFadeTrendStrategy(_trend_cfg(), ["ETHUSDT"])
+    st2.key_levels = _FakeKeyLevelsRegime(ratio=None)
+    st2.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st2.armed("ETHUSDT") is False
+
+
+def test_trend_gate_threshold_boundary():
+    """regime_ratio == trend_max → ещё торгуем (≤); чуть выше → блок. Граница
+    включается в range (canon-вход берётся)."""
+    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
+    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
+            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
+    # точно на пороге 1.5 → range → берём
+    st = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
+    st.key_levels = _FakeKeyLevelsRegime(ratio=1.5)
+    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st.armed("ETHUSDT") is True
+    sig = st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
+    assert sig is not None
+    # 1.5001 → тренд → блок
+    st2 = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
+    st2.key_levels = _FakeKeyLevelsRegime(ratio=1.5001)
+    st2.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+    assert st2.armed("ETHUSDT") is False
+
+
+def test_trend_exit_inherited_from_canon():
+    """should_exit — наследуется от canon (flow_exit@1.5R для winners). Exit
+    НЕ переопределён (MFE canon: flow_exit не виноват, winners мелкие)."""
+    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy, SweepFadeCanonStrategy
+    # trend не определяет свой should_exit → берёт canon (через base)
+    assert "should_exit" not in SweepFadeTrendStrategy.__dict__
+    assert "should_exit" not in SweepFadeCanonStrategy.__dict__  # canon тоже
+
+
+def test_rolling_regime_no_lookahead():
+    """_rolling_regime считает по закрытым барам в прошлом (ts уже были)."""
+    from scalp_bot.data.levels import _rolling_regime
+    # 4 бара, последние 8 (всё окно). move=|close4-open1|, atr=avg(hi-lo)
+    closed = [(1, 100.0, 101.0, 99.0, 100.5),
+              (2, 100.5, 101.5, 100.0, 101.0),
+              (3, 101.0, 102.0, 100.5, 101.5),
+              (4, 101.5, 102.5, 101.0, 102.0)]
+    r = _rolling_regime(closed, lookback=8)
+    atr = sum(abs(b[2] - b[3]) for b in closed) / 4  # (2+1.5+1.5+1.5)/4=1.625
+    assert abs(r - abs(102.0 - 100.0) / atr) < 1e-9
+    # мало баров → None
+    assert _rolling_regime([(1, 100, 101, 99, 100)], lookback=8) is None
+    # lookback обрезает окно
+    closed8 = [(i, 100.0 + i, 101.0 + i, 99.0 + i, 100.5 + i) for i in range(10)]
+    r2 = _rolling_regime(closed8, lookback=3)
+    win = closed8[-3:]
+    atr2 = sum(abs(b[2] - b[3]) for b in win) / 3
+    assert abs(r2 - abs(win[-1][4] - win[0][1]) / atr2) < 1e-9

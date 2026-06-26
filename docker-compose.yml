@@ -223,9 +223,14 @@ services:
       # density_break (momentum-пробой на сносе плотности, v0.8.0) +
       # sweep_fade_canon (v0.18.20: параллельный КАНОН-вариант sweep_fade —
       # значимые уровни PDH/PDL + full reclaim + вселенная мейджоров; A/B
-      # форвард-тест, одобрено пользователем 2026-06-11). Реальное
+      # форвард-тест, одобрено пользователем 2026-06-11) +
+      # sweep_fade_run (v0.18.27: изолированная гипотеза «дай winners бежать» —
+      # canon-вход + breakeven-lock@1.0R + TP 3.0R + scratch только лузеров;
+      # A/B против canon, одобрено пользователем 2026-06-26) +
+      # sweep_fade_trend (v0.18.27: canon + rolling-trend-day-gate входа — не
+      # фейдить в активном тренде дня; A/B против canon, одобрено 2026-06-26). Реальное
       # значение — из .env (env_file); тут дефолт для свежего деплоя.
-      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon}
+      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon,sweep_fade_run,sweep_fade_trend}
       # v0.18.20: вселенная канон-страты — ликвидные мейджоры (глубокие книги,
       # рейнджи: канон fade; live ETH WR 55% vs ZEC 28%). Торгуются ТОЛЬКО
       # sweep_fade_canon (symbol_scope), авто-вселенная других страт не задета.
@@ -238,6 +243,28 @@ services:
       # Turtle Soup входит ПО reclaim, не пассивной лимиткой → taker чище по
       # канону. База sweep_fade остаётся maker (контраст A/B).
       SCALP_SWEEP_FADE_CANON_ENTRY_ORDER_TYPE: ${SCALP_SWEEP_FADE_CANON_ENTRY_ORDER_TYPE:-market}
+      # ─── v0.18.27 (2026-06-26): sweep_fade_run — изолированная гипотеза ──
+      # «дай winners бежать». Canon-вход + НОВОЕ: breakeven-lock@1.0R (перенос
+      # биржевого SL к entry), flow_exit@1.5R УБРАН (winners бегут к TP),
+      # TP 3.0R (медиана winner-MFE), scratch только лузеров. Артефакт
+      # scripts/scalp_sf_study.py (n=169, cutoff 2026-06-17): MFE winners
+      # 3.11R vs фикс base на 1.27R — flow_exit резал winners. A/B против canon.
+      # Вселенная run-страты: пусто → canon-список (чистый A/B canon vs canon+exit).
+      SCALP_SWEEP_FADE_RUN_SYMBOLS: ${SCALP_SWEEP_FADE_RUN_SYMBOLS:-}
+      SCALP_SWEEP_FADE_RUN_TAKE_PROFIT_R: ${SCALP_SWEEP_FADE_RUN_TAKE_PROFIT_R:-3.0}
+      SCALP_SWEEP_FADE_RUN_BE_ACTIVATE_R: ${SCALP_SWEEP_FADE_RUN_BE_ACTIVATE_R:-1.0}
+      SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP: ${SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP:-true}
+      # ─── v0.18.27 (2026-06-26): sweep_fade_trend — canon + trend-day-gate ──
+      # Изолированная гипотеза «не фейдить в активном тренде дня». Canon-вход +
+      # canon-exit (flow_exit@1.5R — у canon winners мелкие, exit не виноват),
+      # НОВОЕ — gate входа по rolling-режиму дня: |close−open| последних N 15m
+      # баров / avgATR > trend_max → пропуск. Артефакт scalp_canon_study n=105:
+      # fade по тренду +$1.40/сделку WR 55%, против тренда −$2.56 (весь минус).
+      # Направленный EMA-гейт снять нельзя (canon v0.18.22) → гейтим режим.
+      # Вселенная trend-страты: пусто → canon-список (чистый A/B).
+      SCALP_SWEEP_FADE_TREND_SYMBOLS: ${SCALP_SWEEP_FADE_TREND_SYMBOLS:-}
+      SCALP_SWEEP_FADE_TREND_MAX: ${SCALP_SWEEP_FADE_TREND_MAX:-1.5}
+      SCALP_SWEEP_FADE_TREND_LOOKBACK_BARS: ${SCALP_SWEEP_FADE_TREND_LOOKBACK_BARS:-8}
       # Авто-селектор: бот сам выбирает монеты под стратегию из get_tickers
       # (композит range%/turnover/spread), берёт ВСЕ прошедшие фильтр и
       # пересматривает раз в 5 мин (ротация — no-op если состав не сменился).

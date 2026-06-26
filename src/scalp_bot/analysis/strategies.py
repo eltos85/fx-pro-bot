@@ -282,6 +282,298 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
                                                     entry_order_type=otype)
 
 
+class SweepFadeRunStrategy(SweepFadeCanonStrategy):
+    """Стратегия №5 (v0.18.27, 2026-06-26): sweep_fade_run — изолированная
+    гипотеза «дай winners бежать». Параллельный форвард-тест A/B против
+    sweep_fade_canon, одобрено пользователем 2026-06-26.
+
+    ─── Research basis ───
+    Глубокий разбор базового sweep_fade (артефакт scripts/scalp_sf_study.py,
+    n=169, cutoff 2026-06-17, verified 100%) показал:
+    - ** Winners реально бегут**: MFE winners медиана **3.11R**, p25=2.42,
+      ≥1.5R ловят 92% winners, ≥3.0R — 52%.
+    - ** Но flow_exit@1.5R режет их на ~1.27R** ($15.79 vs $12.39 risk) —
+      средний win 1.27R вместо доступных ~3R. Это инверсия «Философии B»:
+      заложенный TP 3.5R ловит только 5/168 сделок, потому что flow_exit
+      срабатывает раньше и не даёт добежать.
+    - ** MFE-разделение**: 98% сделок, достигших favourable 1.0R — winners;
+      только 18% лозеров доходят до 1R favourable → чистая точка
+      breakeven-lock.
+    - ** MAE медиана 0.59R**, ни один лузер не уходит глубже до SL → стоп
+      адекватен, расширять его не нужно.
+    Итог: стратегия пограничная (WR 37.5% vs break-even 42.5%), её математика
+    не «сломана», а **перерезает winners** на плече. Источники: Sweeney 1988
+    «Maximum Favorable Excursion»; Schwager/Brooks «let winners run»
+    (Философия B, которую base нарушает); Mark Douglas.
+
+    ─── Что наследует от canon (вход НЕ трогаем — изолируем exit) ───
+    Значимые уровни PDH/PDL + дневные экстремумы (level_gate), full reclaim
+    1.0, вселенная мейджоров (symbol_scope), taker-вход по reclaim. Это уже
+    лучшие найденные решения (canon v0.18.20–24); меняя их вместе с exit, мы
+    потеряли бы изоляцию переменной. symbol_scope унаследован от canon —
+    ИЗОЛИРОВАННОЕ переопределение через sweep_fade_run_symbols (по умолчанию
+    = canon-список, чтобы A/B был чистым «canon vs canon+exit»).
+
+    ─── Что меняет (НОВОЕ — exit-контракт) ───
+    1. ** Breakeven-lock при favourable ≥ be_activate_r (1.0R)**: перенос
+       биржевого SL на entry+буфер. Реализован через manage_levels()
+       (executor вызывает перед exit-проверкой, duck-typing — у base/canon
+       этого метода нет → их поведение не меняется). Артефакт: 98% сделок на
+       1R — winners; breakeven конвертирует большинство будущих лузеров в
+       ~0, не трогая winners. Sweeney MFE; Mark Douglas.
+    2. ** Убран flow_exit@1.5R** (главный убийца winners). Winners при
+       развороте ленты теперь НЕ режутся — их защищает breakeven-стоп, а не
+       ранний фикс. Победитель бежит к биржевому TP.
+    3. ** TP = sweep_fade_run_take_profit_r (3.0R)** — по медиане winner-MFE
+       3.11R (ловит 52% winners полностью; p25=2.42 — остальные через
+       breakeven). Ниже канон-дефолта 3.5R, но по данным (не интуиция).
+    4. ** flow_scratch на losing side** (только лузеры): при развороте ленты
+       ПРОТИВ позиции И favourable < be_activate_r (ещё в минусе, breakeven
+       не сработал) — режем убыток рано. Winners не трогаем (их favourable
+       ≥ 1R → breakeven их уже защитил; scratch-порог стоит выше be).
+
+    ─── Изоляция ───
+    Новый класс с name="sweep_fade_run", своим SCALP_SWEEP_FADE_RUN_* env.
+    Атрибуция в БД по колонке strategy. Не трогает base/canon/density.
+    Копит n≥100 параллельно, решение через 2 недели + p-value (sample-size).
+    """
+
+    name = "sweep_fade_run"
+    # Вход — идентичен canon (наследуем htf_filtered=False, di_long_gated=False,
+    # regime_gated=True). symbol_scope задаётся своим env (по умолчанию = canon).
+
+    def __init__(self, cfg, symbols: list[str]) -> None:
+        # TP override через overlay: build_signal читает take_profit_r из cfg.
+        # Пер-стратегийный TP канонически передаётся через tp_r в build_signal,
+        # но canon-путь вызывает родительский SweepFadeStrategy.update → детектор
+        # → build_signal без tp_r (берёт глобальный). Чтобы не дублировать весь
+        # конвейер, оверлеим take_profit_r на cfg — _CfgOverlay прозрачен.
+        run_cfg = _CfgOverlay(
+            cfg,
+            take_profit_r=getattr(cfg, "sweep_fade_run_take_profit_r",
+                                  cfg.take_profit_r),
+        )
+        super().__init__(run_cfg, [])
+        # canon __init__ поставил self.symbol_scope из canon-списка (через
+        # overlay делегирует в base). Переопределяем нашим (изолированный env,
+        # дефолт = canon) ПОСЛЕ super — canon уже отфильтровал ensure_symbols
+        # по своему scope, но мы передали [] → детекторов нет. Создаём ниже.
+        self.symbol_scope = set(getattr(cfg, "sweep_fade_run_symbol_list",
+                                        cfg.sweep_fade_canon_symbol_list))
+        # canon __init__ зовёт ensure_symbols с [] (мы передали пусто) →
+        # детекторы не созданы. Создаём по нашему scope из реальных символов.
+        self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
+
+    def _risk_r(self, tr) -> float:
+        """R-единица = base_risk (как в SweepFadeStrategy.should_exit):
+        tp_dist/tpr, fallback |entry−sl|. Пороги выхода меряются в base_risk,
+        не в ширине SL (синхронизация с ×1.0)."""
+        cfg = self.cfg
+        tpr = getattr(cfg, "take_profit_r", 0.0) or 0.0
+        tp_dist = abs(getattr(tr, "tp", tr.entry) - tr.entry)
+        if tpr > 0 and tp_dist > 0:
+            return tp_dist / tpr
+        return abs(tr.entry - getattr(tr, "sl", tr.entry))
+
+    def manage_levels(self, tr, snap, client, db) -> None:
+        """Breakeven-lock: при favourable ≥ be_activate_r переносим биржевой
+        SL на entry+буфер (один раз за сделку). Executor вызывает перед
+        exit-проверкой, если метод есть (duck-typing). У base/canon метода
+        нет → их поведение не меняется (изоляция).
+
+        Буфер = sl_buffer_bps (тот же, что у структурного SL) — чтобы стоп
+        не стоял ровно в entry и не выбило рыночным шумом/спредом. Перенос
+        только в сторону уменьшения убытка (long → SL вверх к entry; short →
+        вниз). Повторный перенос ниже уже-поставленного be запрещён
+        (_be_locked в tr-кеше), чтобы не откатить защиту.
+        """
+        if snap is None or getattr(snap, "last_price", None) is None:
+            return
+        if getattr(tr, "_be_locked", False):
+            return
+        price = snap.last_price
+        favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
+        risk = self._risk_r(tr)
+        if risk <= 0:
+            return
+        activate = getattr(self.cfg, "sweep_fade_run_be_activate_r", 1.0) * risk
+        if favorable < activate:
+            return
+        buf = getattr(self.cfg, "sl_buffer_bps", 0.0) / 1e4
+        if tr.side == "long":
+            new_sl = tr.entry * (1.0 + buf)
+            # не ниже уже стоящего SL (не ослабляем защиту)
+            if new_sl <= tr.sl:
+                tr._be_locked = True
+                return
+        else:
+            new_sl = tr.entry * (1.0 - buf)
+            if new_sl >= tr.sl:
+                tr._be_locked = True
+                return
+        if client is not None:
+            rp = client.round_price(tr.symbol, new_sl)
+            res = client.set_trading_stop(tr.symbol, sl_price=rp, tp_price=tr.tp)
+            if not res.get("ok"):
+                play.info("⚠️ [%s] #%d be-lock: set_trading_stop отклонён (%s) — "
+                          "оставляю структурный SL", tr.symbol, tr.id,
+                          res.get("error"))
+                return
+            new_sl = rp
+        if db is not None:
+            db.update_levels(tr.id, sl=new_sl, tp=tr.tp)
+        play.info("🔒 [%s] #%d be-lock %s: favourable %.2fR ≥ %.1fR → SL "
+                  "%.4f→%.4f (биржевой TP %.4f сохранён, winners бегут)",
+                  tr.symbol, tr.id, tr.side.upper(), favorable / risk,
+                  getattr(self.cfg, "sweep_fade_run_be_activate_r", 1.0),
+                  tr.sl, new_sl, tr.tp)
+        tr.sl = new_sl
+        tr._be_locked = True
+
+    def should_exit(self, tr, snap: SymbolSnapshot, now: float
+                    ) -> tuple[str, float] | None:
+        """Exit-контракт sweep_fade_run:
+        - Winners (favorable ≥ be_activate_r) → НЕТ раннего фикса. Их защищает
+          breakeven-стоп (manage_levels); бегут к биржевому TP.
+        - Losing-side scratch: лента развернулась ПРОТИВ И favourable < 0
+          (ещё в минусе, breakeven не сработал) → режем убыток рано.
+        flow_exit (фикс winners по развороту ленты) УБРАН — это и есть фикс
+        главной проблемы base (MFE winners 3.11R vs фикс на 1.27R)."""
+        cfg = self.cfg
+        if not getattr(cfg, "active_exit_enabled", False) or snap is None:
+            return None
+        if getattr(snap, "last_price", None) is None:
+            return None
+        if now - tr.ts_open < getattr(cfg, "active_exit_min_age_sec", 0.0):
+            return None
+        price = snap.last_price
+        favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
+        risk = self._risk_r(tr)
+        if risk <= 0:
+            return None
+        flipped = flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
+        if not flipped:
+            return None  # лента ещё за нас — держим (winner бежит к TP)
+        # Winners при развороте ленты НЕ режем: breakeven-стоп (manage_levels)
+        # их уже защитил. Только losing-side scratch.
+        if favorable >= 0:
+            return None
+        # scratch-порог: режем только если убыток достиг scratch_min_adverse_r
+        # и сделка созрела (анти hair-trigger, как в base).
+        adverse = getattr(cfg, "scratch_min_adverse_r", 0.7) * risk
+        scratch_on = getattr(cfg, "sweep_fade_run_scratch_on_flow_flip",
+                             True)  # у run scratch включён по умолчанию
+        if (scratch_on and favorable <= -adverse
+                and now - tr.ts_open >= getattr(cfg, "scratch_min_age_sec", 20.0)):
+            return ("flow_scratch", price)
+        return None
+
+
+class SweepFadeTrendStrategy(SweepFadeCanonStrategy):
+    """Стратегия №6 (v0.18.27, 2026-06-26): sweep_fade_trend — изолированная
+    гипотеза «не фейдить в активном тренде дня». Параллельный форвард-тест
+    A/B против sweep_fade_canon, одобрено пользователем 2026-06-26.
+
+    ─── Research basis ───
+    Глубокий разбор sweep_fade_canon (артефакт scripts/scalp_canon_study.py,
+    n=105, cutoff 2026-06-14, verified 100%) показал ДРУГУЮ болезнь чем base:
+    - ** Winners у canon МЕЛКИЕ**: MFE winners медиана **1.64R** (vs 3.11R у
+      base), R:R ≈ 1:1 (avgW $13.34 ≈ avgL $13.48). flow_exit@1.5R фиксит
+      почти на пике доступного хода → exit НЕ виноват (не как у base).
+    - ** Зато ЧИСТАЯ тренд-зависимость**: fade ПО тренду дня n=22 WR 55%
+      **+$1.40/сделку** (прибыльно!), fade ПРОТИВ тренда n=83 WR 41%
+      **−$2.56/сделку** (весь минус). Но у canon направленный EMA-гейт СНЯТ
+      (v0.18.22: свип PDH = цена выше вчерашнего хая = EMA всегда long →
+      шорт-фейд блокировался бы в 100%; 252/252 сигналов резались) — поэтому
+      бот фейдит против тренда в 83/105 случаях.
+    - MAE медиана 0.57R — стоп адекватен.
+
+    ─── Гипотеза ───
+    Направленный гейт вернуть нельзя (структурный конфликт с дневными
+    уровнями). Но можно гейтить **режим дня**, а не направление: в активном
+    TREND-дне свип дневного уровня = продолжение тренда (не разворот), фейдить
+    нельзя; в range/mix-дне свип = реальный liquidity grab, фейдить можно.
+    Детектор тренда — rolling: |close−open| за последние N 15m-баров / avgATR
+    (НЕ look-ahead — окно строго в прошлом). Порог 1.5 (консистентно с
+    day_regime в анализе). Источник: Wilder 1978 ADX (тренд vs range);
+    Connors/Raschke «MR работает в диапазоне, momentum — в тренде».
+
+    ─── Что наследует от canon ───
+    Значимые уровни PDH/PDL + full reclaim 1.0 + мейджоры + taker-вход +
+    canon exit-контракт (flow_exit@1.5R, TP 3.5R) — ИЗОЛИРУЕМ ровно одну
+    переменную (regime-gate входа), exit не трогаем (он не виноват по MFE).
+
+    ─── Что меняет (НОВОЕ — gate входа) ───
+    Перед детектором: если rolling regime_ratio символа > trend_max →
+    пропускаем сигнал (не фейдим в активном тренде). Иначе — canon-вход.
+    Fail-closed: нет данных regime (key_levels не прогрет) → пропускаем
+    (не торгуем вслепую, как level_gate). symbol_scope унаследован от canon,
+    ИЗОЛИРОВАННОЕ переопределение через sweep_fade_trend_symbols (дефолт =
+    canon-список → чистый A/B «canon vs canon+trend-gate»).
+
+    ─── Изоляция ───
+    Новый класс с name="sweep_fade_trend", своим SCALP_SWEEP_FADE_TREND_* env.
+    Атрибуция в БД по колонке strategy. Не трогает base/canon/run/density.
+    Копит n≥100 параллельно, решение через 2 недели + p-value (sample-size).
+    """
+
+    name = "sweep_fade_trend"
+    # Вход — идентичен canon (наследуем htf_filtered=False, di_long_gated=False,
+    # regime_gated=True — НО regime_gated тут классовый ADX-гейт, а наш
+    # trend-gate — отдельный, по rolling-regime дня, см. update).
+
+    def __init__(self, cfg, symbols: list[str]) -> None:
+        # trend_max / lookback читаются из cfg (env). super (canon) оверлеит
+        # reclaim_frac; trend-страте TP/reclaim не меняем — exit canon.
+        super().__init__(cfg, [])
+        # canon __init__ поставил symbol_scope из canon-списка. Переопределяем
+        # нашим (изолированный env, дефолт = canon).
+        self.symbol_scope = set(getattr(cfg, "sweep_fade_trend_symbol_list",
+                                        cfg.sweep_fade_canon_symbol_list))
+        # порог трендовости и lookback — из env (для A/B-тюнинга без деплоя)
+        self._trend_max = float(getattr(cfg, "sweep_fade_trend_max", 1.5))
+        self._regime_lookback = int(getattr(cfg, "sweep_fade_trend_lookback_bars", 8))
+        # детекторы по нашему scope (canon создал с [] → пусто)
+        self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
+        self._gate_logged = False
+
+    def _regime_gate_ok(self, symbol: str) -> bool:
+        """True = торгуем (range/mix). False = в активном тренде или нет
+        данных (fail-closed — не торгуем вслепую)."""
+        kl = self.key_levels
+        if kl is None:
+            return False
+        ratio = kl.regime_ratio(symbol) if hasattr(kl, "regime_ratio") else None
+        if ratio is None:
+            return False  # данные не прогреты — не торгуем (fail-closed)
+        return ratio <= self._trend_max
+
+    def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
+        """Canon-вход, но с rolling-trend-gate ПЕРЕД детектором: в активном
+        тренде дня (regime_ratio > trend_max) свип-фейд не берём."""
+        det = self._det.get(snap.symbol)
+        if det is None:
+            return None
+        if not self._regime_gate_ok(snap.symbol):
+            # в тренде / нет данных — не фейдим. Детектор не сбрасываем:
+            # вдруг regime разрядится в следующие тики — переармовится сам
+            # (detect_sweep на свежем окне). Нарратив — раз в цикл (троттл).
+            if not self._gate_logged:
+                play.info("🚫 [%s] trend-gate: rolling regime > %.1f — свип-фейд "
+                          "в активном тренде пропускаю", snap.symbol, self._trend_max)
+                self._gate_logged = True
+            return None
+        self._gate_logged = False
+        sig = det.update(snap, now)
+        if sig is not None:
+            sig.strategy = self.name
+        return sig
+
+    # should_exit — наследуется от canon (canon → base SweepFadeStrategy):
+    # flow_exit@1.5R + биржевой TP/SL. Exit не трогаем (MFE canon показал,
+    # flow_exit не виноват — winners и так мелкие, фикс на пике хода).
+
+
 # ─── density_bounce helpers (чистые, тестируемые без WS) ───────────────────
 
 def near_round(price: float, frac: float) -> bool:
@@ -857,6 +1149,8 @@ def build_strategies(cfg, symbols: list[str]) -> list[Strategy]:
         DensityBounceStrategy.name: DensityBounceStrategy,
         DensityBreakStrategy.name: DensityBreakStrategy,
         SweepFadeCanonStrategy.name: SweepFadeCanonStrategy,
+        SweepFadeRunStrategy.name: SweepFadeRunStrategy,
+        SweepFadeTrendStrategy.name: SweepFadeTrendStrategy,
     }
     out: list[Strategy] = []
     for name in enabled:
