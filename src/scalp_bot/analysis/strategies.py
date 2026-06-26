@@ -535,7 +535,12 @@ class SweepFadeTrendStrategy(SweepFadeCanonStrategy):
         self._regime_lookback = int(getattr(cfg, "sweep_fade_trend_lookback_bars", 8))
         # детекторы по нашему scope (canon создал с [] → пусто)
         self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
-        self._gate_logged = False
+        # троттлинг gate-лога ПО СИМВОЛУ (v0.18.27 hotfix): один флаг на стратегию
+        # давал спам — main loop зовёт update поочерёдно для 5 символов, и флаг
+        # сбрасывался когда хотя бы один символ проходил gate → заблокированный
+        # символ логировался каждый цикл (~1/сек). Per-symbol: логируем блокировку
+        # каждого символа не чаще раза пока он заблокирован.
+        self._gate_logged: dict[str, bool] = {}
 
     def _regime_gate_ok(self, symbol: str) -> bool:
         """True = торгуем (range/mix). False = в активном тренде или нет
@@ -557,13 +562,14 @@ class SweepFadeTrendStrategy(SweepFadeCanonStrategy):
         if not self._regime_gate_ok(snap.symbol):
             # в тренде / нет данных — не фейдим. Детектор не сбрасываем:
             # вдруг regime разрядится в следующие тики — переармовится сам
-            # (detect_sweep на свежем окне). Нарратив — раз в цикл (троттл).
-            if not self._gate_logged:
+            # (detect_sweep на свежем окне). Нарратив per-symbol, не чаще
+            # раза пока символ заблокирован (анти-спам лога).
+            if not self._gate_logged.get(snap.symbol):
                 play.info("🚫 [%s] trend-gate: rolling regime > %.1f — свип-фейд "
                           "в активном тренде пропускаю", snap.symbol, self._trend_max)
-                self._gate_logged = True
+                self._gate_logged[snap.symbol] = True
             return None
-        self._gate_logged = False
+        self._gate_logged.pop(snap.symbol, None)  # символ разблокирован — лог возобновится
         sig = det.update(snap, now)
         if sig is not None:
             sig.strategy = self.name

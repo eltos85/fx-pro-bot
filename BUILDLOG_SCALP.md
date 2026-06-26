@@ -6,6 +6,31 @@
 
 ## 2026-06-26
 
+### fix(trend-gate): per-symbol log throttle (anti-spam)
+`<pending commit>`
+
+**Симптом:** после деплоя sweep_fade_trend лог `🚫 [BNBUSDT] trend-gate` шёл
+~каждую секунду (1290/час), создавая у пользователя впечатление «все боты
+перестали ставить, gate применился ко всем». Расследование показало, что
+торговля НЕ блокировалась (43 сделки после деплоя: sweep_fade 35, canon 3,
+density_break 5; 0 конфликтов в resolve; killswitch не сработал; вчера в то
+же окно 11:00–12:25 UTC тоже 2 сделки — частота не изменилась). Спам был
+только шумом в логе.
+
+**Причина:** `_gate_logged` — один bool на всю стратегию, а main loop зовёт
+`update` поочерёдно для 5 символов. Когда хотя бы один символ проходил gate,
+флаг сбрасывался → заблокированный символ (BNBUSDT в тренде) логировался
+каждый цикл заново.
+
+**Решение:** троттлинг per-symbol через `dict[str,bool]`. Каждый символ
+логируется 1 раз пока заблокирован; при разблокировке запись удаляется и лог
+возобновится при повторной блокировке. Тест `test_trend_gate_log_throttle_per_
+symbol` верифицирует: 3 цикла update (ETHUSDT range + BTCUSDT trend) → ровно
+1 лог BTCUSDT, 0 логов ETHUSDT.
+
+**Файлы:** `src/scalp_bot/analysis/strategies.py` (SweepFadeTrendStrategy),
+`tests/test_scalp_bot.py`.
+
 ### feat(strategy): sweep_fade_run + sweep_fade_trend — две изолированные гипотезы
 `<pending commit>`
 

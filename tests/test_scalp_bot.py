@@ -3461,3 +3461,36 @@ def test_rolling_regime_no_lookahead():
     win = closed8[-3:]
     atr2 = sum(abs(b[2] - b[3]) for b in win) / 3
     assert abs(r2 - abs(win[-1][4] - win[0][1]) / atr2) < 1e-9
+
+
+def test_trend_gate_log_throttle_per_symbol():
+    """v0.18.27 hotfix: gate-лог троттлится ПО СИМВОЛУ, а не одним флагом на
+    стратегию. Был спам: main loop зовёт update поочерёдно для 5 символов;
+    один флаг сбрасывался когда хотя бы один символ проходил gate, и
+    заблокированный символ логировался каждый цикл (в проде 1290/час). Per-
+    symbol dict: каждый символ логируется 1 раз пока заблокирован."""
+    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
+    # scope берётся из sweep_fade_trend_symbol_list (есть в cfg) — кладём оба
+    # символа, иначе детектор создастся только для ETHUSDT и gate по BTCUSDT
+    # не отработает (update вернётся по det is None до gate).
+    st = SweepFadeTrendStrategy(
+        _trend_cfg(sweep_fade_trend_max=1.5,
+                   sweep_fade_trend_symbol_list=["ETHUSDT", "BTCUSDT"]),
+        ["ETHUSDT", "BTCUSDT"])
+    st.key_levels = _FakeKeyLevelsRegime(ratio={"ETHUSDT": 0.6, "BTCUSDT": 2.5})
+    logs = []
+
+    def _cap(msg, *a):
+        logs.append(msg % a if a else msg)
+    import scalp_bot.analysis.strategies as strat_mod
+    orig = strat_mod.play.info
+    strat_mod.play.info = _cap
+    try:
+        for _ in range(3):
+            st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
+            st.update(_snap(_arm_samples(), symbol="BTCUSDT", last_price=96000.0), now=100.0)
+    finally:
+        strat_mod.play.info = orig
+    btc_logs = [l for l in logs if "BTCUSDT" in l and "trend-gate" in l]
+    assert len(btc_logs) == 1, f"ожидал 1 лог BTCUSDT, got {len(btc_logs)}: {btc_logs}"
+    assert not any("ETHUSDT" in l and "trend-gate" in l for l in logs)
