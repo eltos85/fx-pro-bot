@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import signal
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 
 import pandas as pd
@@ -13,6 +14,7 @@ from fx_pro_bot.config.settings import calc_lot_size
 from fx_momentum_bot.state.store import MomentumStore
 from fx_momentum_bot.strategy.event_guard import high_impact_event_near
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
+from fx_momentum_bot.strategy.session_filter import session_skip_reason
 from fx_pro_bot.trading.auth import TokenData
 from fx_pro_bot.trading.client import CTraderClient
 from fx_pro_bot.trading.executor import TradeExecutor
@@ -677,6 +679,7 @@ def run() -> None:
             # ECB — только EUR-пары, BoJ — только JPY-пары.
             # Andersen et al. 2003: вход в момент релиза ловит шип/фейкаут.
             news_blocks: dict[str, str] = {}
+            session_skips: dict[str, str] = {}
             if settings.news_block_enabled:
                 for symbol in settings.symbols:
                     reason = high_impact_event_near(
@@ -691,6 +694,27 @@ def run() -> None:
                         "EVENT-GUARD: входы заблокированы — %s",
                         "; ".join(f"{s}: {r}" for s, r in news_blocks.items()),
                     )
+            # Session-фильтр: час закрытого бара, по которому взят сигнал.
+            # Для 1h-интервала последний закрытый бар = now минус ~1ч; для
+            # сессионных границ 07/21 погрешность в час несущественна.
+            if settings.session_filter_enabled:
+                now_h = datetime.now(timezone.utc).hour
+                # Сдвиг на один интервал назад (сигнал по закрытому бару).
+                try:
+                    interval_h = _INTERVAL_SEC.get(settings.yfinance_interval, 3600) // 3600
+                except Exception:  # noqa: BLE001
+                    interval_h = 1
+                signal_hour = (now_h - max(1, interval_h)) % 24
+                skip_reason = session_skip_reason(
+                    hour_utc=signal_hour,
+                    enabled=settings.session_filter_enabled,
+                    start_hour_utc=settings.session_filter_start_hour_utc,
+                    end_hour_utc=settings.session_filter_end_hour_utc,
+                )
+                if skip_reason:
+                    for symbol in settings.symbols:
+                        session_skips[symbol] = skip_reason
+                    log.info("SESSION-FILTER: входы заблокированы — %s", skip_reason)
 
             for symbol in settings.symbols:
                 signal_data = signal_by_symbol.get(symbol)
@@ -698,6 +722,7 @@ def run() -> None:
                     continue
 
                 sym_news_block = news_blocks.get(symbol)
+                sym_session_block = session_skips.get(symbol)
 
                 last_direction = store.get_last_direction(symbol)
                 # Edge-trigger: входим только на СМЕНЕ направления сигнала.
@@ -762,6 +787,7 @@ def run() -> None:
                     wants_open
                     and open_count < settings.max_open_positions
                     and sym_news_block is None
+                    and sym_session_block is None
                 )
 
                 executed = False
@@ -776,6 +802,11 @@ def run() -> None:
                     # (_should_record_direction) → попытка повторится после
                     # окна, пока сигнал актуален. Сигнал не теряется.
                     note = f"skip:news_window({sym_news_block})"
+                elif sym_session_block is not None:
+                    # Session-фильтр: вход отложен до ликвидной сессии,
+                    # direction НЕ фиксируется → попытка повторится в
+                    # London/NY окне, пока сигнал актуален.
+                    note = f"skip:off_session({sym_session_block})"
                 elif not should_open:
                     note = "skip:max_positions"
                 else:

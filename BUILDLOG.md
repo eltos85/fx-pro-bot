@@ -4,6 +4,57 @@
 
 ---
 
+## 2026-06-26
+
+### feat(momentum): session-фильтр входов — блок Asian/Late, liquid London/NY only
+
+`<pending commit>`
+
+**Контекст / задача:** аудит `tradecard_momentum weekly` (cTrader deal-list
+ground truth, 77 сделок 2026-06-01..26) показал концентрированный убыток в
+Asian session: GBPUSD-asia n=6 WR 0% −$60, AUDUSD-asia n=8 WR 0% −$49 (−$109
+суммарно при нулевой победе); при этом NY session AUDUSD = 60% WR +$45.
+У momentum-бота liquid-session фильтра не было — данные подтвердили его
+отсутствие эмпирически. Пользователь одобрил вариант A (только session-фильтр).
+
+**Research basis:** STRATEGIES.md стр.173 (Liquid session filter — канон для
+FX: Asian session = тонкая ликвидность, ловля падающего ножа); Lyons
+«Microstructure Approach to Exchange Rates» 2001 ch.3–4 (ликвидность и
+информационная эффективность концентрируются в overlapping London/NY);
+Andersen et al. 2003 (пики вол-ти/объёма = London open + NY overlap).
+
+**Что добавлено (только ВХОД, не сопровождение/выходы — как event_guard):**
+- `strategy/session_filter.py`: `session_skip_reason(hour_utc, enabled,
+  start_hour_utc, end_hour_utc)` → причина скипа или None. Полуоткрытый
+  диапазон [7,21) UTC = London 07–12 + NY 12–21. Обёртка через полночь
+  поддерживается (night-only конфиг). Вырожденное окно (start==end) /
+  enabled=False → фильтр выключен.
+- `app/main.py`: session_skips считаются per-cycle (час закрытого бара =
+  now − интервал), учитываются в `should_open` и `note=skip:off_session`.
+  Direction НЕ фиксируется при блоке → повтор в London/NY окне, сигнал не
+  теряется (тот же edge-trigger-инвариант что у news_block).
+- `config/settings.py`: `session_filter_enabled=True`, start=07, end=21 UTC
+  (env `MOMENTUM_BOT_SESSION_FILTER_*`). Обратимо.
+- `docker-compose.yml`: env-строки с дефолтами.
+
+**Что НЕ трогало (no-data-fitting.mdc / strategy-guard.mdc):** пороги
+стратегии (signal_threshold, ATR-множители, lookback) НЕ изменены — это
+фильтр ликвидности, не торговый параметр. Сопровождение (BE/partial/
+trailing), sign-decay выход и SL продолжают работать (риск-менеджмент
+важнее канона входа).
+
+**Выборка:** Asia-срез GBPUSD n=6 / AUDUSD n=8 < 100 (sample-size.mdc), но
+фильтр опирается на канон STRATEGIES.md (research-based, не подгонка), не на
+отключение инструмента → допустимо как research-based фильтр, а не как
+disable-решение по статистике.
+
+**Файлы:** `src/fx_momentum_bot/strategy/session_filter.py` (новый),
+`src/fx_momentum_bot/app/main.py`, `src/fx_momentum_bot/config/settings.py`,
+`docker-compose.yml`, `tests/test_fx_momentum_bot.py` (+7 тестов session).
+Все 1078 тестов зелёные.
+
+---
+
 ## 2026-06-23
 
 ### feat(tradecard-momentum): advisory-ревьюер над fx_momentum_bot (новый пакет)

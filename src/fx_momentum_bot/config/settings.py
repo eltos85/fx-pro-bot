@@ -128,6 +128,26 @@ class MomentumBotSettings(BaseSettings):
         default=60, validation_alias="MOMENTUM_BOT_NEWS_BLOCK_AFTER_MIN"
     )
 
+    # ─── Session-фильтр входов (liquid sessions only) ───────────────────
+    # Блок НОВЫХ входов вне ликвидных FX-сессий (London 07–12 UTC / NY
+    # 12–21 UTC). Asian session (00–07 UTC) и Late (21–24) — тонкая
+    # ликвидность, momentum-сигналы ложные: эмпирически (cTrader deal-list,
+    # 2026-06-01..26, 77 сделок) Asia = 0% WR по GBPUSD/AUDUSD, −$109 net;
+    # NY session AUDUSD = 60% WR +$45. Канон — STRATEGIES.md стр.173
+    # (Liquid session filter для FX mean-reversion: Asian session = ловля
+    # падающего ножа). Блокируются ТОЛЬКО входы; сопровождение (BE/partial/
+    # trailing), sign-decay выход и SL работают (риск-менеджмент важнее
+    # канона входа — тот же принцип что event_guard). 0 0 24 = выключено.
+    session_filter_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_SESSION_FILTER_ENABLED"
+    )
+    session_filter_start_hour_utc: int = Field(
+        default=7, validation_alias="MOMENTUM_BOT_SESSION_FILTER_START_HOUR_UTC"
+    )
+    session_filter_end_hour_utc: int = Field(
+        default=21, validation_alias="MOMENTUM_BOT_SESSION_FILTER_END_HOUR_UTC"
+    )
+
     # Position management (trader-backed):
     # - Van Tharp: R-multiple discipline + break-even transfer.
     # - Linda Raschke discretionary practice: partial profit + runner.

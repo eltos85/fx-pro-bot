@@ -323,3 +323,64 @@ def test_is_market_closed_error_other_errors_false() -> None:
     assert _is_market_closed_error("SLIPPAGE guard rejected") is False
     assert _is_market_closed_error(None) is False
     assert _is_market_closed_error("") is False
+
+
+# ─── Session-фильтр (liquid sessions only, 2026-06-26) ─────────────────
+
+
+def test_session_filter_blocks_asian_session() -> None:
+    from fx_momentum_bot.strategy.session_filter import session_skip_reason
+    # Asia 00–07 UTC вне ликвидного окна [07,21) → блок
+    for h in (0, 1, 3, 5, 6):
+        assert session_skip_reason(
+            hour_utc=h, enabled=True, start_hour_utc=7, end_hour_utc=21
+        ) is not None, f"hour {h} должен блокироваться"
+
+
+def test_session_filter_blocks_late_session() -> None:
+    from fx_momentum_bot.strategy.session_filter import session_skip_reason
+    # Late 21–24 UTC вне окна
+    for h in (21, 22, 23):
+        assert session_skip_reason(
+            hour_utc=h, enabled=True, start_hour_utc=7, end_hour_utc=21
+        ) is not None
+
+
+def test_session_filter_allows_liquid_sessions() -> None:
+    from fx_momentum_bot.strategy.session_filter import session_skip_reason
+    # London 07–12 + NY 12–21 (полуоткрытый [7,21)) → разрешено
+    for h in (7, 10, 12, 15, 19, 20):
+        assert session_skip_reason(
+            hour_utc=h, enabled=True, start_hour_utc=7, end_hour_utc=21
+        ) is None, f"hour {h} должен быть разрешён"
+
+
+def test_session_filter_disabled() -> None:
+    from fx_momentum_bot.strategy.session_filter import session_skip_reason
+    # enabled=False → не блокирует никогда
+    assert session_skip_reason(
+        hour_utc=3, enabled=False, start_hour_utc=7, end_hour_utc=21
+    ) is None
+
+
+def test_session_filter_degenerate_window_disables() -> None:
+    from fx_momentum_bot.strategy.session_filter import session_skip_reason
+    # start==end → фильтр выключен (не блокирует)
+    assert session_skip_reason(
+        hour_utc=3, enabled=True, start_hour_utc=7, end_hour_utc=7
+    ) is None
+
+
+def test_session_filter_wraparound_window() -> None:
+    from fx_momentum_bot.strategy.session_filter import session_skip_reason
+    # Обёртка через полночь: окно [21,7) → night-only, день блокируется
+    assert session_skip_reason(
+        hour_utc=23, enabled=True, start_hour_utc=21, end_hour_utc=7
+    ) is None
+    assert session_skip_reason(
+        hour_utc=2, enabled=True, start_hour_utc=21, end_hour_utc=7
+    ) is None
+    assert session_skip_reason(
+        hour_utc=12, enabled=True, start_hour_utc=21, end_hour_utc=7
+    ) is not None
+
