@@ -148,6 +148,29 @@ class MomentumBotSettings(BaseSettings):
         default=21, validation_alias="MOMENTUM_BOT_SESSION_FILTER_END_HOUR_UTC"
     )
 
+    # ─── Friday-flat: закрытие momentum-позиций перед выходными ─────────
+    # Сделки, переживающие выходные, эмпирически avgR −0.79 (vs −0.08
+    # intra-week), WR 11%, net −$51 (cTrader deal-list, 77 сделок,
+    # 2026-06-01..26). Убыток даёт гэп понедельника (SL вне 1R), не своп.
+    # FX spot разрывается Сб/Вс → понедельничный гэп = информационный
+    # разрыв без price discovery (отличается от continuous-market TSMOM
+    # канона). Dalton 2007 + Lyons 2001 + Andersen 2003 — см.
+    # strategy/friday_flat.py. BUILDLOG 2026-06-11: ранее friday-flat был
+    # только для VP; теперь (2026-06-26) применён к FX-only momentum.
+    # Окно в пятницу UTC, до FX weekly close (~21:00 UTC летом). Retry в
+    # цикле при неудаче. Обратимо: enabled=False или start==end.
+    friday_flat_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_FRIDAY_FLAT_ENABLED"
+    )
+    friday_flat_start: str = Field(
+        default="20:00", validation_alias="MOMENTUM_BOT_FRIDAY_FLAT_START"
+    )
+    # Верхняя граница попыток: после FX close close-ордера отвергаются
+    # (MARKET_CLOSED) — не спамим до полуночи.
+    friday_flat_end: str = Field(
+        default="20:45", validation_alias="MOMENTUM_BOT_FRIDAY_FLAT_END"
+    )
+
     # Position management (trader-backed):
     # - Van Tharp: R-multiple discipline + break-even transfer.
     # - Linda Raschke discretionary practice: partial profit + runner.

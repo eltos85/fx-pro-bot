@@ -6,6 +6,67 @@
 
 ## 2026-06-26
 
+### feat(momentum): friday-flat — закрытие позиций перед выходными (gap-risk)
+
+`<pending commit>`
+
+**Контекст / задача:** пользователь заметил, что позиции, открытые в
+пятницу, уходят в выходные и в понедельник превращаются в большие убытки.
+BUILDLOG 2026-06-11 это уже обсуждалось — тогда friday-flat ввели ТОЛЬКО
+для VP, momentum намеренно оставили держать через выходные (канон
+Turtle/TSMOM). Проверили актуальную эмпирику — она опровергает прежнее
+решение для momentum.
+
+**Эмпирика (tradecard_momentum, cTrader deal-list ground truth, 77 сделок
+2026-06-01..26):**
+- Сделки, пережившие выходные: n=9, **WR 11%, avgR −0.79**, net −$51
+  (vs intra-week n=68, WR 29%, avgR −0.08).
+- Входы в пятницу: n=13, **0% WR**, net −$73.
+- Своп за выходные −$0.74 — копейки; убыток даёт **гэп понедельника**,
+  исполняющий SL вне планового 1R (детально: GBPUSD long Fri→Sun −$14.53
+  R−1.09, USDJPY long Fri 20:01→Sun −$11.65 R−1.14).
+
+**Почему прежний канон тут не работает:** TSMOM «держать через выходные»
+справедлив для continuous-market (commodities/index futures 24/7, гэпы в
+сторону тренда часть edge). FX spot разрывается Сб/Вс → понедельничный
+гэп = чистый informational gap без price discovery, SL исполняется по
+первой доступной цене вне 1R. Это отличает FX от каноничного TSMOM-контекста.
+
+**Research basis:** Dalton «Mind Over Markets» 2007 (профиль понедельника —
+другой рынок; та же аргументация что для VP friday-flat 2026-06-11);
+Lyons 2001 ch.3–4 (FX price discovery = London/NY overlap, разрыв Сб/Вс);
+Andersen/Bollerslev/Diebold/Vega 2003 (разрывы сессии концентрируют
+вол-ть на reopen, SL проскальзывает).
+
+**Что добавлено:**
+- `strategy/friday_flat.py`: `friday_flat_due(enabled, flat_start,
+  flat_end, now_utc)` → True только в пятницу UTC в окне [start, end).
+  Вырожденное окно (start==end) / enabled=False / плохой конфиг → False.
+- `app/main.py`: в окно flat — принудительный close ВСЕХ momentum-позиций
+  (после `_manage_positions`, т.е. сопровождение BE/partial/trailing
+  отрабатывает сначала); retry в цикле, MARKET_CLOSED-дедуп. Новые входы
+  в окне flat запрещены (`skip:friday_flat_window`, direction не
+  фиксируется → сигнал повторится на следующей неделе).
+- `config/settings.py`: `friday_flat_enabled=True`, окно 20:00–20:45 UTC
+  (до FX weekly close ~21:00 UTC летом). Env `MOMENTUM_BOT_FRIDAY_FLAT_*`.
+- `docker-compose.yml`: env-строки с дефолтами.
+
+**Что НЕ трогало:** пороги стратегии (threshold/ATR/lookback) неизменны —
+это фильтр времени, не торговый параметр. Sign-decay выход и SL работают
+до окна flat.
+
+**Выборка:** weekend-hold n=9, fri-open n=13 — <100 (sample-size.mdc), но
+это фильтр gap-risk (не disable инструмента/не тюнинг порогов), обратимый,
+опирается на research-канон → допустимо. Решение согласовано с
+пользователем (вариант A2).
+
+**Файлы:** `src/fx_momentum_bot/strategy/friday_flat.py` (новый),
+`src/fx_momentum_bot/app/main.py`, `src/fx_momentum_bot/config/settings.py`,
+`docker-compose.yml`, `tests/test_fx_momentum_bot.py` (+7 тестов).
+Все 1084 теста зелёные.
+
+---
+
 ### feat(momentum): session-фильтр входов — блок Asian/Late, liquid London/NY only
 
 `<pending commit>`

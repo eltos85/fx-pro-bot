@@ -384,3 +384,81 @@ def test_session_filter_wraparound_window() -> None:
         hour_utc=12, enabled=True, start_hour_utc=21, end_hour_utc=7
     ) is not None
 
+
+# ─── Friday-flat (закрытие перед выходными, 2026-06-26) ─────────────────
+
+
+def _fri(hour: int, minute: int = 0) -> datetime:
+    # Пятница 2026-06-26 (weekday()==4)
+    return datetime(2026, 6, 26, hour, minute, tzinfo=timezone.utc)
+
+
+def _other_day(hour: int, minute: int = 0) -> datetime:
+    # Четверг 2026-06-25 (weekday()==3)
+    return datetime(2026, 6, 25, hour, minute, tzinfo=timezone.utc)
+
+
+def test_friday_flat_due_inside_window() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_flat_due
+    for h, m in [(20, 0), (20, 15), (20, 44)]:
+        assert friday_flat_due(
+            enabled=True, flat_start="20:00", flat_end="20:45",
+            now_utc=_fri(h, m),
+        ) is True, f"{h}:{m} должен быть в окне"
+
+
+def test_friday_flat_due_outside_window() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_flat_due
+    # До окна и после
+    assert friday_flat_due(
+        enabled=True, flat_start="20:00", flat_end="20:45",
+        now_utc=_fri(19, 59),
+    ) is False
+    assert friday_flat_due(
+        enabled=True, flat_start="20:00", flat_end="20:45",
+        now_utc=_fri(20, 45),
+    ) is False
+    assert friday_flat_due(
+        enabled=True, flat_start="20:00", flat_end="20:45",
+        now_utc=_fri(12, 0),
+    ) is False
+
+
+def test_friday_flat_due_only_friday() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_flat_due
+    # Тот же час, но другой день недели → не срабатывает
+    assert friday_flat_due(
+        enabled=True, flat_start="20:00", flat_end="20:45",
+        now_utc=_other_day(20, 15),
+    ) is False
+
+
+def test_friday_flat_due_disabled() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_flat_due
+    assert friday_flat_due(
+        enabled=False, flat_start="20:00", flat_end="20:45",
+        now_utc=_fri(20, 15),
+    ) is False
+
+
+def test_friday_flat_due_degenerate_window() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_flat_due
+    # start==end → правило выключено
+    assert friday_flat_due(
+        enabled=True, flat_start="20:00", flat_end="20:00",
+        now_utc=_fri(20, 15),
+    ) is False
+
+
+def test_friday_flat_due_bad_config_disables() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_flat_due
+    # Плохой формат → False (правило выключается, не блокирует торговлю)
+    assert friday_flat_due(
+        enabled=True, flat_start="bad", flat_end="20:45",
+        now_utc=_fri(20, 15),
+    ) is False
+    assert friday_flat_due(
+        enabled=True, flat_start="20:00", flat_end="not-a-time",
+        now_utc=_fri(20, 15),
+    ) is False
+

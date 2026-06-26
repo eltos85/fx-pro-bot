@@ -13,6 +13,7 @@ from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_pro_bot.config.settings import calc_lot_size
 from fx_momentum_bot.state.store import MomentumStore
 from fx_momentum_bot.strategy.event_guard import high_impact_event_near
+from fx_momentum_bot.strategy.friday_flat import friday_flat_due
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
 from fx_momentum_bot.strategy.session_filter import session_skip_reason
 from fx_pro_bot.trading.auth import TokenData
@@ -658,6 +659,19 @@ def run() -> None:
                     continue
                 signal_by_symbol[symbol] = signal_data
 
+            # Friday-flat-флаг цикла: вычисляем один раз (переиспользуется
+            # для close-блока ниже и для запрета новых входов в окно flat).
+            friday_flat_now = executor is not None and friday_flat_due(
+                enabled=settings.friday_flat_enabled,
+                flat_start=settings.friday_flat_start,
+                flat_end=settings.friday_flat_end,
+            )
+            if friday_flat_now:
+                log.info(
+                    "FRIDAY-FLAT: окно закрытия перед выходными (%s–%s UTC)",
+                    settings.friday_flat_start, settings.friday_flat_end,
+                )
+
             if executor is not None and settings.position_management_enabled:
                 _manage_positions(
                     executor=executor,
@@ -666,6 +680,44 @@ def run() -> None:
                     signal_by_symbol=signal_by_symbol,
                     positions_by_symbol=positions_by_symbol,
                 )
+            # Friday-flat: открытые momentum-позиции принудительно закрываются
+            # перед выходными (окно в пятницу UTC, до FX close). Сопровождение
+            # выше уже отработало (BE/partial/trailing); здесь закрываем
+            # остаток, чтобы не везти через Сб/Вс (гэп понедельника вне 1R).
+            # Retry в следующем цикле внутри окна; MARKET_CLOSED-дедуп через
+            # market_closed_pids ниже по коду переиспользуется для логов.
+            if friday_flat_now:
+                for sym in settings.symbols:
+                    remaining: list[ManagedPosition] = []
+                    for pos in positions_by_symbol.get(sym, []):
+                        close_res = executor.close_position(
+                            pos.position_id, pos.volume
+                        )
+                        if close_res.success:
+                            market_closed_pids.discard(pos.position_id)
+                            log.info(
+                                "FRIDAY FLAT %s #%d %s vol=%d closed "
+                                "(не несём через выходные: гэп пн вне 1R)",
+                                sym, pos.position_id, pos.side, pos.volume,
+                            )
+                        elif _is_market_closed_error(close_res.error):
+                            # Рынок уже закрылся в этом цикле — повторим в
+                            # следующем (внутри окна); логируем один раз.
+                            if pos.position_id not in market_closed_pids:
+                                market_closed_pids.add(pos.position_id)
+                                log.info(
+                                    "FRIDAY FLAT отложен %s #%d: рынок закрыт",
+                                    sym, pos.position_id,
+                                )
+                            remaining.append(pos)
+                        else:
+                            remaining.append(pos)
+                            log.error(
+                                "FRIDAY FLAT failed %s #%d: %s (повтор в цикле)",
+                                sym, pos.position_id, close_res.error,
+                            )
+                    if sym in positions_by_symbol:
+                        positions_by_symbol[sym] = remaining
             if executor is not None:
                 open_count = _count_open_positions_for_symbols(
                     executor, settings.symbols, labels=settings.managed_labels
@@ -788,6 +840,7 @@ def run() -> None:
                     and open_count < settings.max_open_positions
                     and sym_news_block is None
                     and sym_session_block is None
+                    and not friday_flat_now
                 )
 
                 executed = False
@@ -797,6 +850,12 @@ def run() -> None:
                     note = "flat"
                 elif signal_data.direction == last_direction:
                     note = "same_direction"
+                elif friday_flat_now:
+                    # В окне friday-flat новые входы запрещены: позиция всё
+                    # равно уехала бы в выходные (мы тут же flat-нем её в
+                    # этом же цикле). Direction НЕ фиксируется → сигнал
+                    # повторится в следующую неделю, если актуален.
+                    note = "skip:friday_flat_window"
                 elif sym_news_block is not None:
                     # Event-guard: вход отложен, direction НЕ фиксируется
                     # (_should_record_direction) → попытка повторится после
