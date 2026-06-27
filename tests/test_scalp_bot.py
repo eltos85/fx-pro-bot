@@ -1276,6 +1276,7 @@ from scalp_bot.analysis.strategies import (  # noqa: E402
     near_round,
     near_round_hier,
     resolve,
+    resolve_reset_state,
 )
 from scalp_bot.data.universe import rank_universe  # noqa: E402
 from scalp_bot.state.db import ScalpDB  # noqa: E402
@@ -1287,10 +1288,12 @@ def _sig(side, score, strategy="sweep_fade", symbol="SOLUSDT"):
 
 
 def test_resolve_none_when_empty():
+    resolve_reset_state()
     assert resolve([]) is None
 
 
 def test_resolve_same_side_picks_highest_score():
+    resolve_reset_state()
     a = _sig("long", 4, "sweep_fade")
     b = _sig("long", 6, "density_bounce")
     assert resolve([a, b]) is b  # выше score
@@ -1298,8 +1301,10 @@ def test_resolve_same_side_picks_highest_score():
 
 def test_resolve_same_side_collision_logged(caplog):
     """v0.18.21: same-side коллизия логируется (замер частоты — решение о
-    Partial-брекетах по данным), победитель прежний (max score)."""
+    Partial-брекетах по данным), победитель прежний (max score). v0.18.28: лог
+    троттлится per-cluster — логируется на новом кластере, не каждый тик."""
     import logging
+    resolve_reset_state()
     a = _sig("long", 4, "sweep_fade")
     b = _sig("long", 6, "density_bounce")
     with caplog.at_level(logging.INFO, logger="scalp_bot.play"):
@@ -1307,16 +1312,75 @@ def test_resolve_same_side_collision_logged(caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert any("SAME-SIDE КОЛЛИЗИЯ" in m and "sweep_fade(score=4)" in m
                for m in msgs)
+    # повторный вызов того же кластера — лог не повторяется (троттл per-cluster)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="scalp_bot.play"):
+        assert resolve([a, b]) is b
+    assert not any("КОЛЛИЗИЯ" in r.getMessage() for r in caplog.records)
     # одиночный сигнал коллизию не пишет
     caplog.clear()
+    resolve_reset_state()
     with caplog.at_level(logging.INFO, logger="scalp_bot.play"):
         assert resolve([a]) is a
     assert not any("КОЛЛИЗИЯ" in r.getMessage() for r in caplog.records)
 
 
 def test_resolve_conflicting_sides_skips():
+    resolve_reset_state()
     # long и short по одному символу → неоднозначность → не берём ничего
     assert resolve([_sig("long", 5), _sig("short", 9, "density_bounce")]) is None
+
+
+def test_resolve_round_robin_among_tied_strategies():
+    """v0.18.28: при равенстве score победитель вращается по кластерам, а не
+    всегда первая по порядку страта. canon/run/trend дают идентичные сигналы —
+    без вращения canon забирал бы 100%, варианты 0. Каждому новому кластеру
+    (отличный fingerprint = другой уровень входа) — следующая страта."""
+    resolve_reset_state()
+    canon = _sig("short", 6, "sweep_fade_canon", symbol="BTCUSDT")
+    run = _sig("short", 6, "sweep_fade_run", symbol="BTCUSDT")
+    trend = _sig("short", 6, "sweep_fade_trend", symbol="BTCUSDT")
+    # кластер 1 (entry 100.0): первый раз — canon (idx 0)
+    c1 = [_sig("short", 6, "sweep_fade_canon", symbol="BTCUSDT"),
+          _sig("short", 6, "sweep_fade_run", symbol="BTCUSDT"),
+          _sig("short", 6, "sweep_fade_trend", symbol="BTCUSDT")]
+    assert resolve(list(c1)).strategy == "sweep_fade_canon"
+    # тот же кластер (тот же fp) — стабильный победитель, canon снова
+    assert resolve(list(c1)).strategy == "sweep_fade_canon"
+    # кластер 2 (другой уровень entry=200.0) — следующий по ротации: run (idx 1)
+    c2 = [Signal(symbol="BTCUSDT", side="short", entry_ref=200.0, sl_level=99.0,
+                 tp_level=202.0, score=6, reasons=["x"], strategy=s)
+          for s in ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")]
+    assert resolve(c2).strategy == "sweep_fade_run"
+    # кластер 3 (entry=300.0) — trend (idx 2)
+    c3 = [Signal(symbol="BTCUSDT", side="short", entry_ref=300.0, sl_level=99.0,
+                 tp_level=302.0, score=6, reasons=["x"], strategy=s)
+          for s in ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")]
+    assert resolve(c3).strategy == "sweep_fade_trend"
+    # кластер 4 — снова canon (idx 3 % 3 = 0)
+    c4 = [Signal(symbol="BTCUSDT", side="short", entry_ref=400.0, sl_level=99.0,
+                 tp_level=402.0, score=6, reasons=["x"], strategy=s)
+          for s in ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")]
+    assert resolve(c4).strategy == "sweep_fade_canon"
+
+
+def test_resolve_round_robin_independent_per_symbol():
+    """Ротация per-symbol: BTCUSDT и ETHUSDT ведут независимые счётчики."""
+    resolve_reset_state()
+    mk = lambda sym, entry, strat: Signal(symbol=sym, side="short",
+            entry_ref=entry, sl_level=99.0, tp_level=entry + 2.0, score=6,
+            reasons=["x"], strategy=strat)
+    # BTC кластер1 → canon
+    assert resolve([mk("BTCUSDT", 100.0, "sweep_fade_canon"),
+                    mk("BTCUSDT", 100.0, "sweep_fade_run")]).strategy == "sweep_fade_canon"
+    # ETH кластер1 → canon (свой счётчик, не继承 BTC)
+    assert resolve([mk("ETHUSDT", 100.0, "sweep_fade_canon"),
+                    mk("ETHUSDT", 100.0, "sweep_fade_run")]).strategy == "sweep_fade_canon"
+    # BTC кластер2 → run; ETH кластер2 → run (независимо)
+    assert resolve([mk("BTCUSDT", 200.0, "sweep_fade_canon"),
+                    mk("BTCUSDT", 200.0, "sweep_fade_run")]).strategy == "sweep_fade_run"
+    assert resolve([mk("ETHUSDT", 200.0, "sweep_fade_canon"),
+                    mk("ETHUSDT", 200.0, "sweep_fade_run")]).strategy == "sweep_fade_run"
 
 
 def test_build_strategies_defaults_to_sweep_fade():

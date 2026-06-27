@@ -1170,19 +1170,47 @@ def build_strategies(cfg, symbols: list[str]) -> list[Strategy]:
     return out
 
 
+# v0.18.28: round-robin состояние для resolve (per-symbol). [fingerprint, idx]
+# fingerprint отличает сигнальные кластеры (свип разных уровней — разные fp);
+# idx — какая страта по счёту берёт этот кластер. Внутри кластера победитель
+# стабилен (страта успевает реально войти), следующий кластер — следующая страта.
+_RR_STATE: dict[str, list] = {}
+
+
+def _rr_fingerprint(sig: Signal) -> tuple:
+    """Идентичность сигнального кластера: символ + сторона + причины + уровень
+    входа. canon/run/trend наследуют вход → одинаковые fp на одном свипе;
+    новый свип (другой уровень) → другой fp → новый кластер → ход следующей."""
+    return (sig.symbol, sig.side, tuple(sorted(sig.reasons)),
+            round(sig.entry_ref, 6))
+
+
+def resolve_reset_state() -> None:
+    """Сброс round-robin состояния (для тестов)."""
+    _RR_STATE.clear()
+
+
 def resolve(signals: list[Signal]) -> Signal | None:
-    """Гард на конфликт по одному символу.
+    """Гард на конфликт по одному символу + round-robin same-side tie-break.
 
     - нет сигналов → None;
-    - все сигналы в ОДНУ сторону → берём с максимальным score (при равенстве —
-      первый по порядку стратегий);
-    - есть и long, и short → конфликт, не берём НИЧЕГО (неоднозначность).
+    - есть и long, и short → конфликт направлений, не берём НИЧЕГО;
+    - все сигналы в ОДНУ сторону → берём с максимальным score; при РАВЕНСТВЕ
+      score — round-robin по кластерам (а не «первый по порядку», как раньше).
 
-    v0.18.21 (запрос пользователя 2026-06-11): same-side коллизия ЛОГИРУЕТСЯ —
-    проигравшая страта теряет сигнал из своей выборки (Bybit one-way агрегирует
-    одноимённые позиции, честный двойной вход требует Partial-брекетов).
-    Решение «строить ли Partial» примем по замеренной частоте коллизий
-    (no-data-fitting: сначала данные, потом переделка исполнения).
+    v0.18.28 (запрос пользователя 2026-06-27): A/B-варианты sweep_fade_run /
+    sweep_fade_trend наследуют canon-вход и генерят идентичные сигналы (тот же
+    символ/сторона/score). Прежний tie-break max(score) при ничьей возвращал
+    ПЕРВУЮ по порядку страту — всегда canon — и варианты копили 0 сделок (A/B
+    сломан). Теперь среди max-score группы победитель вращается по кластерам:
+    каждый новый сигнальный кластер (отличный fingerprint) достаётся следующей
+    страте, внутри кластера победитель стабилен. Bybit one-way не держит >1
+    позиции на символе → иначе приходится делить единый сигнал, round-robin —
+    честное деление без переделки исполнителя.
+
+    v0.18.21: same-side коллизия логируется (замер частоты для решения о
+    Partial-брекетах). v0.18.28: лог троттлится per-cluster (прежде спамил
+    каждый тик — 124 лога на один кластер в проде).
     """
     if not signals:
         return None
@@ -1193,12 +1221,35 @@ def resolve(signals: list[Signal]) -> Signal | None:
         play.info("🛑 [%s] конфликт стратегий (%s): разные направления — "
                   "пропускаю тик", syms, names)
         return None
-    win = max(signals, key=lambda s: s.score)
-    if len(signals) > 1:
+    max_score = max(s.score for s in signals)
+    group = [s for s in signals if s.score == max_score]
+    if len(group) > 1:
+        # round-robin среди tied max-score: вращаем по кластерам (per-symbol).
+        fp = _rr_fingerprint(group[0])
+        prev = _RR_STATE.get(group[0].symbol)
+        if prev is None or prev[0] != fp:
+            idx = (prev[1] + 1) % len(group) if prev else 0
+            _RR_STATE[group[0].symbol] = [fp, idx]
+            new_cluster = True
+        else:
+            idx = prev[1]
+            new_cluster = False
+        win = group[idx]
+    else:
+        win = group[0]
+        # одиночный победитель — не вращаем, но трогаем state для троттла лога,
+        # если рядом был same-side кластер (чтобы не логировать устаревший fp).
+        fp = _rr_fingerprint(win)
+        prev = _RR_STATE.get(win.symbol)
+        if prev is None or prev[0] != fp:
+            _RR_STATE[win.symbol] = [fp, 0]
+            new_cluster = True
+        else:
+            new_cluster = False
+    if len(signals) > 1 and new_cluster:
         losers = ", ".join(f"{s.strategy}(score={s.score})"
                            for s in signals if s is not win)
         play.info("⚖️ [%s] SAME-SIDE КОЛЛИЗИЯ (%s): входит %s (score=%d), "
-                  "сигнал потеряли: %s — замер частоты для решения о "
-                  "Partial-брекетах", win.symbol, win.side, win.strategy,
-                  win.score, losers)
+                  "сигнал потеряли: %s — round-robin по кластерам (v0.18.28)",
+                  win.symbol, win.side, win.strategy, win.score, losers)
     return win
