@@ -663,12 +663,17 @@ def _select_universe(client, cfg) -> list[str]:
         ranked = rank_rows(rows, top_n=cfg.universe_top_n, vol_metric=rvol)
     if cfg.universe_min_symbols > 0 and len(ranked) < cfg.universe_min_symbols:
         # P-4 (audit A-4): вселенная выродилась (range/RVOL-гейты на остывшем
-        # рынке) — добор из liquidity-pool (только волатильностный floor
-        # ослаблен, стражи ликвидности/анти-памп — нет).
+        # рынке) — добор из liquidity-pool. v0.18.29 (запрос пользователя
+        # 2026-06-28): pool ослабляет ТОЛЬКО RVOL-свежесть, range-floor НЕ
+        # трогаем (min_range_pct = canon floor) — иначе добор тащил майоры
+        # BTC/ETH/SOL (range 2-5%), для которых base sweep_fade непригоден
+        # (fee-guard режет сигналы). Лучше вселенная < floor (или пустая),
+        # чем торговля непригодными монетами. Стражи ликвидности/анти-памп
+        # (turnover, spread cap, range-cap) — остаются.
         pool = filter_tickers(
             tickers,
             min_turnover=cfg.universe_min_turnover_usd,
-            min_range_pct=0.0,
+            min_range_pct=cfg.universe_min_range_pct,
             max_range_pct=cfg.universe_max_range_pct,
             max_spread_bps=cfg.universe_max_spread_bps)
         padded = pad_universe(ranked, pool, cfg.universe_min_symbols)

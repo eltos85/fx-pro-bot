@@ -6,6 +6,50 @@
 
 ## 2026-06-28
 
+### fix(universe): stablecoin blacklist + padding suitability-floor
+`<pending commit>`
+
+Аудит модуля `data/universe.py` на живых данных VPS (диагностический прогон
+`get_tickers`: 704 тикера, 597 USDT-перпов, 46 pre-listing отброшено).
+
+**Баг 1 — стейблкоины не исключены явно (latent):** `score_ticker` разбирал
+USDCUSDT/USDEUSDT (range≈0, turnover высокий). Сегодня не попали во вселенную
+лишь случайно (range-floor 6% + padding сортирует pool по range DESC → стейблы
+в конце). На мёртвом рынке pool мог стать < min_symbols → стейблкоин торговался
+бы base sweep_fade (бессмысленно, минус на fees). Фикс: явный `STABLE_BASES`
+blacklist в `score_ticker` (USDC/FDUSD/TUSD/USDP/DAI/USDE/EUR/USDD/USD1/USTC/
+FRAX/PYUSD/GUSD/USDS/USDJ/BCUSD/UST/CUSD/USD0/USDY).
+
+**Баг 2 — padding тащил непригодные майоры:** на тихом воскресенье hard-фильтр
+пропустил 0 альтов (turnover≥$100M + range 6-20% + spread≤5bps + RVOL≥1), и
+padding (pool min_range_pct=0.0) добрал SOL/XRP/ETH (range 2-4%) — именно те
+монеты, которые range-floor 6% должен исключать для base sweep_fade (fee-guard
+режет сигналы, docstring модуля). Фикс (одобрено пользователем, опция «Не пад-
+дить range<6%»): pool использует `min_range_pct=universe_min_range_pct` (canon
+floor) — ослабляется ТОЛЬКО RVOL-свежесть, range-floor НЕ трогаем. Лучше
+вселенная < floor (или пустая → fallback SCALP_SYMBOLS), чем торговля
+непригодными майорами. Стражи ликвидности/анти-памп (turnover, spread, range-
+cap) остаются.
+
+**Что проверено и корректно:** pre-listing фильтр (46 отброшено), range-cap
+анти-памп (VELVET 37.6%/SLX 41.1% отброшены), range-floor 6%, RVOL-гейт
+fail-open, `hourly_range_rvol` (rolling 1ч vs медиана исторических 1ч, self-
+нормировка), композитный скор (W_VOL/W_LIQ/W_SPREAD research-обоснованы),
+turnover floor $100M (отсёк 545/551).
+
+**Follow-up (не в этом коммите):** на совсем мёртвом рынке suitability-padding
+может оставить вселенную пустой → startup fallback на `SCALP_SYMBOLS`. Нужно
+проверить, что SCALP_SYMBOLS на VPS — не майоры (иначе fallback вернёт
+непригодные монеты через другой путь). Remote-env инспекция блокировалась
+auto-review — проверить отдельно.
+
+**Тесты:** `test_score_ticker_excludes_stablecoins`,
+`test_pad_pool_respects_range_floor_suitability` + 13 universe-тестов зелёные,
+246/246 suite.
+
+**Файлы:** `src/scalp_bot/data/universe.py` (STABLE_BASES + score_ticker),
+`src/scalp_bot/app/main.py` (_select_universe padding pool), `tests/test_scalp_bot.py`.
+
 ### analysis(canon): 112 сделок — exit-логика режет победителей, edge в шуме
 `<без коммита — артефакт анализа>`
 

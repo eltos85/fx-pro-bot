@@ -2396,6 +2396,42 @@ def test_pad_universe_noop_when_disabled_or_enough():
     assert pad_universe(["X", "Y", "Z"], pool, min_symbols=3) == ["X", "Y", "Z"]
 
 
+def test_score_ticker_excludes_stablecoins():
+    """v0.18.29: стейблкоины явно исключены в score_ticker (blacklist STABLE_BASES).
+    Без него USDCUSDT/USDEUSDT разбирались (range≈0, turnover высокий) и могли
+    попасть в вселенную через padding на мёртвом рынке — base sweep_fade на
+    стейблкоине бессмысленен (минус на fees)."""
+    from scalp_bot.data.universe import score_ticker, STABLE_BASES
+    # стейблкоины — отбрасываются независимо от оборота
+    for s in ("USDCUSDT", "USDEUSDT", "FDUSDUSDT", "DAIUSDT", "USDDUSDT"):
+        t = _ticker(s, 1.0, 1.0001, 0.9999, 5e9, bid=0.9999, ask=1.0001)
+        assert score_ticker(t) is None, f"{s} должен быть исключён как стейблкоин"
+    # обычная монета — разбирается
+    assert score_ticker(_ticker("NEARUSDT", 100, 109, 100, 250e6)) is not None
+    # база стейблкоина присутствует в blacklist
+    assert "USDC" in STABLE_BASES
+
+
+def test_pad_pool_respects_range_floor_suitability():
+    """v0.18.29 (запрос пользователя 2026-06-28): padding pool использует canon
+    range-floor (6%), а не 0.0 — добор не тащит непригодные майоры (BTC/ETH/SOL,
+    range 2-5%, fee-guard режет сигналы). Воспроизводим логику _select_universe:
+    pool с min_range_pct=floor → майоры НЕ в pool → не добираются."""
+    from scalp_bot.data.universe import filter_tickers, pad_universe
+    floor = 6.0
+    pool = filter_tickers(
+        [_ticker("BTCUSDT", 100, 102, 100, 2000e6),   # range 2% — майор, НЕ пригоден
+         _ticker("ETHUSDT", 100, 103.1, 100, 900e6),  # range 3.1% — майор
+         _ticker("NEARUSDT", 100, 108, 100, 250e6)],  # range 8% — пригоден
+        min_turnover=100e6, min_range_pct=floor, max_range_pct=20.0,
+        max_spread_bps=5.0)
+    # в pool попал ТОЛЬКО NEARUSDT (range≥6%) — майоры отсечены suitability-floor
+    assert [m["symbol"] for m in pool] == ["NEARUSDT"]
+    # вселенная ниже floor, но добор не может добавить майоры → остаётся как есть
+    out = pad_universe([], pool, min_symbols=3)
+    assert out == ["NEARUSDT"]  # добрали единственного пригодного, майоры НЕ добавлены
+
+
 def test_universe_min_symbols_default():
     """v0.18.19 (P-4): floor 3 монеты — минимальная диверсификация против
     вырождения вселенной в 1 символ (концентрация + sl_cooldown-запирание)."""

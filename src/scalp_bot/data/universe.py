@@ -51,6 +51,18 @@ W_VOL = 0.45
 W_LIQ = 0.45
 W_SPREAD = 0.10
 
+# База-стейблкоины (символ = BASE+USDT, BASE[:-4] ∈ множества). Явный blacklist:
+# score_ticker без него разбирал USDCUSDT/USDEUSDT (range≈0, turnover высокий) —
+# они не попадали во вселенную лишь случайно (range-floor 6% + padding сортирует
+# по range DESC), но на совсем мёртвом рынке pool мог стать < min_symbols и
+# стейблкоин бы торговался base sweep_fade (бессмысленно, минус на fees).
+# Поддерживать при появлении новых стейблов на Bybit.
+STABLE_BASES = frozenset({
+    "USDC", "FDUSD", "TUSD", "USDP", "DAI", "USDE", "EUR", "USDD", "USD1",
+    "USTC", "FRAX", "PYUSD", "GUSD", "USDS", "USDJ", "BCUSD", "UST", "CUSD",
+    "USD0", "USDY",
+})
+
 
 def _f(v: object) -> float | None:
     try:
@@ -76,6 +88,8 @@ def score_ticker(t: dict) -> dict | None:
     пре-маркет-листинг)."""
     sym = t.get("symbol", "") or ""
     if not sym.endswith("USDT"):
+        return None
+    if sym[:-4] in STABLE_BASES:  # стейблкоин-пара — не торгуется (range≈0)
         return None
     if t.get("curPreListingPhase"):  # пре-маркет / новый листинг — пропускаем
         return None
