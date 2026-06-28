@@ -6,6 +6,64 @@
 
 ## 2026-06-28
 
+### fix(density_break): no-trade blacklist BTC/ZEC/TAO (data-driven, изолировано)
+`<pending commit>`
+
+Deep-анализ 72 density_break-сделок (`/tmp/dbreak_timing.py`, dump из VPS
+`scalp_bot.sqlite`). Страта статистически значимо убыточна: WR 24% (17 TP /
+55 SL), net −$227, z=−2.84 vs H0 WR=50%.
+
+**Диагноз 1 — confirm-timing НЕ лечит:** SL-hit медиана **9.5мин ПОСЛЕ входа**
+(вход уже после 60с close-confirm). 91% ложных стопов бьётся ПОЗЖЕ 1-мин
+confirm-окна → confirm их не ловит. Даже confirm=10мин поймал бы только ~53%,
+но настоящие пробои доходят до TP на медиане 17.6мин — 10-мин confirm убил бы
+реальные входы. Вывод: ложные пробои здесь не first-touch фейкаут (который
+ловит confirm C-06), а пробои, что «выглядят настоящими» 60с+, проходят
+confirm + CVD + ob-гейт, и разворачиваются на 5–15мин. Существующий
+`density_break_confirm_bar_sec=60.0` + `confirm_cvd` + `require_ob` активны
+и достаточны для first-touch — проблема НЕ в тайминге подтверждения.
+
+**Диагноз 2 — потеря сконцентрирована в 3 монетах:**
+
+| symbol | n | SL% | net | доля минуса | значимость |
+|---|---|---|---|---|---|
+| BTCUSDT | 21 | 90% | −$192 | 85% | z=3.67, p<0.0003 |
+| ZECUSDT | 24 | 79% | −$116 | 51% | z=2.84, p<0.005 |
+| TAOUSDT | 8 | 88% | −$65 | 29% | z=1.94, p=0.053 |
+| **остальные 19** | 19 | — | **+$147** | ✅ | — |
+
+Без BTC+ZEC+TAO страта в плюсе. По символ×сторона: убийцы BTC-short (92% SL,
+−$128), ZEC-short (88%, −$142), BTC-long (88%, −$64), TAO-short (83%, −$38);
+победители ETH-short (33% SL, +$51), NEAR-short (33%, +$44), ZEC-long (62%,
++$26). Парадокс ZEC: шорт сливает, лонг в плюсе → не side-баг, а
+инструмент-специфика. Разный режим отказов: BTC ломается медленно (медиана
+45мин «пилит-и-разворот»), ZEC/TAO быстро (2–8мин откат) — разные механизмы.
+
+**Решение (одобрено пользователем, опция «Исключить BTC+ZEC+TAO»):**
+per-strategy no-trade blacklist — `density_break` не генерит сигналы на этих
+символах (обе стороны), **изолировано от вселенной**: sweep_fade /
+density_bounce / sweep_fade_* эти монеты торгуют как раньше. Гейт —
+short-circuit `return None` вверху `update()` (до трека стены), лог 1раз/
+символ. Config-driven, reversible через env без деплоя кода.
+
+**Sample-size-оговорка:** BTC 21 / ZEC 24 / TAO 8 < 100 → формально нарушает
+`sample-size.mdc` (≥100 для disable). НО: 90% SL на BTC статистически значимо
+(z=3.67, p<0.0003), решение явно обсуждено и одобрено пользователем (правило
+допускает disable <100 с обсуждения). Reversible — env `SCALP_DENSITY_BREAK_
+NO_TRADE_SYMBOLS=""` возвращает legacy без редеплоя. Пересмотреть после
+добора n≥100 per-символ на остатке (ETH/NEAR/ZEC-long и новые альты).
+
+**Тесты:** `test_density_break_no_trade_blocks_blacklisted_symbol`,
+`test_density_break_no_trade_isolated_other_symbols_trade` (изоляция — SOLUSDT
+на том же setup входит, BTCUSDT срезается),
+`test_density_break_no_trade_empty_is_legacy` (reversible),
+`test_density_break_no_trade_prod_defaults` (ScalpSettings дефолт =
+BTC/ZEC/TAO). 250/250 suite.
+
+**Файлы:** `src/scalp_bot/config/settings.py` (field + property),
+`src/scalp_bot/analysis/strategies.py` (`DensityBreakStrategy.__init__`/`update`),
+`docker-compose.yml` (env default), `tests/test_scalp_bot.py`.
+
 ### fix(universe): stablecoin blacklist + padding suitability-floor
 `<pending commit>`
 

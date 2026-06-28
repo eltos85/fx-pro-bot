@@ -960,6 +960,10 @@ class DensityBreakStrategy:
         # текущего confirm-бара по символу (граница = закрытие свечи).
         self._pending: dict[str, dict] = {}
         self._bar: dict[str, int] = {}
+        # v0.18.29: per-strategy no-trade blacklist (изолировано от вселенной).
+        # См. density_break_no_trade_symbols в settings — data-justified.
+        self._no_trade: set[str] = set(getattr(cfg, "density_break_no_trade_list", []))
+        self._no_trade_logged: dict[str, bool] = {}
 
     def _new_base(self) -> dict[str, RollingBaseline]:
         w = getattr(self.cfg, "density_baseline_sec", 900.0)
@@ -1085,6 +1089,14 @@ class DensityBreakStrategy:
         sym = snap.symbol
         if sym not in self._track:
             self._track[sym] = {"bid": None, "ask": None}
+        # v0.18.29: per-strategy no-trade — монета в blacklist → не торгуем
+        # (изолировано: другие страты этот символ торгуют). Лог — 1 раз/символ.
+        if sym in self._no_trade:
+            if not self._no_trade_logged.get(sym):
+                play.info("🧱 [%s] density_break: монета в no-trade (data: "
+                          "BTC 90%%/ZEC 79%%/TAO 88%% SL) — пропускаю", sym)
+                self._no_trade_logged[sym] = True
+            return None
         last = snap.last_price
         # ── close-confirmation (v0.18.25, V1) ──────────────────────────────
         # Канон C-06: «реальный пробой = ЗАКРЫТИЕ за уровнем + ретест; avoid

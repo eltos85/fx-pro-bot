@@ -515,6 +515,21 @@ class ScalpSettings(BaseSettings):
     # шаг к канону, см. BUILDLOG): + ретест уровня лимиткой (шаг 3) — лучшая цена и
     # ещё жёстче фильтр фейкаутов. V1 — чистый ПРЕФИКС V2, без анти-канон логики.
     density_break_confirm_bar_sec: float = Field(default=60.0)
+    # v0.18.29: per-strategy no-trade blacklist (CSV). Монеты, на которых
+    # density_break НЕ генерит сигналы (обе стороны). Изолировано от вселенной —
+    # другие страты (sweep_fade/density_bounce/…) эти символы торгуют как раньше.
+    # Артефакт решения: deep-анализ 72 density_break-сделок (BUILDLOG_SCALP
+    # 2026-06-28, /tmp/dbreak_timing.py). Timing доказал, что удлиннение confirm
+    # НЕ поможет: SL-hit медиана 9.5мин ПОСЛЕ входа (вход уже после 60с confirm),
+    # 91% ложных стопов бьётся ПОЗЖЕ confirm-окна → confirm их не ловит. Потеря
+    # сконцентрирована: BTC 21 сделка 90% SL net −$192 (z=3.67, p<0.0003 vs
+    # H0 WR=50%) = 85% всего минуса; ZEC 24 79% SL −$116; TAO 8 88% SL −$65.
+    # Без них 19 сделок net +$147. Формально BTC/ZEC <100 → нарушение sample-size,
+    # НО 90% SL статистически значимо и решение одобрено пользователем (правило
+    # допускает disable <100 с обсуждения). Пусто = выкл. env
+    # SCALP_DENSITY_BREAK_NO_TRADE_SYMBOLS. Reversible без деплоя кода.
+    density_break_no_trade_symbols: str = Field(
+        default="BTCUSDT,ZECUSDT,TAOUSDT")
 
     # ─── HTF-bias: трендовый фильтр старшего ТФ (аудит v0.9.3) ────────────
     # Канон CAP «без контекста CVD-дивергенция — шум» (gates 1–3); Murphy 1999
@@ -692,6 +707,11 @@ class ScalpSettings(BaseSettings):
     def no_long_list(self) -> list[str]:
         return [s.strip().upper() for s in self.no_long_symbols.split(",")
                 if s.strip()]
+
+    @property
+    def density_break_no_trade_list(self) -> list[str]:
+        return [s.strip().upper() for s in self.density_break_no_trade_symbols
+                .split(",") if s.strip()]
 
     @property
     def sweep_fade_canon_symbol_list(self) -> list[str]:

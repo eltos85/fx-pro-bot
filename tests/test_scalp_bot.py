@@ -2157,6 +2157,66 @@ def test_density_break_confirm_bar_zero_is_legacy_first_touch():
     assert sig is not None and sig.side == "long"      # тиковый вход (legacy)
 
 
+# ─── v0.18.29: per-strategy no-trade blacklist (изолировано от вселенной) ──────
+
+def test_density_break_no_trade_blocks_blacklisted_symbol():
+    """Монета в no-trade → density_break НЕ генерит сигнал даже на полном
+    валидном пробое (setup, на котором SOLUSDT бы вошёл)."""
+    cfg = _density_cfg(density_break_confirm_bar_sec=0.0,
+                       density_break_no_trade_list=["BTCUSDT"])
+    st = DensityBreakStrategy(cfg, ["BTCUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    # persist + пробой с ЯВНЫМ символом BTCUSDT (no-trade должен срезать на входе)
+    st.update(_snap([], symbol="BTCUSDT", last_price=99.96, bids=bids, asks=asks), now=0.0)
+    st.update(_snap([], symbol="BTCUSDT", last_price=99.96, bids=bids, asks=asks), now=15.0)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], symbol="BTCUSDT", last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    assert st.update(snap, now=16.0) is None            # no-trade → нет входа
+
+
+def test_density_break_no_trade_isolated_other_symbols_trade():
+    """Изоляция: no-trade блокирует ТОЛЬКО чёрные символы — SOLUSDT (не в списке)
+    на том же setup входит нормально. Blacklist не калечит остальную вселенную."""
+    cfg = _density_cfg(density_break_confirm_bar_sec=0.0,
+                       density_break_no_trade_list=["BTCUSDT", "ZECUSDT", "TAOUSDT"])
+    st = DensityBreakStrategy(cfg, ["SOLUSDT", "BTCUSDT"])
+    # SOLUSDT — не в blacklist → полный валидный пробой должен войти
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)           # persist на дефолтном SOLUSDT
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], symbol="SOLUSDT", last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    sig = st.update(snap, now=16.0)
+    assert sig is not None and sig.side == "long" and sig.symbol == "SOLUSDT"
+    # BTCUSDT — в blacklist → тот же setup не даёт сигнала (no-trade срезает до трека)
+    snap_b = _snap([], symbol="BTCUSDT", last_price=100.3, best_bid=100.29, best_ask=100.31,
+                   bids=flat_bids, asks=flat_asks)
+    assert st.update(snap_b, now=17.0) is None
+
+
+def test_density_break_no_trade_empty_is_legacy():
+    """Пустой blacklist → нет блокировки (legacy-поведение, reversible via env)."""
+    cfg = _density_cfg(density_break_confirm_bar_sec=0.0,
+                       density_break_no_trade_list=[])
+    st = DensityBreakStrategy(cfg, ["BTCUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                 bids=flat_bids, asks=flat_asks)
+    assert st.update(snap, now=16.0) is not None        # пустой список → входит
+
+
+def test_density_break_no_trade_prod_defaults():
+    """Prod-дефолт ScalpSettings содержит BTC/ZEC/TAO (data-driven решение)."""
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = ScalpSettings()
+    assert set(cfg.density_break_no_trade_list) == {"BTCUSDT", "ZECUSDT", "TAOUSDT"}
+    st = DensityBreakStrategy(cfg, ["BTCUSDT"])
+    assert "BTCUSDT" in st._no_trade
+
+
 # ─── ИЗОЛЯЦИЯ v0.18.16: sweep_fade и density_bounce НЕ задеты ────────────────
 
 def test_sweep_fade_unaffected_by_v0_18_16():
