@@ -6,6 +6,54 @@
 
 ## 2026-06-29
 
+### fix(run/be-lock): инвертированный знак SL — be-SL на adverse-стороне entry (#2745)
+`b986c90`
+
+Симптом (live #2745 SOLUSDT SHORT, pnl=−$0.91 при ярлыке «цель достигнута
+(биржевой TP)»): TP-ярлык с отрицательным PnL. Расследование БД:
+`entry=72.77, sl=72.71, tp=72.12, exit=72.71, close_reason=sl_hit` — SL стоял
+**НИЖЕ** entry (72.71 < 72.77), т.е. на прибыльной стороне шорта. gross
+`(entry−exit)×qty = +$2.75`, но fees $3.66 → net −$0.91. `bracket_exit_reason`
+ставит ярлык по знаку exit−entry (favorable +0.06 ≥ 0 → провизорно `tp_hit` →
+ушло в TG); реконсиляция по реальному net<0 → `sl_hit` в БД. Отсюда mismatch
+«TP-ярлык при 🔴-pnl».
+
+**Корень:** в `SweepFadeRunStrategy.manage_levels` знак be-SL был инвертирован:
+```python
+raw_sl = tr.entry * (1.0 + buf) if tr.side == "long" else tr.entry * (1.0 - buf)
+```
+long → entry+buf (ВЫШЕ entry, прибыльная сторона), short → entry−buf (НИЖЕ,
+прибыльная). Но структурный SL строится как `entry − sl_risk` (long, ниже) /
+`entry + sl_risk` (short, выше) — `signals.py:250`. BE-lock должен переносить
+стоп **к entry с adverse-стороны** (long → entry−buf, short → entry+buf), что и
+описывает собственный комментарий метода («long → SL вверх к entry; short →
+вниз»). **Код противоречил комментарию.** Для short Bybit триггерит SL на рост
+к цене (api-docs.mdc / Bybit v5 set_trading_stop): SL=entry−buf срабатывал на
+частичном ретрейсе 0.68R вверх → winner, шедший к TP@3.5R, зарезан на +0.32R в
+минус. #2743 уцелел случайно — цена бежала к TP без ретрейса.
+
+**Фикс:** знак приведён к adverse-стороне:
+```python
+raw_sl = tr.entry * (1.0 - buf) if tr.side == "long" else tr.entry * (1.0 + buf)
+```
+Гейты `new_sl <= tr.sl` (long) / `new_sl >= tr.sl` (short) остались корректными
+(be-SL теперь между entry и структурным SL). Winner бежит к TP; только полный
+разворот через entry выбивает BE (микро-убыток = buffer, как задумано «не
+выбило ровно в entry»). Bug-fix (inverted sign) — допустимо без нового анализа
+(no-data-fitting.mdc); SL-логику согласовал с пользователем (strategy-guard.mdc).
+
+**Тесты:** обновлены 4 be-lock-теста на adverse-сторону + 2 новых:
+`test_run_breakeven_lock_sl_always_on_adverse_side` (property: long sl<entry,
+short sl>entry) и `test_run_breakeven_lock_2745_short_winner_not_cut_at_entry_minus_buf`
+(регрессия #2745: be-SL шорта выше entry и выше старого баг-уровня 72.71).
+254/254 pass.
+
+**Файлы:** `src/scalp_bot/analysis/strategies.py` (`SweepFadeRunStrategy.manage_levels`),
+`tests/test_scalp_bot.py`
+
+**Замечание:** тот же profit-side знак в `flowzone_bot._be_sl` — там намеренный
+(docstring «покрыть fees», триггер на дистанции `zone_width`), отдельно не правлю.
+
 ### fix(run/be-lock): idempotent no-op когда SL уже на be-уровне (float-edge)
 `<pending commit>`
 

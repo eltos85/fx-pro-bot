@@ -3368,10 +3368,14 @@ def test_run_symbol_scope_defaults_to_canon():
 
 
 def test_run_breakeven_lock_long_moves_sl_to_entry():
-    """manage_levels: long favourable≥1.0R → SL переносится к entry+буфер,
-    биржа амендится (set_trading_stop), БД обновляется, повторный перенос
-    запрещён (_be_locked). entry=100, sl=99 → risk=1, be_activate=1.0R →
-    favourable≥1.0 (price≥101) триггерит."""
+    """manage_levels: long favourable≥1.0R → SL переносится к entry−буфер
+    (ADVERSE-сторона, чуть ниже entry), биржа амендится, БД обновляется,
+    повторный перенос запрещён (_be_locked). entry=100, sl=99 → risk=1,
+    be_activate=1.0R → favourable≥1.0 (price≥101) триггерит.
+
+    Инвариант (баг #2745): be-SL длинной всегда НИЖЕ entry — winner бежит
+    к TP, и только полный разворот через entry вниз выбивает BE. Прежний
+    знак (entry+buf, прибыльная сторона) резал winners на малом ретрейсе."""
     from scalp_bot.analysis.strategies import SweepFadeRunStrategy
     st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
     cl = _FakeClient()
@@ -3381,11 +3385,11 @@ def test_run_breakeven_lock_long_moves_sl_to_entry():
     st.manage_levels(tr, _snap_at(100.5), cl, db)
     assert tr.sl == 99.0 and cl.calls == [] and db.updates == []
     assert not getattr(tr, "_be_locked", False)
-    # favourable 1.0R (price=101) → перенос
+    # favourable 1.0R (price=101) → перенос на adverse-сторону (entry−buf=99.92)
     st.manage_levels(tr, _snap_at(101.0), cl, db)
     assert tr._be_locked is True
-    assert cl.calls and cl.calls[0]["sl"] > 100.0  # к entry+буфер (буфер 8bps)
-    assert tr.sl > 100.0 and tr.sl < 101.0  # буфер малый
+    assert cl.calls and cl.calls[0]["sl"] < 100.0  # к entry−буфер (adverse, буфер 8bps)
+    assert tr.sl < 100.0 and tr.sl > 99.0  # между структурным SL(99) и entry(100)
     assert db.updates and db.updates[0]["id"] == tr.id
     # повторный вызов — no-op (защита уже стоит)
     n_before = len(cl.calls)
@@ -3395,7 +3399,12 @@ def test_run_breakeven_lock_long_moves_sl_to_entry():
 
 def test_run_breakeven_lock_short_moves_sl_down():
     """short: entry=100, sl=101 → risk=1; favourable≥1.0R (price≤99) → SL
-    вниз к entry−буфер."""
+    вниз к entry+буфер (ADVERSE-сторона, чуть выше entry).
+
+    Инвариант (баг #2745): be-SL шорта всегда ВЫШЕ entry — winner бежит к
+    TP, и только полный разворот через entry вверх выбивает BE. Прежний
+    знак (entry−buf, прибыльная сторона) ставил SL в $0.06 ниже entry и
+    резал winners на частичном ретрейсе (SOL #2745, net −$0.91 при «TP»)."""
     from scalp_bot.analysis.strategies import SweepFadeRunStrategy
     st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
     cl = _FakeClient()
@@ -3403,31 +3412,35 @@ def test_run_breakeven_lock_short_moves_sl_down():
     tr = _tr(side="short", entry=100.0, sl=101.0, tp=97.0)
     st.manage_levels(tr, _snap_at(99.0), cl, db)  # favourable=1.0R
     assert tr._be_locked is True
-    assert tr.sl < 100.0 and tr.sl > 99.0
-    assert cl.calls and cl.calls[0]["sl"] < 100.0
+    assert tr.sl > 100.0 and tr.sl < 101.0  # между entry(100) и структурным SL(101)
+    assert cl.calls and cl.calls[0]["sl"] > 100.0  # adverse-сторона (выше entry)
 
 
 def test_run_breakeven_not_weakening_sl():
     """Если be-уровень НЕ уменьшает убыток (long: new_sl ≤ текущего SL) —
     не ослабляем защиту, просто фиксируем _be_locked. Кейс: SL уже подтянут
-    выше entry вручную/предыдущим циклом."""
+    выше entry вручную/прошлым (баг-эффект) циклом — опускать его к entry−buf
+    (adverse) было бы ослаблением."""
     from scalp_bot.analysis.strategies import SweepFadeRunStrategy
     st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
     cl = _FakeClient()
     tr = _tr(side="long", entry=100.0, sl=100.5, tp=103.0)  # SL уже выше entry
     st.manage_levels(tr, _snap_at(101.0), cl, _FakeLevelsDB())
-    assert cl.calls == []  # не амендим (new_sl ≈ entry+buf < 100.5)
+    assert cl.calls == []  # не амендим (new_sl ≈ entry−buf=99.92 ≤ 100.5 → гейт)
     assert tr._be_locked is True  # но защиту не откатываем
 
 
 def test_run_breakeven_lock_noop_when_sl_already_at_be_level():
     """Live #2743 (BTC SHORT): tr пересоздаётся из БД каждый тик → in-memory
-    _be_locked теряется. tr.sl уже на be-уровне (60209.9), но raw be-SL =
-    entry*(1-buf) = 60258.1*0.9992 = 60209.8935 — tiny float-разница < tr.sl
-    обходила гейт `new_sl >= tr.sl` (short), и каждый тик логировался no-op
-    be-lock + лишний REST + DB-write (122 spam-лога до фикса 2026-06-29).
-    Фикс: округляем be-SL до тика ДО сравнения → rounded(60209.9) >=
-    tr.sl(60209.9) → тихий no-op (нет REST, нет DB-write, нет лога)."""
+    _be_locked теряется. tr.sl уже на be-уровне — повторный be-lock должен
+    быть тихим no-op (нет лишнего REST/DB-write/лога).
+
+    После фикса #2745 be-уровень шорта = entry+buf (ADVERSE, выше entry),
+    а не entry−buf. entry=60258.1, buf=8bps → raw be-SL=60258.1*1.0008=
+    60306.3065, round(BTC tick 0.1)=60306.3. tr.sl уже 60306.3 → гейт
+    `new_sl >= tr.sl` (short) срабатывает (с округлением ДО сравнения) →
+    тихий no-op. Округление-до-сравнения защищает long-сторону от float-edge
+    (raw=99.92001 vs tr.sl=99.92 → без округления гейт `<=` бы прозевал)."""
     from scalp_bot.analysis.strategies import SweepFadeRunStrategy
 
     class _BtcClient:
@@ -3441,17 +3454,69 @@ def test_run_breakeven_lock_noop_when_sl_already_at_be_level():
     st = SweepFadeRunStrategy(_run_cfg(), ["BTCUSDT"])
     cl = _BtcClient()
     db = _FakeLevelsDB()
-    # entry=60258.1, buf=8bps(0.0008) → raw be-SL=60209.8935, round1=60209.9.
-    # tr.sl уже 60209.9 = be-уровень (предыдущий be-lock применил его в БД).
-    # risk = tp_dist/tpr = |59712.9032-60258.1|/3 = 181.73; favourable при
-    # price=60042.2 = 215.9 = 1.19R ≥ 1.0R → триггер (как в live-логе #2743).
+    # entry=60258.1, buf=8bps → raw be-SL=60306.3065, round1=60306.3.
+    # tr.sl уже 60306.3 = корректный be-уровень (предыдущий be-lock применил
+    # его в БД). risk=|entry-sl|=48.2; favourable при price=60042.2 = 215.9 =
+    # 4.48R ≥ 1.0R → триггер, но гейт → тихий no-op.
     tr = SimpleNamespace(id=2743, symbol="BTCUSDT", side="short",
-                         entry=60258.1, sl=60209.9, tp=59712.9032,
+                         entry=60258.1, sl=60306.3, tp=59712.9032,
                          ts_open=0.0, strategy="sweep_fade_run")
     st.manage_levels(tr, _snap_at(60042.2, momentum_for="short"), cl, db)
     assert cl.calls == []          # нет лишнего REST (idempotent no-op)
     assert db.updates == []        # нет лишнего DB-write
     assert tr._be_locked is True   # защиту зафиксировали (без spam-лога)
+
+
+def test_run_breakeven_lock_sl_always_on_adverse_side():
+    """Property-инвариант (баг #2745): после be-lock SL всегда на ADVERSE-
+    стороне entry — long: sl<entry, short: sl>entry. Иначе winner режется
+    на частичном ретрейсе (преждевременный «SL» на прибыльной стороне).
+
+    Прежний инвертированный знак ставил long→entry+buf (sl>entry) и short→
+    entry−buf (sl<entry) — оба на прибыльной стороне → winners резались."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
+
+    # long: entry=100, sl=99 (структурный ниже) → favourable 1.0R at 101
+    tr_l = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
+    st.manage_levels(tr_l, _snap_at(101.0), _FakeClient(), _FakeLevelsDB())
+    assert tr_l._be_locked is True
+    assert tr_l.sl < 100.0, "long be-SL должен быть НИЖЕ entry (adverse)"
+
+    # short: entry=100, sl=101 (структурный выше) → favourable 1.0R at 99
+    tr_s = _tr(side="short", entry=100.0, sl=101.0, tp=97.0)
+    st.manage_levels(tr_s, _snap_at(99.0), _FakeClient(), _FakeLevelsDB())
+    assert tr_s._be_locked is True
+    assert tr_s.sl > 100.0, "short be-SL должен быть ВЫШЕ entry (adverse)"
+
+
+def test_run_breakeven_lock_2745_short_winner_not_cut_at_entry_minus_buf():
+    """Регрессия live #2745 (SOLUSDT short, pnl=−$0.91 при ярлыке «цель
+    достигнута (биржевой TP)»). Канонический сценарий:
+      short entry=72.77, структурный SL выше entry; цена упала на +1R
+      (≈72.58) → be-lock активировался. Прежний (баг) знак ставил SL=
+      entry−buf=72.71 — на прибыльной стороне, в $0.06 от entry. Цена
+      откатилась на 0.68R вверх к 72.71 → «SL» сработал → gross +$2.75,
+      fees $3.66 → net −$0.91; winner, шедший к TP@3.5R (72.12), зарезан.
+
+    Фикс: be-SL = entry+buf (adverse, выше entry) → откат к 72.71 (entry−buf)
+    SL НЕ касается (он в 72.83, выше entry); winner бежит к TP. Проверяем,
+    что после be-lock SL стоит ВЫШЕ entry и ВЫШЕ старого баг-уровня 72.71."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+    st = SweepFadeRunStrategy(_run_cfg(), ["SOLUSDT"])
+    cl = _FakeClient()
+    db = _FakeLevelsDB()
+    # entry=72.77, sl=72.96 (структурный, выше entry), tp=72.12 (TP@3.5R)
+    tr = SimpleNamespace(id=2745, symbol="SOLUSDT", side="short",
+                         entry=72.77, sl=72.96, tp=72.12,
+                         ts_open=0.0, strategy="sweep_fade_run")
+    # favourable ≥ 1.0R: risk=tp_dist/tpr=0.65/3.0=0.2167; price=72.55 →
+    # fav=72.77-72.55=0.22 ≥ 0.2167 → триггер (как в live #2745 при ~72.584)
+    st.manage_levels(tr, _snap_at(72.55, momentum_for="short"), cl, db)
+    assert tr._be_locked is True
+    assert tr.sl > 72.77, "be-SL шорта выше entry (adverse-сторона)"
+    assert tr.sl > 72.71, "be-SL выше старого баг-уровня (entry−buf) — winner не зарежется"
+    assert cl.calls and cl.calls[0]["sl"] > 72.77  # amend на adverse-сторону
 
 
 def test_run_should_exit_no_flow_exit_for_winners():

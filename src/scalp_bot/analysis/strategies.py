@@ -400,8 +400,23 @@ class SweepFadeRunStrategy(SweepFadeCanonStrategy):
         if favorable < activate:
             return
         buf = getattr(self.cfg, "sl_buffer_bps", 0.0) / 1e4
-        raw_sl = tr.entry * (1.0 + buf) if tr.side == "long" \
-            else tr.entry * (1.0 - buf)
+        # BE-SL на ADVERSE-стороне entry (канон «вынос стопа в break-even»):
+        # long → entry−buf (чуть ниже entry, стоп-триггер на падение к entry),
+        # short → entry+buf (чуть выше entry, стоп-триггер на рост к entry).
+        # Структурный SL у long ниже entry (entry−1R), у short выше (entry+1R) —
+        # BE переносит его ВНИЗ/ВВЕРХ к entry, оставляя на стороне убытка. Тогда
+        # winner бежит к TP, и только полный разворот ЧЕРЕЗ entry выбивает BE
+        # (микро-убыток = buffer, как задумано «не выбило ровно в entry»).
+        #
+        # БАГ 2026-06-29 (#2745 SOLUSDT short, pnl=−$0.91 при «цель достигнута»):
+        # прежний знак был инвертирован (long→entry+buf, short→entry−buf) → be-SL
+        # стоял на ПРИБЫЛЬНОЙ стороне, в $0.06 от entry. Для short Bybit триггерит
+        # SL на рост к цене (api-docs.mdc / Bybit v5 set_trading_stop): цена
+        # откатилась на 0.68R вверх → «SL» сработал на entry−buf → gross +$2.75,
+        # но fees $3.66 → net −$0.91. Winner, шедший к TP@3.5R, зарезан в минус.
+        # Знак приведён к adverse-стороне (= собственному комментарию метода).
+        raw_sl = tr.entry * (1.0 - buf) if tr.side == "long" \
+            else tr.entry * (1.0 + buf)
         # Округляем be-SL до тика ДО проверки «не ослабляем защиту». Иначе
         # tiny float-разница обходила гейт: raw be-SL=60209.8935 < tr.sl=60209.9
         # (на тике 0.1) → гейт `new_sl>=tr.sl` (short) не срабатывал, код шёл
