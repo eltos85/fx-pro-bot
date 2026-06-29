@@ -190,6 +190,28 @@ flowzone_bot сверяется с этим документом и с роли�
   отката для входа в сторону уже установленного тренда. Контртренд по этой
   методике **не торгуем**.
 
+### 5.5 BE-lock — вынос стопа в break-even (канон Trade Management)
+- **После пробоя уровня поглощения** — стоп в **break-even** (risk-free), затем
+  трейл по order-flow-агрессии. Реализовано в `executor._maybe_be_lock`.
+- **Триггер**: цена прошла в сторону сделки на масштаб зоны поглощения
+  (`favourable ≥ be_lock_zone_mult × (zone_high − zone_low)`). Это канон-точно
+  («after breaking out of complete absorption»), не 1R-прокси. Зона-границы
+  persist-ятся в БД (`zone_low`, `zone_high`).
+- **BE-уровень** = entry ± `sl_buffer_bps` (anti-flicker буфер, покрывает
+  round-trip fees — чтобы BE не стал микро-убытком).
+- **Idempotent**: persisted `tr.sl` — ключ cross-tick idempotency (executor
+  rebuilds `tr` from DB each cycle; in-memory `_be_locked` не нужен). Если SL
+  уже в BE (round to tick == `tr.sl`) → silent no-op.
+- Выключаемо через env `FLOWZONE_BE_LOCK_ENABLED`. Trail по order-flow —
+  стадия 2 (канон «this print a new one, you bring your stop loss here»).
+
+> Цитата канона (видео «The Only Orderflow Guide You'll Ever Need», 39:00 Trade
+> Management): *«you can decide to go from 1 to 2 to 1 to 5 and put your stop
+> loss to break even… after breaking out of the sellers of complete absorption
+> and you have an amazing explosion where you can trail your position following
+> the aggression of the market… this print a new one, you bring your stop loss
+> here and you continue.»* — <https://youtu.be/Pz8f0wWW12M>
+
 ---
 
 ## 6. Сессии и тайм-фреймы (масштаб)
@@ -479,14 +501,24 @@ A1, A2, A6 — изменения торговой логики/инфры, по
   (канон §2) выполняется в `auction.AuctionTracker.update` (swings-пробой).
   Торговый путь всегда `auction.update(classify(...))` → вход требует
   breakout+acceptance. Docstring `context.py` явно это фиксирует.
-- **R:R-фильтр ≥ 1:2.5 (канон Fabervaale, шаг 5.1).** После расчёта стопа/цели
+- **R:R-фильтр ≥ 1:2 (канон Fabervaale, шаг 5.1).** После расчёта стопа/цели
   бот отбрасывает сделку, если `reward/risk < min_rr` (reward = |tp−last|,
   risk = |sl−last|). Канон: ролик cUTsoU-15Tc «The Simplest Orderflow Trading
   Model» — «our real risk-to-reward… maybe it's 1 to 2, 1 to 2.5»;
   chartfanatics AMT-strategy (Fabio) — «Reward-to-Risk 1:2.5 to 1:5». Источник:
   research, не data-fitting. Кейс-мотивация live #468: tp_hit с убытком (swing
-  0.47 от entry, стоп 6.35 → rr 0.07; gross 0.24 < fees 1.83 → net −1.59). Файлы:
-  `strategy.py`, `settings.py` (`min_rr=2.5`).
+  0.47 от entry, стоп 6.35 → rr 0.07; gross 0.24 < fees 1.83 → net −1.59).
+  **2026-06-29: `min_rr` 2.5 → 2.0** (канон-флор «1 to 2» первоисточника
+  Fabervaale). Причина: на крипто BTC/ETH/SOL (тоньше NQ, 24/7 без cash-session)
+  zone-stop широкий → R:R≥2.5 почти недостижимо, бот встал (0 входов с 06-28).
+  Возврат к канон-флору 1:2 возобновляет входы, не нарушая канон. Файлы:
+  `strategy.py`, `settings.py` (`min_rr=2.0`).
+- **BE-lock (канон Trade Management, видео 39:00).** 2026-06-29: добавлен
+  вынос SL в break-even после пробоя зоны поглощения (`executor._maybe_be_lock`,
+  §5.5). Прямо бьёт по 72% SL-hit (n=116, WR 28%, −$239 за 7д): лузеры, что
+  вернулись → scratch на BE. Источник: <https://youtu.be/Pz8f0wWW12M> (39:00).
+  Файлы: `executor.py`, `db.py` (`zone_low`/`zone_high`), `settings.py`
+  (`be_lock_enabled`, `be_lock_zone_mult`), `strategy.py` (research-блок).
 
 Числовые пороги A4/B2/B3/B5/B1 — оставлены как [НАШЕ] (B1 `min_confluence=3` —
 согласовано с пользователем); изменение требует обоснования данными

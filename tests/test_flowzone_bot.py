@@ -357,7 +357,9 @@ class _Cfg:
     absorption_min_counter_frac = 0.5
     sl_buffer_bps = 8.0
     sl_zone_mult = 1.0               # канон «1-2-3» (far_edge + 1× ширина зоны)
-    min_rr = 2.5                     # канон Fabervaale R:R ≥ 1:2.5
+    min_rr = 2.0                     # канон Fabervaale R:R ≥ 1:2 (флор «1 to 2»)
+    be_lock_enabled = True           # канон Trade Management (видео 39:00)
+    be_lock_zone_mult = 1.0          # BE-триггер = 1× ширина зоны
 
 
 def _evictless_state_snapshot(buckets, bucket_size, trades, last_price, ts):
@@ -394,7 +396,7 @@ def test_evaluate_short_continuation_full_checklist():
     ctx = classify(prof, snap.last_price, accept_frac=0.70)
     assert ctx.state == TREND_DOWN
     # канон §5.3: цель = ближайший swing (без swing-цели сделки нет).
-    # swing low = 95.0 далеко от entry 119.5, чтобы R:R ≥ 2.5 (канон Fabervaale,
+    # swing low = 95.0 далеко от entry 119.5, чтобы R:R ≥ 2.0 (канон Fabervaale,
     # sl≈127.5 → risk≈8, reward=24.5 → rr=3.06). Тест проверяет чеклист, не R:R.
     swings = [type("S", (), {"kind": "low", "price": 95.0})()]
 
@@ -411,8 +413,8 @@ def test_evaluate_short_continuation_full_checklist():
 
 
 def test_evaluate_rr_filter_rejects_close_swing():
-    """Канон Fabervaale R:R ≥ 1:2.5 (ролик cUTsoU-15Tc, chartfanatics). Если
-    swing-цель ближе к entry чем risk × min_rr — сделка не берётся (TP не
+    """Канон Fabervaale R:R ≥ 1:2 (ролик cUTsoU-15Tc «1 to 2», chartfanatics).
+    Если swing-цель ближе к entry чем risk × min_rr — сделка не берётся (TP не
     окупает риск/fees, кейс #468 live: tp_hit с убытком)."""
     prof = build_profile(_short_reload_profile(), bucket_size=1.0)
     now = 1000.0
@@ -420,10 +422,10 @@ def test_evaluate_rr_filter_rejects_close_swing():
                                      last_price=119.5, ts=now)
     ctx = classify(prof, snap.last_price, accept_frac=0.70)
     from flowzone_bot.analysis.strategy import evaluate
-    # swing low = 117 (близко: reward 2.5, risk ~8 → rr 0.31 < 2.5) → None
+    # swing low = 117 (близко: reward 2.5, risk ~8 → rr 0.31 < 2.0) → None
     near = [type("S", (), {"kind": "low", "price": 117.0})()]
     assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=near) is None
-    # swing low = 95 (далеко: rr ~3.06 ≥ 2.5) → сигнал
+    # swing low = 95 (далеко: rr ~3.06 ≥ 2.0) → сигнал
     far = [type("S", (), {"kind": "low", "price": 95.0})()]
     sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=far)
     assert sig is not None
@@ -489,7 +491,7 @@ def test_evaluate_uses_swing_target_only():
     # без swings → нет swing-цели → сделка не берётся (канон: цель всегда swing)
     assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=None) is None
     # со swings → tp = ближайший swing, tp2 не существует (частичная фиксация
-    # удалена, A6). swing low = 95.0 далеко, чтобы R:R ≥ 2.5 (канон Fabervaale).
+    # удалена, A6). swing low = 95.0 далеко, чтобы R:R ≥ 2.0 (канон Fabervaale).
     swings = [type("S", (), {"kind": "low", "price": 95.0})(),
               type("S", (), {"kind": "low", "price": 90.0})()]
     sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swings)
@@ -982,3 +984,211 @@ def test_flowzone_canon_defaults():
     assert cfg.absorption_window_sec == 300.0
     # §2: acceptance вне VA = каноничная Value-Area-доля 0.70.
     assert cfg.context_accept_frac == 0.70
+    # 2026-06-29: R:R-флор 1:2 (канон «1 to 2»), BE-lock включен (видео 39:00).
+    assert cfg.min_rr == 2.0
+    assert cfg.be_lock_enabled is True
+    assert cfg.be_lock_zone_mult == 1.0
+
+
+# ─── R:R-флор 1:2 (канон «1 to 2», 2026-06-29) ───────────────────────────
+
+def test_evaluate_rr_floor_2_lets_rr_between_2_and_2_5():
+    """Канон-флор «1 to 2» (Fabervaale): R:R в [2.0, 2.5) теперь проходит
+    (раньше при min_rr=2.5 отбрасывалось → бот встал на крипто). rr≈2.3 → сигнал."""
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
+    now = 1000.0
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
+                                     last_price=119.5, ts=now)
+    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    from flowzone_bot.analysis.strategy import evaluate
+    # entry≈119.5, sl≈127.5 → risk≈8.0; swing low=101 → reward≈18.5 → rr≈2.31
+    swing = [type("S", (), {"kind": "low", "price": 101.0})()]
+    sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swing)
+    assert sig is not None
+    # rr в reasons должен быть ≥ 2.0 (точное значение считаем для гарантии)
+    rr = next(float(r.split("=")[1]) for r in sig.reasons if r.startswith("rr="))
+    assert 2.0 <= rr < 2.5
+
+
+# ─── BE-lock (канон Trade Management, видео 39:00, 2026-06-29) ────────────
+
+def _be_cfg():
+    c = _Cfg()
+    c.be_lock_enabled = True
+    c.be_lock_zone_mult = 1.0
+    return c
+
+
+class _FakeClientBE:
+    """Клиент для BE-lock тестов: round_price без округления, set_trading_stop
+    всегда ok, instrument() — None."""
+    def __init__(self):
+        self.stops = []  # журнал вызовов set_trading_stop
+    def round_price(self, symbol, price):
+        return price
+    def set_trading_stop(self, symbol, *, sl_price, tp_price):
+        self.stops.append((symbol, sl_price, tp_price))
+        return {"ok": True}
+    def instrument(self, symbol):
+        return None
+
+
+class _FakeDBBE:
+    """БД-стаб: open_trades возвращает mutable TradeRow-подобные объекты;
+    update_levels мутирует in-memory sl."""
+    def __init__(self, trs):
+        self._trs = trs
+        self.updates = []
+    def open_trades(self):
+        return list(self._trs)
+    def update_levels(self, tid, *, sl, tp):
+        self.updates.append((tid, sl, tp))
+        for tr in self._trs:
+            if tr.id == tid:
+                tr.sl = sl
+
+
+def _be_trade(side, entry, sl, tp, zone_low, zone_high, mode="live"):
+    return type("T", (), {
+        "id": 1, "symbol": "BTCUSDT", "side": side, "mode": mode,
+        "entry": entry, "sl": sl, "tp": tp, "qty": 1.0,
+        "zone_low": zone_low, "zone_high": zone_high,
+    })()
+
+
+def test_be_lock_long_moves_sl_to_entry_after_zone_break():
+    """Канон: после пробоя зоны поглощения → SL в BE. LONG: zone_width=10,
+    цена выросла с 100 до 111 (favourable=11 ≥ 10) → SL 90 → BE ≈100.08."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
+                   zone_low=90.0, zone_high=100.0)  # zone_width=10
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    ex._maybe_be_lock(tr, price=111.0)
+    assert len(cl.stops) == 1                       # выставили BE на биржу
+    new_sl = cl.stops[0][1]
+    assert new_sl > 100.0                           # BE = entry + buffer
+    assert abs(new_sl - 100.08) < 0.01              # sl_buffer_bps=8 → +0.08
+    assert tr.sl == new_sl                          # in-memory обновлён
+    assert db.updates[0][1] == new_sl               # БД обновлён
+
+
+def test_be_lock_short_moves_sl_below_entry_after_zone_break():
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("short", entry=100.0, sl=110.0, tp=80.0,
+                   zone_low=100.0, zone_high=110.0)  # zone_width=10
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    ex._maybe_be_lock(tr, price=89.0)               # favourable=11 ≥ 10
+    assert len(cl.stops) == 1
+    new_sl = cl.stops[0][1]
+    assert new_sl < 100.0                           # BE = entry − buffer
+    assert abs(new_sl - 99.92) < 0.01
+
+
+def test_be_lock_no_trigger_before_zone_break():
+    """Цена прошла в сторону сделки < zone_width → BE НЕ срабатывает (ещё не
+    пробой уровня поглощения)."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
+                   zone_low=90.0, zone_high=100.0)  # zone_width=10
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    ex._maybe_be_lock(tr, price=109.0)              # favourable=9 < 10
+    assert cl.stops == []
+    assert db.updates == []
+    assert tr.sl == 90.0                            # SL не тронут
+
+
+def test_be_lock_idempotent_when_sl_already_at_be():
+    """Повторный тик после BE: SL уже в BE (tr.sl == be_sl) → не ослабляем
+    защиту (long: be_sl <= tr.sl) → silent no-op. Канон cross-tick idempotency
+    через persisted SL (executor rebuilds tr from DB each cycle)."""
+    from flowzone_bot.trading.executor import Executor
+    be_sl = 100.08
+    tr = _be_trade("long", entry=100.0, sl=be_sl, tp=120.0,
+                   zone_low=90.0, zone_high=100.0)  # уже в BE
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    ex._maybe_be_lock(tr, price=115.0)              # favourable=15 ≥ 10
+    assert cl.stops == []                           # no-op — SL уже в BE
+    assert db.updates == []
+
+
+def test_be_lock_disabled_via_config():
+    """FLOWZONE_BE_LOCK_ENABLED=false → BE не применяется (reversible)."""
+    from flowzone_bot.trading.executor import Executor
+    cfg = _be_cfg()
+    cfg.be_lock_enabled = False
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
+                   zone_low=90.0, zone_high=100.0)
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=cfg, client=cl, now=lambda: 1.0)
+    ex._maybe_be_lock(tr, price=200.0)              # огромный favourable
+    assert cl.stops == []
+    assert tr.sl == 90.0
+
+
+def test_be_lock_skips_trade_without_zone_columns():
+    """Старая сделка (до миграции) без zone_low/zone_high → BE пропускается
+    (нельзя посчитать zone_width — не ломаем)."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
+                   zone_low=None, zone_high=None)
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    ex._maybe_be_lock(tr, price=200.0)
+    assert cl.stops == []
+    assert tr.sl == 90.0
+
+
+# ─── DB: zone_low/zone_high persist (2026-06-29) ──────────────────────────
+
+def test_db_persists_zone_low_high(tmp_path):
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    tid = db.insert_open(symbol="BTCUSDT", side="long", qty=0.1, entry=100.0,
+                         sl=90.0, tp=120.0, score=3, reasons="x", mode="live",
+                         zone_low=90.0, zone_high=100.0)
+    trs = db.open_trades()
+    assert len(trs) == 1
+    assert trs[0].zone_low == 90.0
+    assert trs[0].zone_high == 100.0
+    db.close()
+
+
+def test_db_migrates_existing_trades_add_zone_columns(tmp_path):
+    """Существующая БД (без zone_low/zone_high) мигрируется: колонки
+    добавляются, старые сделки читаются с zone_low=None."""
+    import sqlite3
+    from flowzone_bot.state.db import FlowzoneDB
+    path = str(tmp_path / "flowzone_bot.sqlite")  # путь, который откроет FlowzoneDB
+    # создаём «старую» БД без zone-колонок
+    con = sqlite3.connect(path)
+    con.executescript("""
+    CREATE TABLE trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts_open REAL, symbol TEXT,
+        side TEXT, qty REAL, entry REAL, sl REAL, tp REAL, score INTEGER,
+        reasons TEXT, mode TEXT, strategy TEXT, status TEXT,
+        entry_order_id TEXT, ts_close REAL, exit REAL, pnl_usd REAL,
+        fees_usd REAL, close_reason TEXT, pnl_provisional INTEGER,
+        pnl_verified INTEGER);
+    INSERT INTO trades (ts_open,symbol,side,qty,entry,sl,tp,score,reasons,
+        mode,strategy,status) VALUES (1,'X','long',1,100,90,120,3,'r','live',
+        'flowzone','open');
+    """)
+    con.commit()
+    con.close()
+    # открытие через FlowzoneDB запускает миграцию
+    db = FlowzoneDB(str(tmp_path))
+    trs = db.open_trades()
+    assert len(trs) == 1
+    assert trs[0].zone_low is None        # старая сделка — без зоны
+    assert trs[0].zone_high is None
+    db.close()

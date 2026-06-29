@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS trades (
     fees_usd REAL,
     close_reason TEXT,
     pnl_provisional INTEGER NOT NULL DEFAULT 0,
-    pnl_verified INTEGER NOT NULL DEFAULT 0
+    pnl_verified INTEGER NOT NULL DEFAULT 0,
+    zone_low REAL,
+    zone_high REAL
 );
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ts_close ON trades(ts_close);
@@ -74,6 +76,8 @@ class TradeRow:
     close_reason: str | None
     pnl_provisional: int = 0
     pnl_verified: int = 0
+    zone_low: float | None = None
+    zone_high: float | None = None
 
 
 @dataclass
@@ -108,6 +112,10 @@ class FlowzoneDB:
             self._conn.execute(
                 "ALTER TABLE trades ADD COLUMN pnl_verified "
                 "INTEGER NOT NULL DEFAULT 0")
+        if "zone_low" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN zone_low REAL")
+        if "zone_high" not in cols:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN zone_high REAL")
 
     def close(self) -> None:
         self._conn.close()
@@ -119,14 +127,15 @@ class FlowzoneDB:
         tp: float, score: int, reasons: str, mode: str,
         strategy: str = "flowzone",
         entry_order_id: str | None = None, ts_open: float | None = None,
+        zone_low: float | None = None, zone_high: float | None = None,
     ) -> int:
         ts = ts_open if ts_open is not None else time.time()
         cur = self._conn.execute(
             "INSERT INTO trades (ts_open,symbol,side,qty,entry,sl,tp,score,"
-            "reasons,mode,strategy,status,entry_order_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?)",
+            "reasons,mode,strategy,status,entry_order_id,zone_low,zone_high) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?)",
             (ts, symbol, side, qty, entry, sl, tp, score, reasons, mode,
-             strategy, entry_order_id),
+             strategy, entry_order_id, zone_low, zone_high),
         )
         self._conn.commit()
         return int(cur.lastrowid)
@@ -337,4 +346,6 @@ class FlowzoneDB:
             pnl_provisional=r["pnl_provisional"] if "pnl_provisional"
             in r.keys() else 0,
             pnl_verified=r["pnl_verified"] if "pnl_verified" in r.keys() else 0,
+            zone_low=r["zone_low"] if "zone_low" in r.keys() else None,
+            zone_high=r["zone_high"] if "zone_high" in r.keys() else None,
         )

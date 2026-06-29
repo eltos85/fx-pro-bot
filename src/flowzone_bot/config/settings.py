@@ -197,9 +197,31 @@ class FlowzoneSettings(BaseSettings):
     # 1 to 2.5»; chartfanatics AMT-strategy (Fabio) — «Reward-to-Risk 1:2.5 to
     # 1:5». Если swing-цель ближе к entry чем risk × min_rr — TP не окупает
     # риск (и при малом ходе даже round-trip fees, кейс #468: reward 0.47 /
-    # risk 6.35 = 0.07 → tp_hit с убытком −1.59). 2.5 = каноничная нижняя
-    # граница. Источник: research, не data-fitting (strategy-guard.mdc).
-    min_rr: float = Field(default=2.5)
+    # risk 6.35 = 0.07 → tp_hit с убытком −1.59).
+    # 2.0 = канон-флор «1 to 2» (первоисточник Fabervaale). 2026-06-29: было
+    # 2.5 (нижняя граница chartfanatics), но на крипто BTC/ETH/SOL (тоньше NQ,
+    # 24/7 без cash-session) zone-stop широкий → R:R≥2.5 почти недостижимо,
+    # бот встал (0 входов). Возврат к канон-флору 1:2 возобновляет входы, не
+    # нарушая канон (strategy-guard/no-data-fitting: правка обоснована каноном,
+    # не подгонкой под P&L). Источник: research, не data-fitting.
+    min_rr: float = Field(default=2.0)
+
+    # ─── Trade Management: BE-lock (канон Fabervaale, видео «The Only Orderflow
+    # Guide» 39:00 Trade Management) ───────────────────────────────────────
+    # Канон: после пробоя уровня поглощения — *«you can decide to put your stop
+    # loss to break even»* (risk-free), затем трейл по order-flow-агрессии.
+    # BE-lock: когда цена прошла в сторону сделки на масштаб зоны поглощения
+    # (favourable ≥ zone_width = zone_high − zone_low) — выносим SL в entry ±
+    # буфер. Прямо бьёт по 72% SL-hit: лузеры, что вернулись → scratch на BE,
+    # победители бегут к swing-TP (и в стадии 2 — трейлятся по order-flow).
+    # Буфер = тот же anti-flicker sl_buffer_bps (покрыть round-trip fees, чтобы
+    # BE не стал микро-убытком). Триггер по краю зоны (persist zone_low/high в
+    # БД) — канон-точно, не 1R-прокси. Выключаемо через env (reversible).
+    be_lock_enabled: bool = Field(default=True)
+    # Во сколько zone_width цена должна пройти в сторону сделки для BE-триггера
+    # (1.0 = «пробой уровня поглощения» на полный масштаб зоны). Канон-инвариант,
+    # не тюним без обсуждения.
+    be_lock_zone_mult: float = Field(default=1.0)
 
     # ─── Цели / swing / re-entry (фаза 5, канон §5.3, §8) ─────────────────
     # Цель = ближайшая swing-точка (STRATEGY §5.3). Swing = фрактал Bill Williams

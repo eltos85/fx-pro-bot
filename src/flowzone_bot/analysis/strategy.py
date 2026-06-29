@@ -11,11 +11,21 @@
    свечи, «failed» контр-сторона).
 5. Вход: лимитка в зоне; стоп ЗА зоной (масштаб 1-2-3/1-2-4/1-2-5 =
    far_edge + N × ширина зоны, §5.2); цель — ближайшая swing-точка (§5.3);
-   R:R-фильтр ≥ 1:2.5 (канон Fabervaale: ролик cUTsoU-15Tc «1 to 2, 1 to 2.5»,
+   R:R-фильтр ≥ 1:2 (канон Fabervaale: ролик cUTsoU-15Tc «1 to 2, 1 to 2.5»,
    chartfanatics «1:2.5 to 1:5» — swing-цель должна окупать риск, иначе TP не
-   покрывает даже fees, кейс #468). Выход — полный на swing point; re-entry —
-   отдельной сделкой на следующей зоне (§5.3, §8). Никакой частичной фиксации
-   и структурного фолбэка — канон их не описывает (правило no-data-fitting.mdc).
+   покрывает даже fees, кейс #468). 1:2 = канон-флор первоисточника; 2026-06-29
+   возврат с 2.5 к 2.0 — крипто BTC/ETH/SOL тоньше NQ, R:R≥2.5 недостижимо
+   (бот встал). Выход — полный на swing point; re-entry — отдельной сделкой на
+   следующей зоне (§5.3, §8).
+   ─── Research basis (Trade Management, видео «The Only Orderflow Guide»
+   39:00) ─── после пробоя уровня поглощения — «put your stop loss to break
+   even» (risk-free), затем трейл по order-flow-агрессии. BE-lock реализован в
+   executor._maybe_be_lock: favourable ≥ zone_width → SL в entry±buffer
+   (буфер sl_buffer_bps, anti-flicker). Никакой частичной фиксации — BE это не
+   фиксация, а перемещение стопа (канон её не описывает как частичную).
+   Источник: https://youtu.be/Pz8f0wWW12M (Fabervaale ENG, Trade Management).
+   Trail по order-flow — стадия 2 (канон «this print a new one, you bring
+   your stop loss here»).
 
 Только по направлению аукциона (continuation, §5.4) — контртренд не торгуем.
 ``evaluate`` — чистая (по снапшоту + per-swing профилю + контексту), тестируется

@@ -140,7 +140,7 @@ class Executor:
                 symbol=sig.symbol, side=sig.side, qty=qty, entry=sig.entry_ref,
                 sl=sig.sl_level, tp=sig.tp_level, score=sig.score,
                 reasons=reasons, mode="paper", strategy=sig.strategy,
-                ts_open=self._now())
+                ts_open=self._now(), zone_low=sig.zone_low, zone_high=sig.zone_high)
             log.info("PAPER open #%d %s %s qty=%.6f risk=$%.2f entry=%.4f "
                      "sl=%.4f tp=%.4f [%s] score=%d", tid, sig.symbol, sig.side,
                      qty, risk_usd, sig.entry_ref, sig.sl_level, sig.tp_level,
@@ -165,7 +165,7 @@ class Executor:
             symbol=sig.symbol, side=sig.side, qty=qty, entry=limit_price,
             sl=sig.sl_level, tp=exch_tp, score=sig.score, reasons=reasons,
             mode="live", strategy=sig.strategy, entry_order_id=link,
-            ts_open=self._now())
+            ts_open=self._now(), zone_low=sig.zone_low, zone_high=sig.zone_high)
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
                             "close_qty": 0.0, "open_val": 0.0, "open_qty": 0.0}
@@ -457,9 +457,69 @@ class Executor:
                      tr.id, tr.symbol, old, net, net - old)
         return True
 
+    # ─── Trade Management: BE-lock (канон Fabervaale, видео 39:00) ────────
+    # После пробоя уровня поглощения (favourable ≥ zone_width) — SL в entry±buf.
+    # Idempotent: persisted tr.sl — ключ. Если SL уже в BE (round to tick == tr.sl)
+    # → no-op. Не нужен in-memory _be_locked (executor rebuilds tr from DB each
+    # cycle; persisted SL сам является cross-tick idempotency key).
+    def _be_sl(self, tr) -> float | None:
+        """BE-уровень = entry ± anti-flicker буфер (sl_buffer_bps). Покрывает
+        round-trip fees, чтобы BE не стал микро-убытком."""
+        if tr.entry <= 0:
+            return None
+        buf = self._cfg.sl_buffer_bps / 10000.0 * tr.entry
+        return tr.entry + buf if tr.side == "long" else tr.entry - buf
+
+    def _maybe_be_lock(self, tr, price: float | None) -> None:
+        """Вынос SL в BE когда цена пробила зону поглощения в сторону сделки.
+        Канон: «after breaking out of complete absorption → stop to break even».
+        Триггер: favourable ≥ be_lock_zone_mult × zone_width (масштаб зоны)."""
+        if not self._cfg.be_lock_enabled or price is None:
+            return
+        if tr.zone_high is None or tr.zone_low is None:
+            return  # старая сделка без zone-границ (до миграции) — не трогаем
+        zone_width = tr.zone_high - tr.zone_low
+        if zone_width <= 0:
+            return
+        favourable = ((price - tr.entry) if tr.side == "long"
+                      else (tr.entry - price))
+        if favourable < zone_width * self._cfg.be_lock_zone_mult:
+            return
+        be_sl = self._be_sl(tr)
+        if be_sl is None:
+            return
+        # BE только улучшает защиту: long → выше текущего SL, short → ниже.
+        if tr.side == "long" and be_sl <= tr.sl:
+            return
+        if tr.side == "short" and be_sl >= tr.sl:
+            return
+        if tr.mode == "live" and self._client is not None:
+            new_sl = self._client.round_price(tr.symbol, be_sl)
+            if tr.side == "long" and new_sl <= tr.sl:
+                return  # округление съело улучшение → no-op
+            if tr.side == "short" and new_sl >= tr.sl:
+                return
+            res = self._client.set_trading_stop(
+                tr.symbol, sl_price=new_sl, tp_price=tr.tp)
+            if not res.get("ok") and not res.get("no_op"):
+                log.warning("be-lock #%d %s отклонён (%s)", tr.id, tr.symbol,
+                            res.get("error"))
+                return
+            self._db.update_levels(tr.id, sl=new_sl, tp=tr.tp)
+            tr.sl = new_sl  # in-memory консистентность в рамках цикла
+            play.info("🔒 [%s] be-lock #%d %s: SL→BE %.4f (зону пробило, "
+                      "risk-free; биржевой TP %.4f сохранён)", tr.symbol, tr.id,
+                      tr.side.upper(), new_sl, tr.tp)
+        else:
+            self._db.update_levels(tr.id, sl=be_sl, tp=tr.tp)
+            tr.sl = be_sl  # paper: close-детекция в этом же цикле видит BE
+            play.info("🔒 [%s] PAPER be-lock #%d %s: SL→BE %.4f", tr.symbol,
+                      tr.id, tr.side.upper(), be_sl)
+
     def _manage_paper(self, tr, price: float | None) -> None:
         if price is None:
             return
+        self._maybe_be_lock(tr, price)  # канон: BE до проверки TP/SL
         hit_tp = price >= tr.tp if tr.side == "long" else price <= tr.tp
         hit_sl = price <= tr.sl if tr.side == "long" else price >= tr.sl
         if not (hit_tp or hit_sl):
@@ -522,7 +582,9 @@ class Executor:
                      pnl or 0.0, reason)
             self._on_close(tr, pnl, reason, is_real)
             return
-        # держим позицию — троттлим лог дистанций до TP/SL
+        # держим позицию — BE-lock (канон: пробой зоны → SL в BE), затем
+        # троттлим лог дистанций до TP/SL
+        self._maybe_be_lock(tr, price)
         iv = 15.0
         if price is not None and self._now() - self._hold_log.get(tr.id, 0.0) >= iv:
             self._hold_log[tr.id] = self._now()

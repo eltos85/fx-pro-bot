@@ -9,6 +9,66 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-06-29
+
+### feat(flowzone): BE-lock + R:R-флор 1:2 — канон Trade Management (стадия 1)
+`<pending commit>`
+
+Контекст: flowzone кровоточит ~2 недели. За 7д: 116 сделок, WR 28%, **−$239**
+(pnl = net closedPnl Bybit, verified=115/116 — ground truth), z≈−4.7 vs 50%
+(p<0.001), n=116 ≥ 100 (порог sample-size для решений достигнут). R:R-фильтр
+≥2.5 (06-25) не починил причину — только порезал частоту: 24→3→1→0→0 сделок,
+бот встал (0 входов с 06-28: на крипто BTC/ETH/SOL zone-stop широкий →
+R:R≥2.5 недостижимо; канон калиброван под глубокий NQ cash-session).
+
+Research (источники автора — Fabio Valentini / Fabervaale): сайт fabervaale.com,
+бесплатный Telegram t.me/fabervaaleEng, видео «The Only Orderflow Guide You'll
+Ever Need» (youtu.be/Pz8f0wWW12M, раздел **39:00 Trade Management**), письм.
+rulebook winkler.expert/reports/fabervaale-rulebook.html, playbook
+tradezella.com/strategies/auction-market-strategy (2 модели: continuation +
+mean-reversion — у нас только первая).
+
+Решение (канон-faithful, 2 расхождения с каноном):
+1. **R:R 2.5 → 2.0** — канон-флор «1 to 2» первоисточника Fabervaale (ролик
+   cUTsoU-15Tc: «maybe it's 1 to 2, 1 to 2.5»). 1:2 — нижняя граница канона,
+   не data-fitting. Возобновляет входы на крипто.
+2. **BE-lock по пробою края зоны** — канон Trade Management (видео 39:00):
+   «after breaking out of complete absorption → put your stop loss to break
+   even». `executor._maybe_be_lock`: favourable ≥ `be_lock_zone_mult` ×
+   zone_width → SL в entry ± `sl_buffer_bps` (anti-flicker, покрыть fees).
+   Прямо бьёт по 72% SL-hit: лузеры, что вернулись → scratch на BE. Зона-
+   границы persist-ятся в БД (`zone_low`, `zone_high` — аддитивная миграция).
+   Idempotent: persisted `tr.sl` = cross-tick idempotency key (executor
+   rebuilds tr from DB each cycle; in-memory `_be_locked` не нужен). Если SL
+   уже в BE → silent no-op. Выключаемо: `FLOWZONE_BE_LOCK_ENABLED`.
+
+Стадии: 1 (R:R-флор + BE-lock) — этот коммит; 2 — трейл по order-flow (канон
+«this print a new one, you bring your stop loss here»); 3 — ужесточение
+`detect_absorption` (закрытие свечи против агрессора + повторные failed-ретесты).
+
+**Файлы:** `config/settings.py` (`min_rr=2.0`, `be_lock_enabled`,
+`be_lock_zone_mult`), `trading/executor.py` (`_maybe_be_lock`, `_be_sl`,
+persist zone в `on_signal`), `state/db.py` (`zone_low`/`zone_high` + миграция),
+`analysis/strategy.py` (research-блок), `STRATEGY_FLOWZONE.md` (§5.5, §11.6),
+`tests/test_flowzone_bot.py` (BE-lock 6 тестов + R:R-флор + DB zone persist).
+
+### анализ(flowzone): диагностика убыточности и стопа входов
+`<pending commit>` (без кода — фиксация наблюдения per sample-size.mdc)
+
+Симптом: «flowzone почти перестал ставить, всё в минус». Диагностика (БД
+flowzone_bot.sqlite, net closedPnl Bybit): частота обвалилась после canon-
+реврайта 06-25 (24→3→1→0→0; 0 входов 06-28/06-29); за 7д −$239, WR 28%,
+n=116 (p<0.001). R:R-фильтр ≥2.5 на крипто делает входы недостижимыми (ctx=
+warming 06-28; ctx=trend_*, session=active, open=0 06-29 — silent `return None`
+в `evaluate`: нет строки генерации/отброса сигнала). Пост-filter сделки (rr≥2.5,
+n=9) всё равно минус (3TP/6SL, реализованный payoff 1.47:1 < канон 2.5:1).
+Бонус-баг: на части сделок sl≈entry (R:R считается мусором ~1e12) — до фильтра.
+
+Файлы: `BUILDLOG_FLOWZONE.md` (запись), `scripts/scalp_perstrat_since.py`
+(коротко: cutoff flowzone не в этом скрипте — БД отдельная)
+
+---
+
 ## 2026-06-25
 
 ### feat(flowzone): R:R-фильтр ≥ 1:2.5 — канон Fabervaale (возврат, не data-fitting)
