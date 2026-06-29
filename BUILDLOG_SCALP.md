@@ -4,6 +4,46 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-06-29
+
+### fix(client): set_trading_stop 34040 «not modified» = идемпотентный no-op
+`<pending commit>`
+
+Симптом (live, #2743 BTCUSDT SHORT): be-lock каждую секунду слал
+`set_trading_stop(sl=60209.9, tp=59712.9)`, Bybit отвечал `ErrCode 34040
+"not modified"`, pybit выбрасывал `InvalidRequestError` → `except Exception`
+логировал ERROR+traceback и возвращал `ok:False` → `manage_levels` не ставил
+`_be_locked=True` → повторял тот же запрос следующим тиком. Шум в логах +
+лишние REST-запросы каждую секунду.
+
+**Дока-обоснование (api-docs.mdc):**
+- Офдок ошибок https://bybit-exchange.github.io/docs/v5/error : `34040 | Not
+  modified. Indicates you already set this TP/SL value or you didn't pass a
+  required parameter` — ДВА смысла.
+- Офдок эндпоинта https://bybit-exchange.github.io/docs/v5/position/trading-stop :
+  Required=true ТОЛЬКО `category`, `symbol`, `tpslMode`, `positionIdx`;
+  `takeProfit`/`stopLoss` — optional.
+- `ScalpBybitClient.set_trading_stop` ВСЕГДА отправляет все 4 required-поля
+  (захардкожены) → ветка «не передан обязательный параметр» структурно
+  невозможна → 34040 здесь означает ТОЛЬКО «TP/SL уже равны отправляемым» =
+  идемпотентный no-op (защита на позиции УЖЕ стоит). Это вывод из доки, не
+  догадка.
+
+**Фикс:** в `except`-ветке ловим `status_code==34040` (атрибут pybit
+`InvalidRequestError`) → `log.debug` + `return {"ok": True, "no_op": True}`.
+Чужие errcode (≠34040) — по-прежнему `log.exception` + `ok:False` (не глотаем
+реальные ошибки). Один фикс лечит оба симптома: убирает ERROR-шум И
+разблокирует `_be_locked` → повторы прекращаются (idempotency-guard
+`manage_levels` срабатывает). retCode-путь 34040 уже обрабатывался ранее
+(стр. выше) — закрыта только exception-ветка pybit.
+
+**Тесты:** `test_set_trading_stop_34040_not_modified_is_idempotent_noop`
+(реальный `pybit.exceptions.InvalidRequestError(34040)` → `ok:True` +
+`no_op:True`; errcode 10001 → `ok:False`). 251/251 suite.
+
+**Файлы:** `src/scalp_bot/trading/client.py` (except-ветка set_trading_stop),
+`tests/test_scalp_bot.py`.
+
 ## 2026-06-28
 
 ### fix(density_break): no-trade blacklist BTC/ZEC/TAO (data-driven, изолировано)

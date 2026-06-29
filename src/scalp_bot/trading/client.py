@@ -299,6 +299,25 @@ class ScalpBybitClient:
         try:
             resp = self._session.set_trading_stop(**params)
         except Exception as e:
+            # 34040 «Not modified». Офдок ошибок: https://bybit-exchange.github.io/
+            # docs/v5/error — «34040 | Not modified. Indicates you already set this
+            # TP/SL value or you didn't pass a required parameter» — ДВА смысла.
+            # Офдок эндпоинта: https://bybit-exchange.github.io/docs/v5/position/
+            # trading-stop — required=true ТОЛЬКО category/symbol/tpslMode/
+            # positionIdx; takeProfit/stopLoss — optional. Этот метод ВСЕГДА
+            # отправляет все 4 required-поля (захардкожены выше) → ветка «не передан
+            # обязательный параметр» структурно невозможна → 34040 здесь означает
+            # ТОЛЬКО «TP/SL уже равны отправляемым» = идемпотентный no-op (защита
+            # на позиции УЖЕ стоит). Считаем успехом, НЕ логируем как ERROR.
+            # pybit выбрасывает InvalidRequestError(status_code=34040) вместо
+            # возврата retCode (поведение pybit, не дока). Иначе be-lock
+            # (manage_levels) и rebracket получали бы ok=False, не фиксировали
+            # _be_locked и повторяли одинаковый запрос каждый тик → шум
+            # traceback'ами (live 2026-06-29: #2743 BTCUSDT ~1 req/сек).
+            if getattr(e, "status_code", None) == 34040 or "34040" in str(e):
+                log.debug("set_trading_stop %s: 34040 not modified (no-op) "
+                          "params=%s", symbol, params)
+                return {"ok": True, "no_op": True, "params": params}
             log.exception("set_trading_stop %s failed: %s", symbol, params)
             return {"ok": False, "error": f"exception: {e}", "params": params}
         ret_code = resp.get("retCode")

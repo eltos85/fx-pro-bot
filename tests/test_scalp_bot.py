@@ -934,6 +934,37 @@ def test_closed_pnl_detail_ambiguous_refuses():
     assert cl.closed_pnl_detail("ETHUSDT", qty=1.0, entry_price=2000.0) is None
 
 
+def test_set_trading_stop_34040_not_modified_is_idempotent_noop():
+    """Bybit 34040 'Not modified' (TP/SL позиции уже равны отправляемым) — pybit
+    выбрасывает InvalidRequestError(status_code=34040) вместо возврата retCode.
+    Должен считаться успехом (no-op), НЕ логироваться как ERROR и НЕ возвращать
+    ok=False — иначе be-lock (manage_levels) не зафиксировал бы _be_locked и
+    повторял одинаковый запрос каждый тик → шум traceback'ами (live 2026-06-29:
+    #2743 BTCUSDT ~1 req/сек). Офдок: docs/v5/error (34040 Not modified)."""
+    from pybit.exceptions import InvalidRequestError
+    from scalp_bot.trading.client import ScalpBybitClient
+
+    class _Sess:
+        def __init__(self, err): self._err = err
+        def set_trading_stop(self, **p): raise self._err
+
+    cl = ScalpBybitClient.__new__(ScalpBybitClient)
+    cl._category = "linear"
+    err = InvalidRequestError(request="POST /v5/position/trading-stop",
+                              message="not modified", status_code=34040,
+                              time="06:45:49", resp_headers=None)
+    cl._session = _Sess(err)
+    res = cl.set_trading_stop("BTCUSDT", sl_price=60209.9, tp_price=59712.9)
+    assert res["ok"] is True and res.get("no_op") is True
+
+    # чужой errcode (не 34040) → честный ok=False (не глотаем реальные ошибки)
+    cl._session = _Sess(InvalidRequestError(request="x", message="boom",
+                                            status_code=10001, time="t",
+                                            resp_headers=None))
+    res2 = cl.set_trading_stop("BTCUSDT", sl_price=60209.9, tp_price=59712.9)
+    assert res2["ok"] is False
+
+
 def test_closed_pnl_detail_paginates_to_find_record():
     """Нужная запись на 2-й странице — пагинация её достаёт."""
     pages = [
