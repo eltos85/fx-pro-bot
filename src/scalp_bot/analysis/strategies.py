@@ -400,26 +400,34 @@ class SweepFadeRunStrategy(SweepFadeCanonStrategy):
         if favorable < activate:
             return
         buf = getattr(self.cfg, "sl_buffer_bps", 0.0) / 1e4
+        raw_sl = tr.entry * (1.0 + buf) if tr.side == "long" \
+            else tr.entry * (1.0 - buf)
+        # Округляем be-SL до тика ДО проверки «не ослабляем защиту». Иначе
+        # tiny float-разница обходила гейт: raw be-SL=60209.8935 < tr.sl=60209.9
+        # (на тике 0.1) → гейт `new_sl>=tr.sl` (short) не срабатывал, код шёл
+        # дальше, round_price возвращал обратно 60209.9 → no-op be-lock + REST
+        # + DB-write каждый тик. Усугублялось тем, что executor строит tr из
+        # db.open_trades() каждый цикл → in-memory _be_locked теряется. С
+        # округлением до сравнения: rounded(60209.9) >= tr.sl(60209.9) → тихий
+        # no-op (live #2743, 122 spam-логов до фикса 2026-06-29).
+        new_sl = (client.round_price(tr.symbol, raw_sl)
+                  if client is not None else raw_sl)
         if tr.side == "long":
-            new_sl = tr.entry * (1.0 + buf)
             # не ниже уже стоящего SL (не ослабляем защиту)
             if new_sl <= tr.sl:
                 tr._be_locked = True
                 return
         else:
-            new_sl = tr.entry * (1.0 - buf)
             if new_sl >= tr.sl:
                 tr._be_locked = True
                 return
         if client is not None:
-            rp = client.round_price(tr.symbol, new_sl)
-            res = client.set_trading_stop(tr.symbol, sl_price=rp, tp_price=tr.tp)
+            res = client.set_trading_stop(tr.symbol, sl_price=new_sl, tp_price=tr.tp)
             if not res.get("ok"):
                 play.info("⚠️ [%s] #%d be-lock: set_trading_stop отклонён (%s) — "
                           "оставляю структурный SL", tr.symbol, tr.id,
                           res.get("error"))
                 return
-            new_sl = rp
         if db is not None:
             db.update_levels(tr.id, sl=new_sl, tp=tr.tp)
         play.info("🔒 [%s] #%d be-lock %s: favourable %.2fR ≥ %.1fR → SL "

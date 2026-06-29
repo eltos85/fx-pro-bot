@@ -3420,6 +3420,40 @@ def test_run_breakeven_not_weakening_sl():
     assert tr._be_locked is True  # но защиту не откатываем
 
 
+def test_run_breakeven_lock_noop_when_sl_already_at_be_level():
+    """Live #2743 (BTC SHORT): tr пересоздаётся из БД каждый тик → in-memory
+    _be_locked теряется. tr.sl уже на be-уровне (60209.9), но raw be-SL =
+    entry*(1-buf) = 60258.1*0.9992 = 60209.8935 — tiny float-разница < tr.sl
+    обходила гейт `new_sl >= tr.sl` (short), и каждый тик логировался no-op
+    be-lock + лишний REST + DB-write (122 spam-лога до фикса 2026-06-29).
+    Фикс: округляем be-SL до тика ДО сравнения → rounded(60209.9) >=
+    tr.sl(60209.9) → тихий no-op (нет REST, нет DB-write, нет лога)."""
+    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
+
+    class _BtcClient:
+        """round_price до тика BTC 0.1 (как прод-клиент), фиксирует REST-вызовы."""
+        def __init__(self): self.calls = []
+        def round_price(self, symbol, price): return round(price, 1)
+        def set_trading_stop(self, symbol, *, sl_price=None, tp_price=None):
+            self.calls.append((symbol, sl_price, tp_price))
+            return {"ok": True}
+
+    st = SweepFadeRunStrategy(_run_cfg(), ["BTCUSDT"])
+    cl = _BtcClient()
+    db = _FakeLevelsDB()
+    # entry=60258.1, buf=8bps(0.0008) → raw be-SL=60209.8935, round1=60209.9.
+    # tr.sl уже 60209.9 = be-уровень (предыдущий be-lock применил его в БД).
+    # risk = tp_dist/tpr = |59712.9032-60258.1|/3 = 181.73; favourable при
+    # price=60042.2 = 215.9 = 1.19R ≥ 1.0R → триггер (как в live-логе #2743).
+    tr = SimpleNamespace(id=2743, symbol="BTCUSDT", side="short",
+                         entry=60258.1, sl=60209.9, tp=59712.9032,
+                         ts_open=0.0, strategy="sweep_fade_run")
+    st.manage_levels(tr, _snap_at(60042.2, momentum_for="short"), cl, db)
+    assert cl.calls == []          # нет лишнего REST (idempotent no-op)
+    assert db.updates == []        # нет лишнего DB-write
+    assert tr._be_locked is True   # защиту зафиксировали (без spam-лога)
+
+
 def test_run_should_exit_no_flow_exit_for_winners():
     """ГЛАВНОЕ отличие от base: winner (favorable>0) при развороте ленты НЕ
     режется flow_exit. base срезал бы на 1.5R; run держит — winner защищён

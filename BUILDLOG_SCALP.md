@@ -6,6 +6,42 @@
 
 ## 2026-06-29
 
+### fix(run/be-lock): idempotent no-op когда SL уже на be-уровне (float-edge)
+`<pending commit>`
+
+Симптом (live, #2743 BTC SHORT, сразу после фикса 34040): `🔒 be-lock` стал
+логироваться ~122 раза с `SL 60209.9000→60209.9000` (SL не менялся). После
+фикса 34040 `set_trading_stop` стал возвращать `ok:True`, и be-lock дошёл до
+успешного лога — но должен был сработать ОДИН раз, а не каждый тик.
+
+**Корень (два слоя):**
+1. `executor.manage()` строит `tr` из `db.open_trades()` каждый цикл →
+   in-memory `_be_locked` теряется каждые тик → гард `if tr._be_locked: return`
+   не работает между тиками.
+2. `manage_levels` проверял «не ослабляем защиту» НА НЕОКРУГЛЁННОМ `new_sl`:
+   `raw be-SL = entry*(1-buf) = 60258.1*0.9992 = 60209.8935`, а `tr.sl = 60209.9`
+   (округлённый до тика BTC 0.1). `60209.8935 >= 60209.9` → False → гейт
+   обойдён → код шёл дальше, `round_price` возвращал обратно 60209.9 → no-op
+   be-lock + REST (34040 no-op) + `db.update_levels` каждый тик.
+
+**Фикс:** округляем `new_sl` до тика ДО проверки «не ослабляем защиту»
+(`client.round_price` поднят выше сравнения). Тогда `rounded(60209.9) >=
+tr.sl(60209.9)` → тихий ранний возврат, `_be_locked=True`, БЕЗ REST/DB-write/
+лога. БД-persisted be-уровень SL становится cross-tick idempotency-маркером —
+`_be_locked` в памяти больше не нужен между тиками. Первый be-lock (когда
+tr.sl ещё исходный структурный) срабатывает ОДИН раз: REST → `db.update_levels`
+→ следующий тик tr.sl=be-уровень из БД → тихий no-op.
+
+Bug-fix (идемпотентность), не смена параметров стратегии — без data-анализа.
+
+**Тест:** `test_run_breakeven_lock_noop_when_sl_already_at_be_level`
+(воспроизводит live #2743: BTC tick 0.1, entry=60258.1, sl=60209.9, tp-based
+risk=181.73, favourable 1.19R при price=60042.2 → `cl.calls==[]`,
+`db.updates==[]`, `_be_locked=True`). 252/252 suite.
+
+**Файлы:** `src/scalp_bot/analysis/strategies.py` (`SweepFadeRunStrategy.manage_levels`),
+`tests/test_scalp_bot.py`.
+
 ### fix(client): set_trading_stop 34040 «not modified» = идемпотентный no-op
 `<pending commit>`
 
