@@ -38,6 +38,21 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ts_close ON trades(ts_close);
+CREATE TABLE IF NOT EXISTS regime_features (
+    trade_id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    adx REAL,
+    regime_ratio REAL,
+    day_range_pct REAL,
+    dist_high_pct REAL,
+    dist_low_pct REAL,
+    spread_bps REAL,
+    ob_imbalance REAL,
+    funding_bps REAL,
+    cvd_slope REAL,
+    liq_count INTEGER,
+    session TEXT
+);
 """
 
 
@@ -135,6 +150,29 @@ class ScalpDB:
         )
         self._conn.commit()
         return int(cur.lastrowid)
+
+    def insert_regime(self, trade_id: int, features: dict,
+                      ts: float | None = None) -> None:
+        """Записать regime-фичи сделки в отдельную таблицу (meta-labeling,
+        Lopez de Prado AFML Ch3). ТОЛЬКО логирование — на торговлю не влияет.
+        Идемпотентно (INSERT OR REPLACE по trade_id PK). Молча игнорируется при
+        ошибке — логирование никогда не рвёт торговый поток (no-data-fitting.mdc)."""
+        if not features:
+            return
+        t = ts if ts is not None else time.time()
+        cols = ("trade_id", "ts", "adx", "regime_ratio", "day_range_pct",
+                "dist_high_pct", "dist_low_pct", "spread_bps", "ob_imbalance",
+                "funding_bps", "cvd_slope", "liq_count", "session")
+        vals = [trade_id, t] + [features.get(c) for c in cols[2:]]
+        placeholders = ",".join("?" for _ in cols)
+        try:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO regime_features "
+                f"({','.join(cols)}) VALUES ({placeholders})", tuple(vals))
+            self._conn.commit()
+        except sqlite3.Error:
+            # лог-таблица — не критично; main loop тоже обёрнут try/except
+            self._conn.rollback()
 
     def mark_closed(
         self, trade_id: int, *, exit_price: float, pnl_usd: float,
@@ -246,6 +284,13 @@ class ScalpDB:
         return [self._row(r) for r in rows]
 
     # ─── reads ───────────────────────────────────────────────────────────
+
+    def regime_for(self, trade_id: int) -> dict | None:
+        """Regime-фичи сделки (для анализа/тестов). None если нет записи."""
+        row = self._conn.execute(
+            "SELECT * FROM regime_features WHERE trade_id=?", (trade_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def open_trades(self) -> list[TradeRow]:
         rows = self._conn.execute(

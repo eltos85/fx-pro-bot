@@ -19,6 +19,7 @@ from scalp_bot.analysis.signals import (
     reclaimed,
     reversal_momentum,
 )
+from scalp_bot.analysis.regime import compute_regime_features
 from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot, SymbolState
 from scalp_bot.safety import killswitch
 from scalp_bot.trading.executor import (
@@ -3784,3 +3785,176 @@ def test_trend_gate_log_throttle_per_symbol():
     btc_logs = [l for l in logs if "BTCUSDT" in l and "trend-gate" in l]
     assert len(btc_logs) == 1, f"ожидал 1 лог BTCUSDT, got {len(btc_logs)}: {btc_logs}"
     assert not any("ETHUSDT" in l and "trend-gate" in l for l in logs)
+
+
+# ─── regime-фичи на входе (meta-labeling, Lopez de Prado AFML Ch3) ──────────
+
+class _RegimeHtf:
+    def __init__(self, adx=None):
+        self._adx = adx
+
+    def trend_strength(self, symbol):
+        return self._adx
+
+
+class _RegimeKeyLevels:
+    """KeyLevels-мок с regime_ratio + levels(day_high/day_low)."""
+
+    def __init__(self, ratio=1.1, day_high=None, day_low=None):
+        self._ratio = ratio
+        self._lv = {"day_high": day_high, "day_low": day_low,
+                    "pdh": day_high, "pdl": day_low, "regime_ratio": ratio}
+
+    def regime_ratio(self, symbol):
+        return self._ratio
+
+    def levels(self, symbol):
+        return self._lv if self._lv["day_high"] is not None else None
+
+
+def test_regime_features_full():
+    snap = _snap([CvdSample(1, 97, -1), CvdSample(2, 97, 1)],
+                 ts=12 * 3600.0,  # 12:00 UTC → europe
+                 last_price=100.0, best_bid=99.9, best_ask=100.1,
+                 ob_imbalance=0.65, funding_rate=0.0001)
+    f = compute_regime_features(snap, _RegimeHtf(adx=28.5),
+                                _RegimeKeyLevels(ratio=1.2, day_high=102.0,
+                                                 day_low=98.0))
+    assert f["adx"] == 28.5
+    assert f["regime_ratio"] == 1.2
+    # spread = (100.1-99.9)/((100.1+99.9)/2) * 1e4 = 0.2/100 * 1e4 = 20 bps
+    assert f["spread_bps"] == pytest.approx(20.0, abs=1e-6)
+    assert f["ob_imbalance"] == 0.65
+    assert f["funding_bps"] == pytest.approx(1.0, abs=1e-6)  # 0.0001 * 1e4
+    assert f["liq_count"] == 1  # _snap кладёт один LiqEvent
+    assert f["session"] == "europe"
+    # day_range = (102-98)/100 *100 = 4.0
+    assert f["day_range_pct"] == pytest.approx(4.0, abs=1e-6)
+    assert f["dist_high_pct"] == pytest.approx(2.0, abs=1e-6)   # (102-100)/100
+    assert f["dist_low_pct"] == pytest.approx(2.0, abs=1e-6)    # (100-98)/100
+    assert f["cvd_slope"] is not None  # 2 точки → slope считается
+
+
+def test_regime_features_missing_data_none():
+    snap = _snap([CvdSample(1, 97, -1)], best_bid=None, best_ask=None)
+    # без htf/key_levels → regime-часть None; без bid/ask → spread None
+    f = compute_regime_features(snap, htf=None, key_levels=None)
+    assert f["adx"] is None
+    assert f["regime_ratio"] is None
+    assert f["day_range_pct"] is None
+    assert f["dist_high_pct"] is None
+    assert f["dist_low_pct"] is None
+    assert f["spread_bps"] is None
+    # всегда есть: ob_imbalance, funding (из snap), liq_count, session, cvd
+    assert f["liq_count"] == 1
+    assert f["session"] is not None
+    assert f["cvd_slope"] is None  # 1 точка → None
+
+
+def test_regime_features_session_buckets():
+    for hour, exp in [(0, "asia"), (7, "asia"), (8, "europe"), (12, "europe"),
+                      (13, "us"), (20, "us"), (21, "asia_pm"), (23, "asia_pm")]:
+        snap = _snap([CvdSample(1, 97, 0)], ts=hour * 3600.0)
+        assert compute_regime_features(snap)["session"] == exp, hour
+
+
+def test_regime_features_cvd_slope_sign_and_none():
+    # монотонный рост CVD → положительный наклон
+    up = [CvdSample(t, 100, c) for t, c in [(1, 0), (2, 2), (3, 5), (4, 9)]]
+    assert compute_regime_features(_snap(up))["cvd_slope"] > 0
+    # монотонное падение → отрицательный
+    down = [CvdSample(t, 100, c) for t, c in [(1, 9), (2, 5), (3, 2), (4, 0)]]
+    assert compute_regime_features(_snap(down))["cvd_slope"] < 0
+    # нулевой разброс времени → None
+    flat = [CvdSample(5, 100, c) for c in (0, 1, 2)]
+    assert compute_regime_features(_snap(flat))["cvd_slope"] is None
+
+
+def test_db_regime_table_created_on_init(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    rows = db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='regime_features'"
+    ).fetchall()
+    assert len(rows) == 1
+    db.close()
+
+
+def test_db_insert_regime_and_read(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="BTCUSDT", side="short", qty=0.1, entry=60000.0,
+                         sl=60200.0, tp=59400.0, score=4, reasons="sweep",
+                         mode="live", strategy="sweep_fade_run", ts_open=100.0)
+    feat = compute_regime_features(
+        _snap([CvdSample(1, 100, -1)], ts=12 * 3600.0, last_price=100.0),
+        _RegimeHtf(adx=33.0), _RegimeKeyLevels(ratio=0.7, day_high=101.0,
+                                               day_low=99.0))
+    db.insert_regime(tid, feat, ts=100.0)
+    got = db.regime_for(tid)
+    assert got is not None
+    assert got["trade_id"] == tid
+    assert got["adx"] == 33.0
+    assert got["regime_ratio"] == 0.7
+    assert got["session"] == "europe"
+    assert got["day_range_pct"] == pytest.approx(2.0, abs=1e-6)
+    db.close()
+
+
+def test_db_insert_regime_idempotent_replace(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ETHUSDT", side="long", qty=1.0, entry=100.0,
+                         sl=99.0, tp=103.0, score=3, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1.0)
+    db.insert_regime(tid, {"adx": 10.0, "session": "asia"}, ts=1.0)
+    # повтор с другими значениями — REPLACE, не дубликат
+    db.insert_regime(tid, {"adx": 40.0, "session": "us"}, ts=2.0)
+    got = db.regime_for(tid)
+    assert got["adx"] == 40.0
+    assert got["session"] == "us"
+    cnt = db._conn.execute(
+        "SELECT COUNT(*) FROM regime_features WHERE trade_id=?", (tid,)
+    ).fetchone()[0]
+    assert cnt == 1
+    db.close()
+
+
+def test_executor_logs_regime_on_live_entry(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    cl = _FakeLiveClient(db)
+    ex = Executor(db, _live_cfg(), client=cl)
+    sig = _live_sig()
+    sig.regime = {"adx": 25.0, "regime_ratio": 1.0, "day_range_pct": 3.0,
+                  "dist_high_pct": 1.5, "dist_low_pct": 1.5, "spread_bps": 12.0,
+                  "ob_imbalance": 0.6, "funding_bps": 0.5, "cvd_slope": 2.0,
+                  "liq_count": 3, "session": "us"}
+    tid = ex.on_signal(sig)
+    assert tid is not None
+    got = db.regime_for(tid)
+    assert got is not None and got["adx"] == 25.0 and got["session"] == "us"
+    db.close()
+
+
+def test_executor_regime_logging_failure_does_not_block_entry(tmp_path):
+    """Логирование regime — read-only: даже если insert_regime бросает, вход
+    проходит (no-data-fitting.mdc: метрики не влияют на торговлю)."""
+
+    class _BoomDB:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def insert_regime(self, *a, **k):
+            raise RuntimeError("boom")
+
+    real = ScalpDB(str(tmp_path))
+    db = _BoomDB(real)
+    cl = _FakeLiveClient(db)  # place_entry лезет в db.open_trades — делегирует
+    ex = Executor(db, _live_cfg(), client=cl)
+    sig = _live_sig()
+    sig.regime = {"adx": 25.0}
+    tid = ex.on_signal(sig)  # insert_regime бросает → _log_regime глушит, вход ок
+    assert tid is not None
+    assert [t.id for t in real.open_trades()] == [tid]  # сделка открылась
+    real.close()
+

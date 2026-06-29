@@ -17,6 +17,7 @@ import logging
 import signal
 import time
 
+from scalp_bot.analysis.regime import compute_regime_features
 from scalp_bot.analysis.signals import diagnose
 from scalp_bot.analysis.strategies import build_strategies, resolve
 from scalp_bot.config.settings import load_settings
@@ -428,6 +429,14 @@ def run() -> None:
                 if not gate.allowed:
                     log.info("gate block: %s", gate.reason)
                     break
+                # regime-фичи на момент входа (meta-labeling, Lopez de Prado
+                # AFML Ch3) — ТОЛЬКО логирование, на торговлю не влияет. Любая
+                # ошибка вычисления → regime=None (анализ просто пропустит).
+                try:
+                    sig.regime = compute_regime_features(snap, htf, key_levels, now)
+                except Exception:
+                    log.exception("regime features %s failed", sym)
+                    sig.regime = None
                 if executor.on_signal(sig) is not None:
                     cooldown[(sig.strategy, sym)] = now
                     open_symbols.add(sym)

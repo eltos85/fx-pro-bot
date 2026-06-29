@@ -57,6 +57,10 @@ class Signal:
     # executor берёт глобальный cfg.entry_order_type. density_break ставит "market"
     # (taker): пробой не наливается maker-лимиткой (C-06, fill-rate 42.6%).
     entry_order_type: str | None = None
+    # regime-фичи на момент сигнала (dict из analysis/regime.py). ТОЛЬКО логирование
+    # в таблицу regime_features (meta-labeling, Lopez de Prado AFML Ch3). На торговую
+    # логику НЕ влияет. Заполняется в main loop (где есть snap+htf+key_levels).
+    regime: dict | None = None
 
 
 def _split_halves(samples: list[CvdSample]) -> tuple[list[CvdSample], list[CvdSample]]:

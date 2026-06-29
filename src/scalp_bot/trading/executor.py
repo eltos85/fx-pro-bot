@@ -185,6 +185,17 @@ class Executor:
 
     # ─── открытие ────────────────────────────────────────────────────────
 
+    def _log_regime(self, tid: int, sig: Signal) -> None:
+        """Записать regime-фичи сигнала в regime_features (meta-labeling, Lopez
+        de Prado AFML Ch3). ТОЛЬКО логирование — обёрнуто try/except, ошибка
+        никогда не рвёт вход (no-data-fitting.mdc: метрики не влияют на торговлю)."""
+        if getattr(sig, "regime", None) is None:
+            return
+        try:
+            self._db.insert_regime(tid, sig.regime, ts=self._now())
+        except Exception:
+            log.exception("regime log #%s failed", tid)
+
     def on_signal(self, sig: Signal) -> int | None:
         cfg = self._cfg
         qty_step = min_qty = 0.0
@@ -220,6 +231,7 @@ class Executor:
             self._notify(f"📝 PAPER open #{tid} {sig.symbol} {sig.side.upper()} "
                          f"${qty * sig.entry_ref:.0f} @{sig.entry_ref:.4f} "
                          f"SL {sig.sl_level:.4f} TP {sig.tp_level:.4f} [{reasons}]")
+            self._log_regime(tid, sig)
             return tid
 
         # LIVE (demo)
@@ -241,6 +253,7 @@ class Executor:
             sl=sig.sl_level, tp=sig.tp_level, score=sig.score, reasons=reasons,
             mode="live", strategy=sig.strategy, entry_order_id=link,
             ts_open=self._now())
+        self._log_regime(tid, sig)
         # регистрируем тег входа → атрибуция филлов из приватного WS execution
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,

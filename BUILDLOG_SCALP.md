@@ -6,6 +6,60 @@
 
 ## 2026-06-29
 
+### feat(regime-logging): regime-фичи на входе в отдельную таблицу (meta-labeling)
+`(коммит будет)`
+
+Контекст: вопрос пользователя «возможно ли придумать фильтр рынка, определяющий
+благоприятность для торговли». Подход — Lopez de Prado «Advances in Financial
+Machine Learning» Ch3 «Meta-Labeling»: primary model = торговый сигнал страты
+(direction решает стратегия), meta-модель = бинарный классификатор «брать ли
+сделку с учётом regime-фичей». Чтобы строить/meta-label без оверфита, сначала
+нужно СОБРАТЬ фичи на каждом входе — это и сделано (read-only для торговли,
+no-data-fitting.mdc: «допустимые правки без выборки — добавление метрик/
+логирования, не влияющих на торговлю»).
+
+Что добавлено (без влияния на торговую логику):
+- Новый модуль `analysis/regime.py` — `compute_regime_features(snap, htf,
+  key_levels, now)` pure-функция. Фичи (все каноничны, уже в проекте): ADX
+  (Wilder 1978, `data/htf.py`), `regime_ratio` = |close−open|/avgATR за N 15m-
+  баров (Kaufman ER-аналог, `data/levels.py`), `day_range_pct` /
+  `dist_high_pct` / `dist_low_pct` (где цена в дневном диапазоне), `spread_bps`
+  (реальный кост скальпа), `ob_imbalance` (стакан), `funding_bps` (8h), 
+  `cvd_slope` (least-squares наклон CVD по времени, Kalena CAP), `liq_count`
+  (активность ликвидаций = capitulation-сигнал), `session` (asia/europe/us/
+  asia_pm по UTC). Любая отсутствующая фича → None (fail-soft).
+- `Signal.regime: dict | None` (`analysis/signals.py`) — переносит фичи из
+  main loop в executor. На торговлю не влияет.
+- `state/db.py`: новая таблица `regime_features(trade_id PK, ts, adx,
+  regime_ratio, day_range_pct, dist_high_pct, dist_low_pct, spread_bps,
+  ob_imbalance, funding_bps, cvd_slope, liq_count, session)` — отдельная от
+  `trades` (не bloated hot-path). Метод `insert_regime` (INSERT OR REPLACE,
+  идемпотентно, обёрнут в try/except sqlite3.Error — лог не рвёт поток) +
+  `regime_for(trade_id)` (read для анализа/тестов).
+- `app/main.py`: перед `executor.on_signal(sig)` — `sig.regime =
+  compute_regime_features(snap, htf, key_levels, now)` в try/except (ошибка
+  вычисления → regime=None, анализ пропустит). `snap`+`htf`+`key_levels` уже
+  в scope этого цикла — никаких доп. REST-запросов (фичи из уже тянущихся
+  kline/WS-агрегатов).
+- `trading/executor.py`: `_log_regime(tid, sig)` после `insert_open` (оба
+  пути — paper и live). Обёрнут try/except Exception — ошибка логирования
+  НИКОГДА не блокирует вход (тест `test_executor_regime_logging_failure_does_not_block_entry`).
+
+Тесты (tests/test_scalp_bot.py, +9): full-вычисление всех фичей, fail-soft при
+отсутствии htf/key_levels/bid-ask, session-buckets (UTC), cvd_slope sign+None,
+создание таблицы на init, insert+read, идемпотентный REPLACE, executor пишет
+regime на live-входе, read-only (insert_regime бросает → вход всё равно ок).
+Всего 263 passed.
+
+Дальнейший анализ (офлайн, `scripts/`): условный разрез E[trade | regime] на
+n≥100 по бинам (sample-size.mdc) + OOS-валидация purged K-fold / Deflated
+Sharpe (Lopez de Prado Ch7/Ch11). По результатам — гейт предлагается ОТДЕЛЬНО
+с research-ссылкой и одобрением (strategy-guard.mdc: торговую логику меняем
+только с согласования). Сейчас — только сбор данных.
+
+**Файлы:** `src/scalp_bot/analysis/regime.py` (новый), `analysis/signals.py`,
+`state/db.py`, `app/main.py`, `trading/executor.py`, `tests/test_scalp_bot.py`
+
 ### fix(run/be-lock): инвертированный знак SL — be-SL на adverse-стороне entry (#2745)
 `058e695`
 
