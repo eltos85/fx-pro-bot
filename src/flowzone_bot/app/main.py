@@ -169,9 +169,16 @@ def run() -> None:
                 except Exception:
                     log.exception("ingest_executions failed")
 
-            # сопровождение открытых (фаза 4: биржевые TP/SL + сверка PnL)
+            # сопровождение открытых (фаза 4: биржевые TP/SL + сверка PnL).
+            # swings нужны для BE-lock стадии 1 (канон 39:00 «break this level» —
+            # пробой предыдущего swing-уровня); собираем по open-символам.
             try:
-                executor.manage(states)
+                open_syms = {tr.symbol for tr in db.open_trades()}
+                swings_by_sym = {
+                    sym: _swings_for(client, cfg, sym, swing_cache, now)
+                    for sym in open_syms
+                }
+                executor.manage(states, swings_by_sym)
             except Exception:
                 log.exception("manage failed")
 

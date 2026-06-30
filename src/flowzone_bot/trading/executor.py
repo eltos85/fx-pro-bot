@@ -22,6 +22,8 @@ import logging
 import math
 import time
 
+from flowzone_bot.analysis.orderflow import (big_trade_threshold,
+                                             detect_big_trades)
 from flowzone_bot.analysis.strategy import Signal
 
 log = logging.getLogger("flowzone_bot.exec")
@@ -70,15 +72,60 @@ def taker_pnl(side: str, entry: float, exit_price: float, qty: float) -> float:
     return gross - fees
 
 
-def bracket_exit_reason(side: str, entry: float, exit_price: float | None) -> str:
-    """Расщепить биржевой bracket-выход на tp_hit / sl_hit по знаку хода цены."""
+def bracket_exit_reason(side: str, entry: float, exit_price: float | None,
+                        sl: float | None = None,
+                        tp: float | None = None) -> str:
+    """Расщепить биржевой bracket-выход на tp_hit / sl_hit.
+
+    Канон-корректно после BE-lock/trail (видео 39:00), где SL стоит В СТОРОНЕ
+    ПРИБЫЛИ (long: SL > entry, short: SL < entry): классифицируем по пересечению
+    ``tp`` / ``sl`` уровней, НЕ по знаку (exit−entry) — иначе закрытие по BE-SL
+    в малый плюс метится как tp_hit (#489: exit=SL, pnl +0.25, reason=tp_hit).
+
+    При наличии sl/tp:
+      long  — exit ≥ tp → tp_hit; exit ≤ sl → sl_hit; иначе ближайший по дистанции.
+      short — exit ≤ tp → tp_hit; exit ≥ sl → sl_hit; иначе ближайший по дистанции.
+    Без sl/tp — фолбэк на знак (старый behaviour, для совместимости)."""
     if exit_price is None or entry <= 0:
         return "tp_sl"
+    if sl is not None and tp is not None and sl > 0 and tp > 0:
+        if side == "long":
+            if exit_price >= tp:
+                return "tp_hit"
+            if exit_price <= sl:
+                return "sl_hit"
+            return ("tp_hit" if (tp - exit_price) <= (exit_price - sl)
+                    else "sl_hit")
+        else:  # short
+            if exit_price <= tp:
+                return "tp_hit"
+            if exit_price >= sl:
+                return "sl_hit"
+            return ("tp_hit" if (exit_price - tp) <= (sl - exit_price)
+                    else "sl_hit")
     favorable = (exit_price - entry) if side == "long" else (entry - exit_price)
     return "tp_hit" if favorable >= 0 else "sl_hit"
 
 
 _BRACKET_REASONS = frozenset({"tp_hit", "sl_hit", "tp_sl"})
+
+
+def _last_swing_price(swings: list, kind: str) -> float | None:
+    """Цена последнего подтверждённого swing-экстремума заданного типа
+    ('high'|'low') = «предыдущий уровень» канона (аукцион/Break-this-level).
+    Последний = max по idx (или ts если idx нет). None если такого нет."""
+    cands = [s for s in swings if s.kind == kind]
+    if not cands:
+        return None
+
+    def _key(s) -> float:
+        idx = getattr(s, "idx", None)
+        if idx is not None:
+            return float(idx)
+        ts = getattr(s, "ts", None)
+        return float(ts) if ts is not None else 0.0
+
+    return max(cands, key=_key).price
 
 
 def reconciled_bracket_reason(old_reason: str | None, net: float) -> str | None:
@@ -200,15 +247,16 @@ class Executor:
 
     # ─── сопровождение ───────────────────────────────────────────────────
 
-    def manage(self, states: dict) -> None:
+    def manage(self, states: dict, swings_by_symbol: dict | None = None) -> None:
+        swings_by_symbol = swings_by_symbol or {}
         for tr in self._db.open_trades():
             st = states.get(tr.symbol)
             snap = st.snapshot() if st else None
-            price = snap.last_price if snap else None
+            swings = swings_by_symbol.get(tr.symbol, [])
             if tr.mode == "paper":
-                self._manage_paper(tr, price)
+                self._manage_paper(tr, snap, swings)
             else:
-                self._manage_live(tr, price)
+                self._manage_live(tr, snap, swings)
         try:
             self.reconcile()
         except Exception:
@@ -457,11 +505,20 @@ class Executor:
                      tr.id, tr.symbol, old, net, net - old)
         return True
 
-    # ─── Trade Management: BE-lock (канон Fabervaale, видео 39:00) ────────
-    # После пробоя уровня поглощения (favourable ≥ zone_width) — SL в entry±buf.
-    # Idempotent: persisted tr.sl — ключ. Если SL уже в BE (round to tick == tr.sl)
-    # → no-op. Не нужен in-memory _be_locked (executor rebuilds tr from DB each
-    # cycle; persisted SL сам является cross-tick idempotency key).
+    # ─── Trade Management: BE-lock + trail (канон Fabervaale, видео 39:00) ──
+    # Канон (полный транскрипт 39:00): «when you BREAK THIS LEVEL, put your stop
+    # loss to break even... after breaking out of complete absorption and you
+    # have an amazing explosion where you can TRAIL your position following the
+    # aggression of the market. This one print a new one, you bring your stop
+    # loss here and you continue.» + tradezella: «If CVD shows strong pressure,
+    # move stop to BE early» + forex.in.rs: «Trail to the LAST absorption, never
+    # re-widen a stop.»
+    #
+    # Стадия 1 (BE-lock): SL → entry±buf при пробое предыдущего swing-уровня в
+    # сторону сделки + CVD-pressure. Стадия 2 (trail): SL едет за последним
+    # absorption-принтом контр-стороны в стороне сделки. Idempotency: persisted
+    # tr.sl — ключ (executor rebuilds tr from DB each cycle).
+
     def _be_sl(self, tr) -> float | None:
         """BE-уровень = entry ± anti-flicker буфер (sl_buffer_bps). Покрывает
         round-trip fees, чтобы BE не стал микро-убытком."""
@@ -470,21 +527,36 @@ class Executor:
         buf = self._cfg.sl_buffer_bps / 10000.0 * tr.entry
         return tr.entry + buf if tr.side == "long" else tr.entry - buf
 
-    def _maybe_be_lock(self, tr, price: float | None) -> None:
-        """Вынос SL в BE когда цена пробила зону поглощения в сторону сделки.
-        Канон: «after breaking out of complete absorption → stop to break even».
-        Триггер: favourable ≥ be_lock_zone_mult × zone_width (масштаб зоны)."""
+    def _maybe_be_lock(self, tr, price: float | None,
+                       swings: list, trades: list) -> None:
+        """Стадия 1: вынос SL в BE (канон «when you break this level»).
+
+        Триггер — ПРОБОЙ предыдущего swing-уровня в сторону сделки (long: price >
+        last swing high; short: price < last swing low) + CVD-pressure в окне
+        доминирует в сторону сделки (tradezella «If CVD shows strong pressure»).
+        НЕ [НАШЕ] «favourable ≥ N×zone_width» — то срабатывало слишком рано и
+        обрезало wins на откате к entry (кейсы #488/#489/#492: +0.03/+0.25)."""
         if not self._cfg.be_lock_enabled or price is None:
             return
-        if tr.zone_high is None or tr.zone_low is None:
-            return  # старая сделка без zone-границ (до миграции) — не трогаем
-        zone_width = tr.zone_high - tr.zone_low
-        if zone_width <= 0:
-            return
-        favourable = ((price - tr.entry) if tr.side == "long"
-                      else (tr.entry - price))
-        if favourable < zone_width * self._cfg.be_lock_zone_mult:
-            return
+        if not getattr(self._cfg, "be_lock_break_structure", True) or not swings:
+            return  # канон: BE по структурному пробою; нет swing-данных — не BE
+        # канон «break this level»: пробой предыдущего swing-экстремума
+        if tr.side == "long":
+            hi = _last_swing_price(swings, "high")
+            if hi is None or price <= hi:
+                return
+        else:
+            lo = _last_swing_price(swings, "low")
+            if lo is None or price >= lo:
+                return
+        # CVD-pressure gate (tradezella): доминирует сторона сделки в окне
+        if getattr(self._cfg, "be_lock_cvd_gate", True) and trades:
+            buy_vol = sum(t.size for t in trades if t.side.upper() == "BUY")
+            sell_vol = sum(t.size for t in trades if t.side.upper() == "SELL")
+            if tr.side == "long" and buy_vol <= sell_vol:
+                return
+            if tr.side == "short" and sell_vol <= buy_vol:
+                return
         be_sl = self._be_sl(tr)
         if be_sl is None:
             return
@@ -507,7 +579,7 @@ class Executor:
                 return
             self._db.update_levels(tr.id, sl=new_sl, tp=tr.tp)
             tr.sl = new_sl  # in-memory консистентность в рамках цикла
-            play.info("🔒 [%s] be-lock #%d %s: SL→BE %.4f (зону пробило, "
+            play.info("🔒 [%s] be-lock #%d %s: SL→BE %.4f (пробой swing-уровня, "
                       "risk-free; биржевой TP %.4f сохранён)", tr.symbol, tr.id,
                       tr.side.upper(), new_sl, tr.tp)
         else:
@@ -516,10 +588,89 @@ class Executor:
             play.info("🔒 [%s] PAPER be-lock #%d %s: SL→BE %.4f", tr.symbol,
                       tr.id, tr.side.upper(), be_sl)
 
-    def _manage_paper(self, tr, price: float | None) -> None:
+    def _sl_in_be_or_beyond(self, tr) -> bool:
+        """SL уже подтянут к BE/дальше в сторону сделки (стадия 1 отработала).
+        long: initial SL < entry; после BE SL ≥ entry. short: зеркально."""
+        if tr.entry <= 0:
+            return False
+        return (tr.sl >= tr.entry) if tr.side == "long" else (tr.sl <= tr.entry)
+
+    def _maybe_trail(self, tr, snap) -> None:
+        """Стадия 2: trail SL за последним absorption-принтом контр-стороны в
+        стороне сделки (канон «this print a new one, you bring your stop loss
+        here and you continue»). Только после BE (стадия 1). SL двигается
+        ТОЛЬКО в сторону сделки (never re-widen, forex.in.rs)."""
+        if not getattr(self._cfg, "trail_enabled", True) or snap is None:
+            return
+        if not self._sl_in_be_or_beyond(tr):
+            return  # стадия 1 (BE) ещё не отработала
+        price = snap.last_price
         if price is None:
             return
-        self._maybe_be_lock(tr, price)  # канон: BE до проверки TP/SL
+        cut = snap.ts - getattr(self._cfg, "trail_window_sec",
+                                self._cfg.absorption_window_sec)
+        window = [t for t in snap.trades if t.ts >= cut]
+        if not window:
+            return
+        big_thr = big_trade_threshold(
+            snap.trades, pct=self._cfg.big_trade_pct,
+            min_samples=self._cfg.big_trade_min_samples)
+        if big_thr is None:
+            return
+        # контр-сторона для trail = пытается развернуть цену против сделки:
+        # long — deep SELL (продавцы агрессировали вниз, поглощены = поддержка);
+        # short — deep BUY (покупатели вверх, поглощены = сопротивление).
+        counter = "Sell" if tr.side == "long" else "Buy"
+        big = detect_big_trades(window, big_thr, side=counter)
+        if not big:
+            return
+        buf = self._cfg.sl_buffer_bps / 10000.0 * tr.entry
+        if tr.side == "long":
+            cands = [t for t in big if t.price < price]
+            if not cands:
+                return
+            anchor = max(cands, key=lambda t: t.price)  # верхний deep-sell под ценой
+            new_sl = anchor.price + buf
+            if new_sl <= tr.sl:
+                return  # never re-widen + only towards deal
+        else:
+            cands = [t for t in big if t.price > price]
+            if not cands:
+                return
+            anchor = min(cands, key=lambda t: t.price)  # нижний deep-buy над ценой
+            new_sl = anchor.price - buf
+            if new_sl >= tr.sl:
+                return
+        if tr.mode == "live" and self._client is not None:
+            new_sl = self._client.round_price(tr.symbol, new_sl)
+            if tr.side == "long" and new_sl <= tr.sl:
+                return
+            if tr.side == "short" and new_sl >= tr.sl:
+                return
+            res = self._client.set_trading_stop(
+                tr.symbol, sl_price=new_sl, tp_price=tr.tp)
+            if not res.get("ok") and not res.get("no_op"):
+                log.warning("trail #%d %s отклонён (%s)", tr.id, tr.symbol,
+                            res.get("error"))
+                return
+            self._db.update_levels(tr.id, sl=new_sl, tp=tr.tp)
+            tr.sl = new_sl
+            play.info("🔁 [%s] trail #%d %s: SL→%.4f (за absorption-принтом; "
+                      "TP %.4f сохранён)", tr.symbol, tr.id, tr.side.upper(),
+                      new_sl, tr.tp)
+        else:
+            self._db.update_levels(tr.id, sl=new_sl, tp=tr.tp)
+            tr.sl = new_sl
+            play.info("🔁 [%s] PAPER trail #%d %s: SL→%.4f", tr.symbol, tr.id,
+                      tr.side.upper(), new_sl)
+
+    def _manage_paper(self, tr, snap, swings: list) -> None:
+        price = snap.last_price if snap else None
+        if price is None:
+            return
+        trades = snap.trades if snap else []
+        self._maybe_be_lock(tr, price, swings, trades)  # стадия 1: BE
+        self._maybe_trail(tr, snap)                      # стадия 2: trail
         hit_tp = price >= tr.tp if tr.side == "long" else price <= tr.tp
         hit_sl = price <= tr.sl if tr.side == "long" else price >= tr.sl
         if not (hit_tp or hit_sl):
@@ -535,8 +686,9 @@ class Executor:
         self._notify(f"{emoji} PAPER close #{tr.id} {tr.symbol} pnl=${pnl:.2f} "
                      f"({reason})")
 
-    def _manage_live(self, tr, price: float | None) -> None:
+    def _manage_live(self, tr, snap, swings: list) -> None:
         cl = self._client
+        price = snap.last_price if snap else None
         pend = self._pending.get(tr.id)
         if pend and not pend["filled"]:
             status = cl.order_status(tr.symbol, pend["link"])
@@ -570,7 +722,8 @@ class Executor:
         if pos.size <= 0:
             pnl, exitp, is_real = self._realized_or_estimate(
                 tr, pos.mark_price or tr.entry)
-            reason = bracket_exit_reason(tr.side, tr.entry, exitp)
+            reason = bracket_exit_reason(tr.side, tr.entry, exitp,
+                                         sl=tr.sl, tp=tr.tp)
             self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,
                                  fees_usd=0.0, close_reason=reason,
                                  ts_close=self._now(), provisional=not is_real)
@@ -582,9 +735,10 @@ class Executor:
                      pnl or 0.0, reason)
             self._on_close(tr, pnl, reason, is_real)
             return
-        # держим позицию — BE-lock (канон: пробой зоны → SL в BE), затем
+        # держим позицию — стадии 1-2 Trade Management (канон 39:00), затем
         # троттлим лог дистанций до TP/SL
-        self._maybe_be_lock(tr, price)
+        self._maybe_be_lock(tr, price, swings, snap.trades if snap else [])
+        self._maybe_trail(tr, snap)
         iv = 15.0
         if price is not None and self._now() - self._hold_log.get(tr.id, 0.0) >= iv:
             self._hold_log[tr.id] = self._now()

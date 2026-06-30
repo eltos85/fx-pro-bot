@@ -3,12 +3,16 @@
 Канон STRATEGY §3.1 + §6.3: профиль строится из ИСПОЛНЕННОГО ПОТОКА
 (tick/footprint), а не из kline-volume, и агрегируется по корзинам цен.
 
-Research basis (канон Market Profile):
-- **Value Area ≈ 70% объёма** вокруг POC — Steidlmayer «Markets & Market Logic»
-  (1989); Jim Dalton «Mind Over Markets» (value area = одно стандартное
-  отклонение ≈ 70% принятого объёма/TPO). Расширение Value Area от POC «двумя
-  рядами» — каноничный CME/Dalton-алгоритм (сравниваем сумму двух соседних
-  корзин сверху и снизу, добавляем больший ряд, пока не наберём value_area_pct).
+Research basis (канон Market Profile + канон-автор):
+- **Value Area ≈ 68% объёма** вокруг POC — канон-автор Fabervaale буквально
+  называет 68%: видео «The Only Orderflow Guide» (28:50) — *«value area… where
+  the 68% of the volume of the distribution took place»*; winkler-rulebook —
+  *«Value Area boundaries — where 68% of volume was transacted»*. 68% = одно
+  стандартное отклонение нормального распределения (Gaussian в ролике). Раньше
+  было 0.70 (Steidlmayer/Dalton literature) — правка к канон-автору. Расширение
+  Value Area от POC «двумя рядами» — каноничный CME/Dalton-алгоритм (сравниваем
+  сумму двух соседних корзин сверху и снизу, добавляем больший ряд, пока не
+  наберём value_area_pct).
 - **POC (Point of Control)** — цена с максимальным объёмом (Steidlmayer).
 - **HVN/LVN (high/low volume node)** — локальные максимумы/минимумы объёма по
   цене (Dalton: HVN = принятие/баланс, LVN = отвержение/быстрый проход).
@@ -56,7 +60,7 @@ class VolumeProfile:
 
 
 def build_profile_from_prints(prints: list, bucket_size: float,
-                              value_area_pct: float = 0.70
+                              value_area_pct: float = 0.68
                               ) -> VolumeProfile | None:
     """Собрать VolumeProfile из списка принтов (канон §3 — профиль ПРЕДЫДУЩЕЙ
     swing-точки, A2). ``prints`` = [(ts, price, size, side), ...] (side =
@@ -88,7 +92,7 @@ def build_profile_from_prints(prints: list, bucket_size: float,
 
 
 def build_profile(buckets: dict[int, tuple[float, float]], bucket_size: float,
-                  value_area_pct: float = 0.70) -> VolumeProfile | None:
+                  value_area_pct: float = 0.68) -> VolumeProfile | None:
     """Собрать VolumeProfile из карты корзин (idx → (buy, sell)).
 
     Value Area — каноничным «двухрядным» расширением от POC (Steidlmayer/Dalton):
@@ -149,6 +153,42 @@ def build_profile(buckets: dict[int, tuple[float, float]], bucket_size: float,
         va_lo_idx=lo,
         va_hi_idx=hi,
     )
+
+
+def merge_profiles(profiles: list[VolumeProfile],
+                   value_area_pct: float = 0.68) -> VolumeProfile | None:
+    """Composite / double-day profile (D3, канон-автор «The Only Orderflow
+    Guide»: *«merge them… double day profile… merge»*).
+
+    Сливает несколько `VolumeProfile` (одинакового `bucket_size`) в один
+    composite: суммирует (buy, sell) по корзинам цен и пересчитывает POC / Value
+    Area «двухрядным» алгоритмом `build_profile`. Сильные VAH/VAL, подтверждённые
+    несколькими профилями, — мощные зоны reload (канон).
+
+    [НАШЕ] инфра-утилита: в live-путь НЕ подключена по умолчанию
+    (`FLOWZONE_PROFILE_MERGE_ENABLED=false`); включение composite-зон как
+    торгового критерия требует OOS-валидации (`no-data-fitting.mdc`,
+    `strategy-guard.mdc`). Возвращает None при пустом/несовместимом входе.
+    """
+    profiles = [p for p in profiles if p is not None]
+    if not profiles:
+        return None
+    bucket_size = profiles[0].bucket_size
+    if any(p.bucket_size != bucket_size for p in profiles):
+        return None  # разные разрешения корзин — сливать бессмысленно
+    merged: dict[int, list[float]] = {}
+    for p in profiles:
+        for idx, (bu, se) in p.buckets.items():
+            b = merged.get(idx)
+            if b is None:
+                b = [0.0, 0.0]
+                merged[idx] = b
+            b[0] += bu
+            b[1] += se
+    if not merged:
+        return None
+    return build_profile({i: (b[0], b[1]) for i, b in merged.items()},
+                         bucket_size, value_area_pct)
 
 
 def find_hvn_lvn(profile: VolumeProfile) -> tuple[list[int], list[int]]:

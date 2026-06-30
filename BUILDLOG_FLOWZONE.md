@@ -9,6 +9,80 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-06-30
+
+### fix(flowzone): BE-lock+trail к канону 39:00 (E1/E2/E3) + канон-аудит D1-D8
+
+Полный аудит бота против трёх канон-видео Fabervaale + winkler-rulebook +
+tradezella/forex.in.rs. Симптом пользователя: «wins минимальны, losses
+существенны, мы поломали логику / отошли от канона». Диагноз: ядро стратегии
+(контекст, зона, absorption-триггер) интерпретировано верно; **Trade
+Management (BE/trail) был сделан по половине цитаты** — починено (E1/E2/E3).
+Остальные расхождения — adaptations/упрощения, исполнены как детекторы/утилиты
+(non-gating, per `no-data-fitting.mdc`/`strategy-guard.mdc`).
+
+**E1 — BE-триггер переписан на канон.** Было [НАШЕ] `favourable ≥
+be_lock_zone_mult × zone_width` (коммит `f6ef82a`, 29 Jun) — срабатывало слишком
+рано, до «amazing explosion», обрезало wins (+0.03/+0.25 вместо +21). Канон
+(Pz8f0wWW12M 39:00): *«when you **break this level**, put your stop loss to
+break even»*. Триггер = пробой предыдущего swing-уровня (`_last_swing_price`) +
+CVD-pressure gate (tradezella «If CVD shows strong pressure»). `be_lock_zone_mult`
+удалён; добавлены `be_lock_break_structure`, `be_lock_cvd_gate`. Файлы:
+`executor.py`, `config/settings.py`, `app/main.py` (swings → manage).
+
+**E2 — trail стадия 2 (канон).** Не была реализована → winning-сделки
+закрывались на откате к entry. Канон: *«this print a new one, you bring your
+stop loss here and you continue»*. `executor._maybe_trail`: после BE SL едет за
+последним absorption-принтом контр-стороны в стороне сделки (окно
+`trail_window_sec`=тело M5), только в сторону сделки (forex.in.rs «never
+re-widen»). `trail_enabled`, `trail_window_sec`. Файлы: `executor.py`,
+`config/settings.py`.
+
+**E3 — `bracket_exit_reason` по tp/sl, не по знаку.** После BE-SL в стороне
+прибыли метил закрытие как `tp_hit` (#489: exit=SL, +0.25, `tp_hit`). Переписан
+по пересечению `tr.tp`/`tr.sl`. Файлы: `executor.py`.
+
+**D1 — Value Area 68% (канон-автор), не 70%.** Канон-автор буквально называет
+68% (Pz8f0wWW12M 28:50 *«68% of the volume»*; winkler-rulebook). Было 0.70
+(Steidlmayer/Dalton literature). `value_area_pct` и `context_accept_frac`
+0.70 → 0.68 в `settings.py`, дефолты в `volume_profile.py`/`context.py`, тесты.
+VA уже на 2% → больше хвостов вне VA → `classify` чаще детектит тренд. Канон-фикс.
+
+**D2 — London+NY задокументированы как [НАШЕ] крипто-адаптация.** Канон держит
+одно NY cash-окно; на крипто 24/7 cash-сессии нет → London+NY. Кода не меняли
+(адаптация оправдана), атрибуция в `STRATEGY_FLOWZONE.md` §6.1.
+
+**D3 — `merge_profiles` (composite/double-day) утилита.** Канон: *«merge them…
+double day profile»*. Утилита в `volume_profile.py` + тесты. В live-путь НЕ
+подключена по умолчанию (`profile_merge_enabled=false`) — OOS-валидация.
+
+**D4 — `classify_shape` (P-shape / double-distribution / balance / shift).**
+Канон различает паттерны формы. Обогащение `ctx.shape` (non-gating), тесты + док
+`STRATEGY_FLOWZONE.md` §2.1. `profile_shape_enabled=true` (обогащение, не
+меняет торговое решение).
+
+**D7 — `detect_initiative` / `detect_exhaustion` детекторы.** Канон описывает
+initiative (continuation) и exhaustion (reversal) паттерны. Детекторы в
+`orderflow.py` + тесты. В live-вход НЕ гейтят по умолчанию
+(`initiative_exhaustion_enabled=false`) — основной канон-сетап absorption (§4).
+
+**D8 — атрибуция трёх канон-видео.** Doc указывал один канон (06R-ebyOhDI), но
+§5.5 — из Pz8f0wWW12M, min_rr — из cUTsoU-15Tc. Header `STRATEGY_FLOWZONE.md` +
+`__init__.py` обновлены: три ролика + winkler/tradezella/forex.in.rs доп.
+
+Обоснование non-gating D3/D7: `strategy-guard.mdc`/`no-data-fitting.mdc`
+запрещают менять торговую логику без OOS-валидации; детекторы/утилиты готовы к
+форвард-эксперименту, live-гейтинг — отдельной правкой по данным. E1/E2/E3 —
+bugfix-категория (канон-несоответствие), не P&L-подгонка; 3 сделки после
+`f6ef82a` — шум (`sample-size.mdc`).
+
+**Файлы:** `src/flowzone_bot/analysis/{context,volume_profile,orderflow}.py`,
+`src/flowzone_bot/config/settings.py`, `src/flowzone_bot/__init__.py`,
+`src/flowzone_bot/trading/executor.py`, `src/flowzone_bot/app/main.py`,
+`tests/test_flowzone_bot.py`, `STRATEGY_FLOWZONE.md`. pytest: 1157 passed.
+
+---
+
 ## 2026-06-29
 
 ### feat(flowzone): BE-lock + R:R-флор 1:2 — канон Trade Management (стадия 1)

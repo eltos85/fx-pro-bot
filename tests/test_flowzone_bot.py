@@ -7,15 +7,18 @@
 from __future__ import annotations
 
 from flowzone_bot.analysis.auction import AuctionTracker
-from flowzone_bot.analysis.context import BALANCE, TREND_DOWN, TREND_UP, classify
+from flowzone_bot.analysis.context import (BALANCE, BALANCE_SHAPE,
+                                          DOUBLE_DISTRIBUTION, NORMAL, P_SHAPE_DOWN,
+                                          P_SHAPE_UP, TREND_DOWN, TREND_UP, classify,
+                                          classify_shape)
 from flowzone_bot.analysis.orderflow import (big_trade_threshold,
-                                             detect_absorption,
-                                             detect_big_trades, size_percentile,
-                                             zone_delta)
+                                             detect_absorption, detect_big_trades,
+                                             detect_exhaustion, detect_initiative,
+                                             size_percentile, zone_delta)
 from flowzone_bot.analysis.swings import (Swing, find_swings,
                                           nearest_swing_target, swing_targets)
 from flowzone_bot.analysis.volume_profile import (build_profile, find_hvn_lvn,
-                                                  find_ledges)
+                                                  find_ledges, merge_profiles)
 from flowzone_bot.analysis.zone import build_zones
 from flowzone_bot.data.aggregates import SymbolState, TradePrint
 
@@ -87,17 +90,17 @@ def _triangular_buckets() -> dict[int, tuple[float, float]]:
 
 def test_build_profile_poc_and_value_area():
     prof = build_profile(_triangular_buckets(), bucket_size=1.0,
-                         value_area_pct=0.70)
+                         value_area_pct=0.68)
     assert prof is not None
     assert prof.poc_idx == 10
     assert prof.poc_price == 10.5
     assert prof.total_volume == 520.0
-    # двухрядное расширение от POC до ≥70% (364): VA idx 8..12
+    # двухрядное расширение от POC до ≥68% (канон-автор): VA idx 8..12 (vol=380)
     assert prof.va_lo_idx == 8
     assert prof.va_hi_idx == 12
     assert prof.val == 8.0
     assert prof.vah == 13.0
-    assert prof.value_area_volume >= 0.70 * prof.total_volume
+    assert prof.value_area_volume >= 0.68 * prof.total_volume
 
 
 def test_build_profile_empty_returns_none():
@@ -152,36 +155,36 @@ def _up_elongated_buckets() -> dict[int, tuple[float, float]]:
 
 def test_classify_trend_up_on_acceptance_above_vah():
     prof = build_profile(_up_elongated_buckets(), bucket_size=1.0)
-    ctx = classify(prof, last_price=20.5, accept_frac=0.70)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.68)
     assert ctx.state == TREND_UP
     assert ctx.trade_side == "long"
-    assert ctx.accept_above >= 0.70
+    assert ctx.accept_above >= 0.68
 
 
 def test_classify_trend_down_on_acceptance_below_val():
     prof = build_profile(_down_elongated_buckets(), bucket_size=1.0)
-    ctx = classify(prof, last_price=20.5, accept_frac=0.70)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.68)
     assert ctx.state == TREND_DOWN
     assert ctx.trade_side == "short"
-    assert ctx.accept_below >= 0.70
+    assert ctx.accept_below >= 0.68
 
 
 def test_classify_balance_symmetric_profile():
     # симметричный треугольник: хвосты вне VA равны → нет направленного принятия.
     prof = build_profile(_triangular_buckets(), bucket_size=1.0)
-    ctx = classify(prof, last_price=10.5, accept_frac=0.70)
+    ctx = classify(prof, last_price=10.5, accept_frac=0.68)
     assert ctx.state == BALANCE
     assert ctx.trade_side is None
 
 
 def test_classify_balance_when_acceptance_below_threshold():
-    # хвосты есть с обеих сторон, но перекос < 0.70 (60/40) → не acceptance.
+    # хвосты есть с обеих сторон, но перекос < 0.68 (60/40) → не acceptance.
     core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}
     buckets = {i: (float(v), 0.0) for i, v in core.items()}
     buckets.update({12: (20.0, 0.0), 13: (20.0, 0.0), 14: (20.0, 0.0)})  # ↓ 60
     buckets.update({26: (20.0, 0.0), 27: (20.0, 0.0)})                   # ↑ 40
     prof = build_profile(buckets, bucket_size=1.0)
-    ctx = classify(prof, last_price=20.5, accept_frac=0.70)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.68)
     assert ctx.state == BALANCE
     assert 0.55 <= ctx.accept_below <= 0.65
 
@@ -359,7 +362,10 @@ class _Cfg:
     sl_zone_mult = 1.0               # канон «1-2-3» (far_edge + 1× ширина зоны)
     min_rr = 2.0                     # канон Fabervaale R:R ≥ 1:2 (флор «1 to 2»)
     be_lock_enabled = True           # канон Trade Management (видео 39:00)
-    be_lock_zone_mult = 1.0          # BE-триггер = 1× ширина зоны
+    be_lock_break_structure = True   # канон «break this level» (swing-пробой)
+    be_lock_cvd_gate = True          # tradezella «CVD strong pressure»
+    trail_enabled = True             # канон «bring your stop loss here» (стадия 2)
+    trail_window_sec = 300.0         # окно absorption-принтов trail = тело M5
 
 
 def _evictless_state_snapshot(buckets, bucket_size, trades, last_price, ts):
@@ -393,7 +399,7 @@ def test_evaluate_short_continuation_full_checklist():
     snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
                                      last_price=119.5, ts=now)
     # контекст trend_down — по ФОРМЕ профиля (хвост ниже VAL), не по потоку.
-    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    ctx = classify(prof, snap.last_price, accept_frac=0.68)
     assert ctx.state == TREND_DOWN
     # канон §5.3: цель = ближайший swing (без swing-цели сделки нет).
     # swing low = 95.0 далеко от entry 119.5, чтобы R:R ≥ 2.0 (канон Fabervaale,
@@ -420,7 +426,7 @@ def test_evaluate_rr_filter_rejects_close_swing():
     now = 1000.0
     snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
                                      last_price=119.5, ts=now)
-    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    ctx = classify(prof, snap.last_price, accept_frac=0.68)
     from flowzone_bot.analysis.strategy import evaluate
     # swing low = 117 (близко: reward 2.5, risk ~8 → rr 0.31 < 2.0) → None
     near = [type("S", (), {"kind": "low", "price": 117.0})()]
@@ -436,7 +442,7 @@ def test_evaluate_none_when_balance_context():
     # симметричный профиль → BALANCE → нет входа.
     prof = build_profile(_triangular_buckets(), bucket_size=1.0)
     snap = _evictless_state_snapshot(prof.buckets, 1.0, [], 10.5, 1000.0)
-    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    ctx = classify(prof, snap.last_price, accept_frac=0.68)
     assert ctx.state == BALANCE
     from flowzone_bot.analysis.strategy import evaluate
     assert evaluate(snap, ctx, prof, cfg=_Cfg()) is None
@@ -486,7 +492,7 @@ def test_evaluate_uses_swing_target_only():
     now = 1000.0
     snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
                                      last_price=119.5, ts=now)
-    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    ctx = classify(prof, snap.last_price, accept_frac=0.68)
     from flowzone_bot.analysis.strategy import evaluate
     # без swings → нет swing-цели → сделка не берётся (канон: цель всегда swing)
     assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=None) is None
@@ -688,7 +694,7 @@ def test_swing_profile_for_builds_from_db_prints(tmp_path):
                       (1000.0, "X", 120.0, 8.0, "Buy"),
                       (1001.0, "X", 120.0, 2.0, "Sell"),
                       (1002.0, "X", 121.0, 1.0, "Buy")])
-    cfg = type("C", (), {"value_area_pct": 0.70})()
+    cfg = type("C", (), {"value_area_pct": 0.68})()
     swings = [Swing(0, 122.0, "high", ts=1000.0)]  # предыдущий swing high (шорт)
     prof = _swing_profile_for(db, cfg, "X", swings, "short", bucket_size=1.0,
                               now=1100.0)
@@ -982,12 +988,18 @@ def test_flowzone_canon_defaults():
     assert cfg.zone_min_confluence == 3
     # §4 + §6.3: absorption на теле M5-свечи (300с).
     assert cfg.absorption_window_sec == 300.0
-    # §2: acceptance вне VA = каноничная Value-Area-доля 0.70.
-    assert cfg.context_accept_frac == 0.70
-    # 2026-06-29: R:R-флор 1:2 (канон «1 to 2»), BE-lock включен (видео 39:00).
+    # §2: acceptance вне VA = Value-Area-доля канон-автора 0.68 (68% объёма).
+    assert cfg.context_accept_frac == 0.68
+    # 2026-06-29: R:R-флор 1:2 (канон «1 to 2»). 2026-06-30: BE-lock + trail
+    # возвращены к канону 39:00 (BE по пробою swing-уровня + CVD pressure,
+    # trail за absorption-принтом; не [НАШЕ] zone_width-триггер).
     assert cfg.min_rr == 2.0
     assert cfg.be_lock_enabled is True
-    assert cfg.be_lock_zone_mult == 1.0
+    assert cfg.be_lock_break_structure is True
+    assert cfg.be_lock_cvd_gate is True
+    assert cfg.trail_enabled is True
+    assert cfg.trail_window_sec == 300.0
+    assert not hasattr(cfg, "be_lock_zone_mult")  # удалён — не канон
 
 
 # ─── R:R-флор 1:2 (канон «1 to 2», 2026-06-29) ───────────────────────────
@@ -999,7 +1011,7 @@ def test_evaluate_rr_floor_2_lets_rr_between_2_and_2_5():
     now = 1000.0
     snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
                                      last_price=119.5, ts=now)
-    ctx = classify(prof, snap.last_price, accept_frac=0.70)
+    ctx = classify(prof, snap.last_price, accept_frac=0.68)
     from flowzone_bot.analysis.strategy import evaluate
     # entry≈119.5, sl≈127.5 → risk≈8.0; swing low=101 → reward≈18.5 → rr≈2.31
     swing = [type("S", (), {"kind": "low", "price": 101.0})()]
@@ -1010,17 +1022,27 @@ def test_evaluate_rr_floor_2_lets_rr_between_2_and_2_5():
     assert 2.0 <= rr < 2.5
 
 
-# ─── BE-lock (канон Trade Management, видео 39:00, 2026-06-29) ────────────
+# ─── BE-lock + trail (канон Trade Management, видео 39:00, 2026-06-30) ──────
 
 def _be_cfg():
     c = _Cfg()
     c.be_lock_enabled = True
-    c.be_lock_zone_mult = 1.0
+    c.be_lock_break_structure = True
+    c.be_lock_cvd_gate = True
+    c.trail_enabled = True
     return c
 
 
+def _swing(kind, price, idx=5):
+    return type("S", (), {"kind": kind, "price": price, "idx": idx})()
+
+
+def _snap(price, trades, ts=1000.0):
+    return type("Snap", (), {"last_price": price, "ts": ts, "trades": trades})()
+
+
 class _FakeClientBE:
-    """Клиент для BE-lock тестов: round_price без округления, set_trading_stop
+    """Клиент для BE/trail тестов: round_price без округления, set_trading_stop
     всегда ok, instrument() — None."""
     def __init__(self):
         self.stops = []  # журнал вызовов set_trading_stop
@@ -1048,59 +1070,92 @@ class _FakeDBBE:
                 tr.sl = sl
 
 
-def _be_trade(side, entry, sl, tp, zone_low, zone_high, mode="live"):
+def _be_trade(side, entry, sl, tp, mode="live"):
     return type("T", (), {
         "id": 1, "symbol": "BTCUSDT", "side": side, "mode": mode,
-        "entry": entry, "sl": sl, "tp": tp, "qty": 1.0,
-        "zone_low": zone_low, "zone_high": zone_high,
+        "entry": entry, "sl": sl, "tp": tp, "qty": 1.0, "ts_open": 0.0,
+        "zone_low": 0.0, "zone_high": 0.0,
     })()
 
 
-def test_be_lock_long_moves_sl_to_entry_after_zone_break():
-    """Канон: после пробоя зоны поглощения → SL в BE. LONG: zone_width=10,
-    цена выросла с 100 до 111 (favourable=11 ≥ 10) → SL 90 → BE ≈100.08."""
+def test_be_lock_long_after_swing_break():
+    """Канон «when you break this level»: LONG, swing high=110, цена 111 > 110 +
+    CVD buy-доминирует → SL 90 → BE ≈100.08 (не zone_width-триггер)."""
     from flowzone_bot.trading.executor import Executor
-    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
-                   zone_low=90.0, zone_high=100.0)  # zone_width=10
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)
     db = _FakeDBBE([tr])
     cl = _FakeClientBE()
     ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
-    ex._maybe_be_lock(tr, price=111.0)
-    assert len(cl.stops) == 1                       # выставили BE на биржу
-    new_sl = cl.stops[0][1]
-    assert new_sl > 100.0                           # BE = entry + buffer
-    assert abs(new_sl - 100.08) < 0.01              # sl_buffer_bps=8 → +0.08
-    assert tr.sl == new_sl                          # in-memory обновлён
-    assert db.updates[0][1] == new_sl               # БД обновлён
-
-
-def test_be_lock_short_moves_sl_below_entry_after_zone_break():
-    from flowzone_bot.trading.executor import Executor
-    tr = _be_trade("short", entry=100.0, sl=110.0, tp=80.0,
-                   zone_low=100.0, zone_high=110.0)  # zone_width=10
-    db = _FakeDBBE([tr])
-    cl = _FakeClientBE()
-    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
-    ex._maybe_be_lock(tr, price=89.0)               # favourable=11 ≥ 10
+    swings = [_swing("high", 110.0)]
+    trades = [TradePrint(900, 110.5, 5.0, "Buy"),
+              TradePrint(910, 110.8, 5.0, "Buy"),
+              TradePrint(920, 111.0, 1.0, "Sell")]  # buy_vol 10 > sell_vol 1
+    ex._maybe_be_lock(tr, price=111.0, swings=swings, trades=trades)
     assert len(cl.stops) == 1
     new_sl = cl.stops[0][1]
-    assert new_sl < 100.0                           # BE = entry − buffer
-    assert abs(new_sl - 99.92) < 0.01
+    assert abs(new_sl - 100.08) < 0.01              # BE = entry + 8 bps
+    assert tr.sl == new_sl
+    assert db.updates[0][1] == new_sl
 
 
-def test_be_lock_no_trigger_before_zone_break():
-    """Цена прошла в сторону сделки < zone_width → BE НЕ срабатывает (ещё не
-    пробой уровня поглощения)."""
+def test_be_lock_short_after_swing_break():
     from flowzone_bot.trading.executor import Executor
-    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
-                   zone_low=90.0, zone_high=100.0)  # zone_width=10
+    tr = _be_trade("short", entry=100.0, sl=110.0, tp=80.0)
     db = _FakeDBBE([tr])
     cl = _FakeClientBE()
     ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
-    ex._maybe_be_lock(tr, price=109.0)              # favourable=9 < 10
+    swings = [_swing("low", 90.0)]
+    trades = [TradePrint(900, 89.5, 5.0, "Sell"),
+              TradePrint(910, 89.2, 5.0, "Sell"),
+              TradePrint(920, 89.0, 1.0, "Buy")]  # sell_vol 10 > buy_vol 1
+    ex._maybe_be_lock(tr, price=89.0, swings=swings, trades=trades)
+    assert len(cl.stops) == 1
+    new_sl = cl.stops[0][1]
+    assert abs(new_sl - 99.92) < 0.01              # BE = entry − 8 bps
+
+
+def test_be_lock_no_trigger_before_swing_break():
+    """Цена НЕ пробила swing-уровень (109 < 110) → BE не срабатывает."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    swings = [_swing("high", 110.0)]
+    trades = [TradePrint(900, 108.5, 5.0, "Buy")]
+    ex._maybe_be_lock(tr, price=109.0, swings=swings, trades=trades)
     assert cl.stops == []
-    assert db.updates == []
-    assert tr.sl == 90.0                            # SL не тронут
+    assert tr.sl == 90.0
+
+
+def test_be_lock_no_trigger_without_swings():
+    """Нет swing-данных → нельзя подтвердить «break this level» → no BE
+    (канон: BE по структурному пробою, не по zone_width)."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    ex._maybe_be_lock(tr, price=200.0, swings=[], trades=[])
+    assert cl.stops == []
+    assert tr.sl == 90.0
+
+
+def test_be_lock_cvd_gate_blocks_when_counter_dominates():
+    """tradezella «If CVD shows strong pressure»: swing пробит, но контр-сторона
+    доминирует (long, sell_vol > buy_vol) → BE НЕ срабатывает (нет pressure)."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    swings = [_swing("high", 110.0)]
+    trades = [TradePrint(900, 111.0, 5.0, "Sell"),
+              TradePrint(910, 111.0, 5.0, "Sell"),
+              TradePrint(920, 111.0, 1.0, "Buy")]  # sell 10 > buy 1 → no pressure
+    ex._maybe_be_lock(tr, price=111.0, swings=swings, trades=trades)
+    assert cl.stops == []
+    assert tr.sl == 90.0
 
 
 def test_be_lock_idempotent_when_sl_already_at_be():
@@ -1109,12 +1164,13 @@ def test_be_lock_idempotent_when_sl_already_at_be():
     через persisted SL (executor rebuilds tr from DB each cycle)."""
     from flowzone_bot.trading.executor import Executor
     be_sl = 100.08
-    tr = _be_trade("long", entry=100.0, sl=be_sl, tp=120.0,
-                   zone_low=90.0, zone_high=100.0)  # уже в BE
+    tr = _be_trade("long", entry=100.0, sl=be_sl, tp=120.0)  # уже в BE
     db = _FakeDBBE([tr])
     cl = _FakeClientBE()
     ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
-    ex._maybe_be_lock(tr, price=115.0)              # favourable=15 ≥ 10
+    swings = [_swing("high", 110.0)]
+    trades = [TradePrint(900, 115.0, 5.0, "Buy")]
+    ex._maybe_be_lock(tr, price=115.0, swings=swings, trades=trades)
     assert cl.stops == []                           # no-op — SL уже в BE
     assert db.updates == []
 
@@ -1124,28 +1180,135 @@ def test_be_lock_disabled_via_config():
     from flowzone_bot.trading.executor import Executor
     cfg = _be_cfg()
     cfg.be_lock_enabled = False
-    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
-                   zone_low=90.0, zone_high=100.0)
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)
     db = _FakeDBBE([tr])
     cl = _FakeClientBE()
     ex = Executor(db=db, settings=cfg, client=cl, now=lambda: 1.0)
-    ex._maybe_be_lock(tr, price=200.0)              # огромный favourable
+    swings = [_swing("high", 110.0)]
+    ex._maybe_be_lock(tr, price=200.0, swings=swings, trades=[])
     assert cl.stops == []
     assert tr.sl == 90.0
 
 
-def test_be_lock_skips_trade_without_zone_columns():
-    """Старая сделка (до миграции) без zone_low/zone_high → BE пропускается
-    (нельзя посчитать zone_width — не ломаем)."""
+# ─── Trail (стадия 2, канон «this print a new one, you bring your stop loss
+#     here and you continue», видео 39:00) ───────────────────────────────────
+
+def test_trail_long_moves_sl_above_absorption_print():
+    """После BE (SL в BE 100.08) — deep SELL print @112 ниже цены 115 = поддержка
+    → SL подтягивается выше неё (112.08), в сторону сделки (never re-widen)."""
     from flowzone_bot.trading.executor import Executor
-    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0,
-                   zone_low=None, zone_high=None)
+    tr = _be_trade("long", entry=100.0, sl=100.08, tp=120.0)  # уже в BE
     db = _FakeDBBE([tr])
     cl = _FakeClientBE()
     ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
-    ex._maybe_be_lock(tr, price=200.0)
+    trades = [TradePrint(880, 114.0, 1.0, "Buy"),
+              TradePrint(890, 114.5, 1.0, "Buy"),
+              TradePrint(900, 112.0, 10.0, "Sell"),   # deep SELL @112 (под ценой)
+              TradePrint(910, 112.0, 10.0, "Sell")]
+    snap = _snap(115.0, trades)
+    ex._maybe_trail(tr, snap)
+    assert len(cl.stops) == 1
+    new_sl = cl.stops[0][1]
+    assert abs(new_sl - 112.08) < 0.01              # anchor 112 + buf 0.08
+    assert new_sl > 100.08                           # в сторону сделки (вверх)
+    assert tr.sl == new_sl
+
+
+def test_trail_short_moves_sl_below_absorption_print():
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("short", entry=100.0, sl=99.92, tp=80.0)  # уже в BE
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    trades = [TradePrint(880, 86.0, 1.0, "Sell"),
+              TradePrint(890, 85.5, 1.0, "Sell"),
+              TradePrint(900, 88.0, 10.0, "Buy"),    # deep BUY @88 (над ценой 85)
+              TradePrint(910, 88.0, 10.0, "Buy")]
+    snap = _snap(85.0, trades)
+    ex._maybe_trail(tr, snap)
+    assert len(cl.stops) == 1
+    new_sl = cl.stops[0][1]
+    assert abs(new_sl - 87.92) < 0.01              # anchor 88 − buf 0.08
+    assert new_sl < 99.92                           # в сторону сделки (вниз)
+
+
+def test_trail_skipped_before_be():
+    """SL ещё не в BE (initial SL < entry для long) → стадия 2 не запускается
+    (канон: trail ПОСЛЕ «break this level → BE»)."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)  # initial SL, не BE
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    trades = [TradePrint(900, 112.0, 10.0, "Sell"),
+              TradePrint(910, 112.0, 10.0, "Sell"),
+              TradePrint(920, 114.0, 1.0, "Buy")]
+    snap = _snap(115.0, trades)
+    ex._maybe_trail(tr, snap)
     assert cl.stops == []
     assert tr.sl == 90.0
+
+
+def test_trail_never_re_widen():
+    """Канон forex.in.rs «never re-widen a stop»: новый absorption-уровень ДАЛЬШЕ
+    от сделки чем текущий SL → SL не двигается (не ослабляем защиту)."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=113.0, tp=120.0)  # SL уже выше anchor
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    trades = [TradePrint(880, 114.0, 1.0, "Buy"),
+              TradePrint(890, 114.5, 1.0, "Buy"),
+              TradePrint(900, 112.0, 10.0, "Sell"),   # anchor 112 → new_sl 112.08
+              TradePrint(910, 112.0, 10.0, "Sell")]   # 112.08 < tr.sl 113 → no-op
+    snap = _snap(115.0, trades)
+    ex._maybe_trail(tr, snap)
+    assert cl.stops == []
+    assert tr.sl == 113.0
+
+
+def test_trail_disabled_via_config():
+    """FLOWZONE_TRAIL_ENABLED=false → стадия 2 выключена (reversible)."""
+    from flowzone_bot.trading.executor import Executor
+    cfg = _be_cfg()
+    cfg.trail_enabled = False
+    tr = _be_trade("long", entry=100.0, sl=100.08, tp=120.0)
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=cfg, client=cl, now=lambda: 1.0)
+    trades = [TradePrint(900, 112.0, 10.0, "Sell"),
+              TradePrint(910, 112.0, 10.0, "Sell"),
+              TradePrint(920, 114.0, 1.0, "Buy")]
+    snap = _snap(115.0, trades)
+    ex._maybe_trail(tr, snap)
+    assert cl.stops == []
+
+
+# ─── close_reason: классификация по tp/sl (E3, 2026-06-30) ──────────────────
+
+def test_bracket_exit_reason_uses_tp_sl_not_entry_sign():
+    """После BE/trail SL стоит в стороне прибыли — классификация по знаку (exit−
+    entry) ломается (#489: exit=SL, pnl +0.25, reason=tp_hit). Канон-корректно:
+    по пересечению tr.tp / tr.sl."""
+    from flowzone_bot.trading.executor import bracket_exit_reason
+    # long, BE-SL=100.08 (выше entry 100), TP=120: закрытие по BE-SL @100.08 →
+    # exit <= sl → sl_hit (НЕ tp_hit, хотя exit > entry).
+    assert bracket_exit_reason("long", 100.0, 100.08, sl=100.08, tp=120.0) == "sl_hit"
+    # long, закрытие по TP @120 → tp_hit
+    assert bracket_exit_reason("long", 100.0, 120.0, sl=90.0, tp=120.0) == "tp_hit"
+    # short, BE-SL=99.92 (ниже entry 100), TP=80: закрытие по BE-SL @99.92 →
+    # exit >= sl → sl_hit (НЕ tp_hit, хотя exit < entry).
+    assert bracket_exit_reason("short", 100.0, 99.92, sl=99.92, tp=80.0) == "sl_hit"
+    # short, TP @80 → tp_hit
+    assert bracket_exit_reason("short", 100.0, 80.0, sl=110.0, tp=80.0) == "tp_hit"
+
+
+def test_bracket_exit_reason_fallback_without_sl_tp():
+    """Без sl/tp — фолбэк на знак (совместимость со старыми вызовами)."""
+    from flowzone_bot.trading.executor import bracket_exit_reason
+    assert bracket_exit_reason("long", 100.0, 103.5) == "tp_hit"
+    assert bracket_exit_reason("long", 100.0, 99.0) == "sl_hit"
+    assert bracket_exit_reason("long", 100.0, None) == "tp_sl"
 
 
 # ─── DB: zone_low/zone_high persist (2026-06-29) ──────────────────────────
@@ -1192,3 +1355,160 @@ def test_db_migrates_existing_trades_add_zone_columns(tmp_path):
     assert trs[0].zone_low is None        # старая сделка — без зоны
     assert trs[0].zone_high is None
     db.close()
+
+
+# ─── D1/D4/D3/D7: канон-аудит 2026-06-30 ────────────────────────────────
+
+# D4: classify_shape — форма профиля (P-shape / double-distribution / balance)
+
+def _pshape_up_buckets():
+    """Тяжёлый верхний хвост с buy-доминантой → P_SHAPE_UP (канон: aggressive
+    buyers → directional). Ядро у idx20, хвост выше VAH из buy-принтов."""
+    core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}
+    # хвост ВЫШЕ VAH — ТОЛЬКО buy (sell=0) → buy-доминанта в хвосте
+    tail = {26: (15, 0.0), 27: (15, 0.0), 28: (15, 0.0), 29: (15, 0.0), 30: (15, 0.0)}
+    out = {i: (float(v), 0.0) for i, v in core.items()}
+    out.update(tail)
+    return out
+
+
+def _pshape_down_buckets():
+    core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}
+    # хвост НИЖЕ VAL — ТОЛЬКО sell (buy=0) → sell-доминанта в нижнем хвосте
+    tail = {10: (0.0, 15), 11: (0.0, 15), 12: (0.0, 15), 13: (0.0, 15), 14: (0.0, 15)}
+    out = {i: (float(v), 0.0) for i, v in core.items()}
+    out.update(tail)
+    return out
+
+
+def test_classify_shape_pshape_up_on_buy_dominant_upper_tail():
+    prof = build_profile(_pshape_up_buckets(), bucket_size=1.0)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.68)
+    assert ctx.state == TREND_UP
+    assert ctx.shape == P_SHAPE_UP
+
+
+def test_classify_shape_pshape_down_on_sell_dominant_lower_tail():
+    prof = build_profile(_pshape_down_buckets(), bucket_size=1.0)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.68)
+    assert ctx.state == TREND_DOWN
+    assert ctx.shape == P_SHAPE_DOWN
+
+
+def test_classify_shape_balance_on_symmetric_profile():
+    prof = build_profile(_triangular_buckets(), bucket_size=1.0)
+    ctx = classify(prof, last_price=10.5, accept_frac=0.68)
+    assert ctx.state == BALANCE
+    assert ctx.shape == BALANCE_SHAPE
+
+
+def test_classify_shape_double_distribution_two_clusters_with_lvn_neck():
+    # два HVN-кластера (idx 10 и 20) с LVN-перешейком (idx 15) между ними.
+    buckets = {i: (float(v), 0.0) for i, v in {
+        10: 100, 9: 60, 11: 60, 8: 20, 12: 20,
+        15: 5,                      # LVN-перешеек
+        20: 100, 19: 60, 21: 60, 18: 20, 22: 20,
+    }.items()}
+    prof = build_profile(buckets, bucket_size=1.0)
+    shape = classify_shape(prof, accept_above=0.0, accept_below=0.0,
+                           accept_frac=0.68)
+    assert shape == DOUBLE_DISTRIBUTION
+
+
+def test_classify_shape_unknown_when_profile_none():
+    assert classify_shape(None, 0.0, 0.0) == "unknown"
+
+
+# D3: merge_profiles — composite / double-day profile
+
+def test_merge_profiles_sums_buckets_and_recomputes_poc():
+    p1 = build_profile({10: (100.0, 0.0), 11: (50.0, 0.0)}, bucket_size=1.0)
+    p2 = build_profile({11: (0.0, 50.0), 12: (80.0, 0.0)}, bucket_size=1.0)
+    merged = merge_profiles([p1, p2])
+    assert merged is not None
+    # idx 10 и 11 суммарно по 100 → POC тай-брейк к меньшему idx (10)
+    assert merged.poc_idx == 10
+    assert merged.bucket_volume(10) == 100.0
+    assert merged.bucket_volume(11) == 100.0
+    assert merged.bucket_volume(12) == 80.0
+    assert merged.total_volume == 280.0
+
+
+def test_merge_profiles_rejects_mismatched_bucket_size():
+    p1 = build_profile({10: (100.0, 0.0)}, bucket_size=1.0)
+    p2 = build_profile({10: (100.0, 0.0)}, bucket_size=2.0)
+    assert merge_profiles([p1, p2]) is None
+
+
+def test_merge_profiles_empty_returns_none():
+    assert merge_profiles([]) is None
+    assert merge_profiles([None, None]) is None
+
+
+# D7: detect_initiative / detect_exhaustion
+
+def _prints(seq):
+    """seq = [(price, size, side), ...] → список TradePrint (ts = index)."""
+    return [TradePrint(i, p, s, sd) for i, (p, s, sd) in enumerate(seq)]
+
+
+def test_detect_initiative_long_on_strong_buy_delta_and_up_move():
+    # 20 принтов: все Buy, цена растёт 100→110 → сильная buy-агрессия + close up
+    seq = [(100 + i * 0.5, 2.0, "Buy") for i in range(20)]
+    trades = _prints(seq)
+    thr = big_trade_threshold(trades, pct=0.90, min_samples=10)
+    res = detect_initiative(trades, "long", big_threshold=thr)
+    assert res.confirmed is True
+    assert res.net_delta > 0
+    assert res.delta_frac >= 0.30
+
+
+def test_detect_initiative_rejected_when_price_against_delta():
+    # buy-доминанта, но цена ПАДАЕТ → не initiative (no close in direction)
+    seq = [(100 - i * 0.5, 2.0, "Buy") for i in range(20)]
+    trades = _prints(seq)
+    thr = big_trade_threshold(trades, pct=0.90, min_samples=10)
+    res = detect_initiative(trades, "long", big_threshold=thr)
+    assert res.confirmed is False
+
+
+def test_detect_initiative_short_on_strong_sell_delta_and_down_move():
+    seq = [(100 - i * 0.5, 2.0, "Sell") for i in range(20)]
+    trades = _prints(seq)
+    thr = big_trade_threshold(trades, pct=0.90, min_samples=10)
+    res = detect_initiative(trades, "short", big_threshold=thr)
+    assert res.confirmed is True
+    assert res.net_delta < 0
+
+
+def test_detect_exhaustion_up_trend_with_decay_and_contrarian_sellers():
+    # первая половина — тяжёлые buy (объём высокий), вторая — затухание + sell-хвост
+    first = [(100 + i * 0.2, 10.0, "Buy") for i in range(10)]
+    second = [(102 + i * 0.1, 3.0, "Sell") for i in range(10)]  # объём ниже + sell
+    trades = _prints(first + second)
+    res = detect_exhaustion(trades, "up")
+    assert res.confirmed is True
+    assert res.vol_decay <= 0.80
+    assert res.contrarian_frac >= 0.60
+
+
+def test_detect_exhaustion_rejected_without_volume_decay():
+    # объём постоянный (нет затухания), хвост sell — но decay не пройден
+    seq = [(100 + i * 0.1, 10.0, "Sell") for i in range(20)]
+    trades = _prints(seq)
+    res = detect_exhaustion(trades, "up")
+    assert res.confirmed is False
+
+
+def test_detect_exhaustion_down_trend_with_contrarian_buyers():
+    first = [(100 - i * 0.2, 10.0, "Sell") for i in range(10)]
+    second = [(98 - i * 0.1, 3.0, "Buy") for i in range(10)]
+    trades = _prints(first + second)
+    res = detect_exhaustion(trades, "down")
+    assert res.confirmed is True
+
+
+def test_detect_initiative_and_exhaustion_no_data_on_short_input():
+    assert detect_initiative([], "long").confirmed is False
+    assert detect_exhaustion([TradePrint(0, 100.0, 1.0, "Buy")], "up").confirmed is False
+

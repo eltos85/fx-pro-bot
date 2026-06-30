@@ -117,10 +117,15 @@ class FlowzoneSettings(BaseSettings):
     print_prune_older_sec: float = Field(default=6 * 3600.0)
 
     # ─── Volume Profile + контекст аукциона (фаза 2, канон STRATEGY §2-3) ─
-    # Value Area = ≈70% объёма вокруг POC. КАНОН Market Profile (Steidlmayer
-    # «Markets & Market Logic» 1989; Dalton «Mind Over Markets» — value area =
-    # одно стандартное отклонение ≈ 70% TPO/объёма). Это инвариант, не тюним.
-    value_area_pct: float = Field(default=0.70)
+    # Value Area = ≈68% объёма вокруг POC. КАНОН-АВТОР (Fabervaale) буквально
+    # называет 68%: видео «The Only Orderflow Guide» (28:50 VP-секция) — *«value
+    # area… where the 68% of the volume of the distribution took place»*; то же в
+    # winkler-rulebook — *«Value Area boundaries — where 68% of volume was
+    # transacted»*. 68% = одно стандартное отклонение нормального распределения
+    # (Gaussian в ролике). Раньше было 0.70 (Steidlmayer/Dalton literature) — но
+    # первоисточник говорит 68%, правка к канон-автору (no-data-fitting.mdc:
+    # обоснование каноном, не подгонка). Инвариант, не тюним.
+    value_area_pct: float = Field(default=0.68)
     # Разрешение профиля: ширина ценовой корзины = tick_size × N. ТЕХНИЧЕСКИЙ
     # параметр гранулярности footprint (не торговый порог): footprint-профиль
     # строится по корзинам цен из исполненного потока (STRATEGY §6.3). Слишком
@@ -132,10 +137,26 @@ class FlowzoneSettings(BaseSettings):
     # VAL / выше VAH) доля ≥ accept_frac на одной стороне → аукцион в эту сторону;
     # симметрия → баланс (не торгуем). Режим читается по самому профилю (дневной
     # footprint), поэтому СТАБИЛЕН на откате к зоне reload (канон «второе движение»).
-    # 0.70 = каноничная Value-Area-константа (value area ≈70% принятого объёма;
-    # acceptance вне VA = направленное принятие той же грейд-доли). Не тюнинг под
-    # P&L; reversible через env (no-data-fitting.mdc).
-    context_accept_frac: float = Field(default=0.70)
+    # accept_frac = 0.68 — та же Value-Area-доля канон-автора («acceptance вне VA
+    # = направленное принятие той же грейд-доли», 68%). Не тюнинг под P&L;
+    # reversible через env (no-data-fitting.mdc).
+    context_accept_frac: float = Field(default=0.68)
+    # D4: форма профиля (P-shape / double-distribution / balance / shift) —
+    # обогащение `ctx.shape`, НЕ гейтит вход (бинарный trend/balance `classify`
+    # гейтит как прежде). Канон-нюанс (Dalton + «The Only Orderflow Guide»),
+    # новая классификация не меняет торговое решение без OOS-валидации
+    # (no-data-fitting.mdc). Флаг зарезервирован под будущий gating-эксперимент.
+    profile_shape_enabled: bool = Field(default=True)
+    # D3: composite / double-day profile merge (канон «merge them… double day
+    # profile»). Утилита `volume_profile.merge_profiles` готова; в live-путь НЕ
+    # подключена по умолчанию — включение composite-зон как торгового критерия
+    # требует OOS-валидации (no-data-fitting.mdc, strategy-guard.mdc).
+    profile_merge_enabled: bool = Field(default=False)
+    # D7: initiative auction / exhaustion — доп. order-flow паттерны (канон «The
+    # Only Orderflow Guide»). Детекторы `orderflow.detect_initiative` /
+    # `detect_exhaustion` готовы; в live-вход НЕ гейтят по умолчанию — основной
+    # канон-сетап absorption-reload (§4); новые триггеры требуют OOS-валидации.
+    initiative_exhaustion_enabled: bool = Field(default=False)
 
     # ─── Поток: big-trades + absorption-триггер (фаза 3, канон STRATEGY §3-4) ─
     # Big trade = крупный исполненный принт (STRATEGY §3.3 «volume got support by
@@ -206,22 +227,45 @@ class FlowzoneSettings(BaseSettings):
     # не подгонкой под P&L). Источник: research, не data-fitting.
     min_rr: float = Field(default=2.0)
 
-    # ─── Trade Management: BE-lock (канон Fabervaale, видео «The Only Orderflow
-    # Guide» 39:00 Trade Management) ───────────────────────────────────────
-    # Канон: после пробоя уровня поглощения — *«you can decide to put your stop
-    # loss to break even»* (risk-free), затем трейл по order-flow-агрессии.
-    # BE-lock: когда цена прошла в сторону сделки на масштаб зоны поглощения
-    # (favourable ≥ zone_width = zone_high − zone_low) — выносим SL в entry ±
-    # буфер. Прямо бьёт по 72% SL-hit: лузеры, что вернулись → scratch на BE,
-    # победители бегут к swing-TP (и в стадии 2 — трейлятся по order-flow).
-    # Буфер = тот же anti-flicker sl_buffer_bps (покрыть round-trip fees, чтобы
-    # BE не стал микро-убытком). Триггер по краю зоны (persist zone_low/high в
-    # БД) — канон-точно, не 1R-прокси. Выключаемо через env (reversible).
+    # ─── Trade Management: BE-lock + trail (канон Fabervaale, видео «The Only
+    # Orderflow Guide» 39:00 Trade Management) ───────────────────────────────
+    # Канон (полный транскрипт 39:00): *«when you BREAK THIS LEVEL, you can decide
+    # to put your stop loss to break even... after breaking out of the sellers of
+    # breaking complete absorption and you have an amazing explosion where you
+    # can TRAIL your position following the aggression of the market. This one
+    # print a new one, you bring your stop loss here and you continue.»*
+    # + tradezella playbook (Fabio): «Break-even: If CVD shows strong pressure,
+    # move the stop to break-even early.»
+    # + forex.in.rs (World-Cup strategy): «Trail to the LAST absorption, never
+    # re-widen a stop. Let runners breathe to the next HTF level.»
+    #
+    # Стадия 1 — BE-lock: SL → entry±buf когда цена ПРОБИЛА ПРЕДЫДУЩИЙ СТРУКТУРНЫЙ
+    # УРОВЕНЬ (swing high для long / swing low для short) + CVD-pressure в окне
+    # доминирует в сторону сделки. Канон-точно («break this level» + «CVD strong
+    # pressure»), НЕ [НАШЕ] «favourable ≥ N×zone_width» (которое срабатывало
+    # слишком рано → обрезало wins на откате к entry, кейсы #488/#489/#492:
+    # wins +0.03/+0.25 вместо +21). Буфер = sl_buffer_bps (покрыть round-trip
+    # fees, чтобы BE не стал микро-убытком). Выключаемо через env (reversible).
     be_lock_enabled: bool = Field(default=True)
-    # Во сколько zone_width цена должна пройти в сторону сделки для BE-триггера
-    # (1.0 = «пробой уровня поглощения» на полный масштаб зоны). Канон-инвариант,
-    # не тюним без обсуждения.
-    be_lock_zone_mult: float = Field(default=1.0)
+    # Канон-флаг: BE по структурному пробою предыдущего swing-уровня. False →
+    # BE-off (только биржевой initial SL). Не тюним — канон-инвариант.
+    be_lock_break_structure: bool = Field(default=True)
+    # CVD-pressure gate (tradezella «If CVD shows strong pressure»): BE только
+    # если в trade_window доминирует сторона сделки (long: buy_vol > sell_vol,
+    # short: sell_vol > buy_vol). [НАШЕ] операционализация качественного канон-
+    # условия («strong pressure» без формулы) — простое большинство объёма.
+    # False → BE по одному структурному пробою без CVD-подтверждения.
+    be_lock_cvd_gate: bool = Field(default=True)
+
+    # Стадия 2 — trail (канон «this print a new one, you bring your stop loss
+    # here and you continue»): после BE — SL едет за последним absorption-принтом
+    # контр-стороны в стороне сделки (deep SELL ниже цены для long = поддержка →
+    # SL выше; deep BUY выше цены для short = сопротивление → SL ниже). Только в
+    # сторону сделки (never re-widen, forex.in.rs). Idempotency: persisted tr.sl.
+    trail_enabled: bool = Field(default=True)
+    # Окно (сек) для детекции absorption-принтов trail = тело M5-свечи (как
+    # absorption_window_sec). Технический параметр окна потока, не торговый порог.
+    trail_window_sec: float = Field(default=300.0)
 
     # ─── Цели / swing / re-entry (фаза 5, канон §5.3, §8) ─────────────────
     # Цель = ближайшая swing-точка (STRATEGY §5.3). Swing = фрактал Bill Williams
