@@ -902,6 +902,36 @@ def test_reconcile_trues_up_ws_drift_against_closedpnl(tmp_path):
     db.close()
 
 
+def test_reconcile_keeps_sl_hit_for_be_trail_close_in_small_profit(tmp_path):
+    """E3 в пути reconciliation: закрытие по BE/trail-SL в МАЛЫЙ ПЛЮС не должно
+    перебиваться на tp_hit по знаку net (кейсы #489/#496: exit=SL в плюс,
+    close_reason ошибочно tp_hit). Канон-классификация — по пересечению sl/tp."""
+    import sqlite3
+    from flowzone_bot.trading.executor import Executor
+
+    class _FakeClient:
+        def closed_pnl_detail(self, *a, **k):
+            return {"pnl": 0.31, "exit": 58503.0, "order_id": "x",
+                    "created": 0.0}
+        def closed_pnl_position(self, *a, **k):
+            return None
+
+    db = _fz_db(tmp_path)
+    tid = db.insert_open(symbol="BTCUSDT", side="short", qty=0.00668,
+                         entry=58549.40, sl=58502.6, tp=58275.0,
+                         score=4, reasons="x", mode="live", ts_open=9000.0)
+    # WS закрыл по traил-SL в малый плюс: exit=58503 ≈ sl=58502.6 → sl_hit
+    db.mark_closed(tid, exit_price=58503.0, pnl_usd=0.31, fees_usd=0.0,
+                   close_reason="sl_hit", ts_close=9000.0, provisional=False)
+    ex = Executor(db=db, settings=_Cfg(), client=_FakeClient(), now=lambda: 10000.0)
+    ex.reconcile()
+    con = sqlite3.connect(str(tmp_path / "flowzone_bot.sqlite"))
+    row = con.execute("SELECT close_reason FROM trades WHERE id=?", (tid,)).fetchone()
+    con.close()
+    assert row[0] == "sl_hit"   # REST-сверка НЕ перебила на tp_hit по знаку +0.31
+    db.close()
+
+
 def test_rest_verify_gives_up_after_max_fails(tmp_path):
     """Неоднозначную сделку (REST не матчится) после N попыток принимаем как
     есть (WS-net) и метим verified — не зацикливаем бюджет."""

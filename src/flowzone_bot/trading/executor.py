@@ -128,11 +128,31 @@ def _last_swing_price(swings: list, kind: str) -> float | None:
     return max(cands, key=_key).price
 
 
-def reconciled_bracket_reason(old_reason: str | None, net: float) -> str | None:
-    if old_reason not in _BRACKET_REASONS:
+def reconciled_bracket_reason(tr, exit_price: float | None,
+                              net: float) -> str | None:
+    """При REST-сверке переопределить close_reason по КАНОН-логике
+    ``bracket_exit_reason`` (по пересечению sl/tp), НЕ по знаку net.
+
+    Почему не по знаку: после BE-lock/trail (видео 39:00) SL стоит В СТОРОНЕ
+    ПРИБЫЛИ (long: SL>entry, short: SL<entry). Закрытие по такому BE/trail-SL
+    даёт малый ПОЛОЖИТЕЛЬНЫЙ net → sign-based классификатор метит `tp_hit`,
+    хотя по факту это `sl_hit` (E3-баг в пути reconciliation: кейсы #489, #496 —
+    exit=SL в малый плюс, close_reason ошибочно tp_hit). Канон-корректно — по
+    уровню: long exit≥tp→tp_hit, exit≤sl→sl_hit; short зеркально; иначе ближайший.
+
+    Если sl/tp/exit неизвестны — НЕ переопределяем (держим old_reason из
+    WS-закрытия, которое уже классифицировало через ``bracket_exit_reason``)."""
+    old = getattr(tr, "close_reason", None)
+    if old not in _BRACKET_REASONS:
         return None
-    corrected = "tp_hit" if net >= 0 else "sl_hit"
-    return corrected if corrected != old_reason else None
+    side = getattr(tr, "side", None)
+    entry = getattr(tr, "entry", 0.0) or 0.0
+    sl = getattr(tr, "sl", None)
+    tp = getattr(tr, "tp", None)
+    if (exit_price and entry > 0 and sl and tp and sl > 0 and tp > 0
+            and side in ("long", "short")):
+        return bracket_exit_reason(side, entry, exit_price, sl, tp)
+    return None  # не переопределяем по знаку (E3-баг) — держим WS-классификацию
 
 
 class Executor:
@@ -392,8 +412,7 @@ class Executor:
             if ts_close >= ws_horizon:
                 net, exit_px, complete = self._realized_from_fills(tr)
                 if complete:
-                    reason = reconciled_bracket_reason(
-                        getattr(tr, "close_reason", None), net)
+                    reason = reconciled_bracket_reason(tr, exit_px, net)
                     # WS-net снимает provisional, но НЕ verified — REST-true-up
                     # (цикл 2) досверит против closedPnl (ловит дрейф комиссий).
                     self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px,
@@ -464,8 +483,7 @@ class Executor:
         d = self._fetch_closed_pnl(tr, ts_close)
         if not d or d.get("pnl") is None:
             return False
-        reason = reconciled_bracket_reason(getattr(tr, "close_reason", None),
-                                           d["pnl"])
+        reason = reconciled_bracket_reason(tr, d.get("exit"), d["pnl"])
         self._db.verify_pnl(tr.id, pnl_usd=d["pnl"], exit_price=d.get("exit"),
                             close_reason=reason)
         pend = self._close_pending.pop(tr.id, None)
@@ -495,7 +513,7 @@ class Executor:
             return False
         net = d["pnl"]
         old = tr.pnl_usd or 0.0
-        reason = reconciled_bracket_reason(getattr(tr, "close_reason", None), net)
+        reason = reconciled_bracket_reason(tr, d.get("exit"), net)
         self._db.verify_pnl(tr.id, pnl_usd=net, exit_price=d.get("exit"),
                             close_reason=reason)
         self._rest_recon_attempts.pop(tr.id, None)

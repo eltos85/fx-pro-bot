@@ -9,6 +9,35 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-07-01
+
+### fix(flowzone): E3-reconcile — close_reason по sl/tp, не по знаку net
+
+Симптом: live #496 BTCUSDT short, `exit=58503`, `sl=58502.6` (trailed в
+прибыль), `tp=58275`, `close_reason=tp_hit` при `pnl=+0.31`. Закрытие по
+traill-SL в малый плюс, должно быть `sl_hit`.
+
+Причина: `executor.reconciled_bracket_reason` переопределял `close_reason` при
+REST-сверке **по знаку net** (`net>=0 → tp_hit`, `net<0 → sl_hit`) — это тот же
+E3-баг, что починили в `bracket_exit_reason` (WS-путь), но он остался в пути
+REST-reconciliation. WS-закрытие корректно ставило `sl_hit` (через
+`bracket_exit_reason` по пересечению sl/tp), а REST-сверка перебивала на
+`tp_hit`, т.к. BE/trail-SL стоит В СТОРОНЕ ПРИБЫЛИ (long: SL>entry, short:
+SL<entry) → малый положительный net. Кейсы #489, #496.
+
+Решение: `reconciled_bracket_reason(tr, exit_price, net)` делегирует канон-логике
+`bracket_exit_reason(side, entry, exit, sl, tp)` (по пересечению sl/tp, не по
+знаку). Если sl/tp/exit неизвестны — НЕ переопределяет (держит WS-классификацию,
+не возвращается к знаку). 3 call-site обновлены под новую сигнатуру
+(`_realized_from_fills`, `_rest_finalize`, `_rest_verify`). Регрессионный тест
+`test_reconcile_keeps_sl_hit_for_be_trail_close_in_small_profit`.
+
+Обоснование: bugfix канон-несоответствия (no-data-fitting.mdc bugfix-категория),
+не P&L-подгонка. pytest 1158 passed. Файлы: `executor.py`,
+`tests/test_flowzone_bot.py`.
+
+---
+
 ## 2026-06-30
 
 ### fix(flowzone): BE-lock+trail к канону 39:00 (E1/E2/E3) + канон-аудит D1-D8
