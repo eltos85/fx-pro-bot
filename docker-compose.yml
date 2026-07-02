@@ -690,8 +690,10 @@ services:
       # Friday-flat (2026-06-26): принудительное закрытие momentum-позиций
       # перед выходными (окно в пятницу UTC, до FX close ~21:00). Гэп пн
       # исполняет SL вне 1R (empirically avgR -0.79 weekend-hold vs -0.08
-      # intra-week). Сопровождение работает до окна; новые входы в окне
-      # запрещены. Обратимо: enabled=false или start==end.
+      # intra-week). Сопровождение работает до окна. Новые входы запрещены
+      # от FRIDAY_FLAT_START до КОНЦА пятницы UTC (2026-07-02: закрыта дыра
+      # 20:45→FX close, когда вход уезжал в выходные). Обратимо:
+      # enabled=false (или start==end — отключает только окно закрытия).
       MOMENTUM_BOT_FRIDAY_FLAT_ENABLED: ${MOMENTUM_BOT_FRIDAY_FLAT_ENABLED:-true}
       MOMENTUM_BOT_FRIDAY_FLAT_START: ${MOMENTUM_BOT_FRIDAY_FLAT_START:-20:00}
       MOMENTUM_BOT_FRIDAY_FLAT_END: ${MOMENTUM_BOT_FRIDAY_FLAT_END:-20:45}

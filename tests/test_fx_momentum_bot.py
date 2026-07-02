@@ -462,3 +462,43 @@ def test_friday_flat_due_bad_config_disables() -> None:
         now_utc=_fri(20, 15),
     ) is False
 
+
+# ─── friday_entry_blocked: блок входов от flat_start до конца пятницы ────────
+# Дыра 2026-06-26 (BUILDLOG 2026-07-02): окно flat [20:00, 20:45) запрещало
+# входы только внутри себя — вход в 20:45–21:00 уезжал в выходные, а после
+# 21:00 бот спамил MARKET_CLOSED каждые 5 минут.
+
+
+def test_friday_entry_blocked_from_flat_start_to_midnight() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked
+    # Внутри окна flat, в дыре 20:45–21:00 и после закрытия рынка — блок
+    for h, m in [(20, 0), (20, 44), (20, 45), (20, 59), (21, 3), (23, 59)]:
+        assert friday_entry_blocked(
+            enabled=True, flat_start="20:00", now_utc=_fri(h, m),
+        ) is True, f"{h}:{m} пятницы должен блокировать вход"
+
+
+def test_friday_entry_blocked_before_flat_start() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked
+    for h, m in [(0, 0), (12, 0), (19, 59)]:
+        assert friday_entry_blocked(
+            enabled=True, flat_start="20:00", now_utc=_fri(h, m),
+        ) is False, f"{h}:{m} пятницы до flat_start вход разрешён"
+
+
+def test_friday_entry_blocked_only_friday() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked
+    assert friday_entry_blocked(
+        enabled=True, flat_start="20:00", now_utc=_other_day(21, 0),
+    ) is False
+
+
+def test_friday_entry_blocked_disabled_or_bad_config() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked
+    assert friday_entry_blocked(
+        enabled=False, flat_start="20:00", now_utc=_fri(21, 0),
+    ) is False
+    assert friday_entry_blocked(
+        enabled=True, flat_start="oops", now_utc=_fri(21, 0),
+    ) is False
+

@@ -13,7 +13,7 @@ from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_pro_bot.config.settings import calc_lot_size
 from fx_momentum_bot.state.store import MomentumStore
 from fx_momentum_bot.strategy.event_guard import high_impact_event_near
-from fx_momentum_bot.strategy.friday_flat import friday_flat_due
+from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked, friday_flat_due
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
 from fx_momentum_bot.strategy.session_filter import session_skip_reason
 from fx_pro_bot.trading.auth import TokenData
@@ -614,6 +614,8 @@ def run() -> None:
     # сразу на открытии), но логируем один раз на переходе, иначе 569
     # ERROR-строк за выходные (BUILDLOG 2026-06-15).
     market_closed_pids: set[int] = set()
+    # Аналогичный дедуп для ОТКРЫТИЙ: symbol → уже логировали «рынок закрыт».
+    market_closed_open_syms: set[str] = set()
     log.info(
         "Momentum bot started | mode=%s | momentum=%s | interval=%s/%s | db=%s",
         "LIVE" if (settings.trading_enabled and executor is not None) else "PAPER",
@@ -671,6 +673,14 @@ def run() -> None:
                     "FRIDAY-FLAT: окно закрытия перед выходными (%s–%s UTC)",
                     settings.friday_flat_start, settings.friday_flat_end,
                 )
+            # Блок новых входов — ШИРЕ окна закрытия: от flat_start до конца
+            # пятницы UTC. Иначе вход в 20:45–21:00 (после окна flat, до FX
+            # weekly close) немедленно уезжает в выходные — дыра, замеченная
+            # 2026-06-26 (MARKET_CLOSED-спам 21:03–21:59, BUILDLOG 2026-07-02).
+            friday_entry_block = executor is not None and friday_entry_blocked(
+                enabled=settings.friday_flat_enabled,
+                flat_start=settings.friday_flat_start,
+            )
 
             if executor is not None and settings.position_management_enabled:
                 _manage_positions(
@@ -840,7 +850,7 @@ def run() -> None:
                     and open_count < settings.max_open_positions
                     and sym_news_block is None
                     and sym_session_block is None
-                    and not friday_flat_now
+                    and not friday_entry_block
                 )
 
                 executed = False
@@ -850,11 +860,12 @@ def run() -> None:
                     note = "flat"
                 elif signal_data.direction == last_direction:
                     note = "same_direction"
-                elif friday_flat_now:
-                    # В окне friday-flat новые входы запрещены: позиция всё
-                    # равно уехала бы в выходные (мы тут же flat-нем её в
-                    # этом же цикле). Direction НЕ фиксируется → сигнал
-                    # повторится в следующую неделю, если актуален.
+                elif friday_entry_block:
+                    # От flat_start до конца пятницы новые входы запрещены:
+                    # позиция уехала бы в выходные (в окне flat её тут же
+                    # закроем, после окна — некому закрыть до понедельника).
+                    # Direction НЕ фиксируется → сигнал повторится в
+                    # следующую неделю, если актуален.
                     note = "skip:friday_flat_window"
                 elif sym_news_block is not None:
                     # Event-guard: вход отложен, direction НЕ фиксируется
@@ -913,7 +924,20 @@ def run() -> None:
                     note = (
                         f"live_open:{'ok' if result.success else result.error}"
                     )
+                    if not result.success and _is_market_closed_error(result.error):
+                        # Рынок закрыт: попытка повторится в след. цикле
+                        # (direction не фиксируется), но логируем один раз
+                        # на переходе — симметрично decay-close дедупу
+                        # (BUILDLOG 2026-06-15), без спама каждые 5 мин.
+                        if symbol not in market_closed_open_syms:
+                            market_closed_open_syms.add(symbol)
+                            log.info(
+                                "OPEN отложен %s %s: рынок закрыт, "
+                                "повторю на открытии",
+                                symbol, signal_data.direction,
+                            )
                     if result.success:
+                        market_closed_open_syms.discard(symbol)
                         risk_price = max(sl_distance, 0.0)
                         if result.broker_position_id > 0 and risk_price > 0:
                             store.upsert_position_state(

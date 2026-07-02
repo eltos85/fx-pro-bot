@@ -6,6 +6,79 @@
 
 ## 2026-07-02
 
+### fix(ctrader-client): корреляция запрос↔ответ по clientMsgId — конец cross-matching'а ExecutionEvent
+
+`<pending commit>`
+
+Фикс БАГа 1 из аудита ниже (одобрено пользователем). Симптом → причина →
+решение:
+
+**Симптом:** SLIPPAGE GUARD срабатывал на чужом символе с pid уже
+закрытой позиции (slip 16 057 pip = цена USDJPY против цены GBPUSD);
+открытия помечались failed при реально исполненном ордере; повторный
+вход дал дубль GBPUSD long 07-02 08:07 (риск ×2).
+
+**Причина:** `_send_and_wait` матчил ответ только по `payloadType`.
+Один ордер/close порождает ≥2 `ProtoOAExecutionEvent` (ORDER_ACCEPTED +
+ORDER_FILLED, `ProtoOAExecutionType` в OpenApiModelMessages.proto) —
+«хвостовое» событие съедалось waiter'ом следующего запроса. Ошибки было
+ещё хуже: error-событие уходило в «первый попавшийся» waiter из любого
+списка.
+
+**Решение (официальная дока, api-docs.mdc):** `ProtoMessage.clientMsgId`
+— «Request message id, assigned by the client that will be returned in
+the response» (<https://help.ctrader.com/open-api/common-messages/#protomessage>).
+Каждый запрос получает uuid; `_on_message` доставляет ответ/ошибку
+СТРОГО waiter'у с совпадающим clientMsgId. Server-push события без
+clientMsgId (хвостовой ORDER_FILLED, SL/TP-срабатывания, TraderUpdated)
+waiter'ов не трогают — раньше именно они и травили диспетчер.
+Библиотечный `ctrader_open_api.Client.send(message, clientMsgId=...)`
+поддерживает это из коробки (проверено по исходнику пакета и
+официальному ConsoleSample Spotware).
+
+Общая инфраструктура: клиент делят advisor, fx_ai_trader и
+fx_momentum_bot — фикс защищает всех (у fx_ai_trader тот же класс бага
+при последовательных open/close).
+
+**Тесты:** новый `tests/test_ctrader_client_dispatch.py` (5 тестов:
+роутинг по clientMsgId, push-события не съедают waiter'ов, ошибки только
+своему запросу, orphan-ошибка не валит чужой запрос, cleanup по
+timeout). Сьют 1183 passed.
+
+**Файлы:** `src/fx_pro_bot/trading/client.py`,
+`tests/test_ctrader_client_dispatch.py`
+
+---
+
+### fix(momentum): пятничный блок входов до конца дня + MARKET_CLOSED-дедуп на открытиях
+
+`<pending commit>`
+
+Фикс БАГа 2 из аудита ниже (одобрено пользователем). Симптом: 06-26 (Пт)
+21:03–21:59 — 13 попыток открыть EURUSD в закрытый рынок (MARKET_CLOSED
+каждые 5 мин). Причина: окно friday-flat [20:00, 20:45) запрещало входы
+только внутри себя — после 20:45 и до FX weekly close вход снова
+разрешался (позиция уехала бы в выходные, некому flat-нуть), а
+session-фильтр проверяет час ЗАКРЫТОГО бара (в 21:03 это час 20 →
+проходит [7,21)). Решение:
+
+- `friday_entry_blocked()` в `strategy/friday_flat.py`: новые входы
+  запрещены от `flat_start` до полуночи пятницы UTC (research basis тот
+  же, что у friday-flat: гэп-риск понедельника, Dalton 2007 / Lyons
+  2001). Окно принудительного ЗАКРЫТИЯ не изменилось ([start, end)).
+- MARKET_CLOSED-дедуп на открытиях (симметрично decay-close дедупу
+  BUILDLOG 2026-06-15): попытки продолжаются каждый цикл, лог — один раз
+  на переходе.
+
+Порогов стратегии не касается (фильтр времени, не торговый параметр).
+
+**Тесты:** +4 (`friday_entry_blocked`). Сьют 1183 passed.
+
+**Файлы:** `src/fx_momentum_bot/strategy/friday_flat.py`,
+`src/fx_momentum_bot/app/main.py`, `docker-compose.yml` (комментарий)
+
+---
+
 ### audit(momentum): окно 06-26→07-02 — P&L −$40 (шум, n=22), найден критичный race в исполнении ордеров
 
 `<без правок кода — только аудит>`

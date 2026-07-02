@@ -74,3 +74,35 @@ def friday_flat_due(
     start_minutes = start_h * 60 + start_m
     end_minutes = end_h * 60 + end_m
     return start_minutes <= now_minutes < end_minutes
+
+
+def friday_entry_blocked(
+    *,
+    enabled: bool,
+    flat_start: str,
+    now_utc: datetime | None = None,
+) -> bool:
+    """True, если новые входы запрещены: пятница UTC от flat_start до полуночи.
+
+    Дыра, закрытая этой функцией (BUILDLOG 2026-07-02): окно flat
+    [20:00, 20:45) запрещало входы только внутри себя — после 20:45 и до
+    FX weekly close (~21:00 UTC летом, позже зимой) вход снова разрешался.
+    Такая позиция немедленно уехала бы в выходные (некому её flat-нуть),
+    что противоречит самой цели friday-flat (gap-risk понедельника,
+    research basis в докстринге модуля). Наблюдение 2026-06-26 21:03–21:59:
+    13 попыток открыть EURUSD в уже закрытый рынок (MARKET_CLOSED-спам).
+
+    Блокируем [flat_start, 24:00) пятницы UTC. После полуночи входы
+    отсекает session-фильтр (закрытый рынок Сб/Вс + окно [7,21) UTC).
+    enabled=False или сбой парсинга → False (не блокирует).
+    """
+    if not enabled:
+        return False
+    try:
+        start_h, start_m = _parse_hhmm(flat_start)
+    except Exception:
+        return False
+    now = now_utc or datetime.now(timezone.utc)
+    if now.weekday() != 4:  # Friday
+        return False
+    return now.hour * 60 + now.minute >= start_h * 60 + start_m

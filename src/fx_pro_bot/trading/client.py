@@ -141,7 +141,18 @@ class CTraderClient:
         self._app_auth_done = threading.Event()
         self._account_auth_done = threading.Event()
         self._lock = threading.Lock()
-        self._waiters: dict[int, list[tuple[threading.Event, list]]] = {}
+        # Корреляция запрос↔ответ по clientMsgId, НЕ по payloadType.
+        # ProtoMessage.clientMsgId: «Request message id, assigned by the
+        # client that will be returned in the response»
+        # (help.ctrader.com/open-api/common-messages/#protomessage).
+        # Матчинг по payloadType ломался: один ордер/close порождает ≥2
+        # ProtoOAExecutionEvent (ORDER_ACCEPTED + ORDER_FILLED, см.
+        # ProtoOAExecutionType в OpenApiModelMessages.proto), «хвостовое»
+        # событие съедалось waiter'ом СЛЕДУЮЩЕГО запроса → чужой
+        # positionId/fill_price в open_position (BUILDLOG 2026-07-02:
+        # ложный slippage-guard, дубль позиции).
+        # msg_id → (event, [response, error]).
+        self._waiters: dict[str, tuple[threading.Event, list]] = {}
         self._running = False
         self._reconnecting = False
         self._reconnect_attempt = 0
@@ -256,10 +267,9 @@ class CTraderClient:
         # сессии — иначе counter сбрасывается в 0 и backoff не растёт.
         self._last_successful_connect_ts = 0.0
         with self._lock:
-            for waiters in self._waiters.values():
-                for ev, res in waiters:
-                    res[1] = ConnectionError("cleanup")
-                    ev.set()
+            for ev, res in self._waiters.values():
+                res[1] = ConnectionError("cleanup")
+                ev.set()
             self._waiters.clear()
         if self._client:
             try:
@@ -790,21 +800,30 @@ class CTraderClient:
     # -- internal -----------------------------------------------------------------
 
     def _send_and_wait(self, message: Any, expected_type: int, timeout: float = 30) -> Any:
-        """Отправить protobuf-сообщение и ждать ответа нужного типа."""
+        """Отправить protobuf-сообщение и ждать СВОЙ ответ по clientMsgId.
+
+        Ответ сопоставляется с запросом по ``clientMsgId`` (уникален на
+        запрос), который сервер echo-ит обратно в ProtoMessage-конверте
+        (help.ctrader.com/open-api/common-messages/#protomessage).
+        ``expected_type`` сохранён для диагностики timeout-сообщений.
+        """
         if not self._connected.is_set():
             raise ConnectionError("cTrader: нет подключения")
+
+        import uuid
 
         from twisted.internet import reactor
 
         event = threading.Event()
         result: list = [None, None]  # [response, error]
+        msg_id = uuid.uuid4().hex
 
         with self._lock:
-            self._waiters.setdefault(expected_type, []).append((event, result))
+            self._waiters[msg_id] = (event, result)
 
         def _do_send():
             try:
-                d = self._client.send(message)
+                d = self._client.send(message, clientMsgId=msg_id)
                 d.addErrback(lambda f: log.debug("cTrader deferred errback: %s", f))
             except Exception as exc:
                 result[1] = exc
@@ -814,9 +833,7 @@ class CTraderClient:
 
         if not event.wait(timeout=timeout):
             with self._lock:
-                waiters = self._waiters.get(expected_type, [])
-                if (event, result) in waiters:
-                    waiters.remove((event, result))
+                self._waiters.pop(msg_id, None)
             raise TimeoutError(f"cTrader: таймаут ожидания ответа (type={expected_type})")
 
         if result[1]:
@@ -849,10 +866,9 @@ class CTraderClient:
         self._connected.clear()
         self._account_auth_done.clear()
         with self._lock:
-            for waiters in self._waiters.values():
-                for ev, res in waiters:
-                    res[1] = ConnectionError(f"Disconnected: {reason}")
-                    ev.set()
+            for ev, res in self._waiters.values():
+                res[1] = ConnectionError(f"Disconnected: {reason}")
+                ev.set()
             self._waiters.clear()
 
         # Smart-reset attempt counter. Сбрасываем ТОЛЬКО если:
@@ -1027,26 +1043,36 @@ class CTraderClient:
             ProtoOAOrderErrorEvent().payloadType,
         )
 
+        # Корреляция ответа с запросом — ТОЛЬКО по clientMsgId (сервер
+        # echo-ит его в ProtoMessage-конверте; help.ctrader.com/open-api/
+        # common-messages/#protomessage). Событие без clientMsgId (server-
+        # push: ExecutionEvent от SL/TP-срабатывания, TraderUpdated и т.п.)
+        # не принадлежит ни одному запросу и waiter'ов не трогает.
+        msg_id = str(getattr(message, "clientMsgId", "") or "")
+
         if payload_type in error_types:
             err_code = getattr(extracted, "errorCode", "?")
             err_desc = getattr(extracted, "description", "")
             log.error("cTrader error (type=%d): %s — %s", payload_type, err_code, err_desc)
-            with self._lock:
-                for waiters in self._waiters.values():
-                    if waiters:
-                        ev, res = waiters.pop(0)
-                        res[1] = RuntimeError(f"cTrader error {err_code}: {err_desc}")
-                        ev.set()
-                        return
+            waiter = None
+            if msg_id:
+                with self._lock:
+                    waiter = self._waiters.pop(msg_id, None)
+            if waiter is not None:
+                ev, res = waiter
+                res[1] = RuntimeError(f"cTrader error {err_code}: {err_desc}")
+                ev.set()
             return
 
-        with self._lock:
-            waiters = self._waiters.get(payload_type, [])
-            if waiters:
-                ev, res = waiters.pop(0)
-                res[0] = extracted
-                ev.set()
-                return
+        waiter = None
+        if msg_id:
+            with self._lock:
+                waiter = self._waiters.pop(msg_id, None)
+        if waiter is not None:
+            ev, res = waiter
+            res[0] = extracted
+            ev.set()
+            return
 
         log.info("cTrader msg (no waiter): type=%d, %s", payload_type, type(extracted).__name__)
 
