@@ -553,9 +553,11 @@ class SweepFadeTrendStrategy(SweepFadeCanonStrategy):
         # нашим (изолированный env, дефолт = canon).
         self.symbol_scope = set(getattr(cfg, "sweep_fade_trend_symbol_list",
                                         cfg.sweep_fade_canon_symbol_list))
-        # порог трендовости и lookback — из env (для A/B-тюнинга без деплоя)
+        # порог трендовости — из env (для A/B-тюнинга без деплоя). lookback
+        # применяется НЕ здесь: main прокидывает его в KeyLevels, который и
+        # считает regime_ratio (fix 2026-07-02 — раньше атрибут висел мёртвым,
+        # а day_levels использовал хардкод-дефолт).
         self._trend_max = float(getattr(cfg, "sweep_fade_trend_max", 1.5))
-        self._regime_lookback = int(getattr(cfg, "sweep_fade_trend_lookback_bars", 8))
         # детекторы по нашему scope (canon создал с [] → пусто)
         self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
         # троттлинг gate-лога ПО СИМВОЛУ (v0.18.27 hotfix): один флаг на стратегию
@@ -1267,7 +1269,12 @@ def resolve(signals: list[Signal]) -> Signal | None:
             _RR_STATE[group[0].symbol] = [fp, idx]
             new_cluster = True
         else:
-            idx = prev[1]
+            # Кламп по текущему размеру группы (аудит 2026-07-02): состав
+            # tie-группы может СЖАТЬСЯ между тиками при том же fingerprint
+            # (например, trend выпал по мигнувшему regime-гейту) — сохранённый
+            # idx тогда выходит за границы → IndexError, а resolve() в main
+            # вне try/except (валит весь процесс). Модуло сохраняет ротацию.
+            idx = prev[1] % len(group)
             new_cluster = False
         win = group[idx]
     else:

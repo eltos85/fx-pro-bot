@@ -253,7 +253,9 @@ services:
       SCALP_SWEEP_FADE_RUN_SYMBOLS: ${SCALP_SWEEP_FADE_RUN_SYMBOLS:-}
       SCALP_SWEEP_FADE_RUN_TAKE_PROFIT_R: ${SCALP_SWEEP_FADE_RUN_TAKE_PROFIT_R:-3.0}
       SCALP_SWEEP_FADE_RUN_BE_ACTIVATE_R: ${SCALP_SWEEP_FADE_RUN_BE_ACTIVATE_R:-1.0}
-      SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP: ${SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP:-true}
+      # 2026-07-02: scratch OFF — live-форвард: 23 скретча = −$257 (−1.13R/шт
+      # при пороге −0.7R), хуже биржевого SL. См. scripts/scalp_loss_anatomy.py.
+      SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP: ${SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP:-false}
       # ─── v0.18.27 (2026-06-26): sweep_fade_trend — canon + trend-day-gate ──
       # Изолированная гипотеза «не фейдить в активном тренде дня». Canon-вход +
       # canon-exit (flow_exit@1.5R — у canon winners мелкие, exit не виноват),

@@ -96,7 +96,15 @@ class ScalpSettings(BaseSettings):
     # Порог breakeven-lock (R favourable). 1.0 = MFE-разделение winners/losers.
     sweep_fade_run_be_activate_r: float = Field(default=1.0)
     # Losing-side scratch при развороте ленты (winners НЕ режем).
-    sweep_fade_run_scratch_on_flow_flip: bool = Field(default=True)
+    # 2026-07-02: ВЫКЛЮЧЕН (default False) по анатомии убытков live-форварда:
+    # 23 flow_scratch у run = −$257 (31% всех потерь бота за период), реализация
+    # −1.13R/скретч при пороге −0.7R (slippage+fees+хвост до фактического
+    # закрытия) — ХУЖЕ чем дать дойти до биржевого SL (−1R). Согласуется с
+    # контрфактуалом v0.13.0 базовой страты (data/scalp_sweep.txt: sa 0.7→OFF
+    # WR 36→43%, avgR −0.238→−0.215) — «чем меньше режем, тем лучше».
+    # Артефакт: scripts/scalp_loss_anatomy.py (snapshot scalp_bot.sqlite
+    # 2026-07-02, сверен с Bybit closedPnl). env для форвард-A/B оставлен.
+    sweep_fade_run_scratch_on_flow_flip: bool = Field(default=False)
 
     # ─── sweep_fade_trend (v0.18.27, 2026-06-26): canon + trend-day-gate ───
     # Изолированная гипотеза «не фейдить в активном тренде дня». A/B против

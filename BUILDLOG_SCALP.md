@@ -4,6 +4,57 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-07-02
+
+### fix(scalp): аудит-фиксы (resolve-краш, мёртвый lookback, слепое окно trend-гейта) + scratch OFF у run
+
+Аудит кода + анатомия убытков live-форварда (снапшот `scalp_bot.sqlite`
+2026-07-02, сверен с Bybit closedPnl; артефакт —
+`scripts/scalp_loss_anatomy.py`, посегментная динамика по каждой страте —
+там же). Одобрено пользователем.
+
+**1. Изменение стратегии (data-driven): `flow_scratch` у `sweep_fade_run` — OFF.**
+Симптом: run — крупнейший источник потерь окна: 23 flow_scratch = −$257
+(31% всех убытков бота post-cutoff), фактическая реализация −1.13R/скретч
+при конфиг-пороге −0.7R (slippage + taker-fee + хвост до фактического
+закрытия) — ХУЖЕ, чем дать сделке дойти до биржевого SL (−1R). Согласуется
+с уже сделанным контрфактуалом v0.13.0 у базовой страты (`data/scalp_sweep.txt`:
+sa 0.7→OFF даёт WR 36→43%, avgR −0.238→−0.215 — «чем меньше режем, тем
+лучше»). n=23 — ниже порога sample-size.mdc для disable страты, но здесь
+не disable, а откат экспериментального exit-механизма к уже
+OOS-валидированному поведению базы; env `SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP`
+оставлен для форвард-A/B. Default False в `settings.py` + `docker-compose.yml`.
+
+**2. Bug-fix: `resolve()` round-robin — IndexError при сжатии tie-группы.**
+Симптом: если состав same-side tie-группы сжимается между тиками при том же
+fingerprint (напр. trend выпал по мигнувшему regime-гейту), сохранённый
+`idx` выходит за границы `group` → IndexError, а `resolve()` в main вне
+try/except — валит процесс. Фикс: кламп `idx % len(group)` (ротация
+сохранена). `analysis/strategies.py`.
+
+**3. Bug-fix: `sweep_fade_trend_lookback_bars` был мёртвым конфигом.**
+`main.py` прокидывал lookback в `KeyLevels`, но `KeyLevels.refresh` не
+передавал его в `day_levels`, а та звала `_rolling_regime` с хардкодом 8.
+Плюс в `SweepFadeTrendStrategy.__init__` висел неиспользуемый атрибут
+`_regime_lookback` (удалён). Теперь env реально управляет окном.
+`data/levels.py`, `analysis/strategies.py`.
+
+**4. Bug-fix: rolling-regime слеп после полуночи UTC.**
+`day_levels` собирал закрытые бары только ТЕКУЩЕГО дня → в 00:00–00:30 UTC
+баров <2, `regime_ratio=None`, trend-гейт fail-closed (страта не торгует),
+а тренд, начавшийся вчера вечером, был невидим и позже. Фикс: окно
+«последние N закрытых баров» катится через границу суток (все закрытые бары
+истории); PDH/PDL/day_high/day_low не тронуты. `data/levels.py`.
+
+**Тесты:** `test_resolve_round_robin_survives_group_shrink`,
+`test_day_levels_regime_rolls_across_midnight`,
+`test_day_levels_regime_lookback_plumbed`, `test_run_scratch_default_off`.
+Полный прогон: 1169 passed.
+
+**Файлы:** `analysis/strategies.py`, `data/levels.py`, `config/settings.py`,
+`docker-compose.yml`, `scripts/scalp_loss_anatomy.py` (новый),
+`scripts/scalp_perstrat_since.py`, `tests/test_scalp_bot.py`.
+
 ## 2026-06-29
 
 ### feat(regime-logging): regime-фичи на входе в отдельную таблицу (meta-labeling)

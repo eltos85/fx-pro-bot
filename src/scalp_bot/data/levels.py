@@ -37,7 +37,8 @@ _KLINE_LIMIT = 200
 _DAY_SEC = 86_400
 
 
-def day_levels(kline: list[list], now: float) -> dict | None:
+def day_levels(kline: list[list], now: float, *,
+               regime_lookback: int = 8) -> dict | None:
     """(pdh, pdl, day_high, day_low, regime_ratio) из Bybit get_kline 15m (DESC).
 
     Элемент свечи: [startTime(ms), open, high, low, close, volume, turnover].
@@ -46,8 +47,12 @@ def day_levels(kline: list[list], now: float) -> dict | None:
     Нет полного покрытия предыдущего дня → None (уровни ненадёжны).
 
     regime_ratio (v0.18.27, sweep_fade_trend) — rolling-трендовость ПОСЛЕДНИХ
-    `regime_lookback_bars` закрытых баров: |close−open|/avgATR. Не look-ahead:
+    ``regime_lookback`` закрытых баров: |close−open|/avgATR. Не look-ahead:
     смотрим в прошлое. >1.5 — активный тренд (не фейдим), <0.8 — range.
+    Fix 2026-07-02: окно КАТИТСЯ через границу UTC-суток (все закрытые бары
+    истории, не только сегодняшние) — раньше после 00:00 UTC гейт слеп
+    (баров <2 → None → fail-closed до 00:30), а тренд из вчера был невидим;
+    lookback раньше не прокидывался (хардкод 8).
     """
     day_start = now - (now % _DAY_SEC)
     prev_start = day_start - _DAY_SEC
@@ -56,7 +61,8 @@ def day_levels(kline: list[list], now: float) -> dict | None:
     cur_hi: float | None = None
     cur_lo: float | None = None
     oldest_ts: float | None = None
-    # закрытые бары (по убыванию ts) для rolling-regime — последние N по времени
+    # ВСЕ закрытые бары истории (любого дня) для rolling-regime — окно
+    # «последние N баров» непрерывно, полночь его не рвёт
     closed: list[tuple] = []  # (ts, open, high, low, close)
     for row in kline or []:
         try:
@@ -68,13 +74,14 @@ def day_levels(kline: list[list], now: float) -> dict | None:
         except (IndexError, TypeError, ValueError):
             continue
         oldest_ts = ts if oldest_ts is None else min(oldest_ts, ts)
+        if ts + 900.0 <= now:  # закрытый 15m-бар (любой день)
+            closed.append((ts, o, hi, lo, c))
         if prev_start <= ts < day_start:
             prev_hi = hi if prev_hi is None else max(prev_hi, hi)
             prev_lo = lo if prev_lo is None else min(prev_lo, lo)
-        elif ts >= day_start and ts + 900.0 <= now:  # закрытый 15m-бар сегодня
+        elif ts >= day_start and ts + 900.0 <= now:  # закрытый бар сегодня
             cur_hi = hi if cur_hi is None else max(cur_hi, hi)
             cur_lo = lo if cur_lo is None else min(cur_lo, lo)
-            closed.append((ts, o, hi, lo, c))
     # требуем, чтобы история доставала до начала предыдущего дня — иначе
     # PDH/PDL посчитаны по обрезку и врут (fail-closed)
     if prev_hi is None or prev_lo is None or oldest_ts is None \
@@ -82,7 +89,7 @@ def day_levels(kline: list[list], now: float) -> dict | None:
         return None
     # rolling regime по последним N закрытым барам (старые→новые)
     closed.sort(key=lambda x: x[0])
-    regime_ratio = _rolling_regime(closed)
+    regime_ratio = _rolling_regime(closed, lookback=regime_lookback)
     return {"pdh": prev_hi, "pdl": prev_lo,
             "day_high": cur_hi, "day_low": cur_lo,
             "regime_ratio": regime_ratio}
@@ -125,7 +132,7 @@ class KeyLevels:
             except Exception:
                 log.exception("levels get_kline %s failed", sym)
                 continue
-            lv = day_levels(kline, ts)
+            lv = day_levels(kline, ts, regime_lookback=self.regime_lookback)
             if lv is not None:
                 self._levels[sym] = lv
 

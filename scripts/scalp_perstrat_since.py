@@ -13,14 +13,21 @@ from datetime import UTC, datetime
 
 DB = "/data/scalp_bot.sqlite"
 
-# страта -> cutoff (UTC date, дата правки логики из скрина)
+# страта -> cutoff (UTC, момент последней правки логики/конфига страты).
+# Точные timestamp-ы деплоев (MSK→UTC) из git log:
+#   density_break       25fa872 2026-06-28T15:55Z (no-trade blacklist BTC/ZEC/TAO)
+#   sweep_fade          c633366 2026-06-28T15:35Z (universe fix — меняет пул монет)
+#   density_bounce      c633366 2026-06-28T15:35Z (universe fix — меняет пул монет)
+#   sweep_fade_canon    d410fd0 2026-06-28T15:27Z (temporarily disabled для A/B)
+#   sweep_fade_run      c4fe43a 2026-06-27T06:06Z (round-robin — конец starving)
+#   sweep_fade_trend    c4fe43a 2026-06-27T06:06Z (round-robin — конец starving)
 CUTOFF = {
-    "sweep_fade": "2026-06-17",
-    "sweep_fade_canon": "2026-06-14",
-    "sweep_fade_run": "2026-06-26",  # v0.18.27: дата деплоя изолированной гипотезы
-    "sweep_fade_trend": "2026-06-26",  # v0.18.27: canon + trend-day-gate
-    "density_break": "2026-06-15",
-    "density_bounce": "2026-06-08",
+    "sweep_fade": "2026-06-28T15:35:00",
+    "sweep_fade_canon": "2026-06-28T15:27:00",
+    "sweep_fade_run": "2026-06-27T06:06:00",
+    "sweep_fade_trend": "2026-06-27T06:06:00",
+    "density_break": "2026-06-28T15:55:00",
+    "density_bounce": "2026-06-28T15:35:00",
 }
 
 _NON_TRADE = ("restart_flat", "entry_Cancelled", "entry_Rejected",

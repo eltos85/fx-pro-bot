@@ -1415,6 +1415,27 @@ def test_resolve_round_robin_independent_per_symbol():
                     mk("ETHUSDT", 200.0, "sweep_fade_run")]).strategy == "sweep_fade_run"
 
 
+def test_resolve_round_robin_survives_group_shrink():
+    """Fix 2026-07-02: tie-группа может СЖАТЬСЯ между тиками при том же
+    fingerprint (страта выпала по мигнувшему гейту, напр. trend по
+    regime_ratio) — сохранённый idx выходил за границы группы → IndexError
+    валил main-loop. Теперь кламп по модулю: победитель валиден, ротация
+    сохранена."""
+    resolve_reset_state()
+    mk = lambda entry, strat: Signal(symbol="BTCUSDT", side="short",
+            entry_ref=entry, sl_level=99.0, tp_level=entry + 2.0, score=6,
+            reasons=["x"], strategy=strat)
+    strats = ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")
+    # три кластера подряд → для entry=300.0 сохранён idx=2 (trend)
+    resolve([mk(100.0, s) for s in strats])
+    resolve([mk(200.0, s) for s in strats])
+    assert resolve([mk(300.0, s) for s in strats]).strategy == "sweep_fade_trend"
+    # тот же кластер (fp совпадает), но trend выпал → группа из 2:
+    # раньше group[2] бросал IndexError; теперь 2 % 2 = 0 → canon
+    win = resolve([mk(300.0, "sweep_fade_canon"), mk(300.0, "sweep_fade_run")])
+    assert win is not None and win.strategy == "sweep_fade_canon"
+
+
 def test_build_strategies_defaults_to_sweep_fade():
     cfg = SimpleNamespace(strategy_list=["sweep_fade"])
     strats = build_strategies(cfg, ["SOLUSDT"])
@@ -3140,6 +3161,58 @@ def test_day_levels_fail_closed_without_full_prev_day():
     assert day_levels(list(reversed(rows)), now) is None
 
 
+def test_day_levels_regime_rolls_across_midnight():
+    """Fix 2026-07-02: rolling-regime считается по последним N закрытым барам
+    ЛЮБОГО дня. Раньше — только по сегодняшним: сразу после 00:00 UTC баров <2
+    → regime_ratio=None → trend-гейт fail-closed на ~30-45 мин каждые сутки,
+    а тренд, начавшийся вчера, был для гейта невидим."""
+    from scalp_bot.data.levels import day_levels
+    day = 86_400.0
+    now = 2 * day + 900  # 00:15 UTC — сегодня закрыт ровно 1 бар
+    rows = [_kline_row(day + i * 900, 101.0, 99.0) for i in range(96)]
+    rows.append(_kline_row(2 * day, 100.5, 99.5))
+    lv = day_levels(list(reversed(rows)), now)
+    assert lv is not None
+    # раньше: сегодняшних закрытых баров 1 (<2) → None; теперь окно катится
+    # через полночь и regime считается по вчерашним+сегодняшнему барам
+    assert lv["regime_ratio"] is not None
+
+
+def _kline_row_oc(ts_sec: float, o: float, hi: float, lo: float, c: float):
+    return [str(int(ts_sec * 1000)), str(o), str(hi), str(lo), str(c), "1", "1"]
+
+
+def test_day_levels_regime_lookback_plumbed():
+    """Fix 2026-07-02: SCALP_SWEEP_FADE_TREND_LOOKBACK_BARS был мёртвым —
+    day_levels всегда считал по хардкоду 8. Теперь параметр прокинут
+    (KeyLevels.refresh → day_levels → _rolling_regime): разное окно даёт
+    разный ratio."""
+    from scalp_bot.data.levels import KeyLevels, day_levels
+    day = 86_400.0
+    now = 2 * day + 8 * 900  # закрыто 8 сегодняшних баров
+    rows = [_kline_row_oc(day + i * 900, 100.0, 101.0, 99.0, 100.0)
+            for i in range(96)]
+    # сегодня: 6 флэт-баров + 2 трендовых (100→104→108)
+    for i in range(6):
+        rows.append(_kline_row_oc(2 * day + i * 900, 100.0, 101.0, 99.0, 100.0))
+    rows.append(_kline_row_oc(2 * day + 6 * 900, 100.0, 104.0, 100.0, 104.0))
+    rows.append(_kline_row_oc(2 * day + 7 * 900, 104.0, 108.0, 104.0, 108.0))
+    kline = list(reversed(rows))
+    lv8 = day_levels(kline, now, regime_lookback=8)
+    lv2 = day_levels(kline, now, regime_lookback=2)
+    # lookback=8: move 8 / atr 2.5 = 3.2; lookback=2: move 8 / atr 4 = 2.0
+    assert lv8["regime_ratio"] == pytest.approx(3.2)
+    assert lv2["regime_ratio"] == pytest.approx(2.0)
+
+    class _FakeClient:
+        def get_kline(self, symbol, interval, limit):
+            return kline
+
+    kl = KeyLevels(regime_lookback=2)
+    kl.refresh(_FakeClient(), ["ETHUSDT"], now=now)
+    assert kl.regime_ratio("ETHUSDT") == pytest.approx(2.0)
+
+
 def test_key_levels_swept_gate_sides():
     from scalp_bot.data.levels import KeyLevels
     kl = KeyLevels()
@@ -3561,6 +3634,14 @@ def test_run_should_exit_scratch_disabled():
                               ["ETHUSDT"])
     tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
     assert st.should_exit(tr, _snap_at(99.3, momentum_for="short"), now=10.0) is None
+
+
+def test_run_scratch_default_off():
+    """2026-07-02: дефолт scratch у run — OFF. Live-форвард: 23 flow_scratch
+    = −$257 (31% всех потерь окна), реализация −1.13R при пороге −0.7R — хуже
+    биржевого SL (−1R). Артефакт: scripts/scalp_loss_anatomy.py."""
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().sweep_fade_run_scratch_on_flow_flip is False
 
 
 def test_run_entry_identical_to_canon():
