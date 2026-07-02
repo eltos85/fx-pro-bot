@@ -12,7 +12,7 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 ## 2026-07-02
 
 ### fix(flowzone): аудит v0.2.0-канона — 5 багов (kline DESC, BE≡TP, trail-буфер, шум-acceptance, session-якорь)
-`<pending commit>`
+`473df5c`
 
 Полный аудит реализации против канона (STRATEGY_FLOWZONE.md + winkler-rulebook
 как независимый вторичный источник) + математическая проверка VA/classify на
