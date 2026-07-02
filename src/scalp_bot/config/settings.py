@@ -471,8 +471,32 @@ class ScalpSettings(BaseSettings):
     density_bounce_persist_sec: float = Field(default=1200.0)
     # Анти-абсорбция: если ≥ absorb_frac стены «съели» за absorb_window —
     # остаток скоро снимут (Kalena: 30% за <10с → выход/не вход).
+    # v0.18.30: у bounce окно СКОЛЬЗЯЩЕЕ (vs пик за window в любой момент
+    # жизни трека) — раньше проверялось только от first_seen и при persist
+    # 20м не работало после первых 10с.
     density_absorb_frac: float = Field(default=0.30)
     density_absorb_window_sec: float = Field(default=10.0)
+    # ─── v0.18.30 (2026-07-02): редизайн трека стены density_bounce ──────
+    # Аудит: 0 сигналов за 24 дня после persist 10с→20м (v0.18.15). Причина —
+    # идентификация трека: стена обязана была быть МАКСИМУМОМ стороны книги с
+    # float-точностью каждый тик все 1200с (любой айсберг-рефреш / чужая
+    # лимитка / выход из топ-50 окна WS сбрасывали first_seen). Канон «стена
+    # сидит 20–30 мин» (Secret Terminal, Bookmap) — о живом УРОВНЕ-ЗОНЕ;
+    # айсберги рефилятся на том же уровне (Bookmap iceberg detection).
+    # Допуск идентичности уровня (б.п. от якоря): квалифицирующий уровень в
+    # пределах tolerance = та же стена (перестановка на пару тиков — норма).
+    # 5 б.п. < near_bps 8 б.п. (зона идентичности уже зоны входа). Инженерный
+    # допуск, env-тюнинг, форвард-замер телеметрией треков.
+    density_wall_tolerance_bps: float = Field(default=5.0)
+    # Grace на пропадание уровня (сек) до снятия трека: WS-чурн orderbook50 и
+    # мгновенный айсберг-рефил не рвут 20-мин персист. Одного порядка с
+    # absorb_window (10с): исчезновение дольше = реальное снятие/пробой.
+    density_track_grace_sec: float = Field(default=10.0)
+    # Тип входа bounce: taker (market). Отскок — быстрое событие: история
+    # maker-входа 12/33 (36%) сигналов не налились (entry_Cancelled/timeout);
+    # тот же вывод C-06 у density_break (fill-rate 42.6% → market).
+    # None/пусто → глобальный entry_order_type (maker).
+    density_bounce_entry_order_type: str = Field(default="market")
     # Вход, когда цена подошла к стене ближе near_bps (б.п. от цены стены).
     density_near_bps: float = Field(default=8.0)
     # Опциональный абсолютный пол стены в USD (0 = выкл, только относительный).

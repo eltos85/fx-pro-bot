@@ -316,6 +316,18 @@ services:
       # bounce; density_break на базовом SCALP_DENSITY_PERSIST_SEC=10с не задет.
       # [forward-test] n=12 — edge не валидирован. Откат: =10.
       SCALP_DENSITY_BOUNCE_PERSIST_SEC: ${SCALP_DENSITY_BOUNCE_PERSIST_SEC:-1200}
+      # v0.18.30 (2026-07-02): редизайн трека стены bounce. После v0.18.15 — 0
+      # сигналов за 24 дня: трек требовал «стена = МАКСИМУМ книги с float-
+      # точностью каждый тик 1200с подряд» (айсберг-рефреш/чужая лимитка/выход
+      # из топ-50 окна WS сбрасывали persist). Теперь: идентичность уровня-зоны
+      # (якорь ± tolerance б.п.), не обязан быть максимумом; grace на пропадание;
+      # анти-абсорбция скользящая (vs пик за окно, весь трек). Канон persist
+      # 20м НЕ менялся. ТОЛЬКО bounce; density_break не задет.
+      SCALP_DENSITY_WALL_TOLERANCE_BPS: ${SCALP_DENSITY_WALL_TOLERANCE_BPS:-5.0}
+      SCALP_DENSITY_TRACK_GRACE_SEC: ${SCALP_DENSITY_TRACK_GRACE_SEC:-10}
+      # v0.18.30: bounce вход taker — maker не наливался (12/33 = 36%
+      # entry_Cancelled/timeout), тот же вывод что C-06 у break (42.6% fill).
+      SCALP_DENSITY_BOUNCE_ENTRY_ORDER_TYPE: ${SCALP_DENSITY_BOUNCE_ENTRY_ORDER_TYPE:-market}
       # Rolling-baseline (v0.9.0): стена vs скользящее среднее за 10–15мин (Kalena),
       # а не мгновенный top-25 (тот давал 0/502 входов — 5× недостижим).
       SCALP_DENSITY_BASELINE_SEC: ${SCALP_DENSITY_BASELINE_SEC:-900}

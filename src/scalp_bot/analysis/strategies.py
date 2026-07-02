@@ -744,6 +744,31 @@ def _wall_in_range(levels: list[tuple[float, float]], lo: float, hi: float,
     return False
 
 
+def _find_wall_near(levels: list[tuple[float, float]], anchor: float,
+                    tol_frac: float, wall_mult: float, min_usd: float = 0.0,
+                    baseline: float | None = None) -> tuple[float, float] | None:
+    """Квалифицирующий уровень (≥wall_mult×base) в допуске |price−anchor| ≤
+    tol_frac×anchor. НЕ требует быть максимумом стороны книги — продолжение
+    трека стены (v0.18.30): айсберг-рефреш/перестановка на пару тиков и чужая
+    крупная лимитка в другом месте книги НЕ рвут идентичность стены.
+    Возвращает крупнейший подходящий уровень или None."""
+    if len(levels) < 5 or anchor <= 0:
+        return None
+    base = baseline if (baseline is not None and baseline > 0) \
+        else _baseline_avg([sz for _, sz in levels])
+    if base <= 0:
+        return None
+    tol = tol_frac * anchor
+    best: tuple[float, float] | None = None
+    for price, size in levels:
+        if abs(price - anchor) <= tol and size >= wall_mult * base:
+            if min_usd > 0 and price * size < min_usd:
+                continue
+            if best is None or size > best[1]:
+                best = (price, size)
+    return best
+
+
 class DensityBounceStrategy:
     """Стратегия №2: отскок от плотности (крупной лимитки) в стакане.
 
@@ -766,6 +791,26 @@ class DensityBounceStrategy:
        отскок, SL сразу за стеной (build_signal swept=цена_стены), TP по R с
        общим fee-guard.
     Выход (should_exit): стена, на которую опирались, исчезла → тезис снят.
+
+    ─── v0.18.30 (2026-07-02): редизайн трека стены ───
+    Аудит: после v0.18.15 (persist 20м) — 0 сигналов за 24 дня. Причина не в
+    рынке (C-05: 267 сырых стен ≥5× за замер), а в идентификации трека: стена
+    обязана была быть МАКСИМУМОМ стороны книги с float-точностью каждый тик
+    (1с) все 1200с подряд — любой айсберг-рефреш, чужая крупная лимитка или
+    выход из топ-50 окна WS обнуляли first_seen. Канон «стена сидит 20–30 мин»
+    (Secret Terminal, Bookmap) говорит о ЖИВОМ УРОВНЕ-ЗОНЕ, а не о строгом
+    максимуме каждый тик; айсберги по определению рефилятся на том же уровне
+    (Bookmap iceberg detection). Новый трек:
+    - идентичность = якорь ± tolerance_bps (уровень-зона, не exact float);
+    - «жива» = есть квалифицирующий уровень ≥mult×base у якоря (НЕ обязан
+      быть максимумом книги);
+    - grace-период на пропадание (WS-чурн/мгновенный рефил) до снятия трека;
+    - анти-абсорбция СКОЛЬЗЯЩАЯ: ≥absorb_frac съедено за ≤absorb_window от
+      недавнего пика в ЛЮБОЙ момент жизни (раньше окно проверялось только от
+      first_seen → при persist 20м не работало вовсе);
+    - вход taker/market (пер-стратегийно): отскок — быстрое событие, история
+      maker-входа: 12/33 (36%) сигналов не налились (entry_Cancelled/timeout);
+      тот же вывод, что C-06 для density_break (fill-rate 42.6% → market).
     """
 
     name = "density_bounce"
@@ -811,39 +856,76 @@ class DensityBounceStrategy:
             self._track.setdefault(s, {"bid": None, "ask": None})
             self._base.setdefault(s, self._new_base())
 
+    def _kill_track(self, sym: str, book_side: str, cur: dict, now: float,
+                    reason: str) -> None:
+        """Снять трек + телеметрия (форвард-замер жизни стен для тюнинга по
+        данным). Смерти короче 60с не логируем (чурн — не сигнал)."""
+        self._track[sym][book_side] = None
+        life = now - cur["first_seen"]
+        if life >= 60.0:
+            play.info("🧱 [%s] трек стены %s %.6f умер: %s (жил %.0fс из "
+                      "%.0fс persist)", sym, book_side, cur["price"], reason,
+                      life, self._persist())
+
+    def _persist(self) -> float:
+        p = getattr(self.cfg, "density_bounce_persist_sec", None)
+        return p if p is not None else self.cfg.density_persist_sec
+
     def _update_track(self, sym: str, book_side: str,
                       levels: list[tuple[float, float]], now: float) -> None:
         cfg = self.cfg
         t = self._track[sym]
         base = self._wall_baseline(sym, book_side, levels, now)
-        wall = detect_wall(levels, cfg.density_wall_mult, cfg.density_min_wall_usd,
-                           baseline=base)
         cur = t[book_side]
-        if wall is None:
-            t[book_side] = None
-            return
-        price, size = wall
-        # v0.18.15: near_round БОЛЬШЕ НЕ ГЕЙТ → демоция в score-бонус. Практики
-        # (Bookmap, Secret Terminal density-scalping, QuantStrategy.io) гейтят
-        # стену по РАЗМЕРУ + persist + absorption; круглый уровень — confluence,
-        # НЕ обязателен (стены бьют и у prev day H/L, и у key levels). Прежний
-        # AND-гейт near_round(0.3%) резал 83.5% реальных стен (замер C-05,
-        # data/scalp_density_nearround_audit.txt). round_tier — иерархический
-        # бонус (00>50, Bloomfield-Chin-Craig/Osler). ТОЛЬКО bounce; break не задет.
-        round_tier = near_round_hier(price, cfg.density_round_frac)
-        if cur is None or abs(cur["price"] - price) > 1e-12:
+        # ── нет трека: ищем новую стену (максимум стороны, как раньше) ──
+        if cur is None:
+            wall = detect_wall(levels, cfg.density_wall_mult,
+                               cfg.density_min_wall_usd, baseline=base)
+            if wall is None:
+                return
+            price, size = wall
+            # v0.18.15: near_round НЕ гейт → score-бонус (Bookmap/Secret
+            # Terminal/QuantStrategy.io: гейт = размер+persist+absorption;
+            # прежний AND-гейт резал 83.5% стен — C-05,
+            # data/scalp_density_nearround_audit.txt).
             t[book_side] = {"price": price, "size0": size, "last_size": size,
-                            "first_seen": now, "round": round_tier}
+                            "first_seen": now, "miss_since": None,
+                            # скользящее окно (ts, size) для анти-абсорбции
+                            "recent": [(now, size)],
+                            "round": near_round_hier(price, cfg.density_round_frac)}
             return
-        # та же стена: обновляем размер + round-бонус + проверяем поглощение
+        # ── трек есть: жив, если у ЯКОРЯ есть уровень ≥mult×base (v0.18.30:
+        # допуск tolerance_bps, НЕ обязан быть максимумом книги) ──
+        tol = getattr(cfg, "density_wall_tolerance_bps", 5.0) / 1e4
+        lvl = _find_wall_near(levels, cur["price"], tol, cfg.density_wall_mult,
+                              cfg.density_min_wall_usd, baseline=base)
+        if lvl is None:
+            # grace-период: WS-чурн/мгновенный айсберг-рефил не рвёт трек
+            grace = getattr(cfg, "density_track_grace_sec", 10.0)
+            if cur["miss_since"] is None:
+                cur["miss_since"] = now
+            elif now - cur["miss_since"] > grace:
+                self._kill_track(sym, book_side, cur, now,
+                                 "уровень исчез > grace (снят/пробит/ушёл из окна)")
+            return
+        price, size = lvl
+        cur["miss_since"] = None
         cur["last_size"] = size
-        cur["round"] = round_tier
-        eaten = (cur["size0"] - size) / cur["size0"] if cur["size0"] > 0 else 0.0
-        if (eaten >= cfg.density_absorb_frac
-                and now - cur["first_seen"] <= cfg.density_absorb_window_sec):
-            play.info("🧱 [%s] стена %s %.6f поглощается (%.0f%% за %.0fс) — "
-                      "снимаю наблюдение (спуфинг/пробой)", sym, book_side,
-                      price, eaten * 100, now - cur["first_seen"])
+        cur["round"] = near_round_hier(price, cfg.density_round_frac)
+        # анти-абсорбция СКОЛЬЗЯЩАЯ (Kalena: ≥30% съедено за <10с → спуф/пробой).
+        # Сравниваем с ПИКОМ за absorb_window, а не с size0 от first_seen —
+        # иначе при persist 20м проверка не работала после первых 10с жизни.
+        win = cfg.density_absorb_window_sec
+        cur["recent"] = [(ts, sz) for ts, sz in cur["recent"]
+                         if ts >= now - win]
+        cur["recent"].append((now, size))
+        peak = max(sz for _, sz in cur["recent"])
+        eaten = (peak - size) / peak if peak > 0 else 0.0
+        if eaten >= cfg.density_absorb_frac:
+            play.info("🧱 [%s] стена %s %.6f поглощается (%.0f%% за ≤%.0fс, "
+                      "жила %.0fс) — снимаю наблюдение (спуфинг/пробой)", sym,
+                      book_side, price, eaten * 100, win,
+                      now - cur["first_seen"])
             t[book_side] = None
 
     def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
@@ -858,10 +940,7 @@ class DensityBounceStrategy:
         last = snap.last_price
         near = cfg.density_near_bps / 1e4
         # v0.18.15: пер-стратегийный persist (канон density-фейда 20–30+ мин).
-        # fallback на базовый density_persist_sec для конфигов/тестов без поля.
-        persist = getattr(cfg, "density_bounce_persist_sec", None)
-        if persist is None:
-            persist = cfg.density_persist_sec
+        persist = self._persist()
         # bid-стена → отскок ВВЕРХ (long); ask-стена → отскок ВНИЗ (short)
         for book_side, side in (("bid", "long"), ("ask", "short")):
             w = self._track[sym][book_side]
@@ -869,6 +948,14 @@ class DensityBounceStrategy:
                 continue
             if now - w["first_seen"] < persist:
                 continue  # ещё не выстояла (анти-спуфинг, канон ≥20–30м)
+            # телеметрия: стена дожила до persist (раз на трек)
+            if not w.get("persisted_logged"):
+                w["persisted_logged"] = True
+                play.info("🧱 [%s] стена %s %.6f ВЫСТОЯЛА %.0fс — жду подхода "
+                          "цены (≤%.1f б.п.)", sym, book_side, w["price"],
+                          persist, cfg.density_near_bps)
+            if w.get("miss_since") is not None:
+                continue  # уровень в grace-паузе (невидим) — не входим вслепую
             if abs(last - w["price"]) > near * w["price"]:
                 continue  # цена ещё не подошла к стене
             # density + persist — обязательные; round — confluence-бонус (v0.18.15,
@@ -876,7 +963,13 @@ class DensityBounceStrategy:
             reasons = ["density", "persist"]
             if w.get("round"):
                 reasons.append(w["round"])
-            sig = build_signal(snap, side, w["price"], cfg, len(reasons), reasons)
+            # v0.18.30: taker-вход (пер-стратегийно). Отскок — быстрое событие:
+            # maker-лимитка не успевала в очередь (12/33 сигналов не налились);
+            # тот же вывод C-06 у density_break. None → глобальный maker.
+            otype = (getattr(cfg, "density_bounce_entry_order_type", None)
+                     or getattr(cfg, "entry_order_type", "market"))
+            sig = build_signal(snap, side, w["price"], cfg, len(reasons), reasons,
+                               order_type=otype)
             if sig is None:
                 continue  # fee-guard / risk не прошли
             sig.strategy = self.name

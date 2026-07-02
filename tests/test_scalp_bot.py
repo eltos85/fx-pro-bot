@@ -1669,6 +1669,8 @@ def _density_cfg(**over):
         density_bounce_persist_sec=10.0,
         density_absorb_frac=0.30, density_absorb_window_sec=10.0,
         density_near_bps=8.0, density_min_wall_usd=0.0,
+        # v0.18.30: редизайн трека (допуск идентичности + grace на пропадание)
+        density_wall_tolerance_bps=5.0, density_track_grace_sec=10.0,
         # rolling-baseline (v0.9.0): high min_samples → тесты на fallback
         # (мгновенный baseline), сохраняя прежние ожидания пер-функции.
         density_baseline_sec=900.0, density_baseline_min_samples=30,
@@ -1806,6 +1808,105 @@ def test_density_should_exit_respects_min_age():
                       asks=_book_with_bid_wall()[1])
     # возраст 5с < 10с → не дёргаемся даже если стены нет
     assert st.should_exit(tr, snap_gone, now=5.0) is None
+
+
+# ─── v0.18.30: редизайн трека стены density_bounce (2026-07-02) ─────────────
+# Аудит: 0 сигналов за 24 дня после persist 20м — трек требовал «стена =
+# максимум книги с float-точностью каждый тик 1200с подряд».
+
+def test_density_track_survives_bigger_wall_elsewhere():
+    """Чужая крупная лимитка в другом месте книги НЕ рвёт трек: идентичность
+    = якорь ± tolerance, уровень не обязан быть максимумом стороны. Старый код
+    (detect_wall каждый тик) сбросил бы first_seen → persist никогда не
+    добегал."""
+    cfg = _density_cfg(density_wall_mult=3.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall(50.0)
+    snap0 = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                  bids=bids, asks=asks)
+    st.update(snap0, now=0.0)
+    assert st.armed("SOLUSDT") is True
+    # t=5: у 99.90 (вне tolerance 5 б.п. от якоря 100.0) встала лимитка КРУПНЕЕ
+    # стены — максимум стороны теперь не наш якорь
+    bids_flicker = [(100.0, 50.0), (99.99, 1), (99.98, 1), (99.97, 1),
+                    (99.90, 60.0)]
+    snap1 = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                  bids=bids_flicker, asks=asks)
+    st.update(snap1, now=5.0)
+    assert st.armed("SOLUSDT") is True  # трек жив, persist НЕ сброшен
+    # t=11: persist 10с добежал (от t=0!) → отскок
+    sig = st.update(snap1, now=11.0)
+    assert sig is not None and sig.side == "long"
+    assert sig.strategy == "density_bounce"
+
+
+def test_density_track_grace_survives_brief_vanish():
+    """Кратковременное пропадание уровня (WS-чурн/айсберг-рефил) ≤ grace НЕ
+    убивает трек; persist считается от ПЕРВОГО появления."""
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall(50.0)
+    snap_wall = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                      bids=bids, asks=asks)
+    flat = [(100.0, 1), (99.99, 1), (99.98, 1), (99.97, 1), (99.96, 1)]
+    snap_flat = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                      bids=flat, asks=asks)
+    st.update(snap_wall, now=0.0)
+    st.update(snap_flat, now=5.0)   # уровень мигнул (5с < grace 10с)
+    assert st.armed("SOLUSDT") is True
+    st.update(snap_wall, now=8.0)   # вернулся → miss снят
+    sig = st.update(snap_wall, now=12.0)  # persist 10с от t=0 добежал
+    assert sig is not None and sig.side == "long"
+
+
+def test_density_track_dies_after_grace_exceeded():
+    """Пропадание уровня ДОЛЬШЕ grace = реальное снятие/пробой → трек умирает.
+    Во время grace-паузы вход не делается (не входим вслепую)."""
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall(50.0)
+    snap_wall = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                      bids=bids, asks=asks)
+    flat = [(100.0, 1), (99.99, 1), (99.98, 1), (99.97, 1), (99.96, 1)]
+    snap_flat = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                      bids=flat, asks=asks)
+    st.update(snap_wall, now=0.0)
+    assert st.update(snap_flat, now=11.0) is None  # miss (persist прошёл) — не входим
+    st.update(snap_flat, now=22.0)  # 11с без уровня > grace 10с → смерть
+    assert st.armed("SOLUSDT") is False
+
+
+def test_density_sliding_absorption_late_in_track_life():
+    """Анти-абсорбция СКОЛЬЗЯЩАЯ: ≥30% съедено за ≤10с относительно недавнего
+    пика убивает трек В ЛЮБОЙ момент жизни. Старый код сравнивал с size0 и
+    только в первые absorb_window от first_seen — при persist 20м проверка
+    была мертва после первых 10 секунд."""
+    cfg = _density_cfg(density_bounce_persist_sec=1200.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    big, asks = _book_with_bid_wall(50.0)
+    small, _ = _book_with_bid_wall(30.0)
+    mk = lambda b: _snap([], last_price=100.05, best_bid=100.0,
+                         best_ask=100.10, bids=b, asks=asks)
+    st.update(mk(big), now=0.0)
+    st.update(mk(big), now=300.0)   # 5 минут живёт, размер стабилен
+    assert st.armed("SOLUSDT") is True
+    st.update(mk(small), now=305.0)  # −40% от пика за 5с → поглощение
+    assert st.armed("SOLUSDT") is False
+
+
+def test_density_bounce_entry_order_type_override():
+    """v0.18.30: bounce входит taker (пер-стратегийный override), даже когда
+    глобальный вход maker. История: maker не наливался (12/33 = 36%
+    entry_Cancelled/timeout)."""
+    cfg = _density_cfg(entry_order_type="post_only_limit",
+                       density_bounce_entry_order_type="market")
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall(50.0)
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    sig = st.update(snap, now=11.0)
+    assert sig is not None and sig.entry_order_type == "market"
 
 
 # ─── v0.18.15: near_round-демоция + пер-стратегийный persist (density_bounce) ──
@@ -2287,9 +2388,9 @@ def test_sweep_fade_unaffected_by_v0_18_16():
 
 
 def test_density_bounce_unaffected_by_v0_18_16():
-    """Изоляция: density_bounce НЕ задет — фейр НЕ гейтится CVD/ob-правками
-    density_break (пустой CVD + ob против НЕ блокируют), сигнал несёт
-    entry_order_type=None (глобальный maker)."""
+    """Изоляция: density_bounce НЕ гейтится CVD/ob-правками density_break
+    (пустой CVD + ob против НЕ блокируют вход bounce). v0.18.30: bounce несёт
+    СВОЙ entry_order_type (market) — от break-полей по-прежнему не зависит."""
     cfg = _density_cfg(density_break_entry_order_type="market",
                        density_break_confirm_cvd=True, density_break_require_ob=True)
     st = DensityBounceStrategy(cfg, ["SOLUSDT"])
@@ -2300,7 +2401,8 @@ def test_density_bounce_unaffected_by_v0_18_16():
     st.update(snap, now=0.0)
     sig = st.update(snap, now=11.0)
     assert sig is not None and sig.side == "long" and sig.strategy == "density_bounce"
-    assert sig.entry_order_type is None        # глобальный maker, не задет
+    # v0.18.30: свой taker-override (density_bounce_entry_order_type)
+    assert sig.entry_order_type == "market"
 
 
 def test_build_strategies_two():
