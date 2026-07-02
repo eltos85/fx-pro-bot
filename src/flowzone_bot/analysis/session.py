@@ -64,39 +64,65 @@ def in_session(ts: float, windows: list[tuple[float, float]]) -> bool:
     return False
 
 
+def merged_segments(windows: list[tuple[float, float]]
+                    ) -> list[tuple[float, float]]:
+    """Объединить перекрывающиеся/смежные окна в непрерывные активные блоки
+    (часы UTC, [start, end) на суточном круге). Окно через полночь режется на
+    два сегмента (start..24 и 0..end). Пример: London 07-16 + NY 12-21 →
+    один блок (7.0, 21.0)."""
+    segs: list[tuple[float, float]] = []
+    for start, end in windows:
+        if start == end:
+            continue  # пустое окно
+        if start < end:
+            segs.append((start, end))
+        else:  # через полночь
+            segs.append((start, 24.0))
+            segs.append((0.0, end))
+    segs.sort()
+    merged: list[list[float]] = []
+    for s, e in segs:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+
+def _day_ts(tm: time.struct_time, start_hour: float) -> float:
+    h = int(start_hour)
+    m = int(round((start_hour - h) * 60))
+    return calendar.timegm((tm.tm_year, tm.tm_mon, tm.tm_mday, h, m, 0, 0, 0, 0))
+
+
 def session_start_ts(ts: float, windows: list[tuple[float, float]]) -> float | None:
-    """Unix-старт текущего активного session-окна для ``ts`` (UTC).
+    """Unix-старт текущего НЕПРЕРЫВНОГО активного блока сессий для ``ts`` (UTC).
 
-    Канон §2/§6.1: контекст = форма СЕССИОННОГО профиля (London/NY окно).
-    Якорь per-session профиля — момент старта текущего окна. Возвращает None,
-    если ``ts`` вне активной сессии (профиль не строим — не торгуем).
+    Канон §2/§6.1: контекст = форма СЕССИОННОГО профиля. Якорь per-session
+    профиля — старт непрерывного активного блока (union перекрывающихся окон):
+    для London 07-16 + NY 12-21 это 07:00 на весь день до 21:00. Раньше якорь
+    брался от ПЕРВОГО совпавшего окна: в 16:00 он прыгал 07:00 → 12:00, профиль
+    обнулялся (терялся объём перекрытия 12-16) и контекст ежедневно уходил в
+    warming посреди NY. Возвращает None, если ``ts`` вне активной сессии
+    (профиль не строим — не торгуем).
 
-    Окно через полночь (end ≤ start) корректно: если час ≥ start, старт сегодня;
-    если час < end, старт был вчера. date вычисляется от ``ts``."""
+    Блок через полночь корректен: если час < end сегмента, начинающегося с
+    0:00, и есть сегмент, кончающийся в 24:00 — старт был вчера."""
     if not windows:
         return None
+    segs = merged_segments(windows)
+    if not segs:
+        return None
     tm = time.gmtime(ts)
-    today = tm.tm_yday
     hour = tm.tm_hour + tm.tm_min / 60.0 + tm.tm_sec / 3600.0
-    for start, end in windows:
-        if start <= end:
-            if start <= hour < end:
-                h = int(start)
-                m = int(round((start - h) * 60))
-                return calendar.timegm((tm.tm_year, tm.tm_mon, tm.tm_mday,
-                                    h, m, 0, 0, 0, 0))
+    wraps_from = next((s for s, e in segs if e >= 24.0), None)
+    for start, end in segs:
+        if not (start <= hour < end):
             continue
-        # окно через полночь
-        if hour >= start:
-            h = int(start)
-            m = int(round((start - h) * 60))
-            return calendar.timegm((tm.tm_year, tm.tm_mon, tm.tm_mday,
-                                h, m, 0, 0, 0, 0))
-        if hour < end:
-            # старт был вчера
+        # сегмент от полуночи, склеенный с вчерашним хвостом (22-24 + 0-02):
+        # старт блока — вчера, в начале хвостового сегмента.
+        if start <= 0.0 and wraps_from is not None and wraps_from > 0.0:
             prev = time.gmtime(ts - 86400.0)
-            h = int(start)
-            m = int(round((start - h) * 60))
-            return calendar.timegm((prev.tm_year, prev.tm_mon, prev.tm_mday,
-                                h, m, 0, 0, 0, 0))
+            return _day_ts(prev, wraps_from)
+        return _day_ts(tm, start)
     return None

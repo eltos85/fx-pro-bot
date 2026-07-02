@@ -257,12 +257,16 @@ VAH/VAL, подтверждённые несколькими профилями,
 после входа в зоне поглощения управление позицией — ДВЕ стадии.
 
 **Стадия 1 — BE-lock** (`executor._maybe_be_lock`):
-- **Триггер**: цена **пробила предыдущий структурный swing-уровень** в сторону
-  сделки (long: `price > last swing high`; short: `price < last swing low`) —
-  канон *«when you **break this level**, you can decide to put your stop loss to
-  break even»*. **НЕ** «favourable ≥ N×zone_width» (то было [НАШЕ] изобретение
-  `f6ef82a`, срабатывало слишком рано → обрезало wins на откате к entry, кейсы
-  #488/#489/#492: wins +0.03/+0.25 вместо +21).
+- **Триггер**: цена **пробила структурный swing-уровень, подтверждённый ПОСЛЕ
+  входа**, в стороне сделки между entry и TP (long: `price > post-entry swing
+  high`; short: `price < post-entry swing low`) — канон *«when you **break this
+  level**, you can decide to put your stop loss to break even»* + *«this one
+  print a new one»*. Пред-entry swing не используется: ближайший из них по
+  направлению сделки — это сама TP-цель (тот же набор M5-фракталов, что у
+  `nearest_swing_target`), т.е. его пробой = момент исполнения TP и BE
+  вырождается в no-op (фикс 2026-07-02). **НЕ** «favourable ≥ N×zone_width»
+  (то было [НАШЕ] изобретение `f6ef82a`, срабатывало слишком рано → обрезало
+  wins на откате к entry, кейсы #488/#489/#492: wins +0.03/+0.25 вместо +21).
 - **CVD-pressure gate** (tradezella playbook Fabio *«If CVD shows strong
   pressure, move the stop to break-even early»*): в `trade_window` доминирует
   сторона сделки (long: `buy_vol > sell_vol`; short: `sell_vol > buy_vol`).
@@ -278,8 +282,12 @@ VAH/VAL, подтверждённые несколькими профилями,
   amazing explosion where you can trail your position following the aggression
   of the market. **This one print a new one, you bring your stop loss here and
   you continue.**»* SL едет за **последним absorption-принтом контр-стороны** в
-  стороне сделки: long — deep SELL print ниже цены = поддержка → SL выше неё;
-  short — deep BUY print выше цены = сопротивление → SL ниже.
+  стороне сделки: long — deep SELL print ниже цены = поддержка → SL сразу ПОД
+  неё; short — deep BUY print выше цены = сопротивление → SL сразу НАД ней.
+  SL ставится **ЗА уровнем** (та же конвенция, что стоп «за зоной» §5.2
+  «protecting yourself above the area»): буфер внутрь уровня выбивал бы позицию
+  на обычном ретесте ещё не сломанной поддержки/сопротивления (фикс 2026-07-02;
+  до этого SL ставился между ценой и уровнем).
 - **Never re-widen** (forex.in.rs World-Cup strategy *«Trail to the last
   absorption, never re-widen a stop»*): SL двигается ТОЛЬКО в сторону сделки
   (long → выше текущего SL, short → ниже). Idempotency: persisted `tr.sl`.

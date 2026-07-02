@@ -189,6 +189,19 @@ def test_classify_balance_when_acceptance_below_threshold():
     assert 0.55 <= ctx.accept_below <= 0.65
 
 
+def test_classify_balance_when_outside_volume_immaterial():
+    """Фикс 2026-07-02: пара случайных принтов за VA (≈0.4% объёма) при колоколе
+    — НЕ acceptance. Доминирующий хвост обязан держать ≥ (1−VA%)/2 общего объёма
+    (нейтральная одно-сторонняя вне-VA масса, при VA 68% → 16%). Раньше
+    accept_below=1.0 давал ложный trend_down по шуму."""
+    buckets = {10: (100.0, 0.0), 9: (90.0, 0.0), 11: (90.0, 0.0),
+               3: (1.0, 0.0)}   # хвост = 1/281 ≈ 0.4% объёма
+    prof = build_profile(buckets, bucket_size=1.0)
+    ctx = classify(prof, last_price=10.5, accept_frac=0.68)
+    assert ctx.accept_below == 1.0      # весь вне-VA объём на одной стороне…
+    assert ctx.state == BALANCE         # …но он нематериален → не тренд
+
+
 # ─── Sticky-направление аукциона (AuctionTracker, §2 «второе движение») ───
 
 # мгновенные контексты (state зависит только от формы профиля, не от цены):
@@ -617,6 +630,24 @@ def test_session_start_ts_overnight_window():
     assert session_start_ts(ts2, wins) == expected2
 
 
+def test_session_start_ts_overlap_anchors_to_block_start():
+    """Фикс 2026-07-02: London 07-16 + NY 12-21 = непрерывный блок 07-21 →
+    якорь 07:00 на весь блок. Раньше якорь брался от ПЕРВОГО совпавшего окна:
+    в 16:00 прыгал 07:00 → 12:00, профиль обнулялся (терялся объём 12-16) и
+    контекст ежедневно уходил в warming посреди NY-сессии."""
+    import calendar
+    from flowzone_bot.analysis.session import merged_segments, session_start_ts
+    wins = [(7.0, 16.0), (12.0, 21.0)]
+    assert merged_segments(wins) == [(7.0, 21.0)]
+    expected = calendar.timegm((2026, 6, 16, 7, 0, 0, 0, 0, 0))
+    for hh, mm in ((12, 1), (15, 59), (16, 1), (20, 59)):
+        ts = calendar.timegm((2026, 6, 16, hh, mm, 0, 0, 0, 0))
+        assert session_start_ts(ts, wins) == expected, (hh, mm)
+    # вне блока — по-прежнему None
+    ts_out = calendar.timegm((2026, 6, 16, 21, 30, 0, 0, 0, 0))
+    assert session_start_ts(ts_out, wins) is None
+
+
 # ─── A2: per-swing профиль из принтов (build_profile_from_prints) ────────
 
 def test_build_profile_from_prints_aggregates_by_price():
@@ -702,6 +733,72 @@ def test_swing_profile_for_builds_from_db_prints(tmp_path):
     assert prof.bucket_delta(120) == 6.0     # 8 buy − 2 sell (после swing)
     # принт 900 (старее swing-якоря 1000) не попал
     assert prof.bucket_volume(int(100.0)) == 0.0
+    db.close()
+
+
+def test_swings_for_reverses_desc_kline():
+    """Фикс 2026-07-02: Bybit get_kline отдаёт DESC (новые сверху) — _swings_for
+    обязан развернуть в хронологию. Иначе Swing.idx инвертируется и «последний
+    swing» (max idx в _last_swing_price/_recent_extreme) — самый СТАРЫЙ бар окна:
+    BE-lock у шортов срабатывал сразу после филла, у лонгов — никогда; латч
+    AuctionTracker сверял пробой с уровнем ~16ч давности."""
+    from flowzone_bot.app.main import _swings_for
+    from flowzone_bot.trading.executor import _last_swing_price
+    # хронология: старый максимум 30 (idx2), недавний swing high 12 (idx6)
+    highs = [5.0, 6.0, 30.0, 6.0, 5.0, 4.0, 12.0, 4.0, 3.0, 2.0]
+    lows = [h - 1.0 for h in highs]
+    rows_chrono = [[str(1_000_000 + i * 300_000), "0", str(h), str(l), "0", "0"]
+                   for i, (h, l) in enumerate(zip(highs, lows))]
+    rows_desc = list(reversed(rows_chrono))  # как отдаёт Bybit (DESC)
+    client = type("C", (), {
+        "get_kline": lambda self, sym, interval, limit: rows_desc})()
+    cfg = type("Cfg", (), {"swing_kline_interval": "5", "swing_kline_limit": 200,
+                           "swing_cache_sec": 60.0, "swing_left": 2,
+                           "swing_right": 2})()
+    swings = _swings_for(client, cfg, "X", {}, now=0.0)
+    assert [s.price for s in swings if s.kind == "high"] == [30.0, 12.0]
+    assert all(a.ts < b.ts for a, b in zip(swings, swings[1:]))  # хронология
+    # «последний» swing high — недавний 12, а не старый максимум 30
+    assert _last_swing_price(swings, "high") == 12.0
+
+
+def test_symbol_state_seed_vp_restores_session_profile():
+    """Фикс 2026-07-02: после рестарта mid-session per-session профиль
+    восстанавливается из persisted-принтов (seed_vp), а не копится с нуля."""
+    from flowzone_bot.data.aggregates import SymbolState
+    st = SymbolState("X")
+    st.set_session_windows([(0.0, 24.0)])
+    st.set_vp_bucket_size(1.0)
+    st.seed_vp([(1000.0, 100.5, 2.0, "Buy"), (1001.0, 100.7, 1.0, "Sell"),
+                (1002.0, 101.2, 3.0, "Buy")], anchor=900.0)
+    snap = st.snapshot()
+    assert snap.vp_session_start == 900.0
+    assert snap.vp_buckets[100] == (2.0, 1.0)
+    assert snap.vp_buckets[101] == (3.0, 0.0)
+    # идемпотентность: при уже непустом профиле повторный seed — no-op
+    st.seed_vp([(1003.0, 100.5, 50.0, "Buy")], anchor=900.0)
+    assert st.snapshot().vp_buckets[100] == (2.0, 1.0)
+
+
+def test_seed_session_vp_backfills_from_db(tmp_path):
+    """Интеграция: _seed_session_vp читает prints из SQLite и заполняет профиль
+    символа с пустым VP (рестарт/ротация mid-session)."""
+    import time as _t
+    from flowzone_bot.app.main import _seed_session_vp
+    from flowzone_bot.data.aggregates import SymbolState
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    now = _t.time()
+    db.insert_prints([(now - 60.0, "X", 100.5, 2.0, "Buy"),
+                      (now - 30.0, "X", 101.2, 1.0, "Sell")])
+    st = SymbolState("X")
+    st.set_session_windows([(0.0, 24.0)])
+    st.set_vp_bucket_size(1.0)
+    _seed_session_vp(db, {"X": st}, [(0.0, 24.0)])
+    snap = st.snapshot()
+    assert snap.vp_buckets.get(100) == (2.0, 0.0)
+    assert snap.vp_buckets.get(101) == (0.0, 1.0)
+    assert snap.vp_session_start is not None
     db.close()
 
 
@@ -1063,8 +1160,10 @@ def _be_cfg():
     return c
 
 
-def _swing(kind, price, idx=5):
-    return type("S", (), {"kind": kind, "price": price, "idx": idx})()
+def _swing(kind, price, idx=5, ts=100.0):
+    # ts=100 > ts_open=0 (_be_trade): swing «подтверждён после входа» —
+    # BE-триггер берёт только post-entry структуры (фикс 2026-07-02).
+    return type("S", (), {"kind": kind, "price": price, "idx": idx, "ts": ts})()
 
 
 def _snap(price, trades, ts=1000.0):
@@ -1171,6 +1270,38 @@ def test_be_lock_no_trigger_without_swings():
     assert tr.sl == 90.0
 
 
+def test_be_lock_ignores_pre_entry_swings():
+    """Фикс 2026-07-02: swing, подтверждённый ДО входа (ts ≤ ts_open), не
+    триггерит BE — ближайший пред-entry swing в сторону сделки совпадает с
+    TP-целью (тот же набор фракталов, что у nearest_swing_target), т.е. его
+    «пробой» = момент исполнения TP."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)  # ts_open=0
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    swings = [_swing("high", 110.0, ts=0.0)]  # подтверждён ДО входа
+    trades = [TradePrint(900, 110.5, 5.0, "Buy")]
+    ex._maybe_be_lock(tr, price=111.0, swings=swings, trades=trades)
+    assert cl.stops == []
+    assert tr.sl == 90.0
+
+
+def test_be_lock_ignores_swing_at_or_beyond_tp():
+    """Swing на уровне TP (или дальше) не триггерит BE: триггер обязан лежать
+    строго МЕЖДУ entry и TP (пробой TP-уровня = исполнение биржевого TP)."""
+    from flowzone_bot.trading.executor import Executor
+    tr = _be_trade("long", entry=100.0, sl=90.0, tp=120.0)
+    db = _FakeDBBE([tr])
+    cl = _FakeClientBE()
+    ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
+    swings = [_swing("high", 120.0)]  # == TP
+    trades = [TradePrint(900, 120.5, 5.0, "Buy")]
+    ex._maybe_be_lock(tr, price=120.5, swings=swings, trades=trades)
+    assert cl.stops == []
+    assert tr.sl == 90.0
+
+
 def test_be_lock_cvd_gate_blocks_when_counter_dominates():
     """tradezella «If CVD shows strong pressure»: swing пробит, но контр-сторона
     доминирует (long, sell_vol > buy_vol) → BE НЕ срабатывает (нет pressure)."""
@@ -1223,9 +1354,10 @@ def test_be_lock_disabled_via_config():
 # ─── Trail (стадия 2, канон «this print a new one, you bring your stop loss
 #     here and you continue», видео 39:00) ───────────────────────────────────
 
-def test_trail_long_moves_sl_above_absorption_print():
+def test_trail_long_moves_sl_behind_absorption_print():
     """После BE (SL в BE 100.08) — deep SELL print @112 ниже цены 115 = поддержка
-    → SL подтягивается выше неё (112.08), в сторону сделки (never re-widen)."""
+    → SL подтягивается сразу ПОД неё (111.92, ЗА уровнем — конвенция «стоп за
+    зоной» §5.2; фикс 2026-07-02: буфер внутрь уровня выбивал на ретесте)."""
     from flowzone_bot.trading.executor import Executor
     tr = _be_trade("long", entry=100.0, sl=100.08, tp=120.0)  # уже в BE
     db = _FakeDBBE([tr])
@@ -1239,12 +1371,12 @@ def test_trail_long_moves_sl_above_absorption_print():
     ex._maybe_trail(tr, snap)
     assert len(cl.stops) == 1
     new_sl = cl.stops[0][1]
-    assert abs(new_sl - 112.08) < 0.01              # anchor 112 + buf 0.08
+    assert abs(new_sl - 111.92) < 0.01              # anchor 112 − buf 0.08 (ЗА уровнем)
     assert new_sl > 100.08                           # в сторону сделки (вверх)
     assert tr.sl == new_sl
 
 
-def test_trail_short_moves_sl_below_absorption_print():
+def test_trail_short_moves_sl_behind_absorption_print():
     from flowzone_bot.trading.executor import Executor
     tr = _be_trade("short", entry=100.0, sl=99.92, tp=80.0)  # уже в BE
     db = _FakeDBBE([tr])
@@ -1258,7 +1390,7 @@ def test_trail_short_moves_sl_below_absorption_print():
     ex._maybe_trail(tr, snap)
     assert len(cl.stops) == 1
     new_sl = cl.stops[0][1]
-    assert abs(new_sl - 87.92) < 0.01              # anchor 88 − buf 0.08
+    assert abs(new_sl - 88.08) < 0.01              # anchor 88 + buf 0.08 (ЗА уровнем)
     assert new_sl < 99.92                           # в сторону сделки (вниз)
 
 
@@ -1289,8 +1421,8 @@ def test_trail_never_re_widen():
     ex = Executor(db=db, settings=_be_cfg(), client=cl, now=lambda: 1.0)
     trades = [TradePrint(880, 114.0, 1.0, "Buy"),
               TradePrint(890, 114.5, 1.0, "Buy"),
-              TradePrint(900, 112.0, 10.0, "Sell"),   # anchor 112 → new_sl 112.08
-              TradePrint(910, 112.0, 10.0, "Sell")]   # 112.08 < tr.sl 113 → no-op
+              TradePrint(900, 112.0, 10.0, "Sell"),   # anchor 112 → new_sl 111.92
+              TradePrint(910, 112.0, 10.0, "Sell")]   # 111.92 < tr.sl 113 → no-op
     snap = _snap(115.0, trades)
     ex._maybe_trail(tr, snap)
     assert cl.stops == []

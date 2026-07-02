@@ -22,7 +22,8 @@ import time
 
 from flowzone_bot.analysis.auction import AuctionTracker
 from flowzone_bot.analysis.context import classify
-from flowzone_bot.analysis.session import in_session, parse_windows
+from flowzone_bot.analysis.session import (in_session, parse_windows,
+                                           session_start_ts)
 from flowzone_bot.analysis.strategy import evaluate
 from flowzone_bot.analysis.swings import Swing, find_swings
 from flowzone_bot.analysis.volume_profile import build_profile
@@ -116,6 +117,9 @@ def run() -> None:
     # REST-инструмент). Без клиента VP не строится (канон требует REST/ликвидности).
     if client is not None:
         _apply_vp_buckets(client, cfg, states)
+        # рестарт mid-session: восстановить per-session профиль из persisted-
+        # принтов (иначе контекст часами warming при живых данных в БД).
+        _seed_session_vp(db, states, session_windows)
     stream = BybitMarketStream(symbols, states, category=cfg.bybit_category,
                                testnet=cfg.bybit_testnet)
     stream.start()
@@ -159,6 +163,7 @@ def run() -> None:
                         client, cfg, db, stream, states, symbols,
                         session_windows, print_store)
                     _apply_vp_buckets(client, cfg, states)
+                    _seed_session_vp(db, states, session_windows)
                 except Exception:
                     log.exception("rotate_universe failed")
 
@@ -279,6 +284,12 @@ def _swings_for(client, cfg, symbol: str,
         log.exception("swing get_kline %s failed", symbol)
         return cache.get(symbol, (0.0, []))[1]
     # Bybit v5 kline row: [startTime(ms), open, high, low, close, volume, ...]
+    # ВАЖНО: get_kline отдаёт DESC (новые сверху, см. docstring клиента) →
+    # разворачиваем в хронологический порядок. Иначе Swing.idx инвертируется и
+    # «последний swing» (max idx в _last_swing_price/_recent_extreme) — самый
+    # СТАРЫЙ бар окна (~16ч назад): BE-lock у шортов срабатывал сразу после
+    # филла, у лонгов — никогда; латч AuctionTracker сверялся с древним уровнем.
+    kl = list(reversed(kl))
     ts = [float(c[0]) / 1000.0 for c in kl]
     highs = [float(c[2]) for c in kl]
     lows = [float(c[3]) for c in kl]
@@ -329,7 +340,8 @@ def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
                             value_area_pct=cfg.value_area_pct)
     if profile is None:
         return None, None
-    inst = classify(profile, snap.last_price, accept_frac=cfg.context_accept_frac)
+    inst = classify(profile, snap.last_price, accept_frac=cfg.context_accept_frac,
+                    value_area_pct=cfg.value_area_pct)
     if auction is None:
         return profile, inst
     ctx = auction.update(snap.symbol, inst, snap.last_price, swings or [], now=now)
@@ -360,6 +372,30 @@ def _heartbeat(states: dict[str, SymbolState], db: FlowzoneDB,
     log.info("HB ws=%s session=%s open=%d dayPnL=%.2f | %s",
              stream.is_connected(), "active" if session_active else "closed",
              db.open_count(), day_pnl, " | ".join(parts))
+
+
+def _seed_session_vp(db, states: dict[str, SymbolState],
+                     session_windows: list[tuple[float, float]]) -> None:
+    """Бэкфилл per-session профиля из persisted-принтов (таблица ``prints``)
+    для символов с пустым профилем — рестарт/ротация mid-session. Требует уже
+    установленного vp_bucket_size (звать ПОСЛЕ _apply_vp_buckets). Вне активной
+    сессии — no-op (профиль не строим)."""
+    if db is None or not session_windows:
+        return
+    now = time.time()
+    anchor = session_start_ts(now, session_windows)
+    if anchor is None:
+        return
+    for sym, st in states.items():
+        try:
+            prints = db.prints_since(sym, anchor, now)
+        except Exception:
+            log.exception("seed_vp prints_since %s failed", sym)
+            continue
+        if prints:
+            st.seed_vp(prints, anchor)
+            log.info("seed_vp %s: восстановлен session-профиль из %d принтов "
+                     "(якорь %.0f)", sym, len(prints), anchor)
 
 
 def _apply_vp_buckets(client, cfg, states: dict[str, SymbolState]) -> None:

@@ -239,13 +239,17 @@ class FlowzoneSettings(BaseSettings):
     # + forex.in.rs (World-Cup strategy): «Trail to the LAST absorption, never
     # re-widen a stop. Let runners breathe to the next HTF level.»
     #
-    # Стадия 1 — BE-lock: SL → entry±buf когда цена ПРОБИЛА ПРЕДЫДУЩИЙ СТРУКТУРНЫЙ
-    # УРОВЕНЬ (swing high для long / swing low для short) + CVD-pressure в окне
-    # доминирует в сторону сделки. Канон-точно («break this level» + «CVD strong
-    # pressure»), НЕ [НАШЕ] «favourable ≥ N×zone_width» (которое срабатывало
-    # слишком рано → обрезало wins на откате к entry, кейсы #488/#489/#492:
-    # wins +0.03/+0.25 вместо +21). Буфер = sl_buffer_bps (покрыть round-trip
-    # fees, чтобы BE не стал микро-убытком). Выключаемо через env (reversible).
+    # Стадия 1 — BE-lock: SL → entry±buf когда цена ПРОБИЛА структурный swing-
+    # уровень, ПОДТВЕРЖДЁННЫЙ ПОСЛЕ ВХОДА, между entry и TP (swing high для
+    # long / swing low для short) + CVD-pressure в окне доминирует в сторону
+    # сделки. Пред-entry swing не годится: ближайший из них в сторону сделки —
+    # сама TP-цель (тот же набор фракталов, что у nearest_swing_target) →
+    # триггер совпадал бы с TP. Канон-точно («break this level» + «this one
+    # print a new one» + «CVD strong pressure»), НЕ [НАШЕ] «favourable ≥
+    # N×zone_width» (срабатывало слишком рано → обрезало wins на откате к
+    # entry, кейсы #488/#489/#492: wins +0.03/+0.25 вместо +21). Буфер =
+    # sl_buffer_bps (покрыть round-trip fees, чтобы BE не стал микро-убытком).
+    # Выключаемо через env (reversible).
     be_lock_enabled: bool = Field(default=True)
     # Канон-флаг: BE по структурному пробою предыдущего swing-уровня. False →
     # BE-off (только биржевой initial SL). Не тюним — канон-инвариант.
@@ -260,8 +264,11 @@ class FlowzoneSettings(BaseSettings):
     # Стадия 2 — trail (канон «this print a new one, you bring your stop loss
     # here and you continue»): после BE — SL едет за последним absorption-принтом
     # контр-стороны в стороне сделки (deep SELL ниже цены для long = поддержка →
-    # SL выше; deep BUY выше цены для short = сопротивление → SL ниже). Только в
-    # сторону сделки (never re-widen, forex.in.rs). Idempotency: persisted tr.sl.
+    # SL сразу ПОД неё; deep BUY выше цены для short = сопротивление → SL сразу
+    # НАД ней). SL ставится ЗА уровнем — та же конвенция, что стоп «за зоной»
+    # при входе (§5.2); буфер внутрь уровня выбивал бы позицию на обычном
+    # ретесте. Только в сторону сделки (never re-widen, forex.in.rs).
+    # Idempotency: persisted tr.sl.
     trail_enabled: bool = Field(default=True)
     # Окно (сек) для детекции absorption-принтов trail = тело M5-свечи (как
     # absorption_window_sec). Технический параметр окна потока, не торговый порог.

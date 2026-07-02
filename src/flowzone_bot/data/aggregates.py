@@ -53,11 +53,12 @@ class SymbolSnapshot:
     trades: list[TradePrint]    # тиковые принты за trade_window_sec
     stale: bool                 # True если данных давно не было
     # Per-SESSION footprint-профиль (контекст аукциона, STRATEGY §2): якорь —
-    # старт текущего London/NY окна. idx корзины → (buy, sell). Цена корзины =
+    # старт непрерывного активного блока сессий (union London/NY окон: 07-21).
+    # idx корзины → (buy, sell). Цена корзины =
     # idx × vp_bucket_size. 0/{} = профиль не активен (вне сессии / нет bucket).
     vp_bucket_size: float = 0.0
     vp_buckets: dict[int, tuple[float, float]] = field(default_factory=dict)
-    # Unix-якорь per-session профиля (старт текущего session-окна). None — вне
+    # Unix-якорь per-session профиля (старт активного session-блока). None — вне
     # активной сессии (профиль не строим, контекст = BALANCE/unknown).
     vp_session_start: float | None = None
     # Top-N уровни стакана (цена, объём). bids убыв. по цене, asks возр.
@@ -123,6 +124,29 @@ class SymbolState:
             self._vp = {}
             self._vp_session_start = None
 
+    def seed_vp(self, prints: list[tuple], anchor: float) -> None:
+        """Восстановить per-session профиль из persisted-принтов (таблица
+        ``prints``) после рестарта mid-session. Иначе профиль стартует пустым и
+        контекст часами warming, хотя данные сессии лежат в БД. ``prints`` =
+        [(ts, price, size, side), ...] с ts ≥ ``anchor`` (старт session-блока).
+        No-op если bucket ещё не задан или профиль уже накоплен (идемпотентно)."""
+        with self._lock:
+            if self._vp_bucket_size <= 0 or self._vp or not prints:
+                return
+            self._vp_session_start = anchor
+            for _ts, price, size, side in prints:
+                if price <= 0 or size <= 0:
+                    continue
+                idx = int(price / self._vp_bucket_size)
+                bucket = self._vp.get(idx)
+                if bucket is None:
+                    bucket = [0.0, 0.0]
+                    self._vp[idx] = bucket
+                if str(side).upper() == "BUY":
+                    bucket[0] += size
+                else:
+                    bucket[1] += size
+
     # ─── Writers (из ws-потока) ──────────────────────────────────────────
 
     def on_trade(self, price: float, size: float, side: str) -> None:
@@ -149,9 +173,11 @@ class SymbolState:
                          wall: float) -> None:
         """Инкрементально докинуть объём сделки в per-SESSION footprint-профиль.
 
-        Якорь = старт текущего session-окна (London/NY). Вне сессии профиль НЕ
-        строим (контекст = BALANCE — не торгуем). При смене якоря профиль
-        сбрасывается (новое окно = новый аукцион)."""
+        Якорь = старт непрерывного активного блока сессий (union London/NY
+        окон: 07-21, session_start_ts). Вне сессии профиль НЕ строим (контекст
+        = BALANCE — не торгуем). При смене якоря профиль сбрасывается (новый
+        блок = новый аукцион); внутри блока якорь стабилен — перекрытие окон
+        больше не обнуляет профиль в 16:00 (фикс 2026-07-02)."""
         if self._vp_bucket_size <= 0 or price <= 0 or not self._session_windows:
             return
         anchor = session_start_ts(wall, self._session_windows)

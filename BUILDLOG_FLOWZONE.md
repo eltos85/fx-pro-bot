@@ -9,6 +9,72 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-07-02
+
+### fix(flowzone): аудит v0.2.0-канона — 5 багов (kline DESC, BE≡TP, trail-буфер, шум-acceptance, session-якорь)
+`<pending commit>`
+
+Полный аудит реализации против канона (STRATEGY_FLOWZONE.md + winkler-rulebook
+как независимый вторичный источник) + математическая проверка VA/classify на
+синтетике. Ядро канона (session-профиль, per-swing зона, confluence, absorption,
+R:R, полный выход) подтверждено корректным. Найдено и исправлено 5 багов:
+
+1. **[КРИТИЧЕСКИЙ] kline DESC не разворачивался** (`main._swings_for`). Bybit
+   get_kline отдаёт новые бары сверху (docstring клиента это фиксирует;
+   `universe.hourly_range_rvol` разворачивает, `_swings_for` — нет) →
+   `Swing.idx` инвертирован → «последний swing» (`max idx` в
+   `_last_swing_price`/`auction._recent_extreme`) = самый СТАРЫЙ бар окна
+   (~16.7ч, 200×M5). Следствия: BE-lock у шортов срабатывал сразу после филла
+   (цена всегда ниже древнего swing low) → trail → выбивание в микро-плюс;
+   у лонгов BE не срабатывал никогда (древний high недостижим) → полный стоп.
+   Это и есть live-симптом «wins минимальны (+0.03/+0.25), losses существенны»
+   (#489/#496), который 06-30 лечили переделкой E1 — симптом, не причину.
+   Латч AuctionTracker сверял «clear breakout» с уровнем 16ч давности
+   (установка тренда тривиальна по ходу движения, переворот невозможен).
+   Фикс: `list(reversed(kl))`. Тесты были зелёные, т.к. кормили хронологию.
+2. **BE-триггер вырождался в TP.** TP и BE-триггер — из одного набора
+   M5-фракталов: ближайший пред-entry swing по направлению сделки = сама
+   TP-цель → «пробой уровня» = момент исполнения TP (BE-no-op). Фикс:
+   триггер = пробой swing-уровня, подтверждённого ПОСЛЕ входа (`s.ts >
+   ts_open`), строго между entry и TP — канон «this one print a new one».
+3. **Trail ставил SL внутри absorption-уровня** (long: `anchor+buf` ВЫШЕ
+   поддержки) — обычный ретест ещё не сломанного уровня выбивал позицию.
+   Фикс: SL ЗА уровнем (long: `anchor−buf`, short: `anchor+buf`) — та же
+   конвенция, что стоп «за зоной» §5.2.
+4. **`classify` давал тренд по шуму**: доли acceptance считались от объёма
+   хвостов без требования материальности — пара случайных принтов за VA
+   (<1% объёма) при колоколе давала trend. Фикс: доминирующий хвост ≥
+   `(1−value_area_pct)/2` общего объёма (нейтральная одно-сторонняя вне-VA
+   масса, при VA 68% → 16%); порог выведен из канон-константы, не magic-number.
+5. **Session-якорь прыгал в 16:00 UTC** (`session_start_ts` брал ПЕРВОЕ
+   совпавшее окно): при London 07-16 + NY 12-21 якорь в 16:00 менялся
+   07:00→12:00 → профиль обнулялся (терялся объём 12-16), контекст ежедневно
+   уходил в warming посреди NY. Фикс: якорь = старт НЕПРЕРЫВНОГО активного
+   блока (union окон, `merged_segments`: 07-21 → якорь 07:00). Бонус:
+   `SymbolState.seed_vp` + `main._seed_session_vp` — бэкфилл session-профиля
+   из persisted `prints` после рестарта/ротации mid-session (раньше профиль
+   часами копился с нуля при живых данных в БД).
+
+Обоснование: №1 — bugfix проводки данных; №2/№3 — канон-несоответствия
+(bugfix-категория `no-data-fitting.mdc`, цитаты 39:00/§5.2); №4/№5 —
+исправление явной логики. Изменения согласованы с пользователем (аудит по его
+запросу, фиксы одобрены). ВАЖНО для статы: live-выборка после `f6ef82a`
+(29 Jun) собрана на сломанном BE/латче — baseline tradecard flowzone сдвигать
+на дату деплоя этого фикса. pytest: 1165 passed (было 1158, +7 регрессионных:
+DESC-kline, pre-entry/at-TP BE-swing, trail-буфер за уровнем, шум-acceptance,
+session-блок 07-21, seed_vp ×2).
+
+**Файлы:** `src/flowzone_bot/app/main.py` (_swings_for reverse,
+_seed_session_vp), `src/flowzone_bot/trading/executor.py` (_maybe_be_lock
+post-entry фильтр, _maybe_trail буфер за уровень),
+`src/flowzone_bot/analysis/context.py` (материальность acceptance),
+`src/flowzone_bot/analysis/session.py` (merged_segments, session_start_ts),
+`src/flowzone_bot/data/aggregates.py` (seed_vp), `config/settings.py`
+(докстринги BE/trail), `STRATEGY_FLOWZONE.md` (§5.5),
+`tests/test_flowzone_bot.py`.
+
+---
+
 ## 2026-07-01
 
 ### fix(flowzone): E3-reconcile — close_reason по sl/tp, не по знаку net

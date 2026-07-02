@@ -549,22 +549,37 @@ class Executor:
                        swings: list, trades: list) -> None:
         """Стадия 1: вынос SL в BE (канон «when you break this level»).
 
-        Триггер — ПРОБОЙ предыдущего swing-уровня в сторону сделки (long: price >
-        last swing high; short: price < last swing low) + CVD-pressure в окне
-        доминирует в сторону сделки (tradezella «If CVD shows strong pressure»).
-        НЕ [НАШЕ] «favourable ≥ N×zone_width» — то срабатывало слишком рано и
-        обрезало wins на откате к entry (кейсы #488/#489/#492: +0.03/+0.25)."""
+        Триггер — ПРОБОЙ swing-уровня, подтверждённого ПОСЛЕ входа, в стороне
+        сделки между entry и TP (long: price > post-entry swing high; short:
+        price < post-entry swing low) + CVD-pressure в окне доминирует в сторону
+        сделки (tradezella «If CVD shows strong pressure»). Пред-entry swing не
+        используется: ближайший из них по направлению сделки — это сама TP-цель
+        (тот же набор M5-фракталов, что у nearest_swing_target) → триггер
+        совпадал бы с TP. НЕ [НАШЕ] «favourable ≥ N×zone_width» — то срабатывало
+        слишком рано и обрезало wins на откате к entry (кейсы #488/#489/#492)."""
         if not self._cfg.be_lock_enabled or price is None:
             return
         if not getattr(self._cfg, "be_lock_break_structure", True) or not swings:
             return  # канон: BE по структурному пробою; нет swing-данных — не BE
-        # канон «break this level»: пробой предыдущего swing-экстремума
+        # канон «break this level» / «this one print a new one»: уровень для
+        # пробоя — swing, ПОДТВЕРЖДЁННЫЙ ПОСЛЕ входа (s.ts > ts_open), в стороне
+        # сделки МЕЖДУ entry и TP. Пред-entry фракталы не годятся: ближайший
+        # из них в сторону сделки — это сама swing-цель (nearest_swing_target),
+        # т.е. пробой = момент исполнения TP → BE вырождался в no-op. Рынок
+        # после входа печатает новый уровень — его пробой и есть канон-триггер.
+        ts_open = getattr(tr, "ts_open", 0.0) or 0.0
+        fresh = [s for s in swings
+                 if getattr(s, "ts", 0.0) and s.ts > ts_open]
         if tr.side == "long":
-            hi = _last_swing_price(swings, "high")
+            fresh = [s for s in fresh
+                     if s.kind == "high" and tr.entry < s.price < tr.tp]
+            hi = _last_swing_price(fresh, "high")
             if hi is None or price <= hi:
                 return
         else:
-            lo = _last_swing_price(swings, "low")
+            fresh = [s for s in fresh
+                     if s.kind == "low" and tr.tp < s.price < tr.entry]
+            lo = _last_swing_price(fresh, "low")
             if lo is None or price >= lo:
                 return
         # CVD-pressure gate (tradezella): доминирует сторона сделки в окне
@@ -642,13 +657,17 @@ class Executor:
         big = detect_big_trades(window, big_thr, side=counter)
         if not big:
             return
+        # SL ставится ЗА absorption-уровнем (long: чуть НИЖЕ поддержки, short:
+        # чуть ВЫШЕ сопротивления) — та же конвенция, что стоп «за зоной» при
+        # входе (§5.2 «protecting yourself above/below the area»). Буфер внутрь
+        # уровня выбивал бы позицию на обычном ретесте ещё не сломанного уровня.
         buf = self._cfg.sl_buffer_bps / 10000.0 * tr.entry
         if tr.side == "long":
             cands = [t for t in big if t.price < price]
             if not cands:
                 return
             anchor = max(cands, key=lambda t: t.price)  # верхний deep-sell под ценой
-            new_sl = anchor.price + buf
+            new_sl = anchor.price - buf
             if new_sl <= tr.sl:
                 return  # never re-widen + only towards deal
         else:
@@ -656,7 +675,7 @@ class Executor:
             if not cands:
                 return
             anchor = min(cands, key=lambda t: t.price)  # нижний deep-buy над ценой
-            new_sl = anchor.price - buf
+            new_sl = anchor.price + buf
             if new_sl >= tr.sl:
                 return
         if tr.mode == "live" and self._client is not None:

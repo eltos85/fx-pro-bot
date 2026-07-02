@@ -135,13 +135,23 @@ def classify_shape(profile: VolumeProfile | None, accept_above: float,
 
 
 def classify(profile: VolumeProfile | None, last_price: float | None, *,
-             accept_frac: float = 0.68) -> Context:
+             accept_frac: float = 0.68,
+             value_area_pct: float = 0.68) -> Context:
     """Определить контекст по ФОРМЕ профиля (Steidlmayer/Dalton, STRATEGY §2).
 
     Тренд = направленный acceptance ВНЕ value area: объём, принятый в ХВОСТАХ
     профиля (корзины ниже VAL / выше VAH), направленно перекошен. Из суммарного
     «вне-VA» объёма доля ≥ ``accept_frac`` на одной стороне → это направление
     аукциона; симметрично/слабо → BALANCE (не торгуем).
+
+    Материальность acceptance: доминирующий хвост дополнительно обязан держать
+    ≥ ``(1 − value_area_pct) / 2`` ОБЩЕГО объёма (при канон-VA 68% → 16%) —
+    нейтральный симметричный колокол держит ровно столько вне VA НА ОДНУ
+    сторону; «принятие» в направлении = хвост как минимум не меньше нейтральной
+    одно-сторонней массы, но собранный на одной стороне. Иначе колокол с 1-2
+    случайными принтами за VA давал бы «тренд» по шуму (VA-алгоритм к тому же
+    overshoot-ит номинал → хвосты меньше 32%). Порог выведен из канон-константы
+    68% VA + симметрии, без нового magic-number (no-data-fitting.mdc).
 
     Это МГНОВЕННЫЙ режим (форма дневного профиля); он флапает при миграции VA на
     откате. Удержание направления (канон «второе движение») — в
@@ -163,11 +173,14 @@ def classify(profile: VolumeProfile | None, last_price: float | None, *,
                        shape=classify_shape(profile, 0.0, 0.0, accept_frac=accept_frac))
     accept_above = vol_above / outside
     accept_below = vol_below / outside
+    # Минимальная материальность acceptance: доминирующий хвост ≥ нейтральной
+    # одно-сторонней вне-VA массы (1 − value_area_pct)/2 общего объёма.
+    min_tail = (1.0 - value_area_pct) / 2.0 * profile.total_volume
     # Направленное принятие вне VA: доминирующий хвост ≥ accept_frac → тренд в его
     # сторону (профиль элонгирован туда). Иначе симметрия → баланс.
-    if accept_below >= accept_frac and vol_below > vol_above:
+    if accept_below >= accept_frac and vol_below > vol_above and vol_below >= min_tail:
         state = TREND_DOWN
-    elif accept_above >= accept_frac and vol_above > vol_below:
+    elif accept_above >= accept_frac and vol_above > vol_below and vol_above >= min_tail:
         state = TREND_UP
     else:
         state = BALANCE
