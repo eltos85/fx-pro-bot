@@ -7,6 +7,7 @@
 ## 2026-07-02
 
 ### fix(scalp): аудит-фиксы (resolve-краш, мёртвый lookback, слепое окно trend-гейта) + scratch OFF у run
+`8e13da5`
 
 Аудит кода + анатомия убытков live-форварда (снапшот `scalp_bot.sqlite`
 2026-07-02, сверен с Bybit closedPnl; артефакт —
