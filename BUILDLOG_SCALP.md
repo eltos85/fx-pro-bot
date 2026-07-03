@@ -7,7 +7,7 @@
 ## 2026-07-03
 
 ### feat(scalp/regime): v0.18.31 — shadow-лог отвергнутых сигналов + 11 новых regime-фичей
-`pending`
+`455583e`
 
 Продолжение meta-labeling (Lopez de Prado AFML Ch3). Анализ первых ~80
 записей `regime_features` показал: гейтящиеся фичи (ADX, regime_ratio) НЕ
