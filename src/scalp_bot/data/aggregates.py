@@ -58,6 +58,10 @@ class SymbolSnapshot:
     # bids убыв. по цене, asks возр. по цене (как отдаёт Bybit orderbook.50).
     bids: list[tuple[float, float]] = field(default_factory=list)
     asks: list[tuple[float, float]] = field(default_factory=list)
+    # История OI (ts, oi) за rolling-окно — для oi_delta_pct в regime-фичах
+    # (Murphy 1999 ch.7: цена+OI↑ = continuation, OI↓ = short covering).
+    # ТОЛЬКО телеметрия (v0.18.31).
+    oi_history: list[tuple[float, float]] = field(default_factory=list)
 
 
 class SymbolState:
@@ -71,11 +75,13 @@ class SymbolState:
         liq_window_sec: float = 60.0,
         ob_levels: int = 25,
         max_age_sec: float = 30.0,
+        oi_window_sec: float = 300.0,
         now: callable = time.monotonic,
     ) -> None:
         self.symbol = symbol
         self._cvd_window = cvd_window_sec
         self._liq_window = liq_window_sec
+        self._oi_window = oi_window_sec
         self._ob_levels = ob_levels
         self._max_age = max_age_sec
         self._now = now
@@ -84,6 +90,7 @@ class SymbolState:
         self._cvd_cum = 0.0
         self._cvd: deque[CvdSample] = deque()
         self._liqs: deque[LiqEvent] = deque()
+        self._oi_hist: deque[tuple[float, float]] = deque()
         self._last_price: float | None = None
         self._best_bid: float | None = None
         self._best_ask: float | None = None
@@ -132,6 +139,8 @@ class SymbolState:
                 self._funding = funding_rate
             if open_interest is not None:
                 self._oi = open_interest
+                self._oi_hist.append((now, open_interest))
+                self._evict_locked(now)
             if mark_price is not None and self._last_price is None:
                 self._last_price = mark_price
             self._last_update = now
@@ -163,6 +172,7 @@ class SymbolState:
                 stale=(now - self._last_update) > self._max_age,
                 bids=list(self._bids),
                 asks=list(self._asks),
+                oi_history=list(self._oi_hist),
             )
 
     def _evict_locked(self, now: float) -> None:
@@ -172,3 +182,6 @@ class SymbolState:
         liq_cut = now - self._liq_window
         while self._liqs and self._liqs[0].ts < liq_cut:
             self._liqs.popleft()
+        oi_cut = now - self._oi_window
+        while self._oi_hist and self._oi_hist[0][0] < oi_cut:
+            self._oi_hist.popleft()

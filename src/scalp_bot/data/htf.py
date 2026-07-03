@@ -202,9 +202,46 @@ def compute_di_dir(highs: list[float], lows: list[float], closes: list[float],
     return "long" if pdi > ndi else "short"
 
 
+def compute_natr(highs: list[float], lows: list[float], closes: list[float],
+                 length: int = 14) -> float | None:
+    """NATR(length) — Wilder ATR / last close × 100 (нормирован в % для
+    кросс-символьного сравнения). Wilder 1978 (ATR). None если данных мало
+    или close≤0. ТОЛЬКО телеметрия regime-фичей (не гейт)."""
+    n = length
+    if n <= 0 or len(closes) < n + 1 or not closes or closes[-1] <= 0:
+        return None
+    tr: list[float] = []
+    for i in range(1, len(closes)):
+        tr.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+                      abs(lows[i] - closes[i - 1])))
+    # Wilder-сглаживание: ATR_i = (ATR_{i-1}*(n-1) + TR_i)/n
+    atr = sum(tr[:n]) / n
+    for x in tr[n:]:
+        atr = (atr * (n - 1) + x) / n
+    return atr / closes[-1] * 100.0
+
+
+def compute_bb_width_pct(closes: list[float], length: int = 20,
+                         k: float = 2.0) -> float | None:
+    """Ширина Bollinger Bands (length, k·σ) в % от SMA: (2kσ)/SMA×100.
+    Bollinger 2001 «Bollinger on Bollinger Bands» (canonical 20, 2σ);
+    Carter 2012 «Mastering the Trade» — squeeze (узкие полосы) предшествует
+    экспансии (precondition пробоя). None если баров < length или SMA≤0.
+    ТОЛЬКО телеметрия regime-фичей (не гейт)."""
+    if length <= 1 or len(closes) < length:
+        return None
+    window = closes[-length:]
+    sma = sum(window) / length
+    if sma <= 0:
+        return None
+    var = sum((c - sma) ** 2 for c in window) / length
+    return 2.0 * k * (var ** 0.5) / sma * 100.0
+
+
 class HtfTrend:
     """Кэш EMA + ADX + DMI старшего ТФ по символу: направление (EMA), сила (ADX)
-    и доминирующая сторона (DMI +DI/−DI) тренда."""
+    и доминирующая сторона (DMI +DI/−DI) тренда. Плюс NATR/BB-width —
+    log-only телеметрия волатильности для regime-фичей (v0.18.31)."""
 
     def __init__(self, ema_len: int = 200, interval: str = "60",
                  adx_len: int = 14) -> None:
@@ -214,6 +251,8 @@ class HtfTrend:
         self._ema: dict[str, float] = {}
         self._adx: dict[str, float] = {}
         self._di_dir: dict[str, str] = {}
+        self._natr: dict[str, float] = {}
+        self._bb_width: dict[str, float] = {}
 
     def refresh(self, client, symbols: list[str]) -> None:
         """Обновить EMA+ADX по символам из ОДНОГО запроса клинов. При сбое одного —
@@ -231,6 +270,12 @@ class HtfTrend:
             di = compute_di_dir(highs, lows, closes, self.adx_len)
             if di is not None:
                 self._di_dir[sym] = di
+            natr = compute_natr(highs, lows, closes, self.adx_len)
+            if natr is not None:
+                self._natr[sym] = natr
+            bbw = compute_bb_width_pct(closes)
+            if bbw is not None:
+                self._bb_width[sym] = bbw
 
     def has_data(self, symbol: str) -> bool:
         """EMA по символу хоть раз успешно посчитана (символ прогрет). False для
@@ -266,6 +311,14 @@ class HtfTrend:
         """Доминирующая сторона по DMI: 'long' (+DI>−DI) | 'short' | None (нет
         данных). v0.18.4."""
         return self._di_dir.get(symbol)
+
+    def natr_pct(self, symbol: str) -> float | None:
+        """NATR(adx_len) старшего ТФ в % (телеметрия regime-фичей, не гейт)."""
+        return self._natr.get(symbol)
+
+    def bb_width_pct(self, symbol: str) -> float | None:
+        """Ширина BB(20, 2σ) старшего ТФ в % от SMA (телеметрия, не гейт)."""
+        return self._bb_width.get(symbol)
 
     def di_blocks_long(self, symbol: str) -> bool:
         """Асимметричный гейт (v0.18.4): DMI смотрит вниз (−DI≥+DI) → лонг-фейд

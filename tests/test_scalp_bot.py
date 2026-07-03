@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from scalp_bot.analysis.signals import (
+    Signal,
     SweepReclaimDetector,
     build_signal,
     cvd_divergence,
@@ -4140,4 +4141,241 @@ def test_executor_regime_logging_failure_does_not_block_entry(tmp_path):
     assert tid is not None
     assert [t.id for t in real.open_trades()] == [tid]  # сделка открылась
     real.close()
+
+
+# ─── v0.18.31: расширенные regime-фичи + shadow-лог отвергнутых сигналов ────
+
+def test_regime_columns_match_db_feature_cols():
+    """Инвариант: набор фичей в analysis/regime.py и колонок в state/db.py
+    совпадает (обе таблицы пишутся по _FEATURE_COLS)."""
+    from scalp_bot.analysis.regime import REGIME_COLUMNS
+    from scalp_bot.state.db import _FEATURE_COLS
+    assert REGIME_COLUMNS == _FEATURE_COLS
+
+
+def test_regime_session_uses_wall_clock_not_snap_ts():
+    """Fix 2026-07-03: session — из wall-clock now (time.time), не из snap.ts
+    (monotonic = секунды с загрузки хоста → бакеты сдвинуты на uptime%24h)."""
+    snap = _snap([CvdSample(1, 97, 0)], ts=3 * 3600.0)  # monotonic «03:00»
+    # wall-clock 14:00 UTC → us, а НЕ asia по monotonic-ts
+    f = compute_regime_features(snap, now=14 * 3600.0)
+    assert f["session"] == "us"
+    # fallback на snap.ts когда wall не передан (юнит-тесты legacy-поведения)
+    assert compute_regime_features(snap)["session"] == "asia"
+
+
+def _cvd_seq(prices, t0=0.0, dt=5.0):
+    """CvdSample-серия: цены по одной на 5с-бакет (cvd не важен)."""
+    return [CvdSample(t0 + i * dt, p, float(i)) for i, p in enumerate(prices)]
+
+
+def test_regime_ret_autocorr_sign():
+    """Lo & MacKinlay 1988: пила (реверсии) → autocorr<0; монотонный тренд с
+    переменным шагом → autocorr>0."""
+    # пила вокруг 100: +1/-1 чередуются → ретёрны чередуют знак
+    saw = [100.0 + (1.0 if i % 2 else 0.0) for i in range(30)]
+    f = compute_regime_features(_snap(_cvd_seq(saw), ts=150.0))
+    assert f["ret_autocorr"] is not None and f["ret_autocorr"] < 0
+    # тренд с нарастающим шагом (положительная связь соседних ретёрнов)
+    trend = [100.0 * (1.0 + 0.001 * i) ** 2 for i in range(30)]
+    f2 = compute_regime_features(_snap(_cvd_seq(trend), ts=150.0))
+    assert f2["ret_autocorr"] is not None and f2["ret_autocorr"] > 0
+    # мало точек → None
+    f3 = compute_regime_features(_snap(_cvd_seq(saw[:6]), ts=30.0))
+    assert f3["ret_autocorr"] is None
+
+
+def test_regime_price_slope_bps_min_sign():
+    up = _cvd_seq([100.0 + 0.1 * i for i in range(20)])
+    f = compute_regime_features(_snap(up, ts=100.0, last_price=102.0))
+    assert f["price_slope_bps_min"] is not None and f["price_slope_bps_min"] > 0
+    down = _cvd_seq([100.0 - 0.1 * i for i in range(20)])
+    f2 = compute_regime_features(_snap(down, ts=100.0, last_price=98.0))
+    assert f2["price_slope_bps_min"] < 0
+
+
+def test_regime_rv_burst_detects_expansion():
+    """Тихие первые 2 минуты + вспышка в последней минуте → rv_burst > 1."""
+    calm = [100.0 + 0.001 * (i % 2) for i in range(24)]          # t=0..115
+    wild = [100.0 + (0.5 if i % 2 else -0.5) for i in range(12)]  # t=120..175
+    samples = _cvd_seq(calm) + _cvd_seq(wild, t0=120.0)
+    f = compute_regime_features(_snap(samples, ts=180.0))
+    assert f["rv_burst"] is not None and f["rv_burst"] > 1.5
+
+
+def test_regime_tape_accel_speeds_up():
+    """Редкие принты в начале окна, плотные в последней минуте → accel > 1."""
+    sparse = [CvdSample(t, 100.0, 0.0) for t in (0.0, 30.0, 60.0, 90.0)]
+    dense = [CvdSample(120.0 + i, 100.0, 0.0) for i in range(60)]
+    f = compute_regime_features(_snap(sparse + dense, ts=180.0))
+    assert f["tape_accel"] is not None and f["tape_accel"] > 1.0
+    # короткое окно (<90с истории) → None
+    f2 = compute_regime_features(_snap(dense, ts=180.0))
+    assert f2["tape_accel"] is None
+
+
+def test_regime_liq_notional_and_side_split():
+    liqs = [LiqEvent(1, "Buy", 30_000.0, 97.0),   # ликвидирован лонг
+            LiqEvent(2, "Sell", 10_000.0, 97.5)]  # ликвидирован шорт
+    f = compute_regime_features(_snap([CvdSample(1, 97, 0)], liq_events=liqs))
+    assert f["liq_notional_usd"] == pytest.approx(40_000.0)
+    assert f["liq_buy_frac"] == pytest.approx(0.75)
+    # без ликвидаций: notional=0, frac=None
+    f2 = compute_regime_features(_snap([CvdSample(1, 97, 0)], liq_events=[]))
+    assert f2["liq_notional_usd"] == 0.0
+    assert f2["liq_buy_frac"] is None
+
+
+def test_regime_oi_delta_pct():
+    hist = [(0.0, 1000.0), (100.0, 1100.0)]
+    f = compute_regime_features(_snap([CvdSample(1, 97, 0)], oi_history=hist))
+    assert f["oi_delta_pct"] == pytest.approx(10.0)
+    # короткий span (<60с) → None
+    f2 = compute_regime_features(
+        _snap([CvdSample(1, 97, 0)], oi_history=[(0.0, 1000.0), (30.0, 1100.0)]))
+    assert f2["oi_delta_pct"] is None
+
+
+def test_regime_btc_ret_bps_from_btc_snapshot():
+    btc = _snap(_cvd_seq([60_000.0, 60_300.0], dt=60.0), symbol="BTCUSDT")
+    f = compute_regime_features(_snap([CvdSample(1, 97, 0)]), btc_snap=btc)
+    assert f["btc_ret_bps"] == pytest.approx(50.0, rel=1e-3)  # +0.5% = 50 bps
+    assert compute_regime_features(_snap([CvdSample(1, 97, 0)]))["btc_ret_bps"] is None
+
+
+def test_regime_near_depth_imb_top5():
+    bids = [(97.0 - i * 0.01, 10.0) for i in range(25)]  # топ-5 bid = 50
+    asks = [(97.1 + i * 0.01, 30.0) for i in range(25)]  # топ-5 ask = 150
+    f = compute_regime_features(
+        _snap([CvdSample(1, 97, 0)], bids=bids, asks=asks))
+    assert f["near_depth_imb"] == pytest.approx(0.25)  # 50/(50+150)
+
+
+def test_symbolstate_oi_history_windowed():
+    clock = {"t": 0.0}
+    st = SymbolState("BTCUSDT", oi_window_sec=100.0, now=lambda: clock["t"])
+    st.on_ticker(None, 1000.0, None)
+    clock["t"] = 50.0
+    st.on_ticker(None, 1100.0, None)
+    clock["t"] = 200.0
+    st.on_ticker(None, 1200.0, None)  # первые две точки старше окна 100с
+    snap = st.snapshot()
+    assert [oi for _, oi in snap.oi_history] == [1200.0]
+
+
+def test_htf_natr_and_bb_width():
+    from scalp_bot.data.htf import compute_bb_width_pct, compute_natr
+    n = 60
+    highs = [100 + i + 0.5 for i in range(n)]
+    lows = [100 + i - 0.5 for i in range(n)]
+    closes = [100.0 + i for i in range(n)]
+    natr = compute_natr(highs, lows, closes, 14)
+    assert natr is not None and natr > 0
+    bbw = compute_bb_width_pct(closes)
+    assert bbw is not None and bbw > 0
+    # флэт → BB схлопнуты (squeeze), ширина ~0
+    assert compute_bb_width_pct([100.0] * 30) == pytest.approx(0.0)
+    # данных мало → None (fail-soft)
+    assert compute_natr(highs[:5], lows[:5], closes[:5], 14) is None
+    assert compute_bb_width_pct(closes[:10]) is None
+
+
+def test_htf_refresh_populates_natr_bb_width():
+    n = 200
+    rows = [(100.0 + i, 100 + i + 0.5, 100 + i - 0.5, 100.0 + i) for i in range(n)]
+    htf = HtfTrend(ema_len=200, adx_len=14)
+    htf.refresh(_FakeOHLCClient({"SOLUSDT": rows}), ["SOLUSDT"])
+    assert htf.natr_pct("SOLUSDT") is not None and htf.natr_pct("SOLUSDT") > 0
+    assert htf.bb_width_pct("SOLUSDT") is not None
+    assert htf.natr_pct("XXXUSDT") is None  # нет данных → None
+
+
+def test_db_shadow_table_insert_and_read(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    feats = {"adx": 33.0, "session": "us", "ret_autocorr": -0.4,
+             "liq_notional_usd": 5000.0, "btc_ret_bps": -12.0}
+    db.insert_shadow(symbol="SOLUSDT", side="long", strategy="sweep_fade",
+                     blocked_by="adx_strong", features=feats, ts=100.0,
+                     entry_ref=97.0, sl_level=96.5, tp_level=98.5, score=4)
+    rows = db.shadow_rows()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["blocked_by"] == "adx_strong"
+    assert r["strategy"] == "sweep_fade"
+    assert r["side"] == "long"
+    assert r["entry_ref"] == 97.0 and r["sl_level"] == 96.5
+    assert r["adx"] == 33.0 and r["ret_autocorr"] == -0.4
+    assert r["btc_ret_bps"] == -12.0
+    db.close()
+
+
+def test_db_regime_migration_adds_new_columns(tmp_path):
+    """Старая БД (regime_features без v0.18.31-колонок) мигрирует на новую
+    схему через ALTER TABLE — insert с новыми фичами не падает."""
+    import sqlite3 as _sq
+    path = str(tmp_path / "scalp_bot.sqlite")
+    conn = _sq.connect(path)
+    conn.executescript("""
+        CREATE TABLE regime_features (
+            trade_id INTEGER PRIMARY KEY, ts REAL NOT NULL,
+            adx REAL, regime_ratio REAL, day_range_pct REAL,
+            dist_high_pct REAL, dist_low_pct REAL, spread_bps REAL,
+            ob_imbalance REAL, funding_bps REAL, cvd_slope REAL,
+            liq_count INTEGER, session TEXT);
+    """)
+    conn.commit()
+    conn.close()
+    db = ScalpDB(str(tmp_path))
+    db.insert_regime(1, {"adx": 20.0, "ret_autocorr": -0.2,
+                         "htf_bb_width_pct": 1.5}, ts=5.0)
+    got = db.regime_for(1)
+    assert got["ret_autocorr"] == -0.2
+    assert got["htf_bb_width_pct"] == 1.5
+    db.close()
+
+
+def test_main_log_shadow_writes_row_and_respects_flag(tmp_path):
+    from scalp_bot.app.main import _log_shadow
+
+    class _Cfg:
+        shadow_log_enabled = True
+
+    db = ScalpDB(str(tmp_path))
+    sig = Signal(symbol="SOLUSDT", side="long", entry_ref=97.0, sl_level=96.5,
+                 tp_level=98.5, score=4, reasons=["x"], strategy="sweep_fade")
+    snap = _snap([CvdSample(1, 97, 0)])
+    _log_shadow(db, _Cfg(), sig, "htf_align", snap, None, None, 14 * 3600.0)
+    rows = db.shadow_rows()
+    assert len(rows) == 1
+    assert rows[0]["blocked_by"] == "htf_align"
+    assert rows[0]["session"] == "us"  # из wall-clock now
+    # флаг off → не пишем
+    _Cfg.shadow_log_enabled = False
+    _log_shadow(db, _Cfg(), sig, "htf_align", snap, None, None, 14 * 3600.0)
+    assert len(db.shadow_rows()) == 1
+    db.close()
+
+
+def test_main_log_shadow_never_raises(tmp_path):
+    """Shadow-лог — телеметрия: сбой БД не рвёт main loop."""
+    from scalp_bot.app.main import _log_shadow
+
+    class _Cfg:
+        shadow_log_enabled = True
+
+    class _BoomShadowDB:
+        def insert_shadow(self, *a, **k):
+            raise RuntimeError("boom")
+
+    sig = Signal(symbol="SOLUSDT", side="long", entry_ref=97.0, sl_level=96.5,
+                 tp_level=98.5, score=4, reasons=["x"])
+    _log_shadow(_BoomShadowDB(), _Cfg(), sig, "dmi_long",
+                _snap([CvdSample(1, 97, 0)]), None, None, 100.0)  # не бросает
+
+
+def test_settings_shadow_log_enabled_default():
+    """v0.18.31: shadow-лог отвергнутых сигналов включён по умолчанию
+    (телеметрия, на торговлю не влияет)."""
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().shadow_log_enabled is True
 

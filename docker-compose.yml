@@ -328,6 +328,10 @@ services:
       # v0.18.30: bounce вход taker — maker не наливался (12/33 = 36%
       # entry_Cancelled/timeout), тот же вывод что C-06 у break (42.6% fill).
       SCALP_DENSITY_BOUNCE_ENTRY_ORDER_TYPE: ${SCALP_DENSITY_BOUNCE_ENTRY_ORDER_TYPE:-market}
+      # v0.18.31: shadow-лог отвергнутых режим-гейтами сигналов (таблица
+      # shadow_signals) + расширенные regime-фичи. ТОЛЬКО телеметрия — лечит
+      # range restriction в оценке гейтов (ADX/DMI/HTF/funding/cooldown).
+      SCALP_SHADOW_LOG_ENABLED: ${SCALP_SHADOW_LOG_ENABLED:-true}
       # Rolling-baseline (v0.9.0): стена vs скользящее среднее за 10–15мин (Kalena),
       # а не мгновенный top-25 (тот давал 0/502 входов — 5× недостижим).
       SCALP_DENSITY_BASELINE_SEC: ${SCALP_DENSITY_BASELINE_SEC:-900}

@@ -12,7 +12,32 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
-_SCHEMA = """
+# Regime-фичи (общие для regime_features и shadow_signals). Порядок и состав
+# должны совпадать с analysis/regime.py REGIME_COLUMNS (тест-инвариант
+# test_regime_columns_match_db). session — TEXT, liq_count — INTEGER,
+# остальное REAL.
+_FEATURE_COLS = (
+    "adx", "regime_ratio", "day_range_pct", "dist_high_pct", "dist_low_pct",
+    "spread_bps", "ob_imbalance", "funding_bps", "cvd_slope", "liq_count",
+    "session",
+    "ret_autocorr", "price_slope_bps_min", "rv_burst", "tape_accel",
+    "liq_notional_usd", "liq_buy_frac", "oi_delta_pct", "btc_ret_bps",
+    "near_depth_imb", "htf_natr_pct", "htf_bb_width_pct",
+)
+
+
+def _feature_col_type(col: str) -> str:
+    if col == "session":
+        return "TEXT"
+    if col == "liq_count":
+        return "INTEGER"
+    return "REAL"
+
+
+_FEATURE_DDL = ",\n    ".join(
+    f"{c} {_feature_col_type(c)}" for c in _FEATURE_COLS)
+
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_open REAL NOT NULL,
@@ -41,18 +66,23 @@ CREATE INDEX IF NOT EXISTS idx_trades_ts_close ON trades(ts_close);
 CREATE TABLE IF NOT EXISTS regime_features (
     trade_id INTEGER PRIMARY KEY,
     ts REAL NOT NULL,
-    adx REAL,
-    regime_ratio REAL,
-    day_range_pct REAL,
-    dist_high_pct REAL,
-    dist_low_pct REAL,
-    spread_bps REAL,
-    ob_imbalance REAL,
-    funding_bps REAL,
-    cvd_slope REAL,
-    liq_count INTEGER,
-    session TEXT
+    {_FEATURE_DDL}
 );
+CREATE TABLE IF NOT EXISTS shadow_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    blocked_by TEXT NOT NULL,
+    entry_ref REAL,
+    sl_level REAL,
+    tp_level REAL,
+    score INTEGER,
+    {_FEATURE_DDL}
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_ts ON shadow_signals(ts);
+CREATE INDEX IF NOT EXISTS idx_shadow_strategy ON shadow_signals(strategy);
 """
 
 
@@ -128,6 +158,15 @@ class ScalpDB:
         # индекс создаём после миграции (на старой БД колонки ещё не было)
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy)")
+        # v0.18.31: новые regime-фичи — досоздать недостающие колонки в уже
+        # существующей regime_features (CREATE IF NOT EXISTS старую не трогает)
+        rcols = {r["name"] for r in
+                 self._conn.execute("PRAGMA table_info(regime_features)")}
+        for col in _FEATURE_COLS:
+            if col not in rcols:
+                self._conn.execute(
+                    f"ALTER TABLE regime_features ADD COLUMN "
+                    f"{col} {_feature_col_type(col)}")
 
     def close(self) -> None:
         self._conn.close()
@@ -160,10 +199,8 @@ class ScalpDB:
         if not features:
             return
         t = ts if ts is not None else time.time()
-        cols = ("trade_id", "ts", "adx", "regime_ratio", "day_range_pct",
-                "dist_high_pct", "dist_low_pct", "spread_bps", "ob_imbalance",
-                "funding_bps", "cvd_slope", "liq_count", "session")
-        vals = [trade_id, t] + [features.get(c) for c in cols[2:]]
+        cols = ("trade_id", "ts") + _FEATURE_COLS
+        vals = [trade_id, t] + [features.get(c) for c in _FEATURE_COLS]
         placeholders = ",".join("?" for _ in cols)
         try:
             self._conn.execute(
@@ -172,6 +209,34 @@ class ScalpDB:
             self._conn.commit()
         except sqlite3.Error:
             # лог-таблица — не критично; main loop тоже обёрнут try/except
+            self._conn.rollback()
+
+    def insert_shadow(self, *, symbol: str, side: str, strategy: str,
+                      blocked_by: str, features: dict | None,
+                      ts: float | None = None, entry_ref: float | None = None,
+                      sl_level: float | None = None,
+                      tp_level: float | None = None,
+                      score: int | None = None) -> None:
+        """Shadow-лог ОТВЕРГНУТОГО гейтом сигнала (v0.18.31): те же regime-
+        фичи + причина блокировки + уровни несостоявшейся сделки (entry/SL/TP
+        — чтобы офлайн по клинам восстановить would-be исход и честно измерить
+        каждый гейт: спасает от лузов или режет профит). ТОЛЬКО логирование,
+        на торговлю не влияет (no-data-fitting.mdc). Молча игнорирует ошибку."""
+        t = ts if ts is not None else time.time()
+        feats = features or {}
+        head = ("ts", "symbol", "side", "strategy", "blocked_by",
+                "entry_ref", "sl_level", "tp_level", "score")
+        cols = head + _FEATURE_COLS
+        vals = [t, symbol, side, strategy, blocked_by,
+                entry_ref, sl_level, tp_level, score] \
+            + [feats.get(c) for c in _FEATURE_COLS]
+        placeholders = ",".join("?" for _ in cols)
+        try:
+            self._conn.execute(
+                f"INSERT INTO shadow_signals ({','.join(cols)}) "
+                f"VALUES ({placeholders})", tuple(vals))
+            self._conn.commit()
+        except sqlite3.Error:
             self._conn.rollback()
 
     def mark_closed(
@@ -284,6 +349,13 @@ class ScalpDB:
         return [self._row(r) for r in rows]
 
     # ─── reads ───────────────────────────────────────────────────────────
+
+    def shadow_rows(self, since_ts: float = 0.0) -> list[dict]:
+        """Shadow-лог отвергнутых сигналов (для анализа/тестов), старые→новые."""
+        rows = self._conn.execute(
+            "SELECT * FROM shadow_signals WHERE ts>=? ORDER BY id", (since_ts,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def regime_for(self, trade_id: int) -> dict | None:
         """Regime-фичи сделки (для анализа/тестов). None если нет записи."""

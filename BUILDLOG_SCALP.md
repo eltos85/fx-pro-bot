@@ -4,6 +4,71 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-07-03
+
+### feat(scalp/regime): v0.18.31 — shadow-лог отвергнутых сигналов + 11 новых regime-фичей
+`pending`
+
+Продолжение meta-labeling (Lopez de Prado AFML Ch3). Анализ первых ~80
+записей `regime_features` показал: гейтящиеся фичи (ADX, regime_ratio) НЕ
+различают winners/losers из-за **range restriction** — гейт сам отрезает
+экстремумы до записи, в лог попадают только «прошедшие», и измерить пользу
+гейта невозможно. Различали только НЕгейтящиеся фичи: cvd_slope
+(side-adjusted, WR 32% vs 20%) и liq_count (WR 9% при >0). Запрос
+пользователя: добавить shadow-лог + продумать метрики, которые «реально
+помогут с определением благоприятного рынка каждой из стратегий».
+
+**1. Shadow-лог (лечит range restriction).** Новая таблица `shadow_signals`:
+на каждом из 7 режим-гейтов main loop (`no_long_symbol`, `htf_warmup`,
+`htf_align`, `dmi_long`, `adx_strong`, `sl_cooldown`, `funding_window`)
+отвергнутый сигнал пишется с полным набором regime-фичей + `blocked_by` +
+entry/SL/TP несостоявшейся сделки — офлайн по клинам можно восстановить
+would-be исход и честно измерить каждый гейт (спасает от лузов или режет
+профит, как оказалось с near_round у bounce). Env
+`SCALP_SHADOW_LOG_ENABLED` (default true). ТОЛЬКО телеметрия
+(no-data-fitting.mdc: логирование не влияет на торговлю).
+
+**2. Новые фичи** (все считаются из уже текущих WS/REST-данных, без новых
+запросов; негейтящиеся → полный диапазон значений в логе):
+- `ret_autocorr` — автокорреляция lag-1 ретёрнов (5с-бакеты, 3м окно). Lo &
+  MacKinlay 1988 (variance-ratio): <0 = MR-режим (фейду ЗА), >0 = momentum
+  (пробою ЗА). Главный кандидат «какой рынок сейчас» per-strategy.
+- `price_slope_bps_min` — микро-тренд LS-наклоном (ungated аналог EMA/ADX).
+- `rv_burst` — σ ретёрнов 60с/180с: vol-экспансия (Bollinger 2001) — break
+  хочет >1, fade — стабильность.
+- `tape_accel` — trade rate 60с/180с (канон tape reading).
+- `liq_notional_usd` + `liq_buy_frac` — нотионал и сторона ликвидаций
+  (liq_count уже показал сигнал; Kalena 2026: long-каскады механически злее).
+- `oi_delta_pct` — ΔOI за 5м (Murphy 1999 ch.7: цена+OI↑ = новые деньги,
+  OI↓ = short covering). Под это в `SymbolState` добавлена rolling-история
+  OI (окно 300с) из ticker-стрима.
+- `btc_ret_bps` — импульс BTC за окно (мейджор ведёт альты; гипотеза:
+  вход в альт-MR во время рывка BTC токсичен).
+- `near_depth_imb` — дисбаланс топ-5 стакана (near-touch, Bookmap-канон;
+  топ-25 уже логировался).
+- `htf_natr_pct`, `htf_bb_width_pct` — NATR(14) и ширина BB(20,2σ) на 15m
+  из ТЕХ ЖЕ клинов HtfTrend (Wilder 1978; Bollinger 2001 / Carter 2012
+  squeeze — сжатие предшествует экспансии, precondition density_break).
+
+**3. Bug-fix `session`:** считался из `snap.ts` = `time.monotonic()`
+(секунды с загрузки VPS) — бакеты сессий в исторических записях сдвинуты
+на константу uptime%24h. Теперь session из wall-clock `now` (time.time из
+main loop). В офлайн-анализе прошлых данных сессию пересчитывать из
+колонки `ts` (она писалась wall-clock — корректна).
+
+Миграция: `ALTER TABLE regime_features ADD COLUMN` для существующей БД на
+VPS (идемпотентно), `shadow_signals` создаётся с нуля. Инвариант схемы
+закреплён тестом (`REGIME_COLUMNS == _FEATURE_COLS`). Тесты: 15 новых,
+все 1201 в проекте зелёные. План анализа: n≥100 shadow-записей на гейт +
+n≥100 сделок с новыми фичами → условные разрезы E[R|фича] с p-value,
+OOS-проверка (sample-size.mdc) — только потом какие-либо гейты.
+
+**Файлы:** `analysis/regime.py` (новые фичи + fix session),
+`data/aggregates.py` (OI-история), `data/htf.py` (NATR/BB-width),
+`state/db.py` (shadow_signals + миграция), `app/main.py` (_log_shadow на
+7 гейтах, btc_snap), `config/settings.py`, `docker-compose.yml`,
+`tests/test_scalp_bot.py`.
+
 ## 2026-07-02
 
 ### fix(scalp/density_bounce): v0.18.30 — редизайн трека стены (0 сигналов за 24 дня)

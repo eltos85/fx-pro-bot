@@ -332,6 +332,13 @@ def run() -> None:
                 sig = resolve(candidates)
                 if sig is None:
                     continue
+                # снапшот BTC для regime-фичи btc_ret_bps (импульс мейджора);
+                # для самого BTC — его же snap (ретёрн символа = импульс BTC)
+                if sym == "BTCUSDT":
+                    btc_snap = snap
+                else:
+                    _bst = states.get("BTCUSDT")
+                    btc_snap = _bst.snapshot() if _bst is not None else None
                 # Per-symbol LONG-блок (v0.18.17, C-07): на символах из no_long_list
                 # запрещаем ЛОНГ ВСЕМ стратегиям (включая density_break, у которого
                 # нет HTF/DMI-гейтов), шорты разрешены. Exposure-management по запросу
@@ -342,6 +349,8 @@ def run() -> None:
                     play.info("🚫 [%s] long заблокирован (no_long_symbols) — "
                               "лонги по символу отключены, шорты разрешены",
                               sig.symbol)
+                    _log_shadow(db, cfg, sig, "no_long_symbol", snap, htf,
+                                key_levels, now, btc_snap)
                     continue
                 # v0.18.2: fail-CLOSED для непрогретого символа. Канон QuantConnect:
                 # «refuse to trade until indicator ready» — не фейдим символ, у
@@ -353,6 +362,8 @@ def run() -> None:
                     play.info("⏳ [%s] %s — HTF-фильтр не прогрет (свежий символ) — "
                               "фейд пропускаю (канон: не торговать до готовности "
                               "индикатора)", sig.symbol, sig.side)
+                    _log_shadow(db, cfg, sig, "htf_warmup", snap, htf,
+                                key_levels, now, btc_snap)
                     continue
                 # HTF-bias: фейд только по старшему тренду (EMA200 15m). Контртренд
                 # (ловля ножа) пропускаем. ТОЛЬКО для MR-стратегий (sig.strategy in
@@ -363,6 +374,8 @@ def run() -> None:
                     play.info("🧭 [%s] %s против старшего тренда (HTF=%s) — "
                               "пропускаю (фейдим только по тренду)", sig.symbol,
                               sig.side, d or "?")
+                    _log_shadow(db, cfg, sig, "htf_align", snap, htf,
+                                key_levels, now, btc_snap)
                     continue
                 # DMI-гейт направления только для ЛОНГОВ (v0.18.4, асимметрия).
                 # Диагноз: live sweep_fade-лонги 20% WR (контртренд в дип),
@@ -380,6 +393,8 @@ def run() -> None:
                     play.info("🧭 [%s] %s long но DMI вниз (−DI≥+DI) — пропускаю "
                               "(контртренд-лонг-пробой в дип = bull trap)",
                               sig.symbol, sig.strategy)
+                    _log_shadow(db, cfg, sig, "dmi_long", snap, htf,
+                                key_levels, now, btc_snap)
                     continue
                 # ADX режим-гейт (v0.17.0): EMA дала направление, но если тренд
                 # СЛИШКОМ сильный (ADX≥adx_max, «трендовый день») — фейд запрещён
@@ -396,6 +411,8 @@ def run() -> None:
                               "день) — не фейдю (канон: не фейдить one-TF тренд)",
                               sig.symbol, sig.side,
                               htf.trend_strength(sig.symbol) or 0.0, cfg.htf_adx_max)
+                    _log_shadow(db, cfg, sig, "adx_strong", snap, htf,
+                                key_levels, now, btc_snap)
                     continue
                 # SL-cooldown: не перефейдиваем провалившийся уровень сразу.
                 # Повторный вход той же стороной сразу после SL — в среднем
@@ -415,6 +432,8 @@ def run() -> None:
                         play.info("🧊 [%s] %s — недавний SL %.0fс назад (<%.0fс "
                                   "cooldown), не перефейдиваю уровень сразу",
                                   sig.symbol, sig.side, now - last_sl, cd_sec)
+                        _log_shadow(db, cfg, sig, "sl_cooldown", snap, htf,
+                                    key_levels, now, btc_snap)
                         continue
                 # funding-окно (per-symbol по реальному интервалу): не открываемся
                 # перед списанием — funding кратно превышает R на волатильных альтах.
@@ -423,6 +442,8 @@ def run() -> None:
                               "пропускаю вход", sig.symbol,
                               funding.sec_to_next(sig.symbol, now),
                               funding.interval(sig.symbol))
+                    _log_shadow(db, cfg, sig, "funding_window", snap, htf,
+                                key_levels, now, btc_snap)
                     continue
                 funnel["fired"] += 1
                 gate = killswitch.can_open(db, cfg, now)
@@ -433,7 +454,8 @@ def run() -> None:
                 # AFML Ch3) — ТОЛЬКО логирование, на торговлю не влияет. Любая
                 # ошибка вычисления → regime=None (анализ просто пропустит).
                 try:
-                    sig.regime = compute_regime_features(snap, htf, key_levels, now)
+                    sig.regime = compute_regime_features(snap, htf, key_levels,
+                                                         now, btc_snap=btc_snap)
                 except Exception:
                     log.exception("regime features %s failed", sym)
                     sig.regime = None
@@ -493,6 +515,34 @@ def _log_strategy_stats(db: ScalpDB) -> None:
 
 
 # Аудит v0.9.0: liq/funding убраны из воронки — больше не факторы входа.
+def _log_shadow(db, cfg, sig, blocked_by: str, snap, htf, key_levels,
+                now: float, btc_snap=None) -> None:
+    """Shadow-лог сигнала, отвергнутого режим-гейтом (v0.18.31).
+
+    Пишет regime-фичи + причину блокировки + уровни несостоявшейся сделки в
+    shadow_signals. Лечит range restriction в оценке гейтов: без этого в
+    regime_features видны только ПРОШЕДШИЕ гейты сигналы, и невозможно
+    измерить «а что было бы без гейта» (спасает гейт от лузов или режет
+    профит). ТОЛЬКО телеметрия — любая ошибка глушится, торговый поток не
+    рвётся (no-data-fitting.mdc)."""
+    if not getattr(cfg, "shadow_log_enabled", True):
+        return
+    try:
+        feats = compute_regime_features(snap, htf, key_levels, now,
+                                        btc_snap=btc_snap)
+    except Exception:
+        log.exception("shadow regime features %s failed", sig.symbol)
+        feats = None
+    try:
+        db.insert_shadow(symbol=sig.symbol, side=sig.side,
+                         strategy=sig.strategy, blocked_by=blocked_by,
+                         features=feats, ts=now, entry_ref=sig.entry_ref,
+                         sl_level=sig.sl_level, tp_level=sig.tp_level,
+                         score=sig.score)
+    except Exception:
+        log.exception("shadow log %s failed", sig.symbol)
+
+
 _FUNNEL_RULES = ("sweep", "div", "reclaim", "momentum", "ob")
 
 

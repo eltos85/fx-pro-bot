@@ -278,6 +278,11 @@ class ScalpSettings(BaseSettings):
     # (0.2% присутствия на 502 входах, не каноничен для 90–120с разворота).
     # liq_events продолжаем собирать только для heartbeat-наблюдаемости.
     liq_window_sec: float = Field(default=60.0)
+    # Shadow-лог отвергнутых сигналов (v0.18.31): сигналы, заблокированные
+    # режим-гейтами main loop (no_long/HTF/DMI/ADX/SL-cooldown/funding),
+    # пишутся с regime-фичами в shadow_signals. ТОЛЬКО телеметрия — лечит
+    # range restriction в оценке гейтов (видим и то, что гейт отрезал).
+    shadow_log_enabled: bool = Field(default=True)
     # Анти-шум между входами по одному символу.
     signal_cooldown_sec: float = Field(default=60.0)
     # Пауза после стоп-аута перед повторным входом в ТУ ЖЕ сторону по символу.
