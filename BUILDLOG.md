@@ -4,11 +4,72 @@
 
 ---
 
+## 2026-07-03
+
+### feat(momentum): ctx-метрики контекста входа — направленный срез убытков (observability only)
+
+`<pending commit>`
+
+**Запрос пользователя:** «есть ощущение, что бот плохо понимает когда лонг
+когда шорт — обмажь метриками, чтобы было проще понять откуда убыток».
+
+**Шаг 1 — проверка гипотезы на имеющихся 103 сделках** (дамп loss-аудита
+06-05→07-02 + реконструкция HTF-контекста из yfinance H1, артефакт
+`data/momentum_loss_audit_enriched.json`):
+
+- **Лонги −$154.58 (avgR −0.23) vs шорты −$34.50 (avgR −0.04)** при
+  одинаковом WR 31%/31% — 82% убытка приносят лонги. Худшие связки:
+  AUDUSD long (n=7, WR 14%, avgR −0.35), GBPUSD long (n=19, −$100.59,
+  avgR −0.35).
+- **Counter-trend входы (против EMA200 H1): −$124 на n=34** (avgR −0.21)
+  vs with-trend −$65 на n=69 (avgR −0.11). Единственный сегмент около
+  нуля — short по тренду (+$0.45, n=38). Лонги теряют даже по тренду
+  (−$65, n=31) — поздний вход, а не только неверная сторона.
+- Растянутость (|close−EMA200| ≥3 ATR) и режим ADX чётких порогов не
+  дали (avgR −0.08…−0.28 без монотонности).
+- Все сегменты n<100 → **наблюдения, не фильтры** (sample-size.mdc).
+  Никакие торговые параметры не изменены.
+
+**Шаг 2 — инструментирование бота**, чтобы следующий аудит не
+реконструировал контекст постфактум (риск look-ahead/несовпадения баров),
+а брал его из БД одним SQL:
+
+- Новый `strategy/context_metrics.py` — `compute_entry_context(candles,
+  direction)` на тех же закрытых барах, что и сигнал (без look-ahead):
+  `ema_dist_atr` (close−EMA200)/ATR14, `adx` (Wilder 14), `with_htf`
+  (сторона сигнала совпадает со стороной EMA200). Research basis:
+  Murphy 1999 ch.9 (EMA200), Wilder 1978 (ADX), Harris 2003 ch.21
+  (спред как вычет из R). **Пороги к торговле НЕ применяются** —
+  метрики только пишутся.
+- `momentum_decisions` + 4 nullable-колонки `ctx_ema_dist_atr`,
+  `ctx_adx`, `ctx_with_htf`, `ctx_spread_pips` (миграция через
+  `PRAGMA table_info`, старые строки NULL). Спред меряется только на
+  live_open-попытках (тот же spot-кэш, что у спред-гарда).
+- Лог `ENTRY CTX ...` при каждой попытке входа.
+- tradecard_momentum читает ctx_* defensively (старые БД без колонок →
+  None) и прокидывает в `MomentumTrade` — weekly-отчёт и loss-аудит
+  могут резать по with_htf/ADX/спреду без yfinance-реконструкции.
+
+Инвариант: контекст опционален и никогда не блокирует решение
+(ошибка/мало баров → None, торговый цикл не падает). Допустимая правка
+без выборки: «добавление метрик/логирования» (sample-size.mdc).
+
+**Тесты:** +8 (математика метрик на детерминированных рядах, миграция
+схемы, defensive-чтение tradecard). Сьют 1208 passed.
+
+**Файлы:** `src/fx_momentum_bot/strategy/context_metrics.py` (новый),
+`src/fx_momentum_bot/state/store.py`, `src/fx_momentum_bot/app/main.py`,
+`src/tradecard_momentum/data/momentum_db.py`,
+`src/tradecard_momentum/data/broker.py`,
+`src/tradecard_momentum/analysis/trade.py`, тесты
+
+---
+
 ## 2026-07-02
 
 ### audit(momentum): loss-аудит 06-05→07-02 — на чём и как стратегия теряет (observation only)
 
-`<pending commit>`
+`05676bc`
 
 **Запрос пользователя:** «проведи аудит лузов, нужно понять как на чём
 стратегия теряет». Артефакты: `scripts/momentum_loss_audit.py` (broker-truth

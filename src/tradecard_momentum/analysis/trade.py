@@ -37,6 +37,12 @@ class MomentumTrade:
     # сигнал входа (traceability, momentum_decisions) — может быть None
     signal_momentum: float | None = None   # |momentum_value| на входе (грейд-score)
     signal_atr: float | None = None
+    # ctx_* — контекст входа (пишется ботом с 2026-07-03): режим/тренд/спред
+    # на момент решения. None для сделок до внедрения метрик.
+    ctx_ema_dist_atr: float | None = None
+    ctx_adx: float | None = None
+    ctx_with_htf: bool | None = None
+    ctx_spread_pips: float | None = None
     # реконструированный плановый риск (ценовая SL-дистанция) и его источник
     risk_price: float | None = None
     n_closing_deals: int = 1               # >1 → был частичный выход (partial)

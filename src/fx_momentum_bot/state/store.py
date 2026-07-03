@@ -31,6 +31,24 @@ class MomentumStore:
                 )
                 """
             )
+            # ── ctx_* — метрики контекста входа (observability, BUILDLOG
+            # 2026-07-03). Nullable: старые строки и circuits без данных
+            # остаются NULL. SQLite не умеет ADD COLUMN IF NOT EXISTS —
+            # мигрируем через pragma table_info.
+            existing = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(momentum_decisions)")
+            }
+            for col, ddl in (
+                ("ctx_ema_dist_atr", "REAL"),
+                ("ctx_adx", "REAL"),
+                ("ctx_with_htf", "INTEGER"),
+                ("ctx_spread_pips", "REAL"),
+            ):
+                if col not in existing:
+                    conn.execute(
+                        f"ALTER TABLE momentum_decisions ADD COLUMN {col} {ddl}"
+                    )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS momentum_state (
@@ -88,13 +106,18 @@ class MomentumStore:
         close_price: float,
         executed: bool,
         note: str,
+        ctx_ema_dist_atr: float | None = None,
+        ctx_adx: float | None = None,
+        ctx_with_htf: bool | None = None,
+        ctx_spread_pips: float | None = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO momentum_decisions(
-                    symbol, direction, momentum_value, atr, close_price, executed, note
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    symbol, direction, momentum_value, atr, close_price, executed, note,
+                    ctx_ema_dist_atr, ctx_adx, ctx_with_htf, ctx_spread_pips
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -104,6 +127,10 @@ class MomentumStore:
                     close_price,
                     int(executed),
                     note,
+                    ctx_ema_dist_atr,
+                    ctx_adx,
+                    None if ctx_with_htf is None else int(ctx_with_htf),
+                    ctx_spread_pips,
                 ),
             )
             conn.commit()

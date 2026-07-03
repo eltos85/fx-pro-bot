@@ -297,9 +297,42 @@ def test_momentum_db_readonly(tmp_path):
     with MomentumDBReadOnly(str(db_path)) as ro:
         decs = ro.executed_decisions()
         assert len(decs) == 1 and decs[0].symbol_yf == "EURUSD=X"
+        # БД БЕЗ ctx_* колонок (старая схема) читается defensively → None
+        assert decs[0].ctx_ema_dist_atr is None
+        assert decs[0].ctx_with_htf is None
         # запись физически невозможна (mode=ro)
         with pytest.raises(sqlite3.OperationalError):
             ro._conn.execute("INSERT INTO momentum_decisions(symbol) VALUES ('X')")
+
+
+def test_momentum_db_reads_ctx_columns(tmp_path):
+    """ctx_* метрики (BUILDLOG 2026-07-03) доезжают до EntryDecision."""
+    from tradecard_momentum.data.momentum_db import MomentumDBReadOnly
+    db_path = tmp_path / "momentum_bot.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE momentum_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "created_at TEXT, symbol TEXT, direction TEXT, momentum_value REAL, "
+        "atr REAL, close_price REAL, executed INTEGER, note TEXT, "
+        "ctx_ema_dist_atr REAL, ctx_adx REAL, ctx_with_htf INTEGER, "
+        "ctx_spread_pips REAL)")
+    conn.execute(
+        "INSERT INTO momentum_decisions(created_at,symbol,direction,"
+        "momentum_value,atr,close_price,executed,note,"
+        "ctx_ema_dist_atr,ctx_adx,ctx_with_htf,ctx_spread_pips) VALUES "
+        "('2026-07-03 09:00:00','GBPUSD=X','short',-0.004,0.0009,1.27,1,"
+        "'live_open:ok',-3.2,27.5,1,0.6)")
+    conn.commit()
+    conn.close()
+
+    with MomentumDBReadOnly(str(db_path)) as ro:
+        decs = ro.executed_decisions()
+    assert len(decs) == 1
+    d = decs[0]
+    assert d.ctx_ema_dist_atr == pytest.approx(-3.2)
+    assert d.ctx_adx == pytest.approx(27.5)
+    assert d.ctx_with_htf is True
+    assert d.ctx_spread_pips == pytest.approx(0.6)
 
 
 # ─── tradecard DB (своё хранилище) ───────────────────────────────────────────

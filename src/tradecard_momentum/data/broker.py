@@ -170,6 +170,10 @@ def fetch_momentum_trades(cfg: TradecardMomentumSettings, *, since_ts: float,
                 gross_usd=round(gross, 4), swap_usd=round(swap, 4),
                 commission_usd=round(comm, 4),
                 signal_momentum=signal_mom, signal_atr=signal_atr,
+                ctx_ema_dist_atr=(dec.ctx_ema_dist_atr if dec else None),
+                ctx_adx=(dec.ctx_adx if dec else None),
+                ctx_with_htf=(dec.ctx_with_htf if dec else None),
+                ctx_spread_pips=(dec.ctx_spread_pips if dec else None),
                 risk_price=risk_price, n_closing_deals=len(closings)))
         out.sort(key=lambda t: t.ts_close or 0.0)
         return out

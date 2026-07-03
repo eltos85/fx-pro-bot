@@ -502,3 +502,115 @@ def test_friday_entry_blocked_disabled_or_bad_config() -> None:
         enabled=True, flat_start="oops", now_utc=_fri(21, 0),
     ) is False
 
+
+# ─── context_metrics: метрики контекста входа (observability) ────────────────
+# BUILDLOG 2026-07-03: проверяем МАТЕМАТИКУ метрик (детерминированные ряды),
+# не торговое поведение — метрики на торговлю не влияют по построению.
+
+
+def _trend_df(n: int = 300, step: float = 0.001) -> pd.DataFrame:
+    """Монотонный ап-тренд: close заведомо выше EMA200, ADX высокий."""
+    idx = pd.date_range("2026-01-01", periods=n, freq="1h", tz="UTC")
+    close = pd.Series([1.0 + step * i for i in range(n)], index=idx)
+    return pd.DataFrame({
+        "Open": close - step / 2,
+        "High": close + step,
+        "Low": close - step,
+        "Close": close,
+        "Volume": [100] * n,
+    })
+
+
+def test_entry_context_uptrend_long_is_with_htf() -> None:
+    from fx_momentum_bot.strategy.context_metrics import compute_entry_context
+    ctx = compute_entry_context(_trend_df(), "long")
+    assert ctx is not None
+    assert ctx.ema_dist_atr > 0          # цена выше EMA200
+    assert ctx.with_htf is True          # long по стороне тренда
+    assert ctx.adx > 25                  # монотонный тренд → высокий ADX
+
+
+def test_entry_context_uptrend_short_is_counter() -> None:
+    from fx_momentum_bot.strategy.context_metrics import compute_entry_context
+    ctx = compute_entry_context(_trend_df(), "short")
+    assert ctx is not None
+    assert ctx.with_htf is False
+
+
+def test_entry_context_flat_direction_has_no_htf_flag() -> None:
+    from fx_momentum_bot.strategy.context_metrics import compute_entry_context
+    ctx = compute_entry_context(_trend_df(), "flat")
+    assert ctx is not None
+    assert ctx.with_htf is None
+
+
+def test_entry_context_not_enough_bars_returns_none() -> None:
+    from fx_momentum_bot.strategy.context_metrics import compute_entry_context
+    assert compute_entry_context(_trend_df(n=150), "long") is None
+    assert compute_entry_context(None, "long") is None
+
+
+# ─── store: миграция ctx_* колонок и персист контекста ────────────────────────
+
+
+def test_store_ctx_columns_migrate_and_persist(tmp_path) -> None:
+    import sqlite3
+
+    from fx_momentum_bot.state.store import MomentumStore
+
+    db = tmp_path / "momentum_bot.sqlite"
+    # Старая схема БЕЗ ctx_* — как на VPS до деплоя
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE momentum_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "created_at TEXT NOT NULL DEFAULT (datetime('now')), symbol TEXT NOT NULL, "
+        "direction TEXT NOT NULL, momentum_value REAL NOT NULL, atr REAL NOT NULL, "
+        "close_price REAL NOT NULL, executed INTEGER NOT NULL, "
+        "note TEXT NOT NULL DEFAULT '')")
+    conn.execute(
+        "INSERT INTO momentum_decisions(symbol,direction,momentum_value,atr,"
+        "close_price,executed,note) VALUES ('EURUSD=X','long',0.005,0.0004,1.1,1,'old')")
+    conn.commit()
+    conn.close()
+
+    store = MomentumStore(db)  # _init_db мигрирует схему
+    store.add_decision(
+        symbol="GBPUSD=X", direction="short", momentum_value=-0.004,
+        atr=0.0009, close_price=1.27, executed=True, note="live_open:ok",
+        ctx_ema_dist_atr=-3.2, ctx_adx=27.5, ctx_with_htf=True,
+        ctx_spread_pips=0.6,
+    )
+    # Повторная инициализация не падает (колонки уже есть)
+    MomentumStore(db)
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM momentum_decisions ORDER BY id").fetchall()
+    conn.close()
+    assert rows[0]["ctx_ema_dist_atr"] is None  # старая строка — NULL
+    new = rows[1]
+    assert new["ctx_ema_dist_atr"] == pytest.approx(-3.2)
+    assert new["ctx_adx"] == pytest.approx(27.5)
+    assert new["ctx_with_htf"] == 1
+    assert new["ctx_spread_pips"] == pytest.approx(0.6)
+
+
+def test_store_ctx_defaults_are_null(tmp_path) -> None:
+    import sqlite3
+
+    from fx_momentum_bot.state.store import MomentumStore
+
+    db = tmp_path / "momentum_bot.sqlite"
+    store = MomentumStore(db)
+    store.add_decision(
+        symbol="EURUSD=X", direction="flat", momentum_value=0.0,
+        atr=0.0, close_price=0.0, executed=False, note="not_enough_data",
+    )
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM momentum_decisions").fetchone()
+    conn.close()
+    assert row["ctx_ema_dist_atr"] is None
+    assert row["ctx_with_htf"] is None
+

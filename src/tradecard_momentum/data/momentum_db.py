@@ -25,6 +25,12 @@ class EntryDecision:
     momentum_value: float
     atr: float
     note: str
+    # ctx_* — метрики контекста входа (пишутся ботом с 2026-07-03,
+    # BUILDLOG). None для старых строк / недоступных данных.
+    ctx_ema_dist_atr: float | None = None   # (close−EMA200)/ATR на входе
+    ctx_adx: float | None = None            # ADX(14) режим
+    ctx_with_htf: bool | None = None        # вход по стороне EMA200?
+    ctx_spread_pips: float | None = None    # live-спред на входе
 
 
 def _parse_dt(raw: str) -> float | None:
@@ -67,10 +73,16 @@ class MomentumDBReadOnly:
         Берём с запасом по времени (вызывающий match'ит к opening-deal'ам).
         Сортировка по времени.
         """
+        # SELECT * — ctx_* колонки появились 2026-07-03 (миграция на стороне
+        # бота); в старых копиях БД их может не быть, читаем defensively.
         rows = self._conn.execute(
-            "SELECT created_at, symbol, direction, momentum_value, atr, note "
-            "FROM momentum_decisions WHERE executed=1 ORDER BY id"
+            "SELECT * FROM momentum_decisions WHERE executed=1 ORDER BY id"
         ).fetchall()
+
+        def _opt_float(row: sqlite3.Row, key: str) -> float | None:
+            val = row[key] if key in row.keys() else None
+            return float(val) if val is not None else None
+
         out: list[EntryDecision] = []
         for r in rows:
             ts = _parse_dt(r["created_at"])
@@ -80,9 +92,14 @@ class MomentumDBReadOnly:
                 continue
             if until_ts is not None and ts >= until_ts:
                 continue
+            with_htf_raw = r["ctx_with_htf"] if "ctx_with_htf" in r.keys() else None
             out.append(EntryDecision(
                 ts=ts, symbol_yf=r["symbol"],
                 direction=str(r["direction"]),
                 momentum_value=float(r["momentum_value"] or 0.0),
-                atr=float(r["atr"] or 0.0), note=str(r["note"] or "")))
+                atr=float(r["atr"] or 0.0), note=str(r["note"] or ""),
+                ctx_ema_dist_atr=_opt_float(r, "ctx_ema_dist_atr"),
+                ctx_adx=_opt_float(r, "ctx_adx"),
+                ctx_with_htf=(None if with_htf_raw is None else bool(with_htf_raw)),
+                ctx_spread_pips=_opt_float(r, "ctx_spread_pips")))
         return out

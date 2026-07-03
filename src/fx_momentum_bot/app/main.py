@@ -12,6 +12,7 @@ import yfinance as yf
 from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_pro_bot.config.settings import calc_lot_size
 from fx_momentum_bot.state.store import MomentumStore
+from fx_momentum_bot.strategy.context_metrics import EntryContext, compute_entry_context
 from fx_momentum_bot.strategy.event_guard import high_impact_event_near
 from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked, friday_flat_due
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
@@ -175,6 +176,31 @@ def _spread_too_wide(
     if fraction > max_fraction:
         return f"spread={spread:.5f}={fraction:.0%} of SL-dist (max {max_fraction:.0%})"
     return None
+
+
+def _entry_spread_pips(executor: TradeExecutor | None, symbol: str) -> float | None:
+    """Live-спред в пипсах на момент решения (observability, не гейт).
+
+    Тот же источник, что у спред-гарда (_spread_too_wide): spot-кэш клиента.
+    None при отсутствии данных — метрика опциональна.
+    """
+    if executor is None:
+        return None
+    info = executor.symbols.resolve_yfinance(symbol)
+    if info is None:
+        return None
+    try:
+        px = executor.client.get_spot_price(info.symbol_id, max_age_sec=900.0)
+    except Exception:  # noqa: BLE001
+        return None
+    if not px or px.get("bid") is None or px.get("ask") is None:
+        return None
+    spread = float(px["ask"]) - float(px["bid"])
+    if spread <= 0:
+        return None
+    from fx_pro_bot.config.settings import pip_size
+    ps = pip_size(symbol)
+    return round(spread / ps, 2) if ps > 0 else None
 
 
 def _fetch_candles(symbol: str, interval: str, period: str, retries: int = 3):
@@ -628,6 +654,7 @@ def run() -> None:
     while not _shutdown:
         try:
             signal_by_symbol: dict[str, MomentumSignal] = {}
+            ctx_by_symbol: dict[str, EntryContext | None] = {}
             positions_by_symbol: dict[str, list[ManagedPosition]] = {}
             if executor is not None:
                 # Позиции нужны не только management'у: exit-on-flip у momentum
@@ -660,6 +687,12 @@ def run() -> None:
                     )
                     continue
                 signal_by_symbol[symbol] = signal_data
+                # Метрики контекста решения (observability, BUILDLOG
+                # 2026-07-03): считаются по тем же закрытым барам, что и
+                # сигнал → без look-ahead. None не блокирует торговлю.
+                ctx_by_symbol[symbol] = compute_entry_context(
+                    candles, signal_data.direction
+                )
 
             # Friday-flat-флаг цикла: вычисляем один раз (переиспользуется
             # для close-блока ниже и для запрета новых входов в окно flat).
@@ -960,6 +993,27 @@ def run() -> None:
                             sl_distance,
                         )
 
+                # Контекст решения (observability, BUILDLOG 2026-07-03):
+                # спред меряем только на реальных попытках входа — на
+                # skip-строках он не несёт информации о качестве исполнения.
+                ctx = ctx_by_symbol.get(symbol)
+                spread_pips = (
+                    _entry_spread_pips(executor, symbol)
+                    if note.startswith("live_open")
+                    else None
+                )
+                if note.startswith("live_open") and ctx is not None:
+                    log.info(
+                        "ENTRY CTX %s %s: ema_dist=%+.2f ATR, adx=%.1f, "
+                        "with_htf=%s, spread=%s pip",
+                        symbol,
+                        signal_data.direction,
+                        ctx.ema_dist_atr,
+                        ctx.adx,
+                        ctx.with_htf,
+                        f"{spread_pips:.2f}" if spread_pips is not None else "n/a",
+                    )
+
                 store.add_decision(
                     symbol=symbol,
                     direction=signal_data.direction,
@@ -968,6 +1022,10 @@ def run() -> None:
                     close_price=signal_data.last_close,
                     executed=executed,
                     note=note,
+                    ctx_ema_dist_atr=ctx.ema_dist_atr if ctx else None,
+                    ctx_adx=ctx.adx if ctx else None,
+                    ctx_with_htf=ctx.with_htf if ctx else None,
+                    ctx_spread_pips=spread_pips,
                 )
                 # НЕ фиксируем direction, если live-вход хотели, но он был
                 # заблокирован (max_positions) или не удался: иначе edge-trigger
