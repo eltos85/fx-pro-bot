@@ -22,6 +22,8 @@ dependencies = [
   "statsmodels>=0.14",
   "anthropic>=0.39.0",
   "feedparser>=6.0",
+  "aiohttp>=3.9",
+  "protobuf>=3.20",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +44,7 @@ ru-stocks-analyst = "ru_stocks_analyst.app.main:run"
 ru-stocks-discover = "ru_stocks_analyst.app.discover_accounts:main"
 ru-stocks-once = "ru_stocks_analyst.app.run_once:main"
 ctrader-token-service = "ctrader_token_service.__main__:main"
+yorsh-bot = "yorsh_bot.app.main:run"
 
 [tool.hatch.build.targets.wheel]
 packages = [
@@ -55,6 +58,7 @@ packages = [
   "src/ru_stocks_analyst",
   "src/shared_oauth",
   "src/ctrader_token_service",
+  "src/yorsh_bot",
 ]
 
 [tool.ruff]

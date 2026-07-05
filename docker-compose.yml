@@ -803,9 +803,48 @@ services:
       # Свой volume: SQLite tradecard + markdown report card.
       - tradecard_momentum_data:/data
 
+  # ─── yorsh-bot: изолированный сканер «ёрш»-паттернов MEXC/Bitget (data-only) ─
+  # Фаза 1: WS-коллектор MEXC/Bitget spot (trades + incremental L2-diff) +
+  # recorder сырой ленты + density-tracker + ёрш-сканер. БЕЗ торговли
+  # (модуля trading/ нет; Фаза 3 практически недостижима по критерию аудита —
+  # см. docs/RESEARCH_SCAM_TOKEN_SCALP_AUDIT.md). Полностью изолирован от
+  # других ботов (strategy-guard.mdc). ТЗ: docs/TZ_YORSH_SCANNER.md.
+  yorsh-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.yorsh-bot
+    image: yorsh-bot:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      YORSH_DATA_DIR: /data
+      YORSH_LOG_LEVEL: ${YORSH_LOG_LEVEL:-INFO}
+      YORSH_EXCHANGES: ${YORSH_EXCHANGES:-mexc,bitget}
+      YORSH_MAX_SYMBOLS_PER_EXCHANGE: ${YORSH_MAX_SYMBOLS_PER_EXCHANGE:-50}
+      YORSH_UNIVERSE_REFRESH_HOURS: ${YORSH_UNIVERSE_REFRESH_HOURS:-6}
+      YORSH_MIN_24H_VOLUME_USD: ${YORSH_MIN_24H_VOLUME_USD:-10000}
+      YORSH_MAX_24H_VOLUME_USD: ${YORSH_MAX_24H_VOLUME_USD:-2000000}
+      YORSH_RAW_RETENTION_DAYS: ${YORSH_RAW_RETENTION_DAYS:-30}
+      YORSH_RAW_MAX_GB: ${YORSH_RAW_MAX_GB:-20}
+      # Пороги — стартовые точки, калибруются на собранной ленте (no-data-fitting).
+      YORSH_DENSITY_KRATNOSTI: ${YORSH_DENSITY_KRATNOSTI:-5.0}
+      YORSH_DENSITY_MIN_PERSISTENCE_SEC: ${YORSH_DENSITY_MIN_PERSISTENCE_SEC:-60}
+      YORSH_SPURT_MIN_AMPLITUDE_PCT: ${YORSH_SPURT_MIN_AMPLITUDE_PCT:-2.0}
+      # Временная (M1/M2, удалится в M3): список символов до готовности universe.
+      YORSH_SYMBOLS_STATIC: ${YORSH_SYMBOLS_STATIC:-}
+    volumes:
+      - yorsh_data:/data
+
 volumes:
   scalp_bot_data:
   flowzone_data:
   momentum_bot_data:
   tradecard_bybit_data:
   tradecard_momentum_data:
+  yorsh_data:
