@@ -226,3 +226,20 @@ scanner (passed+candidate записан + все 5 spurts в БД с density_id
 **Файлы:** `src/yorsh_bot/analysis/prints.py`,
 `src/yorsh_bot/analysis/yorsh_scanner.py`, `src/yorsh_bot/report/daily.py`,
 `src/yorsh_bot/state/db.py`, `tests/test_yorsh_scanner.py`
+
+### Deploy на VPS + фикс cap max_symbols_per_exchange
+`0e73c53`
+
+Первый подъём `yorsh-bot` на VPS (селективный rebuild `--no-deps --build`,
+VPS на ветке `feat/ai-trader-v0.30-institutional`). Сразу вскрылся инфра-баг:
+dynamic-режим ушёл в **119 батчей = ~119 WS-соединений** (filter_universe не
+применял `YORSH_MAX_SYMBOLS_PER_EXCHANGE` → 1800+ USDT-пар MEXC/Bitget в
+оборотном диапазоне 10k–2M). Риск server-side ban (аналог инцидента
+2026-05-07 с cTrader). Контейнер остановлен, фикс в `filter_universe`:
+protected (active-кандидаты, вне капа) + top-by-volume non-protected до
+`max_symbols`. С капом 50: MEXC 4 батча ×15 + Bitget 2 батча ×25 = 6 WS-
+соединений, 100 символов на сбор. После фикса — `batches=6`, подписки
+MEXC (10+30+30+30 channels) + Bitget (50+50 channels), сбор идёт.
+Тесты: cap top-by-volume + protected-outside-cap, no-cap ветка.
+
+**Файлы:** `src/yorsh_bot/data/universe.py`, `tests/test_yorsh_universe.py`
