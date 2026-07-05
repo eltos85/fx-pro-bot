@@ -68,32 +68,46 @@ def filter_universe(rows: Sequence[TickerRow], *,
                     quote: str = "USDT",
                     min_vol: float, max_vol: float,
                     blacklist: frozenset[str] = MAJORITY_BLACKLIST,
-                    protected: set[str] | None = None) -> list[str]:
+                    protected: set[str] | None = None,
+                    max_symbols: int | None = None) -> list[str]:
     """Чистая фильтрация: quote, оборот в диапазоне, не-мейджор, + protected.
 
     Protected-символы (active-кандидаты) добавляются БЕЗ фильтра по обороту/
     мейджору (раз они уже кандидаты — не отписываемся), но только если они
     есть в ``rows`` (символ реально торгуется на бирже).
+
+    ``max_symbols`` — кап числа подписок на биржу (``YORSH_MAX_SYMBOLS_PER_
+    EXCHANGE``): protected добавляются всегда, остальные добираются top-by-
+    volume до лимита. ``None`` = без капа (для тестов).
     """
     protected = protected or set()
-    out: list[str] = []
+    kept_protected: list[str] = []
     seen: set[str] = set()
+    candidates: list[TickerRow] = []   # non-protected, прошедшие фильтр
     for r in rows:
         if r.quote != quote:
             continue
         if r.symbol in seen:
             continue
         is_protected = r.symbol in protected
-        if not is_protected:
-            if _base(r.symbol) in blacklist:
-                continue
-            if not (min_vol <= r.volume_usd_24h <= max_vol):
-                continue
-        out.append(r.symbol)
+        if is_protected:
+            kept_protected.append(r.symbol)
+            seen.add(r.symbol)
+            continue
+        if _base(r.symbol) in blacklist:
+            continue
+        if not (min_vol <= r.volume_usd_24h <= max_vol):
+            continue
+        candidates.append(r)
         seen.add(r.symbol)
-    # protected, которых не оказалось в rows (delisted/пауза) — не добавляем
-    # (нельзя подписаться на несуществующий символ).
-    return out
+    # cap: top-by-volume non-protected + protected (protected вне капа)
+    if max_symbols is not None:
+        remaining = max(0, max_symbols - len(kept_protected))
+        candidates.sort(key=lambda r: r.volume_usd_24h, reverse=True)
+        capped = [r.symbol for r in candidates[:remaining]]
+    else:
+        capped = [r.symbol for r in candidates]
+    return kept_protected + capped
 
 
 def diff_subscriptions(current: set[str], target: set[str]) -> tuple[list[str], list[str]]:
@@ -211,7 +225,8 @@ class UniverseManager:
             rows, quote="USDT",
             min_vol=self.settings.min_24h_volume_usd,
             max_vol=self.settings.max_24h_volume_usd,
-            protected=protected)
+            protected=protected,
+            max_symbols=self.settings.max_symbols_per_exchange)
         target_set = set(target_list)
         self.target[exchange] = target_list
         to_add, to_remove = diff_subscriptions(self.current[exchange], target_set)

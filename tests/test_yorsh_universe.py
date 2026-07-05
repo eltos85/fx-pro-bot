@@ -211,6 +211,31 @@ def test_manager_refresh_error_logged_not_raised():
         asyncio.run(mgr.refresh("mexc"))
 
 
+def test_filter_max_symbols_caps_top_by_volume():
+    """max_symbols ограничивает non-protected top-by-volume; protected вне капа."""
+    rows = [
+        _row("LOWUSDT", 20_000),
+        _row("MIDUSDT", 500_000),
+        _row("HIUSDT", 1_500_000),
+        _row("PROTUSDT", 100),   # protected, ниже min
+    ]
+    out = filter_universe(rows, min_vol=10_000, max_vol=2_000_000,
+                         protected={"PROTUSDT"}, max_symbols=2)
+    # protected всегда; remaining = 2-1 = 1 слот top-by-volume: HIUSDT (MIDUSDT вытеснен)
+    assert "PROTUSDT" in out
+    assert "HIUSDT" in out
+    assert "MIDUSDT" not in out
+    assert "LOWUSDT" not in out
+    assert len(out) == 2   # 1 protected + 1 capped
+
+
+def test_filter_max_symbols_none_no_cap():
+    rows = [_row(f"S{i:02d}USDT", 100_000 - i) for i in range(10)]
+    out = filter_universe(rows, min_vol=10_000, max_vol=2_000_000,
+                         max_symbols=None)
+    assert len(out) == 10
+
+
 def test_majority_blacklist_contents():
     """Каноничный набор мейджоров — в blacklist."""
     for b in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE"):
