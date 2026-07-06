@@ -46,9 +46,10 @@ def day_levels(kline: list[list], now: float, *,
     ещё без закрытых баров (первые минуты суток) — day_high/day_low = None.
     Нет полного покрытия предыдущего дня → None (уровни ненадёжны).
 
-    regime_ratio (v0.18.27, sweep_fade_trend) — rolling-трендовость ПОСЛЕДНИХ
+    regime_ratio (v0.18.27; страта sweep_fade_trend удалена v0.18.33, метрика
+    осталась в regime_features-телеметрии) — rolling-трендовость ПОСЛЕДНИХ
     ``regime_lookback`` закрытых баров: |close−open|/avgATR. Не look-ahead:
-    смотрим в прошлое. >1.5 — активный тренд (не фейдим), <0.8 — range.
+    смотрим в прошлое. >1.5 — активный тренд, <0.8 — range.
     Fix 2026-07-02: окно КАТИТСЯ через границу UTC-суток (все закрытые бары
     истории, не только сегодняшние) — раньше после 00:00 UTC гейт слеп
     (баров <2 → None → fail-closed до 00:30), а тренд из вчера был невидим;
@@ -114,8 +115,9 @@ class KeyLevels:
     """Кэш ключевых уровней по символу (refresh из get_kline 15m).
 
     v0.18.27: также хранит rolling-regime_ratio (трендовость последних N
-    закрытых 15m-баров) — источник для sweep_fade_trend gate. Считается из
-    тех же kline, что PDH/PDL (без доп. REST-запроса)."""
+    закрытых 15m-баров) — источник для regime_features-телеметрии (страта
+    sweep_fade_trend удалена v0.18.33). Считается из тех же kline, что
+    PDH/PDL (без доп. REST-запроса)."""
 
     def __init__(self, interval: str = "15", regime_lookback: int = 8) -> None:
         self.interval = interval

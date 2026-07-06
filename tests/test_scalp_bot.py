@@ -1366,34 +1366,32 @@ def test_resolve_conflicting_sides_skips():
 
 def test_resolve_round_robin_among_tied_strategies():
     """v0.18.28: при равенстве score победитель вращается по кластерам, а не
-    всегда первая по порядку страта. canon/run/trend дают идентичные сигналы —
+    всегда первая по порядку страта. Canon-наследники дают идентичные сигналы —
     без вращения canon забирал бы 100%, варианты 0. Каждому новому кластеру
-    (отличный fingerprint = другой уровень входа) — следующая страта."""
+    (отличный fingerprint = другой уровень входа) — следующая страта.
+    (v0.18.33: sweep_fade_trend удалена; ротация проверяется на трёх любых
+    tied-стратегиях — механизм имени не знает.)"""
     resolve_reset_state()
-    canon = _sig("short", 6, "sweep_fade_canon", symbol="BTCUSDT")
-    run = _sig("short", 6, "sweep_fade_run", symbol="BTCUSDT")
-    trend = _sig("short", 6, "sweep_fade_trend", symbol="BTCUSDT")
+    strats = ("sweep_fade_canon", "sweep_fade_run", "sweep_fade")
     # кластер 1 (entry 100.0): первый раз — canon (idx 0)
-    c1 = [_sig("short", 6, "sweep_fade_canon", symbol="BTCUSDT"),
-          _sig("short", 6, "sweep_fade_run", symbol="BTCUSDT"),
-          _sig("short", 6, "sweep_fade_trend", symbol="BTCUSDT")]
+    c1 = [_sig("short", 6, s, symbol="BTCUSDT") for s in strats]
     assert resolve(list(c1)).strategy == "sweep_fade_canon"
     # тот же кластер (тот же fp) — стабильный победитель, canon снова
     assert resolve(list(c1)).strategy == "sweep_fade_canon"
     # кластер 2 (другой уровень entry=200.0) — следующий по ротации: run (idx 1)
     c2 = [Signal(symbol="BTCUSDT", side="short", entry_ref=200.0, sl_level=99.0,
                  tp_level=202.0, score=6, reasons=["x"], strategy=s)
-          for s in ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")]
+          for s in strats]
     assert resolve(c2).strategy == "sweep_fade_run"
-    # кластер 3 (entry=300.0) — trend (idx 2)
+    # кластер 3 (entry=300.0) — третья страта (idx 2)
     c3 = [Signal(symbol="BTCUSDT", side="short", entry_ref=300.0, sl_level=99.0,
                  tp_level=302.0, score=6, reasons=["x"], strategy=s)
-          for s in ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")]
-    assert resolve(c3).strategy == "sweep_fade_trend"
+          for s in strats]
+    assert resolve(c3).strategy == "sweep_fade"
     # кластер 4 — снова canon (idx 3 % 3 = 0)
     c4 = [Signal(symbol="BTCUSDT", side="short", entry_ref=400.0, sl_level=99.0,
                  tp_level=402.0, score=6, reasons=["x"], strategy=s)
-          for s in ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")]
+          for s in strats]
     assert resolve(c4).strategy == "sweep_fade_canon"
 
 
@@ -1418,20 +1416,20 @@ def test_resolve_round_robin_independent_per_symbol():
 
 def test_resolve_round_robin_survives_group_shrink():
     """Fix 2026-07-02: tie-группа может СЖАТЬСЯ между тиками при том же
-    fingerprint (страта выпала по мигнувшему гейту, напр. trend по
-    regime_ratio) — сохранённый idx выходил за границы группы → IndexError
-    валил main-loop. Теперь кламп по модулю: победитель валиден, ротация
-    сохранена."""
+    fingerprint (страта выпала по мигнувшему гейту) — сохранённый idx выходил
+    за границы группы → IndexError валил main-loop. Теперь кламп по модулю:
+    победитель валиден, ротация сохранена. (v0.18.33: trend удалена, механизм
+    проверяется на любых трёх tied-стратегиях.)"""
     resolve_reset_state()
     mk = lambda entry, strat: Signal(symbol="BTCUSDT", side="short",
             entry_ref=entry, sl_level=99.0, tp_level=entry + 2.0, score=6,
             reasons=["x"], strategy=strat)
-    strats = ("sweep_fade_canon", "sweep_fade_run", "sweep_fade_trend")
-    # три кластера подряд → для entry=300.0 сохранён idx=2 (trend)
+    strats = ("sweep_fade_canon", "sweep_fade_run", "sweep_fade")
+    # три кластера подряд → для entry=300.0 сохранён idx=2 (третья страта)
     resolve([mk(100.0, s) for s in strats])
     resolve([mk(200.0, s) for s in strats])
-    assert resolve([mk(300.0, s) for s in strats]).strategy == "sweep_fade_trend"
-    # тот же кластер (fp совпадает), но trend выпал → группа из 2:
+    assert resolve([mk(300.0, s) for s in strats]).strategy == "sweep_fade"
+    # тот же кластер (fp совпадает), но третья страта выпала → группа из 2:
     # раньше group[2] бросал IndexError; теперь 2 % 2 = 0 → canon
     win = resolve([mk(300.0, "sweep_fade_canon"), mk(300.0, "sweep_fade_run")])
     assert win is not None and win.strategy == "sweep_fade_canon"
@@ -3887,137 +3885,21 @@ def test_run_isolated_from_base_and_canon():
     assert canon.should_exit(tr, _snap_at(102.0, momentum_for="short"), now=10.0) is None
 
 
-# ─── v0.18.27: sweep_fade_trend (canon + rolling-trend-day-gate) ──────────
+# ─── rolling-regime (v0.18.27; страта sweep_fade_trend удалена v0.18.33,
+#     метрика regime_ratio живёт в regime_features-телеметрии) ──────────────
 
-def _trend_cfg(**over):
-    """cfg для SweepFadeTrendStrategy: canon + trend-gate параметры."""
-    base = _canon_cfg(
-        sweep_fade_trend_symbol_list=["ETHUSDT"],
-        sweep_fade_trend_max=1.5,
-        sweep_fade_trend_lookback_bars=8,
-    )
-    for k, v in over.items():
-        setattr(base, k, v)
-    return base
-
-
-class _FakeKeyLevelsRegime:
-    """KeyLevels-мок с regime_ratio (для trend-gate)."""
-
-    def __init__(self, ratio=None, level_name="pdl"):
-        self._ratio = ratio  # dict symbol -> ratio, или scalar, или None
-        self.name = level_name
-
-    def regime_ratio(self, symbol):
-        if self._ratio is None:
-            return None
-        if isinstance(self._ratio, dict):
-            return self._ratio.get(symbol)
-        return self._ratio
-
-    def swept_key_level(self, symbol, side, swept):
-        return self.name
-
-
-def test_trend_in_registry_and_defaults():
-    """sweep_fade_trend зарегистрирован, в дефолтном strategy_list, наследует
-    canon-вход."""
-    from scalp_bot.analysis.strategies import (build_strategies, SweepFadeTrendStrategy,
-                                               SweepFadeCanonStrategy)
-    cfg = _trend_cfg()
-    cfg.strategy_list = ["sweep_fade_trend"]
+def test_trend_strategy_removed():
+    """v0.18.33 (2026-07-06, решение пользователя): sweep_fade_trend удалена —
+    форвард n=35 WR 37% net −$121.62, гипотеза range-day-fade опровергнута
+    (нужен WR 46% при R:R 1.2). Реестр и дефолтный strategy_list её не знают;
+    неизвестное имя в конфиге — мягкий скип (не крэш)."""
+    from scalp_bot.analysis.strategies import build_strategies
+    from scalp_bot.config.settings import ScalpSettings
+    assert "sweep_fade_trend" not in ScalpSettings().strategy_list
+    cfg = _canon_cfg()
+    cfg.strategy_list = ["sweep_fade_trend", "sweep_fade_canon"]
     out = build_strategies(cfg, ["ETHUSDT"])
-    assert [s.name for s in out] == ["sweep_fade_trend"]
-    t = out[0]
-    assert isinstance(t, SweepFadeTrendStrategy)
-    assert isinstance(t, SweepFadeCanonStrategy)  # наследует canon-вход
-    assert t.htf_filtered is False and t.regime_gated is True  # как canon
-    assert t.symbol_scope == {"ETHUSDT"}
-    from scalp_bot.config.settings import ScalpSettings
-    assert "sweep_fade_trend" in ScalpSettings().strategy_list
-    s = ScalpSettings()
-    assert s.sl_cooldown_for("sweep_fade_trend") == s.sweep_fade_sl_cooldown_sec
-
-
-def test_trend_symbol_scope_defaults_to_canon():
-    """Пустой SCALP_SWEEP_FADE_TREND_SYMBOLS → canon-список (чистый A/B)."""
-    from scalp_bot.config.settings import ScalpSettings
-    s = ScalpSettings()
-    assert s.sweep_fade_trend_symbol_list == s.sweep_fade_canon_symbol_list
-
-
-def test_trend_gate_blocks_signal_in_active_trend():
-    """regime_ratio > trend_max (активный тренд) → сигнал НЕ берётся, даже при
-    canon-валидном взводе+выстреле. Главная гипотеза: не фейдить в тренде."""
-    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
-    st = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
-    st.key_levels = _FakeKeyLevelsRegime(ratio=2.5)  # тренд
-    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
-    assert st.armed("ETHUSDT") is False  # gate блокнул взвод
-    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
-            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
-    assert st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0) is None
-
-
-def test_trend_gate_allows_signal_in_range():
-    """regime_ratio ≤ trend_max (range/mix) → canon-вход работает, signal
-    берётся с strategy='sweep_fade_trend'. Доказательство: gate не ломает
-    canon-вход в не-тренде."""
-    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
-    st = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
-    st.key_levels = _FakeKeyLevelsRegime(ratio=0.6)  # range
-    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
-    assert st.armed("ETHUSDT") is True  # canon-взвод прошёл
-    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
-            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
-    sig = st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
-    assert sig is not None and sig.side == "long"
-    assert sig.strategy == "sweep_fade_trend"
-    assert "key_pdl" in sig.reasons and sig.entry_order_type == "market"
-
-
-def test_trend_gate_fail_closed_without_regime_data():
-    """Нет key_levels / regime_ratio=None → fail-closed: не торгуем (как
-    canon level_gate). Не фейдим вслепую без regime-данных."""
-    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
-    st = SweepFadeTrendStrategy(_trend_cfg(), ["ETHUSDT"])
-    assert st.key_levels is None  # не инжектнут
-    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
-    assert st.armed("ETHUSDT") is False
-    # с key_levels, но regime None (данные не прогреты)
-    st2 = SweepFadeTrendStrategy(_trend_cfg(), ["ETHUSDT"])
-    st2.key_levels = _FakeKeyLevelsRegime(ratio=None)
-    st2.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
-    assert st2.armed("ETHUSDT") is False
-
-
-def test_trend_gate_threshold_boundary():
-    """regime_ratio == trend_max → ещё торгуем (≤); чуть выше → блок. Граница
-    включается в range (canon-вход берётся)."""
-    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
-    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
-            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
-    # точно на пороге 1.5 → range → берём
-    st = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
-    st.key_levels = _FakeKeyLevelsRegime(ratio=1.5)
-    st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
-    assert st.armed("ETHUSDT") is True
-    sig = st.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
-    assert sig is not None
-    # 1.5001 → тренд → блок
-    st2 = SweepFadeTrendStrategy(_trend_cfg(sweep_fade_trend_max=1.5), ["ETHUSDT"])
-    st2.key_levels = _FakeKeyLevelsRegime(ratio=1.5001)
-    st2.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
-    assert st2.armed("ETHUSDT") is False
-
-
-def test_trend_exit_inherited_from_canon():
-    """should_exit — наследуется от canon (flow_exit@1.5R для winners). Exit
-    НЕ переопределён (MFE canon: flow_exit не виноват, winners мелкие)."""
-    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy, SweepFadeCanonStrategy
-    # trend не определяет свой should_exit → берёт canon (через base)
-    assert "should_exit" not in SweepFadeTrendStrategy.__dict__
-    assert "should_exit" not in SweepFadeCanonStrategy.__dict__  # canon тоже
+    assert [s.name for s in out] == ["sweep_fade_canon"]  # trend скипнут
 
 
 def test_rolling_regime_no_lookahead():
@@ -4039,39 +3921,6 @@ def test_rolling_regime_no_lookahead():
     win = closed8[-3:]
     atr2 = sum(abs(b[2] - b[3]) for b in win) / 3
     assert abs(r2 - abs(win[-1][4] - win[0][1]) / atr2) < 1e-9
-
-
-def test_trend_gate_log_throttle_per_symbol():
-    """v0.18.27 hotfix: gate-лог троттлится ПО СИМВОЛУ, а не одним флагом на
-    стратегию. Был спам: main loop зовёт update поочерёдно для 5 символов;
-    один флаг сбрасывался когда хотя бы один символ проходил gate, и
-    заблокированный символ логировался каждый цикл (в проде 1290/час). Per-
-    symbol dict: каждый символ логируется 1 раз пока заблокирован."""
-    from scalp_bot.analysis.strategies import SweepFadeTrendStrategy
-    # scope берётся из sweep_fade_trend_symbol_list (есть в cfg) — кладём оба
-    # символа, иначе детектор создастся только для ETHUSDT и gate по BTCUSDT
-    # не отработает (update вернётся по det is None до gate).
-    st = SweepFadeTrendStrategy(
-        _trend_cfg(sweep_fade_trend_max=1.5,
-                   sweep_fade_trend_symbol_list=["ETHUSDT", "BTCUSDT"]),
-        ["ETHUSDT", "BTCUSDT"])
-    st.key_levels = _FakeKeyLevelsRegime(ratio={"ETHUSDT": 0.6, "BTCUSDT": 2.5})
-    logs = []
-
-    def _cap(msg, *a):
-        logs.append(msg % a if a else msg)
-    import scalp_bot.analysis.strategies as strat_mod
-    orig = strat_mod.play.info
-    strat_mod.play.info = _cap
-    try:
-        for _ in range(3):
-            st.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5), now=100.0)
-            st.update(_snap(_arm_samples(), symbol="BTCUSDT", last_price=96000.0), now=100.0)
-    finally:
-        strat_mod.play.info = orig
-    btc_logs = [l for l in logs if "BTCUSDT" in l and "trend-gate" in l]
-    assert len(btc_logs) == 1, f"ожидал 1 лог BTCUSDT, got {len(btc_logs)}: {btc_logs}"
-    assert not any("ETHUSDT" in l and "trend-gate" in l for l in logs)
 
 
 # ─── regime-фичи на входе (meta-labeling, Lopez de Prado AFML Ch3) ──────────

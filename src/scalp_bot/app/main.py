@@ -102,8 +102,6 @@ def run() -> None:
         canon_syms += cfg.sweep_fade_canon_symbol_list
     if "sweep_fade_run" in cfg.strategy_list:
         canon_syms += cfg.sweep_fade_run_symbol_list
-    if "sweep_fade_trend" in cfg.strategy_list:
-        canon_syms += cfg.sweep_fade_trend_symbol_list
     canon_syms = list(dict.fromkeys(canon_syms))  # dedup, preserve order
     universe_syms = set(symbols)
     if canon_syms:
@@ -160,9 +158,9 @@ def run() -> None:
     levels_strats = [s for s in strategies if hasattr(s, "key_levels")]
     last_levels = 0.0
     if levels_strats:
-        # v0.18.27: KeyLevels считает rolling-regime для sweep_fade_trend.
-        # lookback берём из env trend-страты (если она есть), иначе дефолт 8.
-        lookback = getattr(cfg, "sweep_fade_trend_lookback_bars", 8)
+        # v0.18.27→v0.18.33: KeyLevels считает rolling-regime_ratio для
+        # regime_features-телеметрии (страта sweep_fade_trend удалена).
+        lookback = getattr(cfg, "regime_ratio_lookback_bars", 8)
         key_levels = KeyLevels(cfg.htf_interval, regime_lookback=int(lookback))
         for s in levels_strats:
             s.key_levels = key_levels

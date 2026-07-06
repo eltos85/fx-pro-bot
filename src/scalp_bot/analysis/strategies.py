@@ -492,117 +492,11 @@ class SweepFadeRunStrategy(SweepFadeCanonStrategy):
         return None
 
 
-class SweepFadeTrendStrategy(SweepFadeCanonStrategy):
-    """Стратегия №6 (v0.18.27, 2026-06-26): sweep_fade_trend — изолированная
-    гипотеза «не фейдить в активном тренде дня». Параллельный форвард-тест
-    A/B против sweep_fade_canon, одобрено пользователем 2026-06-26.
-
-    ─── Research basis ───
-    Глубокий разбор sweep_fade_canon (артефакт scripts/scalp_canon_study.py,
-    n=105, cutoff 2026-06-14, verified 100%) показал ДРУГУЮ болезнь чем base:
-    - ** Winners у canon МЕЛКИЕ**: MFE winners медиана **1.64R** (vs 3.11R у
-      base), R:R ≈ 1:1 (avgW $13.34 ≈ avgL $13.48). flow_exit@1.5R фиксит
-      почти на пике доступного хода → exit НЕ виноват (не как у base).
-    - ** Зато ЧИСТАЯ тренд-зависимость**: fade ПО тренду дня n=22 WR 55%
-      **+$1.40/сделку** (прибыльно!), fade ПРОТИВ тренда n=83 WR 41%
-      **−$2.56/сделку** (весь минус). Но у canon направленный EMA-гейт СНЯТ
-      (v0.18.22: свип PDH = цена выше вчерашнего хая = EMA всегда long →
-      шорт-фейд блокировался бы в 100%; 252/252 сигналов резались) — поэтому
-      бот фейдит против тренда в 83/105 случаях.
-    - MAE медиана 0.57R — стоп адекватен.
-
-    ─── Гипотеза ───
-    Направленный гейт вернуть нельзя (структурный конфликт с дневными
-    уровнями). Но можно гейтить **режим дня**, а не направление: в активном
-    TREND-дне свип дневного уровня = продолжение тренда (не разворот), фейдить
-    нельзя; в range/mix-дне свип = реальный liquidity grab, фейдить можно.
-    Детектор тренда — rolling: |close−open| за последние N 15m-баров / avgATR
-    (НЕ look-ahead — окно строго в прошлом). Порог 1.5 (консистентно с
-    day_regime в анализе). Источник: Wilder 1978 ADX (тренд vs range);
-    Connors/Raschke «MR работает в диапазоне, momentum — в тренде».
-
-    ─── Что наследует от canon ───
-    Значимые уровни PDH/PDL + full reclaim 1.0 + мейджоры + taker-вход +
-    canon exit-контракт (flow_exit@1.5R, TP 3.5R) — ИЗОЛИРУЕМ ровно одну
-    переменную (regime-gate входа), exit не трогаем (он не виноват по MFE).
-
-    ─── Что меняет (НОВОЕ — gate входа) ───
-    Перед детектором: если rolling regime_ratio символа > trend_max →
-    пропускаем сигнал (не фейдим в активном тренде). Иначе — canon-вход.
-    Fail-closed: нет данных regime (key_levels не прогрет) → пропускаем
-    (не торгуем вслепую, как level_gate). symbol_scope унаследован от canon,
-    ИЗОЛИРОВАННОЕ переопределение через sweep_fade_trend_symbols (дефолт =
-    canon-список → чистый A/B «canon vs canon+trend-gate»).
-
-    ─── Изоляция ───
-    Новый класс с name="sweep_fade_trend", своим SCALP_SWEEP_FADE_TREND_* env.
-    Атрибуция в БД по колонке strategy. Не трогает base/canon/run/density.
-    Копит n≥100 параллельно, решение через 2 недели + p-value (sample-size).
-    """
-
-    name = "sweep_fade_trend"
-    # Вход — идентичен canon (наследуем htf_filtered=False, di_long_gated=False,
-    # regime_gated=True — НО regime_gated тут классовый ADX-гейт, а наш
-    # trend-gate — отдельный, по rolling-regime дня, см. update).
-
-    def __init__(self, cfg, symbols: list[str]) -> None:
-        # trend_max / lookback читаются из cfg (env). super (canon) оверлеит
-        # reclaim_frac; trend-страте TP/reclaim не меняем — exit canon.
-        super().__init__(cfg, [])
-        # canon __init__ поставил symbol_scope из canon-списка. Переопределяем
-        # нашим (изолированный env, дефолт = canon).
-        self.symbol_scope = set(getattr(cfg, "sweep_fade_trend_symbol_list",
-                                        cfg.sweep_fade_canon_symbol_list))
-        # порог трендовости — из env (для A/B-тюнинга без деплоя). lookback
-        # применяется НЕ здесь: main прокидывает его в KeyLevels, который и
-        # считает regime_ratio (fix 2026-07-02 — раньше атрибут висел мёртвым,
-        # а day_levels использовал хардкод-дефолт).
-        self._trend_max = float(getattr(cfg, "sweep_fade_trend_max", 1.5))
-        # детекторы по нашему scope (canon создал с [] → пусто)
-        self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
-        # троттлинг gate-лога ПО СИМВОЛУ (v0.18.27 hotfix): один флаг на стратегию
-        # давал спам — main loop зовёт update поочерёдно для 5 символов, и флаг
-        # сбрасывался когда хотя бы один символ проходил gate → заблокированный
-        # символ логировался каждый цикл (~1/сек). Per-symbol: логируем блокировку
-        # каждого символа не чаще раза пока он заблокирован.
-        self._gate_logged: dict[str, bool] = {}
-
-    def _regime_gate_ok(self, symbol: str) -> bool:
-        """True = торгуем (range/mix). False = в активном тренде или нет
-        данных (fail-closed — не торгуем вслепую)."""
-        kl = self.key_levels
-        if kl is None:
-            return False
-        ratio = kl.regime_ratio(symbol) if hasattr(kl, "regime_ratio") else None
-        if ratio is None:
-            return False  # данные не прогреты — не торгуем (fail-closed)
-        return ratio <= self._trend_max
-
-    def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
-        """Canon-вход, но с rolling-trend-gate ПЕРЕД детектором: в активном
-        тренде дня (regime_ratio > trend_max) свип-фейд не берём."""
-        det = self._det.get(snap.symbol)
-        if det is None:
-            return None
-        if not self._regime_gate_ok(snap.symbol):
-            # в тренде / нет данных — не фейдим. Детектор не сбрасываем:
-            # вдруг regime разрядится в следующие тики — переармовится сам
-            # (detect_sweep на свежем окне). Нарратив per-symbol, не чаще
-            # раза пока символ заблокирован (анти-спам лога).
-            if not self._gate_logged.get(snap.symbol):
-                play.info("🚫 [%s] trend-gate: rolling regime > %.1f — свип-фейд "
-                          "в активном тренде пропускаю", snap.symbol, self._trend_max)
-                self._gate_logged[snap.symbol] = True
-            return None
-        self._gate_logged.pop(snap.symbol, None)  # символ разблокирован — лог возобновится
-        sig = det.update(snap, now)
-        if sig is not None:
-            sig.strategy = self.name
-        return sig
-
-    # should_exit — наследуется от canon (canon → base SweepFadeStrategy):
-    # flow_exit@1.5R + биржевой TP/SL. Exit не трогаем (MFE canon показал,
-    # flow_exit не виноват — winners и так мелкие, фикс на пике хода).
+# sweep_fade_trend (v0.18.27) УДАЛЕНА 2026-07-06 (v0.18.33, решение
+# пользователя): форвард-тест n=35 WR 37% net −$121.62 — гипотеза «range-day
+# fades прибыльны» опровергнута (нужен WR 46% при R:R 1.2, canon-exit).
+# Полное обоснование с числами — BUILDLOG_SCALP 2026-07-06; история сделок в
+# БД (strategy='sweep_fade_trend') сохранена; код — git v0.18.27..v0.18.32.
 
 
 # ─── density_bounce helpers (чистые, тестируемые без WS) ───────────────────
@@ -1330,7 +1224,6 @@ def build_strategies(cfg, symbols: list[str]) -> list[Strategy]:
         DensityBreakStrategy.name: DensityBreakStrategy,
         SweepFadeCanonStrategy.name: SweepFadeCanonStrategy,
         SweepFadeRunStrategy.name: SweepFadeRunStrategy,
-        SweepFadeTrendStrategy.name: SweepFadeTrendStrategy,
     }
     out: list[Strategy] = []
     for name in enabled:
@@ -1353,8 +1246,8 @@ _RR_STATE: dict[str, list] = {}
 
 def _rr_fingerprint(sig: Signal) -> tuple:
     """Идентичность сигнального кластера: символ + сторона + причины + уровень
-    входа. canon/run/trend наследуют вход → одинаковые fp на одном свипе;
-    новый свип (другой уровень) → другой fp → новый кластер → ход следующей."""
+    входа. canon-наследники (run) генерят вход canon → одинаковые fp на одном
+    свипе; новый свип (другой уровень) → другой fp → кластер → ход следующей."""
     return (sig.symbol, sig.side, tuple(sorted(sig.reasons)),
             round(sig.entry_ref, 6))
 
@@ -1372,8 +1265,8 @@ def resolve(signals: list[Signal]) -> Signal | None:
     - все сигналы в ОДНУ сторону → берём с максимальным score; при РАВЕНСТВЕ
       score — round-robin по кластерам (а не «первый по порядку», как раньше).
 
-    v0.18.28 (запрос пользователя 2026-06-27): A/B-варианты sweep_fade_run /
-    sweep_fade_trend наследуют canon-вход и генерят идентичные сигналы (тот же
+    v0.18.28 (запрос пользователя 2026-06-27): A/B-варианты canon-входа (на
+    тот момент run/trend; trend удалена v0.18.33) генерят идентичные сигналы (тот же
     символ/сторона/score). Прежний tie-break max(score) при ничьей возвращал
     ПЕРВУЮ по порядку страту — всегда canon — и варианты копили 0 сделок (A/B
     сломан). Теперь среди max-score группы победитель вращается по кластерам:

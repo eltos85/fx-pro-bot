@@ -226,11 +226,14 @@ services:
       # форвард-тест, одобрено пользователем 2026-06-11) +
       # sweep_fade_run (v0.18.27: изолированная гипотеза «дай winners бежать» —
       # canon-вход + breakeven-lock@1.0R + TP 3.0R + scratch только лузеров;
-      # A/B против canon, одобрено пользователем 2026-06-26) +
-      # sweep_fade_trend (v0.18.27: canon + rolling-trend-day-gate входа — не
-      # фейдить в активном тренде дня; A/B против canon, одобрено 2026-06-26). Реальное
-      # значение — из .env (env_file); тут дефолт для свежего деплоя.
-      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon,sweep_fade_run,sweep_fade_trend}
+      # A/B против canon, одобрено пользователем 2026-06-26).
+      # sweep_fade_trend УДАЛЕНА v0.18.33 (2026-07-06, решение пользователя):
+      # форвард n=35 WR 37% net −$121.62, гипотеза range-day-fade опровергнута;
+      # оставлена run (перспективнее: R:R 2.4:1, breakeven-WR 30% vs 46%) —
+      # единственной canon-наследницей, стата копится ×2 быстрее (round-robin
+      # очередь сигналов больше не делится). Числа — BUILDLOG_SCALP 2026-07-06.
+      # Реальное значение — из .env (env_file); тут дефолт для свежего деплоя.
+      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon,sweep_fade_run}
       # v0.18.20: вселенная канон-страты — ликвидные мейджоры (глубокие книги,
       # рейнджи: канон fade; live ETH WR 55% vs ZEC 28%). Торгуются ТОЛЬКО
       # sweep_fade_canon (symbol_scope), авто-вселенная других страт не задета.
@@ -256,17 +259,9 @@ services:
       # 2026-07-02: scratch OFF — live-форвард: 23 скретча = −$257 (−1.13R/шт
       # при пороге −0.7R), хуже биржевого SL. См. scripts/scalp_loss_anatomy.py.
       SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP: ${SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP:-false}
-      # ─── v0.18.27 (2026-06-26): sweep_fade_trend — canon + trend-day-gate ──
-      # Изолированная гипотеза «не фейдить в активном тренде дня». Canon-вход +
-      # canon-exit (flow_exit@1.5R — у canon winners мелкие, exit не виноват),
-      # НОВОЕ — gate входа по rolling-режиму дня: |close−open| последних N 15m
-      # баров / avgATR > trend_max → пропуск. Артефакт scalp_canon_study n=105:
-      # fade по тренду +$1.40/сделку WR 55%, против тренда −$2.56 (весь минус).
-      # Направленный EMA-гейт снять нельзя (canon v0.18.22) → гейтим режим.
-      # Вселенная trend-страты: пусто → canon-список (чистый A/B).
-      SCALP_SWEEP_FADE_TREND_SYMBOLS: ${SCALP_SWEEP_FADE_TREND_SYMBOLS:-}
-      SCALP_SWEEP_FADE_TREND_MAX: ${SCALP_SWEEP_FADE_TREND_MAX:-1.5}
-      SCALP_SWEEP_FADE_TREND_LOOKBACK_BARS: ${SCALP_SWEEP_FADE_TREND_LOOKBACK_BARS:-8}
+      # rolling-regime_ratio lookback (бывш. sweep_fade_trend v0.18.27; страта
+      # удалена v0.18.33, но regime_ratio остаётся в regime_features-телеметрии).
+      SCALP_REGIME_RATIO_LOOKBACK_BARS: ${SCALP_REGIME_RATIO_LOOKBACK_BARS:-8}
       # Авто-селектор: бот сам выбирает монеты под стратегию из get_tickers
       # (композит range%/turnover/spread), берёт ВСЕ прошедшие фильтр и
       # пересматривает раз в 5 мин (ротация — no-op если состав не сменился).
