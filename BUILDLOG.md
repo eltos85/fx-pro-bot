@@ -8,7 +8,7 @@
 
 ### fix(ctrader-client): конец каскада рефрешей токена — sync из token-service + убрать silent-rotation эвристику
 
-`<pending commit>`
+`18871b5`
 
 **Симптом (2 дня, 07-04 12:52 → 07-06):** оба бота (`fx-momentum-bot`,
 `fx-ai-trader`) на общем cTrader `client_id` сидели в reconnect-цикле на
