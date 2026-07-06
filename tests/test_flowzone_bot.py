@@ -1674,3 +1674,75 @@ def test_detect_initiative_and_exhaustion_no_data_on_short_input():
     assert detect_initiative([], "long").confirmed is False
     assert detect_exhaustion([TradePrint(0, 100.0, 1.0, "Buy")], "up").confirmed is False
 
+
+# ─── DirectionTelemetry: наблюдаемость устойчивости направления (06.07) ───
+# Не гейтит вход; пишет init/dwell/day-extremes/shock в reasons для mining.
+
+def _tele_snap(price, trades):
+    return type("S", (), {"last_price": price, "trades": trades})()
+
+
+def _make_telemetry():
+    from flowzone_bot.analysis.telemetry import DirectionTelemetry
+    return DirectionTelemetry(big_trade_pct=0.90)
+
+
+def test_telemetry_day_extremes_distance_bps():
+    t = _make_telemetry()
+    t.update("X", 1000.0, _tele_snap(100.0, []), [])
+    t.update("X", 1010.0, _tele_snap(110.0, []), [])   # day high 110
+    t.update("X", 1020.0, _tele_snap(95.0, []), [])    # day low 95
+    f = t.features("X", 1030.0, 100.0)
+    assert abs(f["day_hi_bps"] - (110 - 100) / 100 * 1e4) < 1e-6   # 1000 bp
+    assert abs(f["day_lo_bps"] - (100 - 95) / 100 * 1e4) < 1e-6    # 500 bp
+    # новый UTC-день → экстремумы сбрасываются
+    t.update("X", 90000.0, _tele_snap(100.0, []), [])
+    f2 = t.features("X", 90001.0, 100.0)
+    assert f2["day_hi_bps"] == 0.0 and f2["day_lo_bps"] == 0.0
+
+
+def test_telemetry_dwell_tracks_time_beyond_swing_extreme():
+    t = _make_telemetry()
+    swings = [Swing(0, 110.0, "high", ts=100.0), Swing(1, 90.0, "low", ts=200.0)]
+    t.update("X", 1000.0, _tele_snap(111.0, []), swings)   # выше swing high
+    t.update("X", 1030.0, _tele_snap(112.0, []), swings)   # держится
+    f = t.features("X", 1060.0, 112.0)
+    assert abs(f["dwell_up_sec"] - 60.0) < 1e-6
+    assert "dwell_dn_sec" not in f
+    # возврат под уровень → dwell сбрасывается
+    t.update("X", 1090.0, _tele_snap(109.0, []), swings)
+    assert "dwell_up_sec" not in t.features("X", 1091.0, 109.0)
+
+
+def test_telemetry_shock_detected_on_tick_burst_and_ages():
+    t = _make_telemetry()
+    calm = [TradePrint(i, 100.0, 1.0, "Buy") for i in range(100)]
+    t.update("X", 0.0, _tele_snap(100.0, calm), [])       # ema=100 (прогрев)
+    t.update("X", 130.0, _tele_snap(100.0, calm), [])     # warmed, без шока
+    assert "shock_dir" not in t.features("X", 131.0, 100.0)
+    # burst ×12 от базы, цена падает → shock:down
+    burst = [TradePrint(i, 100.0 - i * 0.001, 1.0, "Sell") for i in range(1200)]
+    t.update("X", 140.0, _tele_snap(98.8, burst), [])
+    f = t.features("X", 200.0, 98.8)
+    assert f["shock_dir"] == "down"
+    assert abs(f["shock_age_sec"] - 60.0) < 1e-6
+
+
+def test_telemetry_initiative_alignment_in_fmt():
+    t = _make_telemetry()
+    up = [TradePrint(i, 100.0 + i * 0.5, 2.0, "Buy") for i in range(25)]
+    t.update("X", 1000.0, _tele_snap(112.0, up), [])
+    f = t.features("X", 1010.0, 112.0)
+    assert f["init_dir"] == "up"
+    assert abs(f["init_age_sec"] - 10.0) < 1e-6
+    s_long = t.fmt("X", 1010.0, "long", 112.0)
+    s_short = t.fmt("X", 1010.0, "short", 112.0)
+    assert "init:up:10s:same" in s_long
+    assert "init:up:10s:counter" in s_short
+    assert s_long.startswith("tele=")
+
+
+def test_telemetry_fmt_none_when_no_data():
+    t = _make_telemetry()
+    assert t.fmt("X", 0.0, None, None) == "tele=none"
+

@@ -26,6 +26,7 @@ from flowzone_bot.analysis.session import (in_session, parse_windows,
                                            session_start_ts)
 from flowzone_bot.analysis.strategy import evaluate
 from flowzone_bot.analysis.swings import Swing, find_swings
+from flowzone_bot.analysis.telemetry import DirectionTelemetry
 from flowzone_bot.analysis.volume_profile import build_profile
 from flowzone_bot.config.settings import load_settings
 from flowzone_bot.data.aggregates import SymbolState
@@ -144,6 +145,11 @@ def run() -> None:
     # Sticky-направление аукциона (канон §2: пробой+acceptance, держим до
     # встречного структурного пробоя — не переворачиваемся на откате).
     auction = AuctionTracker()
+    # Телеметрия устойчивости направления (наблюдаемость, НЕ гейтит вход):
+    # initiative-alignment / dwell / дистанция до day-экстремумов / volume-shock.
+    # Пишется в reasons сделки + лог переворота латча для последующего mining
+    # на ≥100 сделках (sample-size.mdc). См. analysis/telemetry.py.
+    telemetry = DirectionTelemetry(big_trade_pct=cfg.big_trade_pct)
     if cfg.session_gate_enabled:
         log.info("session gate: окна UTC %s", cfg.session_windows_utc)
     last_heartbeat = 0.0
@@ -194,7 +200,7 @@ def run() -> None:
             killed = killswitch.is_killed(db, cfg, now)
             if killed.allowed and in_active_session:
                 _scan_signals(states, db, cfg, executor, cooldown, now,
-                              client, swing_cache, auction)
+                              client, swing_cache, auction, telemetry)
             elif not killed.allowed and now - last_heartbeat >= 60:
                 log.warning("KILLSWITCH: %s — входы заблокированы", killed.reason)
 
@@ -218,10 +224,12 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
                   executor: Executor, cooldown: dict[str, float],
                   now: float, client,
                   swing_cache: dict[str, tuple[float, list[Swing]]],
-                  auction: AuctionTracker) -> None:
+                  auction: AuctionTracker,
+                  telemetry: DirectionTelemetry | None = None) -> None:
     """Прогон чеклиста входа по символам: контекст → зона → absorption → Signal
     (цель = ближайший swing, §5.3). Один открытый сетап на символ; rate/позиции —
-    killswitch.can_open."""
+    killswitch.can_open. ``telemetry`` — наблюдаемость устойчивости направления
+    (пишется в reasons и в лог переворота латча, вход НЕ гейтит)."""
     open_symbols = {tr.symbol for tr in db.open_trades()}
     for sym, st in states.items():
         if sym in open_symbols:
@@ -238,8 +246,23 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         # swings нужны и для латча направления (структурный пробой), и для цели,
         # и для per-swing якоря профиля зоны (A2).
         swings = _swings_for(client, cfg, sym, swing_cache, now)
+        if telemetry is not None:
+            try:
+                telemetry.update(sym, now, snap, swings)
+            except Exception:
+                log.exception("telemetry update %s failed", sym)
+        prev_dir = auction.peek(sym)
         _ctx_profile, ctx = _context_for(snap, cfg, auction=auction,
                                          swings=swings, now=now)
+        # лог переворота/установки латча + телеметрия (mining флапов, D-audit
+        # 06.07: кейсы #531/#532 — ложный переворот после volume-shock).
+        cur_dir = auction.peek(sym)
+        if telemetry is not None and cur_dir != prev_dir and cur_dir is not None:
+            log.info("auction flip %s: %s → %s | %s", sym,
+                     prev_dir or "none", cur_dir,
+                     telemetry.fmt(sym, now,
+                                   "long" if cur_dir == "trend_up" else "short",
+                                   snap.last_price))
         if ctx is None or not ctx.is_trend:
             continue
         # per-swing профиль зоны (канон §3: профиль ПРЕДЫДУЩЕЙ swing-точки из
@@ -256,6 +279,14 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
             continue
         if sig is None:
             continue
+        # телеметрия устойчивости направления → в reasons (persist в БД для
+        # mining на ≥100 сделках; вход НЕ гейтит).
+        if telemetry is not None:
+            try:
+                sig.reasons.append(telemetry.fmt(sym, now, sig.side,
+                                                 snap.last_price))
+            except Exception:
+                log.exception("telemetry fmt %s failed", sym)
         gate = killswitch.can_open(db, cfg, now)
         if not gate.allowed:
             log.info("gate block: %s", gate.reason)
