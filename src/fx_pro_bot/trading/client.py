@@ -255,6 +255,15 @@ class CTraderClient:
 
         _time.sleep(3)
 
+        # Подтянуть актуальный токен из token-service ДО auth. Сервис —
+        # single source of truth: другой бот мог обновить токен, из-за чего
+        # cTrader инвалидировал наш in-memory access_token
+        # (ProtoOAAccountsTokenInvalidatedEvent, help.ctrader.com/open-api/
+        # messages/). Auth со stale токеном → GetAccountList timeout →
+        # ранее это запускало каскад рефрешей (BUILDLOG 2026-07-06).
+        # Сервис недоступен / нет новее — остаёмся на in-memory (fallback).
+        self._sync_token_from_service()
+
         self._do_auth(timeout)
         self._last_successful_connect_ts = _time.time()
 
@@ -278,14 +287,27 @@ class CTraderClient:
             except Exception:
                 pass
 
-    def _do_auth(self, timeout: float = 30, allow_refresh: bool = True) -> None:
+    def _do_auth(self, timeout: float = 30) -> None:
         """Авторизация приложения и аккаунта (вызывается из start и reconnect).
 
-        Если `GetAccountListByAccessTokenRes` падает по timeout — это
-        классический симптом silent token-rotation на серверной стороне
-        cTrader (Spotware закрывает TCP cleanly без ProtoOAErrorRes).
-        В этом случае при `allow_refresh=True` пробуем обновить access_token
-        через refresh_token и переавторизоваться ОДИН раз; иначе пробрасываем.
+        Token sync ДО auth делает ``_connect_and_auth`` через
+        ``_sync_token_from_service``: подтягивает актуальный access_token из
+        ctrader-token-service (single source of truth). Если зайти на auth со
+        stale in-memory токеном (другой бот обновил — cTrader инвалидировал
+        старый, см. ProtoOAAccountsTokenInvalidatedEvent,
+        https://help.ctrader.com/open-api/messages/), GetAccountListByAccessTokenReq
+        таймаутит.
+
+        РАНЬШЕ (BUILDLOG 2026-05-12 → 2026-07-06) на этот timeout стояла
+        эвристика «silent rotation»: бот сам делал force_refresh. Но timeout
+        почти никогда не настоящий rotation (0 TokenInvalidatedEvent за 2 дня
+        против 154 false-рефрешей), а транзиентный сбой или троттл — и каждый
+        force_refresh инвалидировал ТОКЕН ДРУГОГО бота → встречный рефреш →
+        бесконечный каскад (154 свернутых 30-дневных токена за 2 дня, оба бота
+        в троттле). Поэтому теперь: timeout → просто проброс, reconnect-loop
+        ретраит с backoff, а свежий токен берётся из сервиса на след. попытке.
+        Рефреш — только по авторитативному ProtoOAAccountsTokenInvalidatedEvent
+        (хендлер _handle_token_invalidated).
         """
         from ctrader_open_api.messages.OpenApiMessages_pb2 import (
             ProtoOAAccountAuthReq,
@@ -309,27 +331,14 @@ class CTraderClient:
         account_id = self._account_id
         acct_list_req = ProtoOAGetAccountListByAccessTokenReq()
         acct_list_req.accessToken = self._access_token
-        try:
-            acct_list_res = self._send_and_wait(
-                acct_list_req,
-                ProtoOAGetAccountListByAccessTokenRes().payloadType,
-                timeout=timeout,
-            )
-        except TimeoutError as exc:
-            if allow_refresh and self._refresh_token:
-                log.warning(
-                    "cTrader: GetAccountListByAccessTokenRes timeout — "
-                    "пробуем proactive refresh access_token (silent rotation?)"
-                )
-                if self._try_refresh_token():
-                    # После refresh access_token cessия сервера, скорее всего,
-                    # уже невалидна — нужен новый TCP-connect. Пробрасываем
-                    # специфический exception, чтобы reconnect-loop повторил
-                    # connect+auth с новым токеном.
-                    raise ConnectionError(
-                        "cTrader: token refreshed, reconnect required"
-                    ) from exc
-            raise
+        # Timeout на GetAccountList — НЕ сигнал token-rotation (см. докстринг):
+        # пробрасываем как есть, reconnect-loop ретраит. Свежий токен будет
+        # подтянут из token-service на следующей попытке (_sync_token_from_service).
+        acct_list_res = self._send_and_wait(
+            acct_list_req,
+            ProtoOAGetAccountListByAccessTokenRes().payloadType,
+            timeout=timeout,
+        )
         accounts = getattr(acct_list_res, "ctidTraderAccount", [])
         if accounts:
             is_live = self._host_type == "live"
@@ -1138,6 +1147,50 @@ class CTraderClient:
             log.error("cTrader: refresh_access_token не удался: %s", exc)
             return False
 
+    def _sync_token_from_service(self) -> None:
+        """Подтянуть актуальный токен из token-service перед auth (read-only sync).
+
+        Сервис — single source of truth: другой бот мог обновить токен, из-за
+        чего cTrader инвалидировал наш in-memory access_token
+        (ProtoOAAccountsTokenInvalidatedEvent шлётся при refresh ВСЕМ
+        сессиям на старом токене —
+        https://help.ctrader.com/open-api/messages/). Auth со stale токеном
+        → GetAccountListByAccessTokenReq timeout → ранее запускало каскад
+        рефрешей (BUILDLOG 2026-07-06). Подтягиваем свежий ДО auth.
+
+        Без callback push: мы только что ВЗЯЛИ токен из сервиса, push обратно
+        бесполезен. Сервис недоступен / нет новее — остаёмся на in-memory
+        (fallback на локальный refresh в _handle_token_invalidated).
+        """
+        try:
+            from shared_oauth.token_client import (  # type: ignore
+                fetch_token,
+                load_service_config,
+            )
+        except Exception:
+            return  # shared_oauth не установлен — локальный режим
+        cfg = load_service_config(client_label="ctrader-client")
+        if cfg is None:
+            return  # token-service не настроен
+        try:
+            tok = fetch_token(cfg)
+        except Exception as exc:  # noqa: BLE001 — sync не должен ронять auth
+            log.warning(
+                "cTrader: token-service sync failed (%s) — auth с in-memory токеном",
+                exc,
+            )
+            return
+        if not tok.access_token or tok.access_token == self._access_token:
+            return  # уже актуален / нечего подтягивать
+        log.info(
+            "cTrader: подтянули свежий токен из token-service "
+            "(expires +%.1f дней) — другой бот обновил, stale in-memory заменён",
+            (tok.expires_at - time.time()) / 86400.0,
+        )
+        self._access_token = tok.access_token
+        self._refresh_token = tok.refresh_token
+        self._token_expires_at = tok.expires_at
+
     def _try_refresh_via_service(self) -> bool:
         """Попытка обновить токен через ctrader-token-service.
 
@@ -1215,10 +1268,9 @@ class CTraderClient:
             return
 
         try:
-            # allow_refresh=False — мы уже только что обновились; второй
-            # подряд refresh при том же symptom скорее всего бесполезен,
-            # лучше уйти в reconnect.
-            self._do_auth(timeout=30, allow_refresh=False)
+            # _connect_and_auth/_do_auth сами подтянут свежий токен из
+            # token-service перед auth; повторный рефреш здесь не нужен.
+            self._do_auth(timeout=30)
             log.info("cTrader: аккаунт переавторизован после обновления токена")
         except Exception as exc:
             log.error("cTrader: reauth после refresh не удался (%s), полный reconnect", exc)

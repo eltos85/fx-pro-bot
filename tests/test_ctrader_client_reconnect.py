@@ -124,48 +124,28 @@ def test_cleanup_resets_last_successful_connect_ts():
     assert c._last_successful_connect_ts == 0.0
 
 
-# -- proactive token refresh при timeout на GetAccountList (bug 11.05 #2) -----
+# -- timeout на GetAccountList: БЕЗ proactive refresh (регрессия каскада) -----
+#
+# Раньше (bug 11.05 #2 → FIXED 2026-07-06) здесь стояла эвристика «silent
+# rotation»: timeout на GetAccountListByAccessTokenRes → force_refresh. Но
+# timeout почти никогда не настоящий rotation (0 TokenInvalidatedEvent за 2
+# дня против 154 false-рефрешей), а каждый force_refresh инвалидировал токен
+# ДРУГОГО бота на общем client_id → встречный refresh → бесконечный каскад
+# (154 свернутых 30-дневных токена за 2 дня, оба бота в троттле).
+#
+# Фикс по доке cTrader (help.ctrader.com/open-api/messages/): свежий токен
+# подтягивается из token-service в _connect_and_auth ДО auth; timeout → просто
+# проброс, reconnect-loop ретраит; refresh — только по авторитативному
+# ProtoOAAccountsTokenInvalidatedEvent (_handle_token_invalidated).
+# Подробно: tests/test_ctrader_client_token_sync.py.
 
 
-def test_do_auth_triggers_refresh_on_account_list_timeout():
-    """TimeoutError на GetAccountListByAccessTokenRes → refresh + reconnect.
+def test_do_auth_get_account_list_timeout_does_not_refresh():
+    """Timeout на GetAccountList → проброс TimeoutError, refresh НЕ зовётся.
 
-    Это lechu от silent token rotation. См. community.ctrader.com/forum/45954.
+    Регрессия каскада 2026-07-06: раньше здесь зрался _try_refresh_token.
     """
     c = _make_client()
-
-    # Заглушаем `_send_and_wait`: первый вызов (app_auth) ОК, второй
-    # (GetAccountList) бросает TimeoutError.
-    calls = {"n": 0}
-
-    def fake_send(message, expected_type, timeout=30):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return object()  # app_auth_res
-        raise TimeoutError("cTrader: таймаут ожидания ответа (type=2150)")
-
-    with patch.object(c, "_send_and_wait", side_effect=fake_send), \
-         patch.object(c, "_try_refresh_token", return_value=True) as mock_refresh:
-        with pytest.raises(ConnectionError, match="token refreshed"):
-            c._do_auth(timeout=5)
-
-    mock_refresh.assert_called_once()
-
-
-def test_do_auth_does_not_loop_refresh_when_allow_refresh_false():
-    """`allow_refresh=False` → refresh не вызывается, исходный TimeoutError пробрасывается.
-
-    Гарантия что не зациклимся: если уже сделали refresh и timeout повторился,
-    уходим в общий reconnect, а не в бесконечный refresh-loop.
-    """
-    c = _make_client()
-
-    def fake_send(message, expected_type, timeout=30):
-        if expected_type == 1:  # фиктивный, app_auth
-            return object()
-        raise TimeoutError("type=2150")
-
-    # Первый вызов — app_auth, второй — GetAccountList.
     call_seq = [object(), TimeoutError("type=2150")]
     seq_iter = iter(call_seq)
 
@@ -178,13 +158,16 @@ def test_do_auth_does_not_loop_refresh_when_allow_refresh_false():
     with patch.object(c, "_send_and_wait", side_effect=stepper), \
          patch.object(c, "_try_refresh_token") as mock_refresh:
         with pytest.raises(TimeoutError):
-            c._do_auth(timeout=5, allow_refresh=False)
+            c._do_auth(timeout=5)
 
     mock_refresh.assert_not_called()
 
 
 def test_do_auth_no_refresh_when_refresh_token_missing():
-    """Если refresh_token пустой, refresh не дёргается, TimeoutError пробрасывается."""
+    """Если refresh_token пустой, refresh не дёргается, TimeoutError пробрасывается.
+
+    Актуально и после удаления эвристики: refresh вообще не зовётся из _do_auth.
+    """
     c = _make_client()
     c._refresh_token = ""
 

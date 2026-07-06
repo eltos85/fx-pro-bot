@@ -4,6 +4,79 @@
 
 ---
 
+## 2026-07-06
+
+### fix(ctrader-client): конец каскада рефрешей токена — sync из token-service + убрать silent-rotation эвристику
+
+`<pending commit>`
+
+**Симптом (2 дня, 07-04 12:52 → 07-06):** оба бота (`fx-momentum-bot`,
+`fx-ai-trader`) на общем cTrader `client_id` сидели в reconnect-цикле на
+попытке ~155 с backoff 900s, `Connection was closed cleanly (uptime 0s)` на
+каждом подключении → server-side троттл. Боты циклически считали сигналы, но
+`executed=False` — не торговали. Лог `reconcile` таймаутил (type=2125).
+
+**Диагноз по данным** (token-service + оба бота, 2 дня):
+
+| Метрика | Значение |
+|---|---|
+| `ProtoOAAccountsTokenInvalidatedEvent` (авторитативный сигнал сервера) | **0** |
+| `GetAccountListByAccessTokenRes` timeout (momentum) | 46 |
+| `force_refresh` причин `silent-rotation` | 322 |
+| Успешных рефрешей 30-дневного токена | **154** |
+
+Токен валиден 30 дней, но свернут 154 раза (каждые ~30 мин). Сервер НИ РАЗУ
+не прислал `TokenInvalidatedEvent` — все рефреши manufactured эвристикой.
+
+**Причина (по офиц. доке cTrader):** при refresh access_token cTrader
+инвалидирует старый токен у ВСЕХ сессий и шлёт им
+`ProtoOAAccountsTokenInvalidatedEvent`
+(https://help.ctrader.com/open-api/messages/;
+форум community.ctrader.com/forum/connect-api-support/38179/ — «If you
+refresh your access token ... your previous token will be invalidated»).
+Эвристика «silent rotation» в `_do_auth` (`client.py:318-332`, введена
+BUILDLOG 2026-05-12) трактовала `GetAccountListByAccessTokenRes` timeout как
+silent token-rotation и звала `force_refresh`. Но timeout почти никогда не
+настоящий rotation (0 событий vs 154 false-рефреша) — а каждый `force_refresh`
+инвалидировал токен ДРУГОГО бота → тот переподключался со **stale in-memory**
+токеном (`_connect_and_auth` не подтягивал токен из сервиса перед auth) →
+снова timeout → снова `force_refresh` → встречный каскад → server-throttle.
+
+**Решение (по доке, api-docs.mdc):**
+
+1. **`_sync_token_from_service`** — перед `_do_auth` в `_connect_and_auth`
+   подтягивать актуальный access_token из ctrader-token-service (single
+   source of truth). Если другой бот обновил токен — берём свежий, не идём со
+   stale. Без callback push (мы только что ВЗЯЛИ из сервиса). Сервис
+   недоступен / нет новее — остаёмся на in-memory (fallback).
+2. **Убрана эвристика silent-rotation** из `_do_auth`: на timeout
+   `GetAccountListByAccessTokenRes` — просто проброс `TimeoutError`,
+   reconnect-loop ретраит с backoff. Параметр `allow_refresh` убран (вместе с
+   ним ушёл и «Баг A» `ConnectionError("token refreshed, reconnect required")`,
+   который тратился как generic failure и ждал 900s вместо immediate retry).
+3. Рефреш токена — **только** по авторитативному
+   `ProtoOAAccountsTokenInvalidatedEvent` (хендлер `_handle_token_invalidated`
+   уже был, остаётся). Токен живёт 30 дней, token-service `background_tick`
+   обновляет его proactively до expiry — эвристика не нужна.
+
+Общая инфраструктура: клиент делят advisor, fx_ai_trader, fx_momentum_bot —
+фикс защищает всех от встречного каскада при общем client_id.
+
+**Операционно:** боты остановлены 07-06 ~07:15 UTC для очистки server-side
+троттла (~30-60 мин), после паузы — селективный rebuild + старт с фиксом.
+
+**Тесты:** +6 (`tests/test_ctrader_client_token_sync.py`: sync newer/same/
+unavailable/not-configured, timeout-без-refresh, allow_refresh убран);
+обновлены 2 теста в `test_ctrader_client_reconnect.py` (валидировали
+удалённую эвристику → заменены на регрессию нового поведения). Сьют 1298
+passed.
+
+**Файлы:** `src/fx_pro_bot/trading/client.py`,
+`tests/test_ctrader_client_token_sync.py` (новый),
+`tests/test_ctrader_client_reconnect.py`
+
+---
+
 ## 2026-07-03
 
 ### feat(momentum): ctx-метрики контекста входа — направленный срез убытков (observability only)
