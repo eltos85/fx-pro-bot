@@ -327,6 +327,16 @@ def run() -> None:
                         continue
                     if st.armed(sym):
                         funnel["armed"] += 1
+                    # v0.18.32: lifecycle-телеметрия треков density_bounce →
+                    # БД (density_tracks). Стратегия эмитит в очередь, main
+                    # loop дренирует и пишет. Не влияет на торговлю.
+                    if (getattr(cfg, "density_track_log_enabled", True)
+                            and hasattr(st, "drain_lifecycle")):
+                        try:
+                            for row in st.drain_lifecycle():
+                                db.insert_density_track(row)
+                        except Exception:
+                            log.exception("density track lifecycle log failed")
                     if s is not None:
                         candidates.append(s)
                 sig = resolve(candidates)

@@ -4,6 +4,53 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-07-06
+
+### feat(scalp/density_bounce): v0.18.32 — lifecycle-телеметрия треков стен → density_tracks
+`pending`
+
+Запрос пользователя после стат-среза с v0.18.30: density_bounce дал **0
+сделок за 5 дней**, хотя редизайн починил детекцию. Аудит логов (3 дня):
+воронка ~3877 треков → 3746 поглощены (спуф, скользящая абсорбция) → 131
+умерли (vanish > grace, жизнь p50=75с p95=181с) → **1 дожил до persist
+1200с** → 0 выстрелов. Корень: `density_bounce_persist_sec=1200` (канон
+20–30м, Secret Terminal/Bookmap) глушит 99.97% стен — крипто-альт-перп
+стены живут секунды-минуты, не 20м. Анти-спуфинг УЖЕ есть (скользящая
+абсорбция ≥30% за ≤10с), persist — избыточный второй фильтр. Единственный
+выживший трек (ETHUSDT 1723.02) не выстрелил: стена висела в стороне от
+цены ~50 мин, цена ни разу не подошла ≤8 b.п.
+
+`persist` — канон-параметр (strategy-guard.mdc); меньшить по интуиции
+нельзя (no-data-fitting.mdc). Нужен data-артефакт: кривая выживаемости
+стен + post-wall цена при разных persist. Для этого добавлена
+**lifecycle-телеметрия треков в БД** (не влияет на торговлю):
+
+- Новая таблица `density_tracks`: `ts_start/ts_end/symbol/book_side/
+  anchor_price/life_sec/death_reason/reached_persist/persisted_ts/
+  price_start/price_persist/price_end/did_price_approach/max_size/
+  round_tier`. На каждый трек при смерти (absorbed/vanished) — одна строка.
+- `DensityBounceStrategy` эмитит lifecycle в очередь (`_lifecycle`),
+  `drain_lifecycle()` дренируется main loop после `update()` и пишет в БД
+  через `db.insert_density_track` (стратегия остаётся чистым
+  signal-generator, без БД-импорта). Wallstate дополнен полями
+  `price_start/persisted_ts/price_persist/did_price_approach/max_size`.
+- `death_reason`: `absorbed` (≥absorb_frac за ≤window) | `уровень исчез
+  > grace` (vanish). Смерти <60с тоже пишутся в БД (анализу нужна полная
+  кривая выживаемости), в play-лог только ≥60с.
+- Env `SCALP_DENSITY_TRACK_LOG_ENABLED` (default true).
+
+Анализ (через неделю, n≥пара тысяч треков):生存 curve по life_sec →
+сколько стен доживает 60/120/300/600/1200с; для доживших —
+`did_price_approach` и post-wall цена (`price_persist`→`price_end`) →
+предсказывает ли стена отскок. Только по этому артефакту — предложение по
+persist (или вывод, что bounce на крипто не работает). До тех пор persist
+1200с НЕ трогается.
+
+**Файлы:** `analysis/strategies.py` (lifecycle emit + drain + wallstate
+поля), `state/db.py` (density_tracks + insert/read), `app/main.py`
+(drain в loop), `config/settings.py`, `docker-compose.yml`,
+`tests/test_scalp_bot.py` (6 новых тестов, все 1293 зелёные).
+
 ## 2026-07-03
 
 ### feat(scalp/regime): v0.18.31 — shadow-лог отвергнутых сигналов + 11 новых regime-фичей

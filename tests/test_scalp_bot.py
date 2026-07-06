@@ -1910,6 +1910,109 @@ def test_density_bounce_entry_order_type_override():
     assert sig is not None and sig.entry_order_type == "market"
 
 
+# ─── v0.18.32: lifecycle-телеметрия треков density_bounce → density_tracks ──
+
+def test_density_lifecycle_absorbed_death_emitted():
+    """Стена, поглощенная ≥absorb_frac за ≤window → трек умирает с
+    death_reason='absorbed'; lifecycle-строка попадает в drain_lifecycle()."""
+    cfg = _density_cfg(density_bounce_persist_sec=1200.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    big, asks = _book_with_bid_wall(50.0)
+    small, _ = _book_with_bid_wall(30.0)
+    mk = lambda b: _snap([], last_price=100.05, best_bid=100.0,
+                         best_ask=100.10, bids=b, asks=asks)
+    st.update(mk(big), now=0.0)     # старт трека
+    st.update(mk(big), now=300.0)   # живёт
+    st.drain_lifecycle()            # сброс — старт не эмитится (трек жив)
+    st.update(mk(small), now=305.0)  # −40% за 5с → поглощение
+    rows = st.drain_lifecycle()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["death_reason"] == "absorbed"
+    assert r["book_side"] == "bid"
+    assert r["anchor_price"] == 100.0
+    assert r["life_sec"] == pytest.approx(305.0)
+    assert r["reached_persist"] == 0   # persist 1200с — не дожил
+    assert r["price_start"] == 100.05
+    assert r["price_end"] == 100.05
+    assert r["max_size"] == 50.0
+
+
+def test_density_lifecycle_vanished_death_emitted():
+    """Стена, исчезнувшая > grace → death_reason об уровне исчезшем."""
+    cfg = _density_cfg()
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall(50.0)
+    snap_wall = _snap([], last_price=100.05, bids=bids, asks=asks)
+    flat = [(100.0, 1), (99.99, 1), (99.98, 1), (99.97, 1), (99.96, 1)]
+    snap_flat = _snap([], last_price=100.05, bids=flat, asks=asks)
+    st.update(snap_wall, now=0.0)
+    st.drain_lifecycle()
+    st.update(snap_flat, now=11.0)   # miss (persist 10с прошёл, но уровня нет)
+    st.update(snap_flat, now=22.0)   # 11с > grace 10с → смерть
+    rows = st.drain_lifecycle()
+    assert len(rows) == 1
+    assert rows[0]["death_reason"].startswith("уровень исчез")
+    assert rows[0]["reached_persist"] == 1  # persist=10с, дожил (first_seen 0 → 11с)
+
+
+def test_density_lifecycle_persist_and_approach_fields():
+    """Трек, доживший до persist: reached_persist=1, persisted_ts/price_persist
+    заполнены. Цена FAR → did_price_approach=0, выстрела нет (трек жив,
+    wallstate инспектируем). Затем убиваем и проверяем lifecycle-строку."""
+    cfg = _density_cfg(density_bounce_persist_sec=10.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall(50.0)
+    # цена ДАЛЕКО от стены 100.0 (last 101.0 → 100 bps > 8 bps) — подхода нет
+    snap_far = _snap([], last_price=101.0, best_bid=100.0, best_ask=100.10,
+                     bids=bids, asks=asks)
+    st.update(snap_far, now=0.0)     # старт
+    st.update(snap_far, now=11.0)    # persist 10с прошёл, цена далеко → ждём
+    w = st._track["SOLUSDT"]["bid"]
+    assert w is not None
+    assert w["persisted_ts"] == 11.0
+    assert w["price_persist"] == 101.0
+    assert w["did_price_approach"] == 0
+    # теперь подгоним цену к стене → подход, выстрел
+    snap_near = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                      bids=bids, asks=asks)
+    sig = st.update(snap_near, now=12.0)
+    assert sig is not None  # выстрелил — подтверждает persisted-трек стреляет
+
+
+def test_db_density_tracks_insert_and_read(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    db.insert_density_track({
+        "ts_start": 0.0, "ts_end": 305.0, "symbol": "SOLUSDT",
+        "book_side": "bid", "anchor_price": 100.0, "life_sec": 305.0,
+        "death_reason": "absorbed", "reached_persist": 0, "persisted_ts": None,
+        "price_start": 100.05, "price_persist": None, "price_end": 100.05,
+        "did_price_approach": 0, "max_size": 50.0, "round_tier": "round00",
+    })
+    rows = db.density_track_rows()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["death_reason"] == "absorbed"
+    assert r["anchor_price"] == 100.0
+    assert r["reached_persist"] == 0
+    assert r["round_tier"] == "round00"
+    db.close()
+
+
+def test_db_density_tracks_failure_does_not_raise(tmp_path):
+    """Телеметрия — не рвёт торговый поток: кривая строка глушится."""
+    db = ScalpDB(str(tmp_path))
+    db.insert_density_track({})  # нет обязательных полей → NOT NULL fail
+    # не бросает, просто rollback
+    assert db.density_track_rows() == []
+    db.close()
+
+
+def test_settings_density_track_log_enabled_default():
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().density_track_log_enabled is True
+
+
 # ─── v0.18.15: near_round-демоция + пер-стратегийный persist (density_bounce) ──
 
 def _non_round_bid_wall():

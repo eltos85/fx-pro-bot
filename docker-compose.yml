@@ -332,6 +332,9 @@ services:
       # shadow_signals) + расширенные regime-фичи. ТОЛЬКО телеметрия — лечит
       # range restriction в оценке гейтов (ADX/DMI/HTF/funding/cooldown).
       SCALP_SHADOW_LOG_ENABLED: ${SCALP_SHADOW_LOG_ENABLED:-true}
+      # v0.18.32: lifecycle треков density_bounce → density_tracks (телеметрия
+      # для анализа persist-порога по данным, не влияет на торговлю).
+      SCALP_DENSITY_TRACK_LOG_ENABLED: ${SCALP_DENSITY_TRACK_LOG_ENABLED:-true}
       # Rolling-baseline (v0.9.0): стена vs скользящее среднее за 10–15мин (Kalena),
       # а не мгновенный top-25 (тот давал 0/502 входов — 5× недостижим).
       SCALP_DENSITY_BASELINE_SEC: ${SCALP_DENSITY_BASELINE_SEC:-900}

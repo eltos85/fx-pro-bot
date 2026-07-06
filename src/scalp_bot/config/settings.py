@@ -283,6 +283,12 @@ class ScalpSettings(BaseSettings):
     # пишутся с regime-фичами в shadow_signals. ТОЛЬКО телеметрия — лечит
     # range restriction в оценке гейтов (видим и то, что гейт отрезал).
     shadow_log_enabled: bool = Field(default=True)
+    # v0.18.32: lifecycle-телеметрия треков density_bounce → таблица
+    # density_tracks (symbol/side/anchor/life/death_reason/reached_persist/
+    # price_start/persist/end/did_price_approach). Для офлайн-анализа
+    # выживаемости стен и post-wall цены — обоснование persist-порога по
+    # данным (strategy-guard.mdc). Не влияет на торговлю.
+    density_track_log_enabled: bool = Field(default=True)
     # Анти-шум между входами по одному символу.
     signal_cooldown_sec: float = Field(default=60.0)
     # Пауза после стоп-аута перед повторным входом в ТУ ЖЕ сторону по символу.

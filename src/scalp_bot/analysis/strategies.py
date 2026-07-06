@@ -829,6 +829,10 @@ class DensityBounceStrategy:
             s: self._new_base() for s in symbols
         }
         self._last_log: dict[str, float] = {}
+        # v0.18.32: очередь lifecycle-событий треков (дренируется main loop →
+        # БД). Стратегия не пишет в БД сама (чистый signal-generator); main
+        # loop вызывает drain_lifecycle() после update().
+        self._lifecycle: list[dict] = []
 
     def _new_base(self) -> dict[str, RollingBaseline]:
         w = getattr(self.cfg, "density_baseline_sec", 900.0)
@@ -857,9 +861,11 @@ class DensityBounceStrategy:
             self._base.setdefault(s, self._new_base())
 
     def _kill_track(self, sym: str, book_side: str, cur: dict, now: float,
-                    reason: str) -> None:
+                    reason: str, last: float | None = None) -> None:
         """Снять трек + телеметрия (форвард-замер жизни стен для тюнинга по
-        данным). Смерти короче 60с не логируем (чурн — не сигнал)."""
+        данным). Смерти короче 60с не логируем в play (чурн — не сигнал), но
+        в БД lifecycle пишутся ВСЕ (анализу нужна полная кривая выживаемости)."""
+        self._emit_lifecycle(sym, book_side, cur, now, reason, last)
         self._track[sym][book_side] = None
         life = now - cur["first_seen"]
         if life >= 60.0:
@@ -867,12 +873,39 @@ class DensityBounceStrategy:
                       "%.0fс persist)", sym, book_side, cur["price"], reason,
                       life, self._persist())
 
+    def _emit_lifecycle(self, sym: str, book_side: str, cur: dict,
+                        now: float, reason: str, last: float | None) -> None:
+        """Собрать строку lifecycle трека в очередь (main loop запишет в БД).
+        v0.18.32 — телеметрия для офлайн-анализа persist-порога."""
+        self._lifecycle.append({
+            "ts_start": cur["first_seen"], "ts_end": now,
+            "symbol": sym, "book_side": book_side,
+            "anchor_price": cur["price"], "life_sec": now - cur["first_seen"],
+            "death_reason": reason,
+            "reached_persist": 1 if cur.get("persisted_ts") is not None else 0,
+            "persisted_ts": cur.get("persisted_ts"),
+            "price_start": cur.get("price_start"),
+            "price_persist": cur.get("price_persist"),
+            "price_end": last,
+            "did_price_approach": cur.get("did_price_approach", 0),
+            "max_size": cur.get("max_size"),
+            "round_tier": cur.get("round"),
+        })
+
+    def drain_lifecycle(self) -> list[dict]:
+        """Вернуть накопленные lifecycle-события треков и очистить очередь.
+        Main loop вызывает после update() и пишет в density_tracks."""
+        out = self._lifecycle
+        self._lifecycle = []
+        return out
+
     def _persist(self) -> float:
         p = getattr(self.cfg, "density_bounce_persist_sec", None)
         return p if p is not None else self.cfg.density_persist_sec
 
     def _update_track(self, sym: str, book_side: str,
-                      levels: list[tuple[float, float]], now: float) -> None:
+                      levels: list[tuple[float, float]], now: float,
+                      last: float | None = None) -> None:
         cfg = self.cfg
         t = self._track[sym]
         base = self._wall_baseline(sym, book_side, levels, now)
@@ -892,7 +925,11 @@ class DensityBounceStrategy:
                             "first_seen": now, "miss_since": None,
                             # скользящее окно (ts, size) для анти-абсорбции
                             "recent": [(now, size)],
-                            "round": near_round_hier(price, cfg.density_round_frac)}
+                            "round": near_round_hier(price, cfg.density_round_frac),
+                            # v0.18.32: lifecycle-телеметрия
+                            "price_start": last, "persisted_ts": None,
+                            "price_persist": None, "did_price_approach": 0,
+                            "max_size": size}
             return
         # ── трек есть: жив, если у ЯКОРЯ есть уровень ≥mult×base (v0.18.30:
         # допуск tolerance_bps, НЕ обязан быть максимумом книги) ──
@@ -906,12 +943,15 @@ class DensityBounceStrategy:
                 cur["miss_since"] = now
             elif now - cur["miss_since"] > grace:
                 self._kill_track(sym, book_side, cur, now,
-                                 "уровень исчез > grace (снят/пробит/ушёл из окна)")
+                                 "уровень исчез > grace (снят/пробит/ушёл из окна)",
+                                 last)
             return
         price, size = lvl
         cur["miss_since"] = None
         cur["last_size"] = size
         cur["round"] = near_round_hier(price, cfg.density_round_frac)
+        if size > cur.get("max_size", size):
+            cur["max_size"] = size
         # анти-абсорбция СКОЛЬЗЯЩАЯ (Kalena: ≥30% съедено за <10с → спуф/пробой).
         # Сравниваем с ПИКОМ за absorb_window, а не с size0 от first_seen —
         # иначе при persist 20м проверка не работала после первых 10с жизни.
@@ -926,6 +966,7 @@ class DensityBounceStrategy:
                       "жила %.0fс) — снимаю наблюдение (спуфинг/пробой)", sym,
                       book_side, price, eaten * 100, win,
                       now - cur["first_seen"])
+            self._emit_lifecycle(sym, book_side, cur, now, "absorbed", last)
             t[book_side] = None
 
     def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
@@ -935,9 +976,9 @@ class DensityBounceStrategy:
         sym = snap.symbol
         if sym not in self._track:
             self._track[sym] = {"bid": None, "ask": None}
-        self._update_track(sym, "bid", snap.bids, now)
-        self._update_track(sym, "ask", snap.asks, now)
         last = snap.last_price
+        self._update_track(sym, "bid", snap.bids, now, last)
+        self._update_track(sym, "ask", snap.asks, now, last)
         near = cfg.density_near_bps / 1e4
         # v0.18.15: пер-стратегийный persist (канон density-фейда 20–30+ мин).
         persist = self._persist()
@@ -951,6 +992,8 @@ class DensityBounceStrategy:
             # телеметрия: стена дожила до persist (раз на трек)
             if not w.get("persisted_logged"):
                 w["persisted_logged"] = True
+                w["persisted_ts"] = now  # v0.18.32: lifecycle
+                w["price_persist"] = last
                 play.info("🧱 [%s] стена %s %.6f ВЫСТОЯЛА %.0fс — жду подхода "
                           "цены (≤%.1f б.п.)", sym, book_side, w["price"],
                           persist, cfg.density_near_bps)
@@ -958,6 +1001,7 @@ class DensityBounceStrategy:
                 continue  # уровень в grace-паузе (невидим) — не входим вслепую
             if abs(last - w["price"]) > near * w["price"]:
                 continue  # цена ещё не подошла к стене
+            w["did_price_approach"] = 1  # v0.18.32: lifecycle
             # density + persist — обязательные; round — confluence-бонус (v0.18.15,
             # не гейт). score = число факторов: 2 (без round) / 3 (round00/50).
             reasons = ["density", "persist"]

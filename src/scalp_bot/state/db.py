@@ -83,6 +83,26 @@ CREATE TABLE IF NOT EXISTS shadow_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_ts ON shadow_signals(ts);
 CREATE INDEX IF NOT EXISTS idx_shadow_strategy ON shadow_signals(strategy);
+CREATE TABLE IF NOT EXISTS density_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_start REAL NOT NULL,
+    ts_end REAL NOT NULL,
+    symbol TEXT NOT NULL,
+    book_side TEXT NOT NULL,
+    anchor_price REAL NOT NULL,
+    life_sec REAL NOT NULL,
+    death_reason TEXT NOT NULL,
+    reached_persist INTEGER NOT NULL DEFAULT 0,
+    persisted_ts REAL,
+    price_start REAL,
+    price_persist REAL,
+    price_end REAL,
+    did_price_approach INTEGER NOT NULL DEFAULT 0,
+    max_size REAL,
+    round_tier TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_density_tracks_ts ON density_tracks(ts_start);
+CREATE INDEX IF NOT EXISTS idx_density_tracks_symbol ON density_tracks(symbol);
 """
 
 
@@ -355,6 +375,31 @@ class ScalpDB:
         rows = self._conn.execute(
             "SELECT * FROM shadow_signals WHERE ts>=? ORDER BY id", (since_ts,)
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    def insert_density_track(self, row: dict) -> None:
+        """Жизненный цикл трека стены density_bounce (v0.18.32, телеметрия):
+        для офлайн-анализа выживаемости стен и post-wall цены — обоснование
+        persist-порога по данным (strategy-guard.mdc). Молча игнорирует ошибку."""
+        cols = ("ts_start", "ts_end", "symbol", "book_side", "anchor_price",
+                "life_sec", "death_reason", "reached_persist", "persisted_ts",
+                "price_start", "price_persist", "price_end",
+                "did_price_approach", "max_size", "round_tier")
+        vals = [row.get(c) for c in cols]
+        placeholders = ",".join("?" for _ in cols)
+        try:
+            self._conn.execute(
+                f"INSERT INTO density_tracks ({','.join(cols)}) "
+                f"VALUES ({placeholders})", tuple(vals))
+            self._conn.commit()
+        except sqlite3.Error:
+            self._conn.rollback()
+
+    def density_track_rows(self, since_ts: float = 0.0) -> list[dict]:
+        """Треки стен density_bounce (для анализа/тестов), старые→новые."""
+        rows = self._conn.execute(
+            "SELECT * FROM density_tracks WHERE ts_start>=? ORDER BY id",
+            (since_ts,)).fetchall()
         return [dict(r) for r in rows]
 
     def regime_for(self, trade_id: int) -> dict | None:
