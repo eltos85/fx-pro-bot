@@ -145,6 +145,23 @@ def main() -> int:
         for k in kinds:
             _agg(k, [t for t in seg if _exit_kind(t) == k])
 
+        # ctx_* — метрики контекста входа (пишутся ботом с 2026-07-03,
+        # BUILDLOG). Для сделок до внедрения — None, срез пропускается.
+        with_ctx = [t for t in seg if t.ctx_with_htf is not None]
+        if with_ctx:
+            print(f"── ctx-метрики входа (есть у {len(with_ctx)} сделок) ──")
+            _agg("with_htf (по EMA200)", [t for t in with_ctx if t.ctx_with_htf])
+            _agg("counter (против EMA200)", [t for t in with_ctx if not t.ctx_with_htf])
+            _agg("ADX<20 (рейндж)", [t for t in with_ctx if (t.ctx_adx or 0) < 20])
+            _agg("ADX 20-30", [t for t in with_ctx if 20 <= (t.ctx_adx or 0) < 30])
+            _agg("ADX>=30 (тренд)", [t for t in with_ctx if (t.ctx_adx or 0) >= 30])
+            _agg("|ema_dist| < 2 ATR", [t for t in with_ctx
+                                        if abs(t.ctx_ema_dist_atr or 0) < 2])
+            _agg("|ema_dist| 2-5 ATR", [t for t in with_ctx
+                                        if 2 <= abs(t.ctx_ema_dist_atr or 0) < 5])
+            _agg("|ema_dist| >=5 ATR", [t for t in with_ctx
+                                        if abs(t.ctx_ema_dist_atr or 0) >= 5])
+
         print("── weekend-hold / partial ──")
         _agg("weekend_hold", [t for t in seg if _crossed_weekend(t.ts_open, t.ts_close)])
         _agg("partial(>1 close)", [t for t in seg if t.n_closing_deals > 1])
@@ -185,6 +202,8 @@ def main() -> int:
         "signal_momentum": t.signal_momentum, "signal_atr": t.signal_atr,
         "risk_price": t.risk_price, "n_closings": t.n_closing_deals,
         "session": t.session, "exit_kind": _exit_kind(t),
+        "ctx_ema_dist_atr": t.ctx_ema_dist_atr, "ctx_adx": t.ctx_adx,
+        "ctx_with_htf": t.ctx_with_htf, "ctx_spread_pips": t.ctx_spread_pips,
     } for t in closed]
     out_path = "/data/tradecard/loss_audit_trades.json"
     try:
