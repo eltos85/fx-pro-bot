@@ -17,7 +17,7 @@ import logging
 import signal
 import time
 
-from scalp_bot.analysis.regime import compute_regime_features
+from scalp_bot.analysis.regime import compute_regime_features, is_dead_market
 from scalp_bot.analysis.signals import diagnose
 from scalp_bot.analysis.strategies import build_strategies, resolve
 from scalp_bot.config.settings import load_settings
@@ -422,6 +422,36 @@ def run() -> None:
                     _log_shadow(db, cfg, sig, "adx_strong", snap, htf,
                                 key_levels, now, btc_snap)
                     continue
+                # Гейт «мёртвого рынка» (v0.18.34, 2026-07-10, одобрено
+                # пользователем): fade-профит = амплитуда отскока, в тихом
+                # рынке без топлива (NATR<0.5 И liq=0 И rv_burst<1.1) отскоку
+                # некуда идти. ТОЛЬКО sweep_fade-семейство (data-driven scope:
+                # threshold-sweep n=86 07-03..10, cut WR 16% −$208 vs keep 38%
+                # +$16, p=0.049; гипотеза префиксирована BUILDLOG 07-07; см.
+                # docstring is_dead_market). density-страты не тронуты (нет
+                # данных). Fail-open при None-фичах. Откат:
+                # SCALP_DEAD_MARKET_GATE_ENABLED=false (без деплоя).
+                if (cfg.dead_market_gate_enabled
+                        and sig.strategy.startswith("sweep_fade")):
+                    try:
+                        _feats = compute_regime_features(
+                            snap, htf, key_levels, now, btc_snap=btc_snap)
+                    except Exception:
+                        log.exception("dead-market feats %s failed", sig.symbol)
+                        _feats = None
+                    if is_dead_market(_feats,
+                                      natr_max=cfg.dead_market_natr_max_pct,
+                                      rv_max=cfg.dead_market_rv_max):
+                        play.info("💀 [%s] %s — мёртвый рынок (NATR %.2f%%<%.2f, "
+                                  "liq=0, rv %.2f<%.2f): отскоку нет топлива — "
+                                  "фейд пропускаю", sig.symbol, sig.side,
+                                  _feats.get("htf_natr_pct") or 0.0,
+                                  cfg.dead_market_natr_max_pct,
+                                  _feats.get("rv_burst") or 0.0,
+                                  cfg.dead_market_rv_max)
+                        _log_shadow(db, cfg, sig, "dead_market", snap, htf,
+                                    key_levels, now, btc_snap, feats=_feats)
+                        continue
                 # SL-cooldown: не перефейдиваем провалившийся уровень сразу.
                 # Повторный вход той же стороной сразу после SL — в среднем
                 # убыточен (backtest 15д; live-кейс XLMUSDT #816 SL→#817 SL за
@@ -524,7 +554,7 @@ def _log_strategy_stats(db: ScalpDB) -> None:
 
 # Аудит v0.9.0: liq/funding убраны из воронки — больше не факторы входа.
 def _log_shadow(db, cfg, sig, blocked_by: str, snap, htf, key_levels,
-                now: float, btc_snap=None) -> None:
+                now: float, btc_snap=None, feats=None) -> None:
     """Shadow-лог сигнала, отвергнутого режим-гейтом (v0.18.31).
 
     Пишет regime-фичи + причину блокировки + уровни несостоявшейся сделки в
@@ -535,12 +565,13 @@ def _log_shadow(db, cfg, sig, blocked_by: str, snap, htf, key_levels,
     рвётся (no-data-fitting.mdc)."""
     if not getattr(cfg, "shadow_log_enabled", True):
         return
-    try:
-        feats = compute_regime_features(snap, htf, key_levels, now,
-                                        btc_snap=btc_snap)
-    except Exception:
-        log.exception("shadow regime features %s failed", sig.symbol)
-        feats = None
+    if feats is None:  # dead_market-гейт передаёт уже посчитанные (не дублируем)
+        try:
+            feats = compute_regime_features(snap, htf, key_levels, now,
+                                            btc_snap=btc_snap)
+        except Exception:
+            log.exception("shadow regime features %s failed", sig.symbol)
+            feats = None
     try:
         db.insert_shadow(symbol=sig.symbol, side=sig.side,
                          strategy=sig.strategy, blocked_by=blocked_by,

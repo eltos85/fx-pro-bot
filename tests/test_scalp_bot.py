@@ -4331,3 +4331,78 @@ def test_settings_shadow_log_enabled_default():
     from scalp_bot.config.settings import ScalpSettings
     assert ScalpSettings().shadow_log_enabled is True
 
+
+# ─── v0.18.34: гейт «мёртвого рынка» (natr<0.5 & liq=0 & rv<1.1) ────────────
+
+def test_dead_market_blocks_only_full_conjunction():
+    """Блок ТОЛЬКО при конъюнкции всех трёх условий (data: одиночные условия
+    не сепарируют — liq=0 p=1.0, rv p=1.0; конъюнкция p=0.049)."""
+    from scalp_bot.analysis.regime import is_dead_market
+    kw = dict(natr_max=0.5, rv_max=1.1)
+    dead = {"htf_natr_pct": 0.4, "liq_count": 0, "rv_burst": 0.8}
+    assert is_dead_market(dead, **kw) is True
+    # каждое условие в отдельности снимает блок
+    assert is_dead_market({**dead, "htf_natr_pct": 0.6}, **kw) is False
+    assert is_dead_market({**dead, "liq_count": 3}, **kw) is False
+    assert is_dead_market({**dead, "rv_burst": 1.3}, **kw) is False
+
+
+def test_dead_market_boundaries_strict():
+    """Границы строгие (<): natr==0.5 / rv==1.1 — НЕ мёртвый (торгуем)."""
+    from scalp_bot.analysis.regime import is_dead_market
+    kw = dict(natr_max=0.5, rv_max=1.1)
+    assert is_dead_market(
+        {"htf_natr_pct": 0.5, "liq_count": 0, "rv_burst": 0.8}, **kw) is False
+    assert is_dead_market(
+        {"htf_natr_pct": 0.4, "liq_count": 0, "rv_burst": 1.1}, **kw) is False
+
+
+def test_dead_market_fail_open_on_missing_features():
+    """Fail-open: None-фича или пустой dict → False (не блокируем вслепую,
+    консистентно с ADX-гейтом)."""
+    from scalp_bot.analysis.regime import is_dead_market
+    kw = dict(natr_max=0.5, rv_max=1.1)
+    assert is_dead_market(None, **kw) is False
+    assert is_dead_market({}, **kw) is False
+    assert is_dead_market(
+        {"htf_natr_pct": None, "liq_count": 0, "rv_burst": 0.5}, **kw) is False
+    assert is_dead_market(
+        {"htf_natr_pct": 0.3, "liq_count": None, "rv_burst": 0.5}, **kw) is False
+    assert is_dead_market(
+        {"htf_natr_pct": 0.3, "liq_count": 0, "rv_burst": None}, **kw) is False
+
+
+def test_dead_market_settings_defaults():
+    """v0.18.34: гейт включён по умолчанию, пороги из threshold-sweep
+    (natr<0.5, rv<1.1); откат через env без деплоя."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.dead_market_gate_enabled is True
+    assert s.dead_market_natr_max_pct == 0.5
+    assert s.dead_market_rv_max == 1.1
+
+
+def test_main_log_shadow_accepts_precomputed_feats(tmp_path):
+    """dead_market-гейт передаёт уже посчитанные фичи — _log_shadow пишет их
+    как есть (без пересчёта)."""
+    from scalp_bot.app.main import _log_shadow
+
+    class _Cfg:
+        shadow_log_enabled = True
+
+    from scalp_bot.analysis.regime import REGIME_COLUMNS
+    db = ScalpDB(str(tmp_path))
+    sig = Signal(symbol="SOLUSDT", side="long", entry_ref=97.0, sl_level=96.5,
+                 tp_level=98.5, score=4, reasons=["x"], strategy="sweep_fade")
+    feats = {k: None for k in REGIME_COLUMNS}
+    feats.update({"htf_natr_pct": 0.33, "liq_count": 0, "rv_burst": 0.9,
+                  "session": "asia"})
+    _log_shadow(db, _Cfg(), sig, "dead_market", _snap([CvdSample(1, 97, 0)]),
+                None, None, 3 * 3600.0, feats=feats)
+    rows = db.shadow_rows()
+    assert len(rows) == 1
+    assert rows[0]["blocked_by"] == "dead_market"
+    assert abs(rows[0]["htf_natr_pct"] - 0.33) < 1e-9
+    assert rows[0]["session"] == "asia"  # прекомпьютнутые, без пересчёта
+    db.close()
+

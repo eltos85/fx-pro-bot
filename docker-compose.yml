@@ -262,6 +262,15 @@ services:
       # rolling-regime_ratio lookback (бывш. sweep_fade_trend v0.18.27; страта
       # удалена v0.18.33, но regime_ratio остаётся в regime_features-телеметрии).
       SCALP_REGIME_RATIO_LOOKBACK_BARS: ${SCALP_REGIME_RATIO_LOOKBACK_BARS:-8}
+      # ─── v0.18.34 (2026-07-10): гейт «мёртвого рынка» для sweep_fade-семейства ──
+      # Блок при «тихо И нет топлива»: NATR<0.5% И liq=0 И rv_burst<1.1.
+      # Data: threshold-sweep n=86, cut WR 16% −$208 vs keep 38% +$16 (p=0.049),
+      # 7/8 дней лучше; гипотеза префиксирована 07-07, OOS 07-08..10 подтверждён.
+      # Блоки пишутся в shadow_signals ('dead_market') — контрфактуал копится.
+      # Откат без деплоя: false.
+      SCALP_DEAD_MARKET_GATE_ENABLED: ${SCALP_DEAD_MARKET_GATE_ENABLED:-true}
+      SCALP_DEAD_MARKET_NATR_MAX_PCT: ${SCALP_DEAD_MARKET_NATR_MAX_PCT:-0.5}
+      SCALP_DEAD_MARKET_RV_MAX: ${SCALP_DEAD_MARKET_RV_MAX:-1.1}
       # Авто-селектор: бот сам выбирает монеты под стратегию из get_tickers
       # (композит range%/turnover/spread), берёт ВСЕ прошедшие фильтр и
       # пересматривает раз в 5 мин (ротация — no-op если состав не сменился).

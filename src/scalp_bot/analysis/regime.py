@@ -360,6 +360,40 @@ def compute_regime_features(snap, htf=None, key_levels=None, now: float = 0.0,
     }
 
 
+def is_dead_market(feats: dict | None, *, natr_max: float, rv_max: float) -> bool:
+    """Гейт «мёртвого рынка» (v0.18.34, 2026-07-10) для sweep_fade-семейства.
+
+    True = рынок мёртв (блокируем вход): НИЗКАЯ волатильность И нет топлива —
+    все три условия одновременно:
+      htf_natr_pct < natr_max  И  liq_count == 0  И  rv_burst < rv_max.
+
+    ─── Data basis (артефакт: threshold-sweep 2026-07-10, regime_features
+    n=86 decided 07-03..07-10, Fisher exact) ───
+    Гипотеза префиксирована в BUILDLOG_SCALP 2026-07-07 (анти-паттерн дня
+    −$112: cvd≈0, liq=0, NATR 0.32–0.76, rv<1.1) ДО сбора проверочных данных.
+    Блок natr<0.5 & liq=0 & rv<1.1: cut n=31 WR 16% net −$207.88 vs keep
+    n=55 WR 38% net +$16.00 (p=0.049); 7/8 дней улучшены; post-registration
+    OOS 07-08..10 — все дни улучшены; sweep_fade_run −$101.54→+$67.14.
+    Одиночные условия НЕ сепарируют (liq=0 p=1.0, rv p=1.0, asia p=0.81) —
+    работает только конъюнкция «тихо И нет топлива». Физика: fade-профит =
+    амплитуда отскока; в сжатом рынке без ликвидаций и всплесков RV отскоку
+    некуда идти (Bollinger 2001 squeeze; Osler 2003 — стопы кластеризуются
+    у уровней, но каскад нужен поток).
+
+    Fail-open: любая фича None → False (не блокируем вслепую; консистентно
+    с ADX-гейтом). Каждый блок пишется в shadow_signals (blocked_by=
+    'dead_market') — контрфактуал продолжает копиться для пересмотра.
+    """
+    if not feats:
+        return False
+    natr = feats.get("htf_natr_pct")
+    liq = feats.get("liq_count")
+    rv = feats.get("rv_burst")
+    if natr is None or liq is None or rv is None:
+        return False
+    return natr < natr_max and liq == 0 and rv < rv_max
+
+
 # Порядок колонок = порядок значений в dict (для INSERT в regime_features).
 # Должен совпадать с _FEATURE_COLS в state/db.py (тест-инвариант).
 REGIME_COLUMNS = (

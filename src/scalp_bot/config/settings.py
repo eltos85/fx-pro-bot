@@ -609,6 +609,21 @@ class ScalpSettings(BaseSettings):
     # (Wilder 1978; multi-confirmation trend filter).
     htf_di_long_gate: bool = Field(default=True)
 
+    # ─── Гейт «мёртвого рынка» (v0.18.34, 2026-07-10, одобрено пользователем) ──
+    # Блок входа sweep_fade-семейства при конъюнкции «тихо И нет топлива»:
+    # htf_natr_pct < natr_max И liq_count == 0 И rv_burst < rv_max.
+    # Data basis: threshold-sweep n=86 (07-03..10), cut n=31 WR 16% −$207.88
+    # vs keep n=55 WR 38% +$16.00, p=0.049 (Fisher); 7/8 дней улучшены;
+    # гипотеза префиксирована BUILDLOG_SCALP 2026-07-07 (анти-паттерн дня
+    # −$112), post-registration OOS 07-08..10 — все дни улучшены. Одиночные
+    # условия не сепарируют (liq=0 p=1.0, rv p=1.0) — только конъюнкция.
+    # Физика: fade-профит = амплитуда отскока (Bollinger 2001 squeeze).
+    # Блоки пишутся в shadow_signals (blocked_by='dead_market') — контрфактуал
+    # копится, пересмотр порогов при следующем n≥100. Fail-open при None.
+    dead_market_gate_enabled: bool = Field(default=True)
+    dead_market_natr_max_pct: float = Field(default=0.5)
+    dead_market_rv_max: float = Field(default=1.1)
+
     # ─── Сессионный фильтр (опционально, default OFF) ─────────────────────
     # Канон: свипы доходят в London/NY open + overlap, «мёртвые» часы дают
     # ложные. Crypto 24/7 + строгий конфлюенс → по умолчанию ВЫКЛ, чтобы не
