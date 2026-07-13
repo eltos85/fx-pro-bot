@@ -8,7 +8,6 @@ from fx_momentum_bot.app.main import (
     _calc_partial_close_volume,
     _drop_forming_bar,
     _flip_close_targets,
-    _has_same_side_position,
     _momentum_sign_direction,
     _r_multiple,
     _should_record_direction,
@@ -97,20 +96,6 @@ def test_flip_close_targets_empty_on_flat_or_no_positions() -> None:
 
 def test_flip_close_targets_nothing_when_same_direction() -> None:
     assert _flip_close_targets([_pos(1, "long")], "long") == []
-
-
-def test_has_same_side_position_blocks_duplicate_entry() -> None:
-    # Per-symbol гард (BUILDLOG 2026-07-10): при живой long-позиции повторный
-    # long-сигнал (дребезг threshold / retry после slippage-guard) — дубль.
-    assert _has_same_side_position([_pos(1, "long")], "long")
-    assert _has_same_side_position([_pos(1, "short"), _pos(2, "long")], "long")
-
-
-def test_has_same_side_position_allows_opposite_or_empty() -> None:
-    # Противоположная позиция не блокирует: её закроет sign-decay/флип.
-    assert not _has_same_side_position([_pos(1, "short")], "long")
-    assert not _has_same_side_position([], "long")
-    assert not _has_same_side_position([_pos(1, "long")], "flat")
 
 
 def test_momentum_sign_direction() -> None:

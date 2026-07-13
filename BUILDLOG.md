@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-07-13
+
+### revert(momentum): откат per-symbol guard + возврат бота в торговлю на демо
+
+Пользователь попросил откатить правки по боту за пятницу (2026-07-10) и
+вернуть его к доправочному состоянию — пусть торгует на демо.
+
+Откатан только код-фикс `1af1022` (per-symbol гард входа `_has_same_side_position`
+в `src/fx_momentum_bot/app/main.py` + тесты в `tests/test_fx_momentum_bot.py`):
+файлы возвращены к версии коммита `443d589` (pre-guard). Research-коммиты
+`2cc8079`/`473c0cc` (scripts/_*.py, валидация канона, pivot-кандидаты) и
+research-артефакты из `1af1022` (loss_audit_trades_0710.json, scripts/_momentum_*)
+оставлены как история анализа — на торговлю не влияют.
+
+На VPS: `MOMENTUM_BOT_TRADING_ENABLED=false` → `true` (бот был переведён в paper
+в ходе research-фазы), selective rebuild `fx-momentum-bot`.
+
+**Симптом → причина → решение:** бот был остановлен в paper-режиме на время
+research pivot-а стратегии; решение пользователя — откатить кодовый фикс
+пятницы и вернуть бота в live-торговлю на демо в доправочном состоянии.
+Тесты `tests/test_fx_momentum_bot.py` — 55 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`,
+`.env` (VPS, TRADING_ENABLED)
+
 ## 2026-07-10
 
 ### research(momentum-pivot): бэктест кандидатов на замену — intraday MR отпадает, multi-asset TSMOM работает

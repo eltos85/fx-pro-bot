@@ -345,27 +345,6 @@ def _flip_close_targets(
     return [p for p in positions if p.side != new_direction]
 
 
-def _has_same_side_position(
-    positions: list[ManagedPosition], direction: str
-) -> bool:
-    """Есть ли уже открытая позиция этого символа в направлении сигнала.
-
-    Per-symbol гард входа — инвариант бэктест-модели «один трейд на символ»
-    (scripts/momentum_exit_backtest.py: вход только при pos is None). Live
-    его не имел, и edge-trigger дублировал позиции двумя путями (диагностика
-    BUILDLOG 2026-07-10, 22 дубля / −10.1R за 05.06–10.07):
-      1) дребезг momentum вокруг threshold: long→flat→long при живой
-         позиции — «новый флип» открывал вторую;
-      2) retry после отказа slippage-guard, чей аварийный close не прошёл —
-         позиция жила на брокере, бот открывал вторую.
-    Сигнал при открытой same-side позиции считается отработанным (в бэктесте
-    last_direction обновляется каждый бар независимо от позиции).
-    """
-    if direction not in {"long", "short"}:
-        return False
-    return any(p.side == direction for p in positions)
-
-
 def _is_market_closed_error(err: str | None) -> bool:
     """Ошибка закрытия/открытия = рынок закрыт (выходные, maintenance break).
 
@@ -841,18 +820,10 @@ def run() -> None:
                 sym_session_block = session_skips.get(symbol)
 
                 last_direction = store.get_last_direction(symbol)
-                # Per-symbol гард: уже есть открытая позиция символа в эту же
-                # сторону → входа не будет (см. _has_same_side_position).
-                # wants_open=False → direction фиксируется, сигнал считается
-                # отработанным (эквивалент бэктест-семантики).
-                same_side_open = _has_same_side_position(
-                    positions_by_symbol.get(symbol, []), signal_data.direction
-                )
                 # Edge-trigger: входим только на СМЕНЕ направления сигнала.
                 wants_open = (
                     signal_data.direction in {"long", "short"}
                     and signal_data.direction != last_direction
-                    and not same_side_open
                     and executor is not None
                 )
 
@@ -922,11 +893,6 @@ def run() -> None:
                     note = "flat"
                 elif signal_data.direction == last_direction:
                     note = "same_direction"
-                elif same_side_open:
-                    # Позиция в эту сторону уже открыта — дубль запрещён
-                    # (per-symbol гард). Direction фиксируется: сигнал
-                    # отработан существующей позицией.
-                    note = "skip:already_open"
                 elif friday_entry_block:
                     # От flat_start до конца пятницы новые входы запрещены:
                     # позиция уехала бы в выходные (в окне flat её тут же
