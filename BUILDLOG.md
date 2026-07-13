@@ -26,6 +26,23 @@ research pivot-а стратегии; решение пользователя �
 пятницы и вернуть бота в live-торговлю на демо в доправочном состоянии.
 Тесты `tests/test_fx_momentum_bot.py` — 55 passed.
 
+### fix(momentum): re-apply per-symbol guard — защита от задвоения позиций
+
+Сразу после отката пользователь подтвердил, что per-symbol гард
+`_has_same_side_position` — это фикс задвоения позиций (диагностика
+2026-07-10: 22 дубля / −10.1R за 05.06–10.07), и попросил вернуть его.
+Без гарда оба механизма задвоения снова активны:
+1) дребезг momentum вокруг threshold (long→flat→long при живой позиции);
+2) retry после отказа slippage-guard (аварийный close не прошёл → позиция
+   жива на брокере, бот открывает вторую).
+
+Возвращена только кодовая часть `1af1022` (`src/fx_momentum_bot/app/main.py`
++34, `tests/test_fx_momentum_bot.py` +15) поверх доправочного состояния
+`443d589`. Research-артефакты не тронуты. Тесты — 57 passed
+(+2 теста guard'а: blocks_duplicate_entry, allows_opposite_or_empty).
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`
+
 **Файлы:** `src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`,
 `.env` (VPS, TRADING_ENABLED)
 
