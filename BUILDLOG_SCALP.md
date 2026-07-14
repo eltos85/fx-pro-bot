@@ -4,6 +4,54 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-07-14
+
+### fix(scalp/universe): v0.18.35 — отсев stock-перпов (demo ErrCode 110126)
+`(хеш после коммита)`
+
+**Симптом:** после ротации Bybit demo API-key (старый истёк 2026-07-12,
+ErrCode 33004) новый ключ отклонял ордера по `SKHYNIXUSDT` / `SOXLUSDT` с
+`ErrCode 110126` («You must sign the required agreement before trading this
+contract»). Бот почти не делал ставок. Первоначальная гипотеза «проблема в
+контракте» пользователем опровергнута — корень в селекторе вселенной.
+
+**Причина:** авто-селектор `universe.py` отбирал инструменты только по
+24h-метрикам (turnover/range/spread) и не проверял `symbolType`. В отбор
+попадали **stock perpetuals** (`symbolType=stock` — перпы на акции/ETF:
+SKHYNIX, SOXL, NVDL...). По офдокам Bybit:
+- demo-trading поддерживает только Linear Perpetual, но **stock-перпы требуют
+  отдельного Trading Terms** (коды 110123/110125/110126 —
+  https://bybit-exchange.github.io/docs/v5/error);
+- demo-API **не предоставляет endpoint** для принятия соглашения
+  (https://bybit-exchange.github.io/docs/v5/demo) → на «чистом» новом
+  demo-аккаунте stock-перпы неторгуемы через API.
+Дополнительно stock-перпы торгуются по сессиям реальных бирж (KRX/NYSE),
+а не 24/7 крипто-флоу — это ломает скальп-логику (свипы/лонгации/CVD).
+
+**Решение:** `ScalpBybitClient.stock_type_symbols()` — собирает множество
+linear-символов с `symbolType == "stock"` через `get_instruments_info` с
+**пагинацией** (на Bybit >500 linear-символов, без cursor API вернёт первую
+страницу — правило stats-collection.mdc: incomplete data). Кэш 1ч (листинги
+редки, селектор крутится каждые `universe_refresh_sec`). Fail-open: при
+ошибке API возвращаем пустое множество (не блокируем вселенную). В
+`_select_universe` тикеры stock-перпов отсекаются ДО `filter_tickers` —
+они не попадают ни в rows, ни в padding-pool, ни в momentum-ветку.
+
+Это **баг-фикс исполнения ордеров** (ордер отклоняется биржей на
+несовместимом с demo инструменте), не изменение торговой логики — попадает
+в допустимые быстрые правки strategy-guard.mdc. Пороги/фильтры стратегии
+не тронуты.
+
+**Файлы:** `src/scalp_bot/trading/client.py` (метод + кэш),
+`src/scalp_bot/app/main.py` (`_select_universe` фильтр),
+`tests/test_scalp_bot.py` (4 теста: пагинация, кэш-TTL, fail-open, отсев в
+`_select_universe`).
+
+**Дока:** https://bybit-exchange.github.io/docs/v5/error (110123/110125),
+https://bybit-exchange.github.io/docs/v5/demo (demo limitations),
+https://bybit-exchange.github.io/docs/v5/market/instrument (symbolType,
+cursor pagination).
+
 ## 2026-07-10
 
 ### feat(scalp/regime): v0.18.34 — гейт «мёртвого рынка» для sweep_fade-семейства

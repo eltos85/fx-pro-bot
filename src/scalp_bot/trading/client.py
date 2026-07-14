@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 
 from pybit.unified_trading import HTTP
@@ -60,6 +61,10 @@ class ScalpBybitClient:
                              demo=demo, recv_window=10000)
         self._category = category
         self._instr: dict[str, InstrumentInfo] = {}
+        # Кэш множества stock-перпов (get_instruments_info с пагинацией — дорого).
+        # symbolType меняется редко (листинги/делистинги), TTL 1ч достаточно.
+        self._stock_syms: set[str] | None = None
+        self._stock_syms_ts: float = 0.0
 
     # ─── instruments ─────────────────────────────────────────────────────
 
@@ -133,6 +138,54 @@ class ScalpBybitClient:
             log.exception("get_tickers failed")
             return []
         return resp.get("result", {}).get("list", []) or []
+
+    _STOCK_TYPE_TTL_SEC = 3600.0
+
+    def stock_type_symbols(self) -> set[str]:
+        """Множество linear-символов с ``symbolType == "stock"`` (перпы на
+        акции/ETF: SKHYNIXUSDT, SOXLUSDT, ...). На demo Bybit требует по ним
+        отдельного Trading Terms (ErrCode 110126 — «must sign required
+        agreement before trading this contract»), а demo-API не предоставляет
+        endpoint для принятия соглашения → ордер отклоняется. Дополнительно
+        stock-перпы торгуются по сессиям реальных бирж (KRX/NYSE), а не 24/7
+        крипто-флоу — это ломает скальп-логику (свипы/лонгации/CVD).
+
+        Пагинация обязательна: на Bybit >500 linear-символов, без cursor
+        API вернёт первую страницу и символы после 500 будут пропущены
+        (правило stats-collection.mdc: incomplete data → неверный вывод).
+        Офдок (поле symbolType, cursor):
+        https://bybit-exchange.github.io/docs/v5/market/instrument
+
+        Кэшируется на ``_STOCK_TYPE_TTL_SEC`` (1ч): листинги редки, селектор
+        крутится каждые ``universe_refresh_sec``. fail-open: при ошибке API
+        возвращаем пустое множество (не блокируем вселенную)."""
+        now = time.time()
+        if (self._stock_syms is not None
+                and now - self._stock_syms_ts < self._STOCK_TYPE_TTL_SEC):
+            return self._stock_syms
+        out: set[str] = set()
+        cursor = ""
+        try:
+            while True:
+                kw: dict = {"category": self._category, "limit": 1000}
+                if cursor:
+                    kw["cursor"] = cursor
+                resp = self._session.get_instruments_info(**kw)
+                res = resp.get("result", {}) or {}
+                for it in res.get("list", []) or []:
+                    if (it.get("symbolType") or "").lower() == "stock":
+                        s = it.get("symbol") or ""
+                        if s:
+                            out.add(s)
+                cursor = res.get("nextPageCursor") or ""
+                if not cursor:
+                    break
+        except Exception:
+            log.exception("get_instruments_info(stock) failed")
+            return out  # частичный/пустой — fail-open
+        self._stock_syms = out
+        self._stock_syms_ts = now
+        return out
 
     def round_qty(self, symbol: str, qty: float) -> float:
         info = self.instrument(symbol)

@@ -2729,6 +2729,115 @@ def test_score_ticker_excludes_stablecoins():
     assert "USDC" in STABLE_BASES
 
 
+# ─── отсев stock-перпов из вселенной (v0.18.35, Bybit demo ErrCode 110126) ──
+class _InstrSession:
+    """Заглушка pybit HTTP: get_instruments_info отдаёт страницы с курсором."""
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = 0
+
+    def get_instruments_info(self, **params):
+        cur = int(params.get("cursor", "0") or "0")
+        self.calls += 1
+        page = self.pages[cur] if cur < len(self.pages) else []
+        nxt = str(cur + 1) if cur + 1 < len(self.pages) else ""
+        return {"result": {"list": page, "nextPageCursor": nxt}}
+
+
+def _instr(symbol, symbol_type):
+    return {"symbol": symbol, "symbolType": symbol_type,
+            "contractType": "LinearPerpetual"}
+
+
+def _mk_instr_client(pages):
+    from scalp_bot.trading.client import ScalpBybitClient
+    cl = ScalpBybitClient.__new__(ScalpBybitClient)
+    cl._category = "linear"
+    cl._instr = {}
+    cl._stock_syms = None
+    cl._stock_syms_ts = 0.0
+    cl._session = _InstrSession(pages)
+    return cl
+
+
+def test_stock_type_symbols_pagination_and_filter():
+    """v0.18.35: stock_type_symbols собирает ВСЕ stock-перпы через пагинацию
+    (>500 linear-символов на Bybit — без cursor API вернёт первую страницу и
+    символы после 500 будут пропущены, правило stats-collection.mdc). Крипто-
+    и innovation-перпы в множество НЕ попадают."""
+    pages = [
+        [_instr("BTCUSDT", ""), _instr("SKHYNIXUSDT", "stock"),
+         _instr("SOXLUSDT", "stock"), _instr("NEARUSDT", "")],
+        [_instr("SOLUSDT", ""), _instr("NVDLUSDT", "stock"),
+         _instr("HYPEUSDT", "innovation")],
+    ]
+    cl = _mk_instr_client(pages)
+    stock = cl.stock_type_symbols()
+    assert stock == {"SKHYNIXUSDT", "SOXLUSDT", "NVDLUSDT"}
+    assert cl._session.calls == 2  # прошли обе страницы, остановились на пустом cursor
+
+
+def test_stock_type_symbols_cached_within_ttl():
+    """Повторный вызов в пределах TTL не бьёт по API (листинги редки, селектор
+    крутится каждые universe_refresh_sec — кэш 1ч сберегает rate-limit)."""
+    cl = _mk_instr_client([[_instr("TSLAUSDT", "stock")]])
+    cl.stock_type_symbols()
+    assert cl._session.calls == 1
+    cl.stock_type_symbols()  # из кэша
+    assert cl._session.calls == 1
+
+
+def test_stock_type_symbols_fail_open_on_api_error():
+    """При ошибке API возвращаем пустое множество (fail-open): не блокируем
+    вселенную целиком из-за временного хиккапа instruments-info."""
+    class _ErrSess:
+        def get_instruments_info(self, **p):
+            raise RuntimeError("network down")
+    from scalp_bot.trading.client import ScalpBybitClient
+    cl = ScalpBybitClient.__new__(ScalpBybitClient)
+    cl._category = "linear"
+    cl._instr = {}
+    cl._stock_syms = None
+    cl._stock_syms_ts = 0.0
+    cl._session = _ErrSess()
+    assert cl.stock_type_symbols() == set()
+
+
+def test_select_universe_drops_stock_perps():
+    """v0.18.35: _select_universe отсекает stock-перпы ДО фильтра/ранжирования
+    — они не попадают ни в rows, ни в padding-pool. На demo Bybit требует по
+    ним Trading Terms (ErrCode 110126), который нельзя принять через API;
+    плюс торгуются по сессиям реальных бирж, а не 24/7 крипто-флоу."""
+    from scalp_bot.app.main import _select_universe
+    from scalp_bot.config.settings import ScalpSettings
+
+    class _Client:
+        def __init__(self):
+            self.tickers = [
+                _ticker("NEARUSDT", 100, 108, 100, 250e6),       # крипто — годен
+                _ticker("SKHYNIXUSDT", 100, 112, 100, 400e6),    # stock — отсечь
+                _ticker("SOXLUSDT", 100, 115, 100, 500e6),       # stock — отсечь
+                _ticker("ZECUSDT", 100, 110, 100, 130e6),        # крипто — годен
+            ]
+
+        def get_tickers(self):
+            return self.tickers
+
+        def stock_type_symbols(self):
+            return {"SKHYNIXUSDT", "SOXLUSDT"}
+
+        def get_kline(self, *a, **k):  # для _fresh_rvol (universe_min_rvol>0)
+            return []
+
+    cfg = ScalpSettings()
+    cfg.universe_min_rvol = 0.0  # отключаем RVOL-гейт — он требует klines
+    picked = _select_universe(_Client(), cfg)
+    assert "SKHYNIXUSDT" not in picked
+    assert "SOXLUSDT" not in picked
+    # крипто-перпы остаются в вселенной
+    assert "NEARUSDT" in picked or "ZECUSDT" in picked
+
+
 def test_pad_pool_respects_range_floor_suitability():
     """v0.18.29 (запрос пользователя 2026-06-28): padding pool использует canon
     range-floor (6%), а не 0.0 — добор не тащит непригодные майоры (BTC/ETH/SOL,
