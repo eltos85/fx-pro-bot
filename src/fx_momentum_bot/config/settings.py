@@ -194,18 +194,21 @@ class MomentumBotSettings(BaseSettings):
         default=1.5, validation_alias="MOMENTUM_BOT_TRAILING_ATR_MULT"
     )
 
-    # ── Эксперимент «profit floor» (BUILDLOG 2026-07-15): трейлинг-флор в
-    # долларах. При достижении gross-PnL ≥ profit_floor_usd ставит защитный
-    # SL на цену, соответствующую ровно profit_floor_usd прибыли, и двигает
-    # его только в прибыльную сторону (max для long / min для short). Прибыль
-    # может расти дальше, откат вниз закрывается брокером, но не ниже floor.
-    # Не канон: $3 = 0.2R при risk $15 (канон TP 3R, Carter 2012) — режет
-    # тренды рано. Opt-in: default off, включается env для эксперимента.
-    profit_floor_enabled: bool = Field(
-        default=False, validation_alias="MOMENTUM_BOT_PROFIT_FLOOR_ENABLED"
+    # ── Эксперимент «profit protect» (BUILDLOG 2026-07-15): трейлинг-стоп по
+    # долларовой прибыли с защитой ratio× текущего gross-PnL. При достижении
+    # gross ≥ profit_protect_activate_usd ставит SL на цену, дающую ровно
+    # ratio× текущей прибыли, и двигает только в прибыльную сторону. При
+    # росте PnL SL едет вверх, при откате — max/min с prev_SL держит его,
+    # закрытие по брокерному SL в realtime. Пример (ratio 0.8): $4 → SL $3.2,
+    # $5 → SL $4. Не канон: режет тренды раньше 3R-TP (Carter 2012). Opt-in.
+    profit_protect_enabled: bool = Field(
+        default=False, validation_alias="MOMENTUM_BOT_PROFIT_PROTECT_ENABLED"
     )
-    profit_floor_usd: float = Field(
-        default=3.0, validation_alias="MOMENTUM_BOT_PROFIT_FLOOR_USD"
+    profit_protect_ratio: float = Field(
+        default=0.8, validation_alias="MOMENTUM_BOT_PROFIT_PROTECT_RATIO"
+    )
+    profit_protect_activate_usd: float = Field(
+        default=2.0, validation_alias="MOMENTUM_BOT_PROFIT_PROTECT_ACTIVATE_USD"
     )
 
     # Dedicated cTrader credentials for this bot only.

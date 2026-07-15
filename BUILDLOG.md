@@ -6,6 +6,46 @@
 
 ## 2026-07-15
 
+### experiment(momentum): трейлинг 80% прибыли — profit-protect (замена floor $3)
+
+Переделка механики по инициативе пользователя (не data-driven, не канон).
+Вместо фиксированного floor $3 — трейлинг-стоп по долларовой прибыли с
+защитой 80% текущего gross-PnL: SL защищает `ratio×` прибыли и двигается
+вверх за ростом PnL, при откате не опускается. Пример (ratio 0.8): gross
+$4 → SL защищает $3.2; gross $5 → SL $4. Активация при gross ≥ $2 (выбор
+пользователя). База — gross PnL (выбор пользователя; net в cTrader будет
+ниже на swap+commission, как показал аудит #152541014 ниже).
+
+**Формула** (упрощается благодаря линейности PnL по цене, swap в gross не
+входит): `SL = entry ± ratio × signed_move`, gross нужен только для порога
+активации — нет зависимости от точности K (USD/price-unit), точнее прошлого
+floor-расчёта. `target_SL = max/min(prev_SL, protect_price)` → SL только в
+прибыльную сторону. Брокерный SL срабатывает в realtime при откате.
+
+**Аудит предыдущей механики (floor $3), запись ниже, подтвердил работу**:
+AUDUSD #152541014 закрылась по SL ровно на executionPrice=0.69812=SL,
+gross=$3.05 (floor $3 отработал). Но net=$2.71 = gross − swap($0.10) −
+commission($0.24) — cTrader UI показывает net. Это не баг, а gross-vs-net.
+Новая 80%-механика тоже защищает gross (выбор пользователя); при желании
+защиты net — переключить на `pnl_entry[1]` (net) в `_manage_positions`.
+
+**Реализация (заменила profit_floor):**
+- `MomentumBotSettings.profit_protect_enabled` (default false, env
+  `MOMENTUM_BOT_PROFIT_PROTECT_ENABLED`), `profit_protect_ratio` (0.8, env
+  `_RATIO`), `profit_protect_activate_usd` (2.0, env `_ACTIVATE_USD`) —
+  opt-in. Старые `profit_floor_*` удалены.
+- `_profit_protect_sl(...)` — чистая функция, формула выше.
+- В `_manage_positions` после BE/partial/trailing: `max/min(prev_SL,
+  protect_price)`, `amend_sl_tp` если выгоднее. Лог: `MANAGE ...
+  profit-protect SL -> ... (gross=$.., protect=80%=$..)`.
+- Применяется ко всем позициям.
+
+Тесты `tests/test_fx_momentum_bot.py` — 62 passed (5 переделаны: long/short
+80%, below-activate-none, not-in-profit-none, bad-ratio-none).
+
+**Файлы:** `src/fx_momentum_bot/config/settings.py`,
+`src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`
+
 ### experiment(momentum): трейлинг-флор прибыли $3 — «страховать ставку»
 
 Эксперимент по инициативе пользователя (не data-driven, не канон): закрывать

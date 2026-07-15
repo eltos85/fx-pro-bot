@@ -10,7 +10,7 @@ from fx_momentum_bot.app.main import (
     _flip_close_targets,
     _has_same_side_position,
     _momentum_sign_direction,
-    _profit_floor_sl,
+    _profit_protect_sl,
     _r_multiple,
     _should_record_direction,
 )
@@ -114,54 +114,55 @@ def test_has_same_side_position_allows_opposite_or_empty() -> None:
     assert not _has_same_side_position([_pos(1, "long")], "flat")
 
 
-def test_profit_floor_sl_long_midpoint() -> None:
-    # gross $6 при $3 floor → floor-цена на середине движения (entry→current).
-    # entry 1.10, current 1.12 → signed_move 0.02, K=6/0.02=300 $/price-unit,
-    # floor_signed = 3/300 = 0.01 → floor = 1.11.
-    sl = _profit_floor_sl(
+def test_profit_protect_sl_long_80pct() -> None:
+    # gross $4, ratio 0.8, activate $2 → SL защищает $3.2 = 80% пути entry→cur.
+    # entry 1.10, current 1.12, signed_move 0.02 → SL = 1.10 + 0.8·0.02 = 1.116.
+    sl = _profit_protect_sl(
         side="long", entry_price=1.10, current_price=1.12,
-        gross_usd=6.0, floor_usd=3.0, digits=5,
+        gross_usd=4.0, ratio=0.8, activate_usd=2.0, digits=5,
     )
-    assert sl == round(1.11, 5)
+    assert sl == round(1.116, 5)
 
 
-def test_profit_floor_sl_short_midpoint() -> None:
-    # short: entry 1.12, current 1.10, gross $6, floor $3 → floor 1.11.
-    sl = _profit_floor_sl(
+def test_profit_protect_sl_short_80pct() -> None:
+    # short: entry 1.12, current 1.10, gross $5, ratio 0.8 → SL = 1.12 - 0.8·0.02 = 1.104.
+    sl = _profit_protect_sl(
         side="short", entry_price=1.12, current_price=1.10,
-        gross_usd=6.0, floor_usd=3.0, digits=5,
+        gross_usd=5.0, ratio=0.8, activate_usd=2.0, digits=5,
     )
-    assert sl == round(1.11, 5)
+    assert sl == round(1.104, 5)
 
 
-def test_profit_floor_sl_exact_at_floor() -> None:
-    # gross == floor → floor-цена = current (защита ровно на текущем уровне).
-    sl = _profit_floor_sl(
-        side="long", entry_price=1.10, current_price=1.115,
-        gross_usd=3.0, floor_usd=3.0, digits=5,
-    )
-    assert sl == round(1.115, 5)
-
-
-def test_profit_floor_sl_below_floor_returns_none() -> None:
-    # gross < floor → floor недостижим, ничего не ставим.
-    sl = _profit_floor_sl(
+def test_profit_protect_sl_below_activate_returns_none() -> None:
+    # gross < activate_usd → защита не активна.
+    sl = _profit_protect_sl(
         side="long", entry_price=1.10, current_price=1.111,
-        gross_usd=1.0, floor_usd=3.0, digits=5,
+        gross_usd=1.0, ratio=0.8, activate_usd=2.0, digits=5,
     )
     assert sl is None
 
 
-def test_profit_floor_sl_not_in_profit_returns_none() -> None:
-    # Позиция в убытке (signed_move ≤ 0) → floor не активируется, даже если
-    # gross формально ≥ floor (защита от деления на отрицательное/ноль).
-    assert _profit_floor_sl(
+def test_profit_protect_sl_not_in_profit_returns_none() -> None:
+    # Позиция в убытке (signed_move ≤ 0) → None даже при gross ≥ activate.
+    assert _profit_protect_sl(
         side="long", entry_price=1.12, current_price=1.10,
-        gross_usd=5.0, floor_usd=3.0, digits=5,
+        gross_usd=5.0, ratio=0.8, activate_usd=2.0, digits=5,
     ) is None
-    assert _profit_floor_sl(
+    assert _profit_protect_sl(
         side="long", entry_price=1.10, current_price=1.10,
-        gross_usd=3.0, floor_usd=3.0, digits=5,
+        gross_usd=2.0, ratio=0.8, activate_usd=2.0, digits=5,
+    ) is None
+
+
+def test_profit_protect_sl_bad_ratio_returns_none() -> None:
+    # ratio вне (0, 1] → None.
+    assert _profit_protect_sl(
+        side="long", entry_price=1.10, current_price=1.12,
+        gross_usd=4.0, ratio=0.0, activate_usd=2.0, digits=5,
+    ) is None
+    assert _profit_protect_sl(
+        side="long", entry_price=1.10, current_price=1.12,
+        gross_usd=4.0, ratio=1.5, activate_usd=2.0, digits=5,
     ) is None
 
 

@@ -366,43 +366,45 @@ def _has_same_side_position(
     return any(p.side == direction for p in positions)
 
 
-def _profit_floor_sl(
+def _profit_protect_sl(
     *,
     side: str,
     entry_price: float,
     current_price: float,
     gross_usd: float,
-    floor_usd: float,
+    ratio: float,
+    activate_usd: float,
     digits: int,
 ) -> float | None:
-    """Цена SL, соответствующая ровно ``floor_usd`` прибыли (трейлинг-флор).
+    """Цена SL, защищающая ``ratio``× текущей gross-прибыли (трейлинг по PnL).
 
-    Эксперимент «profit floor» (BUILDLOG 2026-07-15). PnL линеен по цене:
-    ``gross = K · signed_move``, где ``signed_move`` — цена в прибыльную
-    сторону от entry. Тогда ``K = gross / signed_move`` (USD per price-unit),
-    и цена для ровно ``floor_usd`` прибыли:
-      long:  entry + floor_usd / K
-      short: entry − floor_usd / K
+    Эксперимент «profit protect» (BUILDLOG 2026-07-15). Защита ratio× gross
+    = SL на ratio пути от entry к current (PnL линейна по цене, swap в gross
+    не входит). Формула не зависит от точности K (USD/price-unit), gross нужен
+    только для порога активации:
+      long:  entry + ratio × (current − entry)
+      short: entry − ratio × (entry − current)
 
-    Возвращает цену, округлённую до ``digits``, или ``None`` если floor
-    недостижим: gross < floor, либо позиция не в плюсе (signed_move ≤ 0),
-    либо K ≤ 0 (деление на ~0 при отсутствии движения).
+    Пример (ratio 0.8): gross $4 → SL защищает $3.2; gross $5 → $4. Движение
+    только в прибыльную сторону обеспечивает вызывающий код через max/min с
+    prev_SL — при откате gross SL не опускается.
+
+    Возвращает цену, округлённую до ``digits``, или ``None`` если защита не
+    активна: gross < activate_usd, либо позиция не в плюсе (signed_move ≤ 0),
+    либо ratio вне (0, 1].
     """
-    if gross_usd < floor_usd:
+    if gross_usd < activate_usd or not (0.0 < ratio <= 1.0):
         return None
     signed_move = (
         current_price - entry_price if side == "long" else entry_price - current_price
     )
     if signed_move <= 0:
         return None
-    k = gross_usd / signed_move
-    if k <= 0:
-        return None
-    floor_signed = floor_usd / k
-    floor_price = (
-        entry_price + floor_signed if side == "long" else entry_price - floor_signed
+    protect_signed = ratio * signed_move
+    sl_price = (
+        entry_price + protect_signed if side == "long" else entry_price - protect_signed
     )
-    return round(floor_price, digits)
+    return round(sl_price, digits)
 
 
 def _is_market_closed_error(err: str | None) -> bool:
@@ -554,14 +556,15 @@ def _manage_positions(
     # - Linda Raschke discretionary pattern: partial take + runner.
     # - Turtle/LeBeau ATR-family trailing to hold trend legs.
     active_ids: set[int] = set()
-    # Эксперимент «profit floor» (BUILDLOG 2026-07-15): gross-PnL per position
-    # в USD от брокера (точный, с учётом contract_size/quote-conversion).
+    # Эксперимент «profit protect» (BUILDLOG 2026-07-15): gross-PnL per
+    # position в USD от брокера (точный, с учётом contract_size/quote-
+    # conversion для USDJPY/CFD).
     pnl_map: dict[int, tuple[float, float]] = {}
-    if settings.profit_floor_enabled:
+    if settings.profit_protect_enabled:
         try:
             pnl_map = executor.get_unrealized_pnl() or {}
         except Exception as exc:  # noqa: BLE001
-            log.warning("PROFIT_FLOOR: get_unrealized_pnl failed: %s", exc)
+            log.warning("PROFIT_PROTECT: get_unrealized_pnl failed: %s", exc)
             pnl_map = {}
     for symbol, positions in positions_by_symbol.items():
         signal_data = signal_by_symbol.get(symbol)
@@ -683,30 +686,32 @@ def _manage_positions(
                         atr,
                     )
 
-            # ── Эксперимент «profit floor» (BUILDLOG 2026-07-15): трейлинг-
-            # флор в долларах. После BE/partial/trailing — гарантировать что
-            # SL не ниже цены, дающей ровно profit_floor_usd прибыли. floor
-            # считается из линейности PnL по цене через gross-PnL брокера.
-            if settings.profit_floor_enabled and pnl_map:
+            # ── Эксперимент «profit protect» (BUILDLOG 2026-07-15): трейлинг
+            # по долларовой прибыли. После BE/partial/trailing — гарантировать
+            # что SL защищает ratio× текущего gross-PnL. SL = entry ± ratio×
+            # signed_move; max/min с prev_SL → двигаем только в прибыльную
+            # сторону (при откате gross SL не опускается).
+            if settings.profit_protect_enabled and pnl_map:
                 pnl_entry = pnl_map.get(pos.position_id)
                 gross = float(pnl_entry[0]) if pnl_entry else None
-                if gross is not None and gross >= settings.profit_floor_usd:
-                    floor_price = _profit_floor_sl(
+                if gross is not None and gross >= settings.profit_protect_activate_usd:
+                    protect_price = _profit_protect_sl(
                         side=pos.side,
                         entry_price=pos.entry_price,
                         current_price=current_price,
                         gross_usd=gross,
-                        floor_usd=settings.profit_floor_usd,
+                        ratio=settings.profit_protect_ratio,
+                        activate_usd=settings.profit_protect_activate_usd,
                         digits=pos.digits,
                     )
-                    if floor_price is not None:
+                    if protect_price is not None:
                         if pos.side == "long":
                             target_sl = max(
-                                pos.stop_loss or float("-inf"), floor_price
+                                pos.stop_loss or float("-inf"), protect_price
                             )
                         else:
                             target_sl = min(
-                                pos.stop_loss or float("inf"), floor_price
+                                pos.stop_loss or float("inf"), protect_price
                             )
                         target_sl = round(target_sl, pos.digits)
                         prev_sl = (
@@ -722,23 +727,24 @@ def _manage_positions(
                             else target_sl < prev_sl
                         )
                         if better and target_sl != prev_sl:
-                            floor_ok = executor.amend_sl_tp(
+                            prot_ok = executor.amend_sl_tp(
                                 pos.position_id,
                                 sl_price=target_sl,
                                 tp_price=None,
                                 yf_symbol=symbol,
                                 current_price=current_price,
                             )
-                            if floor_ok:
+                            if prot_ok:
                                 pos.stop_loss = target_sl
                                 log.info(
-                                    "MANAGE %s #%d: profit-floor SL -> "
-                                    "%.5f (gross=$%.2f, floor=$%.2f)",
+                                    "MANAGE %s #%d: profit-protect SL -> "
+                                    "%.5f (gross=$%.2f, protect=%.0f%%=$%.2f)",
                                     symbol,
                                     pos.position_id,
                                     target_sl,
                                     gross,
-                                    settings.profit_floor_usd,
+                                    settings.profit_protect_ratio * 100,
+                                    gross * settings.profit_protect_ratio,
                                 )
 
     cleaned = store.cleanup_position_state(active_ids)
