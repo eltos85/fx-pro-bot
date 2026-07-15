@@ -300,7 +300,15 @@ services:
       SCALP_UNIVERSE_MIN_TURNOVER_USD: ${SCALP_UNIVERSE_MIN_TURNOVER_USD:-100000000}
       # Пины: v0.12.0 (канон-ревизия) — пусто. Убран ALLO: канон «избегать pump/
       # dump» (Volity/stoic.ai/dev.to). Пин был ручной override в обход фильтра.
-      SCALP_UNIVERSE_PIN_SYMBOLS: ${SCALP_UNIVERSE_PIN_SYMBOLS:-}
+      # v0.18.35 (2026-07-15): пины NEAR/HYPE/WLD/ENA — оживить density_break,
+      # которая замолчала 07-03 из-за сужения вселенной до майоров на мёртвом
+      # рынке (rvol-селектор не пропускает волатильные альты). density_break
+      # заточена под пробои плотных стен на волатильных альтах — на майорах
+      # таких стен нет. Решение пользователя (add_all): принять ожидаемый убыток
+      # ради сбора статы. Артефакт: trades density_break по символам (n=195),
+      # NEAR −$40/13, HYPE −$32/9, WLD +$75/4, ENA +$20/4. Пины глобальные —
+      # расширяют вселенную для ВСЕХ стратегий (см. BUILDLOG_SCALP 2026-07-15).
+      SCALP_UNIVERSE_PIN_SYMBOLS: ${SCALP_UNIVERSE_PIN_SYMBOLS:-NEARUSDT,HYPEUSDT,WLDUSDT,ENAUSDT}
       # Per-symbol LONG-блок (v0.18.17, C-07): лонги на этих символах запрещены ВСЕМ
       # стратегиям, шорты разрешены. v0.18.17 ставил ZECUSDT; v0.18.19 СНЯТ
       # (одобрено): основание развалилось на полной выборке — лонг-минус ZEC
