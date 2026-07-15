@@ -366,6 +366,45 @@ def _has_same_side_position(
     return any(p.side == direction for p in positions)
 
 
+def _profit_floor_sl(
+    *,
+    side: str,
+    entry_price: float,
+    current_price: float,
+    gross_usd: float,
+    floor_usd: float,
+    digits: int,
+) -> float | None:
+    """Цена SL, соответствующая ровно ``floor_usd`` прибыли (трейлинг-флор).
+
+    Эксперимент «profit floor» (BUILDLOG 2026-07-15). PnL линеен по цене:
+    ``gross = K · signed_move``, где ``signed_move`` — цена в прибыльную
+    сторону от entry. Тогда ``K = gross / signed_move`` (USD per price-unit),
+    и цена для ровно ``floor_usd`` прибыли:
+      long:  entry + floor_usd / K
+      short: entry − floor_usd / K
+
+    Возвращает цену, округлённую до ``digits``, или ``None`` если floor
+    недостижим: gross < floor, либо позиция не в плюсе (signed_move ≤ 0),
+    либо K ≤ 0 (деление на ~0 при отсутствии движения).
+    """
+    if gross_usd < floor_usd:
+        return None
+    signed_move = (
+        current_price - entry_price if side == "long" else entry_price - current_price
+    )
+    if signed_move <= 0:
+        return None
+    k = gross_usd / signed_move
+    if k <= 0:
+        return None
+    floor_signed = floor_usd / k
+    floor_price = (
+        entry_price + floor_signed if side == "long" else entry_price - floor_signed
+    )
+    return round(floor_price, digits)
+
+
 def _is_market_closed_error(err: str | None) -> bool:
     """Ошибка закрытия/открытия = рынок закрыт (выходные, maintenance break).
 
@@ -515,6 +554,15 @@ def _manage_positions(
     # - Linda Raschke discretionary pattern: partial take + runner.
     # - Turtle/LeBeau ATR-family trailing to hold trend legs.
     active_ids: set[int] = set()
+    # Эксперимент «profit floor» (BUILDLOG 2026-07-15): gross-PnL per position
+    # в USD от брокера (точный, с учётом contract_size/quote-conversion).
+    pnl_map: dict[int, tuple[float, float]] = {}
+    if settings.profit_floor_enabled:
+        try:
+            pnl_map = executor.get_unrealized_pnl() or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("PROFIT_FLOOR: get_unrealized_pnl failed: %s", exc)
+            pnl_map = {}
     for symbol, positions in positions_by_symbol.items():
         signal_data = signal_by_symbol.get(symbol)
         if signal_data is None:
@@ -634,6 +682,64 @@ def _manage_positions(
                         r_now,
                         atr,
                     )
+
+            # ── Эксперимент «profit floor» (BUILDLOG 2026-07-15): трейлинг-
+            # флор в долларах. После BE/partial/trailing — гарантировать что
+            # SL не ниже цены, дающей ровно profit_floor_usd прибыли. floor
+            # считается из линейности PnL по цене через gross-PnL брокера.
+            if settings.profit_floor_enabled and pnl_map:
+                pnl_entry = pnl_map.get(pos.position_id)
+                gross = float(pnl_entry[0]) if pnl_entry else None
+                if gross is not None and gross >= settings.profit_floor_usd:
+                    floor_price = _profit_floor_sl(
+                        side=pos.side,
+                        entry_price=pos.entry_price,
+                        current_price=current_price,
+                        gross_usd=gross,
+                        floor_usd=settings.profit_floor_usd,
+                        digits=pos.digits,
+                    )
+                    if floor_price is not None:
+                        if pos.side == "long":
+                            target_sl = max(
+                                pos.stop_loss or float("-inf"), floor_price
+                            )
+                        else:
+                            target_sl = min(
+                                pos.stop_loss or float("inf"), floor_price
+                            )
+                        target_sl = round(target_sl, pos.digits)
+                        prev_sl = (
+                            round(pos.stop_loss, pos.digits)
+                            if pos.stop_loss is not None
+                            else None
+                        )
+                        # Только если выгоднее текущего SL (двигаем в
+                        # прибыльную сторону, никогда не опускаем).
+                        better = prev_sl is None or (
+                            target_sl > prev_sl
+                            if pos.side == "long"
+                            else target_sl < prev_sl
+                        )
+                        if better and target_sl != prev_sl:
+                            floor_ok = executor.amend_sl_tp(
+                                pos.position_id,
+                                sl_price=target_sl,
+                                tp_price=None,
+                                yf_symbol=symbol,
+                                current_price=current_price,
+                            )
+                            if floor_ok:
+                                pos.stop_loss = target_sl
+                                log.info(
+                                    "MANAGE %s #%d: profit-floor SL -> "
+                                    "%.5f (gross=$%.2f, floor=$%.2f)",
+                                    symbol,
+                                    pos.position_id,
+                                    target_sl,
+                                    gross,
+                                    settings.profit_floor_usd,
+                                )
 
     cleaned = store.cleanup_position_state(active_ids)
     if cleaned > 0:

@@ -194,6 +194,20 @@ class MomentumBotSettings(BaseSettings):
         default=1.5, validation_alias="MOMENTUM_BOT_TRAILING_ATR_MULT"
     )
 
+    # ── Эксперимент «profit floor» (BUILDLOG 2026-07-15): трейлинг-флор в
+    # долларах. При достижении gross-PnL ≥ profit_floor_usd ставит защитный
+    # SL на цену, соответствующую ровно profit_floor_usd прибыли, и двигает
+    # его только в прибыльную сторону (max для long / min для short). Прибыль
+    # может расти дальше, откат вниз закрывается брокером, но не ниже floor.
+    # Не канон: $3 = 0.2R при risk $15 (канон TP 3R, Carter 2012) — режет
+    # тренды рано. Opt-in: default off, включается env для эксперимента.
+    profit_floor_enabled: bool = Field(
+        default=False, validation_alias="MOMENTUM_BOT_PROFIT_FLOOR_ENABLED"
+    )
+    profit_floor_usd: float = Field(
+        default=3.0, validation_alias="MOMENTUM_BOT_PROFIT_FLOOR_USD"
+    )
+
     # Dedicated cTrader credentials for this bot only.
     ctrader_host_type: str = Field(
         default="demo", validation_alias="MOMENTUM_BOT_CTRADER_HOST_TYPE"

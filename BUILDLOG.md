@@ -4,6 +4,41 @@
 
 ---
 
+## 2026-07-15
+
+### experiment(momentum): трейлинг-флор прибыли $3 — «страховать ставку»
+
+Эксперимент по инициативе пользователя (не data-driven, не канон): закрывать
+позицию защитой при откате, но не ниже $3 прибыли. Механика — трейлинг-флор
+(не жёсткий TP): при достижении gross-PnL ≥ $3 ставит SL на цену, дающую
+ровно $3 прибыли, и двигает его только в прибыльную сторону. Прибыль может
+расти дальше, откат вниз закрывается брокером в realtime, но не ниже $3.
+
+**Контекст и компромисс:** $3 = 0.2R при risk $15/сделку. Канон TP 3 ATR ≈ 3R
+(John Carter 2012, `STRATEGIES.md`). Флор на $3 закроет позиции задолго до
+канон-TP и будет резать тренды рано — осознанный эксперимент ради частой
+фиксации, не research-based правка (`no-data-fitting.mdc`: это гипотеза
+пользователя, не артефакт анализа; результат будет оценён по live-выборке).
+
+**Реализация:**
+- `MomentumBotSettings.profit_floor_enabled` (default false, env
+  `MOMENTUM_BOT_PROFIT_FLOOR_ENABLED`) + `profit_floor_usd` (default 3.0, env
+  `MOMENTUM_BOT_PROFIT_FLOOR_USD`) — opt-in, легко выключить.
+- `_profit_floor_sl(...)` — чистая функция расчёта floor-цены из линейности
+  PnL: `K = gross/signed_move`, `floor = entry ± floor_usd/K`. Gross-PnL
+  берётся у брокера (`executor.get_unrealized_pnl`, точный с учётом
+  contract_size/quote-conversion для USDJPY/CFD).
+- В `_manage_positions` после BE/partial/trailing: `target_sl = max/min(
+  current_SL, floor_price)` — SL никогда не опускается. Если floor выше
+  текущего SL → `amend_sl_tp`. Брокерный SL сработает в realtime при откате.
+- Применяется ко всем позициям (`all_positions`).
+
+Тесты `tests/test_fx_momentum_bot.py` — 62 passed (+5: long/short midpoint,
+exact-at-floor, below-floor-none, not-in-profit-none).
+
+**Файлы:** `src/fx_momentum_bot/config/settings.py`,
+`src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`
+
 ## 2026-07-13
 
 ### revert(momentum): откат per-symbol guard + возврат бота в торговлю на демо
