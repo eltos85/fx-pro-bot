@@ -612,10 +612,18 @@ SL ставится сразу за стеной (`build_signal swept = цена
 - `density_persist_sec = 10` — стена должна продержаться до входа.
   - [research] анти-спуфинг (мелькнувшая стена — спуфинг).
   - [v0.18.15 — density_bounce] для bounce — ОТДЕЛЬНОЕ окно
-    `density_bounce_persist_sec = 1200` (20м): канон density-фейда «стена держит цену
-    ≥20–30+ мин» (Secret Terminal, Bookmap). 10с был наследием быстрого скальпа.
+    `density_bounce_persist_sec` (канон density-фейда «стена держит цену
+    ≥20–30+ мин», Secret Terminal, Bookmap). 10с был наследием быстрого скальпа.
     **density_break остаётся на базовых 10с** (пробою нужен момент; длинная пауза
     backwards режет импульс) — окна изолированы (guard-тесты).
+  - [v0.18.36 — density_bounce] `density_bounce_persist_sec = 300` (5м, data-driven).
+    Канон 1200с (20м) **опровергнут** телеметрией `density_tracks` n=76 086:
+    медиана life_sec=13с, p99=85с; при 1200 — 0 сигналов за 24д (18 треков из 76к
+    дожили, и те зависшие артефакты 28–31ч). Размер стены не коррелирует с life_sec
+    (медиана 13с во всех квартилях) → ужесточение detect_wall не спасает. 300с —
+    между p99 (85с) и каноном, ≈5 кандидатов/день. Все 29 сделок 06-01..06-08 были
+    при persist=10с; после 1200 — 0. Forward-test: собираем approach/WR при 300с
+    (no-data-fitting.mdc — не под P&L). Артефакт: `/tmp/scalp_audit/wall_classes.py`.
 - `density_absorb_frac = 0.30`, `density_absorb_window_sec = 10`.
   - [research] Kalena: «30% за <10с → выход/не вход» (поглощение = снимут остаток).
   - [v0.18.30 — bounce] окно СКОЛЬЗЯЩЕЕ: ≥30% съедено за ≤10с относительно

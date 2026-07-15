@@ -328,8 +328,10 @@ services:
       # гейтят размером+persist+absorption, круглый = confluence). + persist
       # 10с→20м (канон density-фейда 20–30+ мин: стена должна выстоять). ТОЛЬКО
       # bounce; density_break на базовом SCALP_DENSITY_PERSIST_SEC=10с не задет.
-      # [forward-test] n=12 — edge не валидирован. Откат: =10.
-      SCALP_DENSITY_BOUNCE_PERSIST_SEC: ${SCALP_DENSITY_BOUNCE_PERSIST_SEC:-1200}
+      # v0.18.36 (2026-07-15): 1200→300 (data-driven). Канон 20–30мин опровергнут
+      # телеметрией density_tracks n=76086 (med life=13с, p99=85с): при 1200 — 0
+      # сигналов за 24д. 300с ≈5 кандидатов/день. Forward-test approach/WR.
+      SCALP_DENSITY_BOUNCE_PERSIST_SEC: ${SCALP_DENSITY_BOUNCE_PERSIST_SEC:-300}
       # v0.18.30 (2026-07-02): редизайн трека стены bounce. После v0.18.15 — 0
       # сигналов за 24 дня: трек требовал «стена = МАКСИМУМ книги с float-
       # точностью каждый тик 1200с подряд» (айсберг-рефреш/чужая лимитка/выход

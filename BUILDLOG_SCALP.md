@@ -6,6 +6,42 @@
 
 ## 2026-07-15
 
+### feat(scalp/density): v0.18.36 — density_bounce persist 1200с→300с (data-driven)
+`(хеш после коммита)`
+
+**Симптом:** `density_bounce` — 0 сделок с 2026-06-08 (5+ недель тишины) после
+коммита v0.18.15, поднявшего `density_bounce_persist_sec` 10с→1200с (20м, канон
+density-фейда «стена держит цену ≥20–30 мин»).
+
+**Причина (data basis, артефакт `/tmp/scalp_audit/wall_classes.py` →
+`density_tracks` n=76 086 в `scalp_bot.sqlite` на VPS):** канон «стена 20–30 мин»
+**опровергнут** реальной телеметрией жизни стен:
+- медиана `life_sec` = 13с, p95=43с, p99=85с, p99.9=238с.
+- при persist=1200 — лишь 18 треков из 76 086 дожили (0.024%), и те — зависшие
+  артефакты 28–31ч (ZEC/SOXL/SKHYNIX), 0 подходов цены (`did_price_approach=0`).
+- размер стены **не коррелирует** с `life_sec` (медиана 13с для Q1..Q4 и top10%
+  по `max_size`) → ужесточение `detect_wall` (`min_wall_usd`/больший `mult`)
+  **не спасёт** — узкое место именно persist, а не фильтр стен.
+- все 29 сделок 06-01..06-08 06:11 были при persist=10с; после 1200с (коммит
+  06-08 17:28) — 0 сделок.
+
+**Решение:** `density_bounce_persist_sec` 1200с → **300с** (5м). Data-driven порог
+из кривой выживаемости: между p99 (85с) и каноном (1200с). Воронка при 300с —
+≈45 треков/период (≈5 кандидатов/день) вместо 0; approach при таком persist
+возможен (стена свежая, цена рядом), но `did_price_approach` в БД сейчас =0
+везде (артефакт persist=1200 — approach фиксируется только после persist) —
+покажет только forward-test. Это **не** подгонка под P&L (no-data-fitting.mdc):
+порог выбран из распределения `life_sec`, а не из результатов сделок.
+
+**Forward-test:** собираем approach/WR при 300с. Плотность `density_tracks`
+продолжает писаться (v0.18.32). Пересмотр через 1–2 недели. `density_break`
+остаётся на базовом `density_persist_sec=10с` (пробою нужен момент) — окна
+изолированы, guard-тесты зелёные.
+
+**Файлы:** `config/settings.py` (`density_bounce_persist_sec` default + docstring),
+`docker-compose.yml` (`SCALP_DENSITY_BOUNCE_PERSIST_SEC` default 1200→300),
+`STRATEGY_RATIONALE_SCALP.md`.
+
 ### feat(scalp/universe): v0.18.35 — per-strategy пины density_break (NEAR/HYPE/WLD/ENA)
 `(хеш после коммита)`
 

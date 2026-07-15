@@ -463,11 +463,21 @@ class ScalpSettings(BaseSettings):
     # это и есть анти-спуфинг (Secret Terminal density-scalping «sitting 30+ min»;
     # Bookmap order-flow; QuantStrategy.io). Прежние 10с (наследие быстрого скальпа)
     # пропускали спуф-грейд стены. None → fallback на density_persist_sec (для
-    # обратной совместимости тестов/конфигов). 1200с = 20м (нижняя граница канона,
-    # наименее ограничительная; env override SCALP_DENSITY_BOUNCE_PERSIST_SEC).
-    # ТОЛЬКО density_bounce: density_break (момент-пробой) остаётся на базовом окне.
-    # [forward-test] на n=12 edge не валидирован — это канон-grounded форвард-тест.
-    density_bounce_persist_sec: float = Field(default=1200.0)
+    # обратной совместимости тестов/конфигов). env override
+    # SCALP_DENSITY_BOUNCE_PERSIST_SEC. ТОЛЬКО density_bounce: density_break
+    # (момент-пробой) остаётся на базовом окне.
+    # ─── v0.18.36 (2026-07-15): 1200с → 300с (data-driven) ───
+    # Канон «стена 20–30 мин» ОПРОВЕРГНУТ телеметрией density_tracks (n=76 086,
+    # artifact: /tmp/scalp_audit/wall_classes.py → scalp_bot.sqlite): медиана
+    # life_sec=13с, p95=43с, p99=85с, p99.9=238с. При persist=1200 — 0 сигналов
+    # за 24д (только 18 треков из 76к дожили, и те — зависшие артефакты 28–31ч).
+    # Размер стены НЕ коррелирует с life_sec (медиана 13с для Q1..Q4 и top10%),
+    # значит ужесточение detect_wall не спасёт — узкое место именно persist.
+    # 300с = 5м: между p99 (85с) и каноном (1200с), data-driven порог из кривой
+    # выживаемости. Воронка: ~45 треков/период (≈5/день) вместо 0. Все 29 сделок
+    # 06-01..06-08 были при persist=10с; после 1200с — 0. Forward-test: собираем
+    # approach/WR при 300с, не подгоняя под P&L (no-data-fitting.mdc).
+    density_bounce_persist_sec: float = Field(default=300.0)
     # Анти-абсорбция: если ≥ absorb_frac стены «съели» за absorb_window —
     # остаток скоро снимут (Kalena: 30% за <10с → выход/не вход).
     # v0.18.30: у bounce окно СКОЛЬЗЯЩЕЕ (vs пик за window в любой момент
