@@ -54,8 +54,8 @@ def outcome(side: str, tp: float, sl: float,
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--from", dest="frm", default="2026-06-05T11:00")
-    p.add_argument("--to", default="2026-06-08T00:00")
+    p.add_argument("--from", dest="frm", default="2026-07-10T08:05")
+    p.add_argument("--to", default="2026-07-15T07:30")
     p.add_argument("--horizon-min", type=int, default=180)
     p.add_argument("--db", default="/data/scalp_bot.sqlite")
     args = p.parse_args()

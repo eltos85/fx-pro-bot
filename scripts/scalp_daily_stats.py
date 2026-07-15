@@ -4,7 +4,7 @@
 (т.е. позиция реально открылась и закрылась). pnl_usd — как записал бот
 (net с учётом комиссий, см. executor). Read-only.
 
-    docker exec fx-pro-bot-scalp-bot-1 python3 /tmp/scalp_daily_stats.py --since 2026-06-05
+    docker exec fx-pro-bot-scalp-bot-1 python3 /tmp/scalp_daily_stats.py --since 2026-07-10
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _agg(items: list[dict]) -> tuple[int, int, float, float]:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--since", default="2026-06-05")
+    p.add_argument("--since", default="2026-07-10")
     p.add_argument("--db", default="/data/scalp_bot.sqlite")
     args = p.parse_args()
 

@@ -16,7 +16,7 @@ COOLDOWN_S = 300  # текущий пост-SL кулдаун (v0.15.0)
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--from", dest="frm", default="2026-06-05T11:00")
+    p.add_argument("--from", dest="frm", default="2026-07-10T08:05")
     p.add_argument("--to", default="2026-06-09T00:00")
     p.add_argument("--window-min", type=int, default=90)
     p.add_argument("--db", default="/data/scalp_bot.sqlite")

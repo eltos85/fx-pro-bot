@@ -26,7 +26,7 @@ def line(label, items, flag_small=True):
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--from", dest="frm", default="2026-06-05T11:00")
+    p.add_argument("--from", dest="frm", default="2026-07-10T08:05")
     p.add_argument("--to", default="2026-06-08T00:00")
     p.add_argument("--db", default="/data/scalp_bot.sqlite")
     args = p.parse_args()

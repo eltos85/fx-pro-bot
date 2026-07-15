@@ -14,20 +14,23 @@ from datetime import UTC, datetime
 DB = "/data/scalp_bot.sqlite"
 
 # страта -> cutoff (UTC, момент последней правки логики/конфига страты).
-# Точные timestamp-ы деплоев (MSK→UTC) из git log:
-#   density_break       25fa872 2026-06-28T15:55Z (no-trade blacklist BTC/ZEC/TAO)
-#   sweep_fade          c633366 2026-06-28T15:35Z (universe fix — меняет пул монет)
-#   density_bounce      c633366 2026-06-28T15:35Z (universe fix — меняет пул монет)
-#   sweep_fade_canon    d410fd0 2026-06-28T15:27Z (temporarily disabled для A/B)
-#   sweep_fade_run      c4fe43a 2026-06-27T06:06Z (round-robin — конец starving)
-#   sweep_fade_trend    c4fe43a 2026-06-27T06:06Z (round-robin — конец starving)
+# Точные timestamp-ы деплоев (MSK→UTC, -3ч) из git log:
+#   sweep_fade          443d589 2026-07-10T08:05Z (v0.18.34 — dead_market gate
+#                                  для sweep_fade-семейства; should_exit не трогали,
+#                                  но гейт меняет пул входов)
+#   sweep_fade_canon   acff168 2026-07-15T07:30Z (v0.18.37 — возврат канона,
+#                                  A/B base vs canon; canon снова активна)
+#   density_break      8de1733 2026-07-15T07:11Z (v0.18.35 — per-strategy пины
+#                                  NEAR/HYPE/WLD/ENA)
+#   density_bounce     5fd433c 2026-07-15T07:17Z (v0.18.36 — persist 1200с→300с)
+# Удалённые (история сделок в БД сохранена, в сборе не участвуют):
+#   sweep_fade_run     acff168 2026-07-15T07:30Z (v0.18.37 — удалена)
+#   sweep_fade_trend   7a879a3 2026-07-06T12:02Z (v0.18.33 — удалена)
 CUTOFF = {
-    "sweep_fade": "2026-06-28T15:35:00",
-    "sweep_fade_canon": "2026-06-28T15:27:00",
-    "sweep_fade_run": "2026-06-27T06:06:00",
-    "sweep_fade_trend": "2026-06-27T06:06:00",
-    "density_break": "2026-06-28T15:55:00",
-    "density_bounce": "2026-06-28T15:35:00",
+    "sweep_fade": "2026-07-10T08:05:00",
+    "sweep_fade_canon": "2026-07-15T07:30:00",
+    "density_break": "2026-07-15T07:11:00",
+    "density_bounce": "2026-07-15T07:17:00",
 }
 
 _NON_TRADE = ("restart_flat", "entry_Cancelled", "entry_Rejected",
@@ -91,7 +94,7 @@ def main() -> int:
 
     con.close()
     print(f"\n{'='*54}")
-    print(f"  ИТОГО по 4 стратам: {grand_n} сделок, net ${grand:+.2f}")
+    print(f"  ИТОГО по {len(CUTOFF)} стратам: {grand_n} сделок, net ${grand:+.2f}")
     print(f"{'='*54}")
     return 0
 

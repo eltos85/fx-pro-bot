@@ -1,8 +1,8 @@
 """Диагностика sweep_fade: баг входа/тренда ИЛИ режим/вариативность?
 
-Чистая отсечка: 2026-06-05 11:00 UTC (после v0.18.10, страту с тех пор не трогали,
-кроме SL-cooldown v0.18.14 8 июня). Read-only. Цель — отличить системный дефект
-(инверсия стороны, сломанный HTF-фильтр) от рыночного режима/шума.
+Чистая отсечка: 2026-07-10 08:05 UTC (после v0.18.34 — dead_market gate для
+sweep_fade-семейства; меняет пул входов). Read-only. Цель — отличить системный
+дефект (инверсия стороны, сломанный HTF-фильтр) от рыночного режима/шума.
 
     docker exec fx-pro-bot-scalp-bot-1 python3 /tmp/sf_diag.py
 """
@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 DB = "/data/scalp_bot.sqlite"
-CUT = datetime(2026, 6, 5, 11, 0, tzinfo=timezone.utc).timestamp()
+CUT = datetime(2026, 7, 10, 8, 5, tzinfo=timezone.utc).timestamp()
 con = sqlite3.connect(DB)
 con.row_factory = sqlite3.Row
 
@@ -39,7 +39,7 @@ def block(title, rs):
 
 
 print("=" * 78)
-print(f"sweep_fade ВСЕГО с 2026-06-05 11:00 UTC (n={len(rows)})")
+print(f"sweep_fade ВСЕГО с 2026-07-10 08:05 UTC (n={len(rows)})")
 print("=" * 78)
 block("ИТОГО          ", rows)
 print()

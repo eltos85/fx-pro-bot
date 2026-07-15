@@ -24,12 +24,10 @@ NT = ("restart_flat", "entry_Cancelled", "entry_Rejected",
 
 # Пер-стратегийные cutoffs текущего конфига (см. scalp_perstrat_since.py).
 CUTOFF = {
-    "sweep_fade": "2026-06-28T15:35:00",
-    "sweep_fade_canon": "2026-06-28T15:27:00",
-    "sweep_fade_run": "2026-06-27T06:06:00",
-    "sweep_fade_trend": "2026-06-27T06:06:00",
-    "density_break": "2026-06-28T15:55:00",
-    "density_bounce": "2026-06-28T15:35:00",
+    "sweep_fade": "2026-07-10T08:05:00",
+    "sweep_fade_canon": "2026-07-15T07:30:00",
+    "density_break": "2026-07-15T07:11:00",
+    "density_bounce": "2026-07-15T07:17:00",
 }
 
 # Сегменты: (метка правки, ts начала UTC); конец сегмента = следующая правка
@@ -37,35 +35,20 @@ CUTOFF = {
 # (MSK→UTC −3ч).
 SEGMENTS = {
     "sweep_fade": [
-        ("v0.18.14 SL-cd 60м (925d105)",            "2026-06-08T10:53"),
-        ("v0.18.26 skip_round+reclaim (0d5b96f)",   "2026-06-16T10:10"),
-        ("universe→momentum (171d1da)",             "2026-06-17T06:31"),
-        ("revert→rvol (6326e7f)",                   "2026-06-19T10:50"),
-        ("universe blacklist+floor (c633366)",      "2026-06-28T15:35"),
+        ("v0.18.31 shadow-лог+regime-фичи (455583e)", "2026-07-03T07:30"),
+        ("v0.18.34 dead_market gate (443d589)",        "2026-07-10T08:05"),
     ],
     "sweep_fade_canon": [
-        ("v0.18.20 создана maker (9fa9113)",        "2026-06-11T08:10"),
-        ("v0.18.22 сняты EMA/DMI (3819c67)",        "2026-06-11T13:16"),
-        ("v0.18.24 taker-вход (6a35134)",           "2026-06-14T05:19"),
-        ("DISABLED для A/B (d410fd0)",              "2026-06-28T15:27"),
-    ],
-    "sweep_fade_run": [
-        ("создана, starving (e4efe43)",             "2026-06-26T11:02"),
-        ("round-robin, реальный старт (c4fe43a)",   "2026-06-27T06:06"),
-        ("be-lock 34040+идемпотент (b3d0e9e)",      "2026-06-29T06:51"),
-        ("be-lock знак adverse (058e695)",          "2026-06-29T10:18"),
-    ],
-    "sweep_fade_trend": [
-        ("создана (e4efe43)",                       "2026-06-26T11:02"),
-        ("round-robin, реальный старт (c4fe43a)",   "2026-06-27T06:06"),
+        ("v0.18.37 возврат канона (acff168)",          "2026-07-15T07:30"),
     ],
     "density_break": [
-        ("v0.18.16 taker+CVD/ob (9837331)",         "2026-06-08T15:20"),
-        ("v0.18.25 close-confirm (9c88410)",        "2026-06-15T06:54"),
-        ("no-trade BTC/ZEC/TAO (25fa872)",          "2026-06-28T15:55"),
+        ("v0.18.35 отсев stock-перпов (90002aa)",      "2026-07-14T07:01"),
+        ("v0.18.35 per-strategy пины (8de1733)",       "2026-07-15T07:11"),
     ],
     "density_bounce": [
-        ("v0.18.15 persist 20м (27b4248)",          "2026-06-08T14:28"),
+        ("v0.18.30 редизайн трека (e43d79f)",          "2026-07-02T11:10"),
+        ("v0.18.32 lifecycle-телеметрия (02bd1c0)",    "2026-07-06T07:14"),
+        ("v0.18.36 persist 300с (5fd433c)",            "2026-07-15T07:17"),
     ],
 }
 
@@ -86,7 +69,7 @@ def main() -> int:
         "SELECT id, ts_open, ts_close, symbol, side, qty, entry, sl, pnl_usd, "
         "close_reason, strategy FROM trades WHERE status='closed' "
         "AND ts_close IS NOT NULL AND close_reason NOT IN ({}) "
-        "AND ts_close >= strftime('%s','2026-06-01') ORDER BY ts_close"
+        "AND ts_close >= strftime('%s','2026-07-01') ORDER BY ts_close"
         .format(",".join("?" * len(NT))), NT)]
 
     # ── 1. Динамика по сегментам правок каждой страты ──
