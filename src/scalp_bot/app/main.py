@@ -103,9 +103,17 @@ def run() -> None:
     if "sweep_fade_run" in cfg.strategy_list:
         canon_syms += cfg.sweep_fade_run_symbol_list
     canon_syms = list(dict.fromkeys(canon_syms))  # dedup, preserve order
+    # v0.18.35: per-strategy пины density_break — canon-like extra_syms
+    # (force-include в WS в обход rvol), торгуются ТОЛЬКО density_break
+    # (db_pin-гейт ниже). Не выталкивают символы из авто-вселенной sweep_fade
+    # (в отличие от глобальных universe_pin_symbols). Цель: дать density_break
+    # волатильные альты на мёртвом рынке, где rvol-селектор их не пропускает.
+    db_pins: list[str] = list(dict.fromkeys(cfg.density_break_pin_list))
     universe_syms = set(symbols)
     if canon_syms:
         symbols = list(dict.fromkeys(symbols + canon_syms))
+    if db_pins:
+        symbols = list(dict.fromkeys(symbols + db_pins))
 
     log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
              "kill day/total=$%.0f/$%.0f | strats=%s", mode, ",".join(symbols),
@@ -173,6 +181,8 @@ def run() -> None:
     # canon-only символы: в WS-подписках ради канон-страты, но НЕ в авто-вселенной
     # остальных стратегий — те их пропускают (чистота A/B).
     canon_only = set(canon_syms) - universe_syms
+    # db_pin-множество для гейта: density_break торгует db_pins, остальные — нет.
+    db_pin_set = set(db_pins)
 
     # HTF-bias: трендовый фильтр старшего ТФ (EMA200 1H). Первичный прогрев на
     # старте, далее refresh раз в htf_refresh_sec (метрика медленная).
@@ -215,10 +225,13 @@ def run() -> None:
                     prev_syms = set(symbols)
                     stream, states, symbols, picked = _rotate_universe(
                         client, cfg, db, stream, states, strategies, symbols,
-                        notifier, extra_syms=canon_syms)
+                        notifier,
+                        extra_syms=list(dict.fromkeys(canon_syms + db_pins)))
                     if picked:
                         universe_syms = set(picked)
                         canon_only = set(canon_syms) - universe_syms
+                        # db_pins не зависят от авто-вселенной (всегда force-include)
+                        db_pin_set = set(db_pins)
                     funding.refresh(client, symbols)  # новые символы → их график
                     # v0.18.2: прогрев HTF новых символов СРАЗУ (до того как они
                     # смогут торговаться) — закрываем fail-open окно ≤htf_refresh_sec.
@@ -309,6 +322,12 @@ def run() -> None:
                     if scope is not None and sym not in scope:
                         continue
                     if scope is None and sym in canon_only:
+                        continue
+                    # v0.18.35: db_pins (NEAR/HYPE/WLD/ENA) торгует ТОЛЬКО
+                    # density_break — остальные стратегии (scope is None:
+                    # sweep_fade, density_bounce) их пропускают. canon/run
+                    # (scope задан) и так не торгают вне scope.
+                    if scope is None and sym in db_pin_set and st.name != "density_break":
                         continue
                     # v0.18.21: signal_cooldown ПЕР-СТРАТЕГИЙНЫЙ (запрос
                     # пользователя 2026-06-11). Раньше вход (или неналитая

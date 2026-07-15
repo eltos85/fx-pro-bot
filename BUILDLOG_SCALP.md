@@ -6,7 +6,7 @@
 
 ## 2026-07-15
 
-### feat(scalp/universe): v0.18.35 — пины волатильных альтов для density_break
+### feat(scalp/universe): v0.18.35 — per-strategy пины density_break (NEAR/HYPE/WLD/ENA)
 `(хеш после коммита)`
 
 **Симптом:** `density_break` замолчала с 07-03 (последняя сделка 07-03 02:36,
@@ -22,19 +22,23 @@ per-strategy no-trade blacklist (BTC −$358/47, ZEC −$272/59, TAO −$147/14,
 data-justified), stock — не её профиль. Селектор вселенной (`universe.py`) и
 его пороги НЕ менялись с 06-28 (`c633366`) — сужение рыночное, не от правок.
 
-**Решение (одобрено пользователем, опция add_all):** пины
-`SCALP_UNIVERSE_PIN_SYMBOLS=NEARUSDT,HYPEUSDT,WLDUSDT,ENAUSDT` — force-include
-во вселенную в обход rvol-фильтра. Пины глобальные (расширяют вселенную для
-ВСЕХ стратегий, не только density_break) — это осознанный рыночно-нейтральный
-способ дать density_break кандидатов.
+**Решение (одобрено пользователем, опция per_strat_pins):** per-strategy пины
+`density_break_pin_symbols=NEARUSDT,HYPEUSDT,WLDUSDT,ENAUSDT` — canon-like
+extra_syms (force-include в WS в обход rvol), торгуются **ТОЛЬКО**
+density_break (гейт в main: `scope is None and sym in db_pin_set and
+st.name != "density_break" → continue`). В отличие от глобальных
+`universe_pin_symbols`, **не выталкивают** символы из авто-вселенной sweep_fade
+(ранжирование не меняется) — sweep_fade продолжает торговать свою rvol-вселенную,
+density_break получает альты сверху. Аналогично canon_syms (canon-only гейт),
+но для density_break.
 
 **Ожидаемый эффект (честно, no-data-fitting.mdc):** density_break оживёт и
 перестанет молчать, но данные говорят, что скорее добавит убытков, чем
 прибыли — на альтах она тоже убыточна: NEAR −$40.99/13, HYPE −$32.63/9
 (убыточны), WLD +$75.54/4, ENA +$20.47/4 (прибыль, но 4 сделки = шум). В целом
 density_break структурно убыточна (195 сделок, 22% WR, −$686). Цель пинов —
-**сбор статы** на волатильных альтах (чтобы оценить стратегию на большей
-выборке), а не гарантия прибыли. Пользователь принял ожидаемый убыток.
+**сбор статы** на волатных альтах (оценить стратегию на большей выборке), а не
+гарантия прибыли. Пользователь принял ожидаемый убыток.
 
 **Не от правок прошлой недели:** проверено — ни одна «молчащая/деградирующая»
 стратегия не пострадала от коммитов 07-02..07-10. Сводка (сверено с Bybit
@@ -46,8 +50,9 @@ density_break структурно убыточна (195 сделок, 22% WR, �
   жизни стены 12с) — отдельный баг параметра v0.18.30;
 - density_break: молчит с 07-03 из-за вселенной (этот фикс).
 
-**Файлы:** `docker-compose.yml` (default `SCALP_UNIVERSE_PIN_SYMBOLS`),
-`STRATEGY_RATIONALE_SCALP.md`.
+**Файлы:** `config/settings.py` (`density_break_pin_symbols` + property),
+`app/main.py` (стартовая вселенная + db_pin-гейт + ротация extra_syms),
+`docker-compose.yml` (`SCALP_DENSITY_BREAK_PIN_SYMBOLS`), `STRATEGY_RATIONALE_SCALP.md`.
 
 ## 2026-07-14
 

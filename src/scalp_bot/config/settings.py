@@ -562,6 +562,20 @@ class ScalpSettings(BaseSettings):
     density_break_no_trade_symbols: str = Field(
         default="BTCUSDT,ZECUSDT,TAOUSDT")
 
+    # v0.18.35 (2026-07-15): per-strategy пины density_break — force-include во
+    # вселенную в ОБХОД rvol-фильтра (canon-like extra_syms: всегда в WS), но
+    # торгуются ТОЛЬКО density_break (гейт в main блокирует остальные).
+    # Цель: density_break заточена под пробои плотных стен на волатильных
+    # альтах, а на мёртвом рынке rvol-селектор их не пропускает → стратегия
+    # молчит (0 сделок с 07-03). Пины дают ей кандидатов, не затрагивая
+    # авто-вселенную sweep_fade (в отличие от глобальных universe_pin_symbols,
+    # которые выталкивают символы из ранжирования). Артефакт: trades
+    # density_break по символам n=195; NEAR −$40/13, HYPE −$32/9, WLD +$75/4,
+    # ENA +$20/4. Решение пользователя add_all — принять ожидаемый убыток ради
+    # сбора статы. Пусто = выкл. env SCALP_DENSITY_BREAK_PIN_SYMBOLS.
+    density_break_pin_symbols: str = Field(
+        default="NEARUSDT,HYPEUSDT,WLDUSDT,ENAUSDT")
+
     # ─── HTF-bias: трендовый фильтр старшего ТФ (аудит v0.9.3) ────────────
     # Канон CAP «без контекста CVD-дивергенция — шум» (gates 1–3); Murphy 1999
     # (EMA200 primary trend); Asness 2013 (mean-reversion в согласии с трендом).
@@ -757,6 +771,14 @@ class ScalpSettings(BaseSettings):
     @property
     def density_break_no_trade_list(self) -> list[str]:
         return [s.strip().upper() for s in self.density_break_no_trade_symbols
+                .split(",") if s.strip()]
+
+    @property
+    def density_break_pin_list(self) -> list[str]:
+        """Per-strategy пины density_break (canon-like extra_syms). env
+        SCALP_DENSITY_BREAK_PIN_SYMBOLS. Force-include в WS, торгует только
+        density_break (гейт в main)."""
+        return [s.strip().upper() for s in self.density_break_pin_symbols
                 .split(",") if s.strip()]
 
     @property

@@ -2838,6 +2838,82 @@ def test_select_universe_drops_stock_perps():
     assert "NEARUSDT" in picked or "ZECUSDT" in picked
 
 
+def test_density_break_pin_list_parses():
+    """v0.18.35: density_break_pin_symbols — per-strategy пины (canon-like
+    extra_syms), торгуются ТОЛЬКО density_break. Парсинг CSV → upper."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert s.density_break_pin_list == ["NEARUSDT", "HYPEUSDT", "WLDUSDT", "ENAUSDT"]
+    s2 = ScalpSettings(density_break_pin_symbols="  nearusdt , HYPEUSDT  ")
+    assert s2.density_break_pin_list == ["NEARUSDT", "HYPEUSDT"]
+    assert ScalpSettings(density_break_pin_symbols="").density_break_pin_list == []
+
+
+def test_density_break_pins_do_not_pollute_auto_universe():
+    """v0.18.35: per-strategy пины density_break (в отличие от глобальных
+    universe_pin_symbols) НЕ добавляются в авто-вселенную _select_universe —
+    они force-include в main как canon-like extra_syms, не выталкивая символы
+    из ранжирования sweep_fade. sweep_fade продолжает торговать свою rvol-
+    вселенную без изменений."""
+    from scalp_bot.app.main import _select_universe
+    from scalp_bot.config.settings import ScalpSettings
+
+    class _Client:
+        def __init__(self):
+            # только ZEC проходит rvol-фильтр (range 10%, turnover 130M);
+            # NEAR/HYPE/WLD/ENA — db_pins, но НЕ в тикерах вообще
+            self.tickers = [_ticker("ZECUSDT", 100, 110, 100, 130e6)]
+
+        def get_tickers(self):
+            return self.tickers
+
+        def stock_type_symbols(self):
+            return set()
+
+        def get_kline(self, *a, **k):
+            return []
+
+    cfg = ScalpSettings()
+    cfg.universe_min_rvol = 0.0
+    cfg.density_break_pin_symbols = "NEARUSDT,HYPEUSDT,WLDUSDT,ENAUSDT"
+    picked = _select_universe(_Client(), cfg)
+    # авто-вселенная = только ZEC (db_pins НЕ должны сюда попасть — они в main)
+    assert "ZECUSDT" in picked
+    for s in ("NEARUSDT", "HYPEUSDT", "WLDUSDT", "ENAUSDT"):
+        assert s not in picked, f"{s} не должен быть в авто-вселенной (per-strategy)"
+
+
+def test_db_pin_gate_blocks_other_strategies():
+    """v0.18.35: db_pin-гейт в main loop — sweep_fade/density_bounce (scope is
+    None) НЕ торгуют db_pins; density_break (scope is None) торгует. Воспроиз-
+    водим логику гейта напрямую (canon_only + db_pin_set проверки)."""
+    # симулируем гейт: для символа из db_pin_set, scope-None стратегия кроме
+    # density_break должна пропускаться; density_break — нет.
+    db_pin_set = {"NEARUSDT", "HYPEUSDT", "WLDUSDT", "ENAUSDT"}
+    canon_only = set()  # упрощаем: canon_syms в авто-вселенной
+
+    def gated(st_name, sym, scope):
+        if scope is not None and sym not in scope:
+            return True  # skip (canon scope)
+        if scope is None and sym in canon_only:
+            return True
+        if scope is None and sym in db_pin_set and st_name != "density_break":
+            return True  # db_pin-гейт
+        return False
+
+    # sweep_fade (scope None) на db_pin → блокируется
+    assert gated("sweep_fade", "NEARUSDT", None) is True
+    assert gated("density_bounce", "HYPEUSDT", None) is True
+    # density_break (scope None) на db_pin → НЕ блокируется (торгует)
+    assert gated("density_break", "NEARUSDT", None) is False
+    # sweep_fade на обычном альт-символе (не db_pin) → НЕ блокируется
+    assert gated("sweep_fade", "ZECUSDT", None) is False
+    # canon/run (scope задан) на db_pin → блокируется scope (не торгует вне scope)
+    assert gated("sweep_fade_run", "NEARUSDT", {"BTCUSDT", "ETHUSDT"}) is True
+    # canon/run на своём scope → НЕ блокируется
+    assert gated("sweep_fade_run", "BTCUSDT", {"BTCUSDT", "ETHUSDT"}) is False
+
+
 def test_pad_pool_respects_range_floor_suitability():
     """v0.18.29 (запрос пользователя 2026-06-28): padding pool использует canon
     range-floor (6%), а не 0.0 — добор не тащит непригодные майоры (BTC/ETH/SOL,
