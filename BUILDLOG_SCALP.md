@@ -6,6 +6,48 @@
 
 ## 2026-07-15
 
+### refactor(scalp): v0.18.37 — удаление sweep_fade_run, возврат к канону (base vs canon A/B)
+`(хеш после коммита)`
+
+**Симптом/решение:** пользователь: «удалить экспериментальные стратегии и вернуть
+канон». Оставить `sweep_fade`, `sweep_fade_canon`, `density_break`, `density_bounce`.
+
+**Причина (data basis, артефакт `/tmp/scalp_audit/around_0629.py` → `trades`
+n=880 за 25.06–15.07):** `sweep_fade_run` (v0.18.27 «дай winners бежать» —
+breakeven-lock@1.0R + убранный flow_exit + TP 3.0R + losing-side scratch) —
+**главный убыточник периода**: n=176 WR 12% net **−$327**, убыточна и до, и после
+bug-fixа 058e695 (знак BE-SL, 29.06) — гипотеза «winners режутся flow_exit»
+**опровергнута**: exit-контракт run не дал winners «бежать» в плюс. Сравнение:
+- `sweep_fade` (база): n=621 WR 9% net **+$120** (крупные winners тянут);
+- `sweep_fade_canon`: n=15 WR 40% net −$46 (шум, но WR выше);
+- `sweep_fade_run`: n=176 WR 12% net **−$327** — худшая.
+`sweep_fade_trend` уже удалена v0.18.33 (n=35 WR 37% net −$121.62).
+
+**Доп. вывод аудита:** перелом 29.06 (+$99) → 30.06 (−$125) — **не от коммитов**
+(коммитов 30.06–01.07 нет, WR рухнул 33%→7% — рынок). Фикс 058e695 (BE-SL знак) —
+правильный bug-fix (winners не режутся), не причина убытка. Массовые entry_Rejected
+07-08..07-14 (68-100%) — инфраструктура (stock-perp agreement + API key expired),
+пофикшены 07-14/07-15. Т.е. правки после 29.06 **не сломали** торговлю — убыток
+сконцентрирован в экспериментальных run/trend.
+
+**Решение:** удалить `SweepFadeRunStrategy` (класс + registry), config-поля
+`sweep_fade_run_*`, env `SCALP_SWEEP_FADE_RUN_*`, BE-lock duck-typing в executor
+(`manage_levels` был только у run), тесты run (−14) → заменены на
+`test_run_strategy_removed` (аналог `test_trend_strategy_removed`). `enabled_strategies`
+default: `sweep_fade,density_bounce,density_break,sweep_fade_canon` (canon снова
+в дефолте). Возврат к исходному A/B-дизайну v0.18.20: **base vs canon** (canon с
+базовым `flow_exit`, значимыми уровнями PDH/PDL, full reclaim, вселенной мейджоров).
+
+**Forward-test:** canon копит стату параллельно с base (n≥100 на каждую,
+sample-size.mdc). История сделок `strategy='sweep_fade_run'` сохранена в БД;
+код — git v0.18.27..v0.18.36.
+
+**Файлы:** `analysis/strategies.py` (класс + registry), `config/settings.py`
+(поля + `enabled_strategies` default + property), `docker-compose.yml`
+(`SCALP_SWEEP_FADE_RUN_*` + `SCALP_ENABLED_STRATEGIES`), `app/main.py`
+(`canon_syms`), `trading/executor.py` (`_strategy_exit` без duck-typing),
+`tests/test_scalp_bot.py`, `STRATEGY_RATIONALE_SCALP.md`.
+
 ### feat(scalp/density): v0.18.36 — density_bounce persist 1200с→300с (data-driven)
 `(хеш после коммита)`
 

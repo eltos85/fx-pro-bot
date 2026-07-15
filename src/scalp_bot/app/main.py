@@ -94,14 +94,9 @@ def run() -> None:
     # торгуется ТОЛЬКО sweep_fade_canon (symbol_scope); остальные стратегии
     # canon-only символы не трогают (canon_only-гейт ниже) — их vol-вселенная
     # не изменена, A/B чистый.
-    # v0.18.27: sweep_fade_run наследует канон-вход → её вселенная тоже
-    # требует WS-подписок + key_levels-прогрева. Объединяем символы всех
-    # «canon-like» стратегий (атрибут symbol_scope), а не хардкодим имя.
     canon_syms: list[str] = []
     if "sweep_fade_canon" in cfg.strategy_list:
         canon_syms += cfg.sweep_fade_canon_symbol_list
-    if "sweep_fade_run" in cfg.strategy_list:
-        canon_syms += cfg.sweep_fade_run_symbol_list
     canon_syms = list(dict.fromkeys(canon_syms))  # dedup, preserve order
     # v0.18.35: per-strategy пины density_break — canon-like extra_syms
     # (force-include в WS в обход rvol), торгуются ТОЛЬКО density_break

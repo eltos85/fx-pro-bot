@@ -1369,20 +1369,20 @@ def test_resolve_round_robin_among_tied_strategies():
     всегда первая по порядку страта. Canon-наследники дают идентичные сигналы —
     без вращения canon забирал бы 100%, варианты 0. Каждому новому кластеру
     (отличный fingerprint = другой уровень входа) — следующая страта.
-    (v0.18.33: sweep_fade_trend удалена; ротация проверяется на трёх любых
-    tied-стратегиях — механизм имени не знает.)"""
+    (v0.18.33: sweep_fade_trend удалена; v0.18.37: sweep_fade_run удалена;
+    ротация проверяется на трёх любых tied-стратегиях — механизм имени не знает.)"""
     resolve_reset_state()
-    strats = ("sweep_fade_canon", "sweep_fade_run", "sweep_fade")
+    strats = ("sweep_fade_canon", "strat_b", "sweep_fade")
     # кластер 1 (entry 100.0): первый раз — canon (idx 0)
     c1 = [_sig("short", 6, s, symbol="BTCUSDT") for s in strats]
     assert resolve(list(c1)).strategy == "sweep_fade_canon"
     # тот же кластер (тот же fp) — стабильный победитель, canon снова
     assert resolve(list(c1)).strategy == "sweep_fade_canon"
-    # кластер 2 (другой уровень entry=200.0) — следующий по ротации: run (idx 1)
+    # кластер 2 (другой уровень entry=200.0) — следующий по ротации: strat_b (idx 1)
     c2 = [Signal(symbol="BTCUSDT", side="short", entry_ref=200.0, sl_level=99.0,
                  tp_level=202.0, score=6, reasons=["x"], strategy=s)
           for s in strats]
-    assert resolve(c2).strategy == "sweep_fade_run"
+    assert resolve(c2).strategy == "strat_b"
     # кластер 3 (entry=300.0) — третья страта (idx 2)
     c3 = [Signal(symbol="BTCUSDT", side="short", entry_ref=300.0, sl_level=99.0,
                  tp_level=302.0, score=6, reasons=["x"], strategy=s)
@@ -1403,15 +1403,15 @@ def test_resolve_round_robin_independent_per_symbol():
             reasons=["x"], strategy=strat)
     # BTC кластер1 → canon
     assert resolve([mk("BTCUSDT", 100.0, "sweep_fade_canon"),
-                    mk("BTCUSDT", 100.0, "sweep_fade_run")]).strategy == "sweep_fade_canon"
+                    mk("BTCUSDT", 100.0, "strat_b")]).strategy == "sweep_fade_canon"
     # ETH кластер1 → canon (свой счётчик, не继承 BTC)
     assert resolve([mk("ETHUSDT", 100.0, "sweep_fade_canon"),
-                    mk("ETHUSDT", 100.0, "sweep_fade_run")]).strategy == "sweep_fade_canon"
-    # BTC кластер2 → run; ETH кластер2 → run (независимо)
+                    mk("ETHUSDT", 100.0, "strat_b")]).strategy == "sweep_fade_canon"
+    # BTC кластер2 → strat_b; ETH кластер2 → strat_b (независимо)
     assert resolve([mk("BTCUSDT", 200.0, "sweep_fade_canon"),
-                    mk("BTCUSDT", 200.0, "sweep_fade_run")]).strategy == "sweep_fade_run"
+                    mk("BTCUSDT", 200.0, "strat_b")]).strategy == "strat_b"
     assert resolve([mk("ETHUSDT", 200.0, "sweep_fade_canon"),
-                    mk("ETHUSDT", 200.0, "sweep_fade_run")]).strategy == "sweep_fade_run"
+                    mk("ETHUSDT", 200.0, "strat_b")]).strategy == "strat_b"
 
 
 def test_resolve_round_robin_survives_group_shrink():
@@ -1424,14 +1424,14 @@ def test_resolve_round_robin_survives_group_shrink():
     mk = lambda entry, strat: Signal(symbol="BTCUSDT", side="short",
             entry_ref=entry, sl_level=99.0, tp_level=entry + 2.0, score=6,
             reasons=["x"], strategy=strat)
-    strats = ("sweep_fade_canon", "sweep_fade_run", "sweep_fade")
+    strats = ("sweep_fade_canon", "strat_b", "sweep_fade")
     # три кластера подряд → для entry=300.0 сохранён idx=2 (третья страта)
     resolve([mk(100.0, s) for s in strats])
     resolve([mk(200.0, s) for s in strats])
     assert resolve([mk(300.0, s) for s in strats]).strategy == "sweep_fade"
     # тот же кластер (fp совпадает), но третья страта выпала → группа из 2:
     # раньше group[2] бросал IndexError; теперь 2 % 2 = 0 → canon
-    win = resolve([mk(300.0, "sweep_fade_canon"), mk(300.0, "sweep_fade_run")])
+    win = resolve([mk(300.0, "sweep_fade_canon"), mk(300.0, "strat_b")])
     assert win is not None and win.strategy == "sweep_fade_canon"
 
 
@@ -2908,10 +2908,10 @@ def test_db_pin_gate_blocks_other_strategies():
     assert gated("density_break", "NEARUSDT", None) is False
     # sweep_fade на обычном альт-символе (не db_pin) → НЕ блокируется
     assert gated("sweep_fade", "ZECUSDT", None) is False
-    # canon/run (scope задан) на db_pin → блокируется scope (не торгует вне scope)
-    assert gated("sweep_fade_run", "NEARUSDT", {"BTCUSDT", "ETHUSDT"}) is True
-    # canon/run на своём scope → НЕ блокируется
-    assert gated("sweep_fade_run", "BTCUSDT", {"BTCUSDT", "ETHUSDT"}) is False
+    # canon (scope задан) на db_pin → блокируется scope (не торгует вне scope)
+    assert gated("sweep_fade_canon", "NEARUSDT", {"BTCUSDT", "ETHUSDT"}) is True
+    # canon на своём scope → НЕ блокируется
+    assert gated("sweep_fade_canon", "BTCUSDT", {"BTCUSDT", "ETHUSDT"}) is False
 
 
 def test_pad_pool_respects_range_floor_suitability():
@@ -3730,344 +3730,24 @@ def test_canon_strategy_in_registry_and_cooldown_family():
     assert "sweep_fade_canon" in s.strategy_list  # включён по умолчанию (A/B)
 
 
-# ─── v0.18.27: sweep_fade_run (изолированная гипотеза «дай winners бежать») ─
+# ─── v0.18.27: sweep_fade_run — УДАЛЕНА v0.18.37 (2026-07-15) ─
 
-def _run_cfg(**over):
-    """cfg для SweepFadeRunStrategy: canon-вход + run-exit параметры."""
-    base = _canon_cfg(
-        sweep_fade_run_symbol_list=["ETHUSDT"],
-        sweep_fade_run_take_profit_r=3.0,
-        sweep_fade_run_be_activate_r=1.0,
-        sweep_fade_run_scratch_on_flow_flip=True,
-        # should_exit опирается на active_exit_enabled + scratch_* + momentum
-        active_exit_enabled=True,
-        active_exit_min_age_sec=0.0,
-        scratch_min_adverse_r=0.7,
-        scratch_min_age_sec=0.0,
-        take_profit_r=3.0,
-    )
-    for k, v in over.items():
-        setattr(base, k, v)
-    return base
-
-
-class _FakeClient:
-    """Минимальный client-мок для manage_levels: round_price + set_trading_stop."""
-
-    def __init__(self, *, ok=True):
-        self._ok = ok
-        self.calls = []
-
-    def round_price(self, symbol, price):
-        return round(price, 4)
-
-    def set_trading_stop(self, symbol, *, sl_price=None, tp_price=None):
-        self.calls.append({"symbol": symbol, "sl": sl_price, "tp": tp_price})
-        return {"ok": self._ok, "error": "" if self._ok else "boom"}
-
-
-class _FakeLevelsDB:
-    def __init__(self):
-        self.updates = []
-
-    def update_levels(self, trade_id, *, sl, tp):
-        self.updates.append({"id": trade_id, "sl": sl, "tp": tp})
-
-
-def _tr(*, side="long", entry=100.0, sl=99.0, tp=103.0, ts_open=0.0,
-         strategy="sweep_fade_run"):
-    """Лёгкий trade-объект: атрибуты, которые читают should_exit/manage_levels.
-    side='long': entry=100, sl=99 → risk=1 (|entry-sl|); tp=103 → base_risk=1
-    при tpr=3. Проверяем favourable в R."""
-    t = SimpleNamespace(id=1, symbol="ETHUSDT", side=side, entry=entry,
-                        sl=sl, tp=tp, ts_open=ts_open, strategy=strategy)
-    return t
-
-
-def _snap_at(price, *, momentum_for="long"):
-    """snap с last_price и cvd_samples, дающими flow_invalidated по стороне.
-    momentum_for='long' → CVD растёт (flow_invalidated long=False, short=True).
-    'short' → CVD падает (flow_invalidated short=False, long=True).
-    'none' → плоский (ни одна сторона не инвалидирована)."""
-    if momentum_for == "long":
-        s = [CvdSample(1, price, -2), CvdSample(2, price, -1),
-             CvdSample(3, price, 0), CvdSample(4, price, 1), CvdSample(5, price, 2)]
-    elif momentum_for == "short":
-        s = [CvdSample(1, price, 2), CvdSample(2, price, 1),
-             CvdSample(3, price, 0), CvdSample(4, price, -1), CvdSample(5, price, -2)]
-    else:
-        s = [CvdSample(1, price, 0), CvdSample(2, price, 0),
-             CvdSample(3, price, 0), CvdSample(4, price, 0), CvdSample(5, price, 0)]
-    return _snap(s, symbol="ETHUSDT", last_price=price)
-
-
-def test_run_in_registry_and_defaults():
-    """sweep_fade_run зарегистрирован, в дефолтном strategy_list, наследует
-    canon-вход (htf_filtered=False, regime_gated=True, taker)."""
-    from scalp_bot.analysis.strategies import (build_strategies, SweepFadeRunStrategy,
-                                               SweepFadeCanonStrategy)
-    cfg = _run_cfg()
-    cfg.strategy_list = ["sweep_fade_run"]
+def test_run_strategy_removed():
+    """v0.18.37 (2026-07-15, решение пользователя): sweep_fade_run удалена —
+    форвард n=176 WR 12% net -$327, гипотеза «дай winners бежать» (BE-lock +
+    убранный flow_exit + scratch) опровергнута — run хуже canon (n=15 WR 40%)
+    и base (n=621 WR 9% но +$120). Возврат к канону: A/B base vs canon, как в
+    исходном дизайне v0.18.20. Реестр и дефолтный strategy_list её не знают;
+    неизвестное имя — мягкий скип. Артефакт: /tmp/scalp_audit/around_0629.py."""
+    from scalp_bot.analysis.strategies import build_strategies
+    from scalp_bot.config.settings import ScalpSettings
+    assert "sweep_fade_run" not in ScalpSettings().strategy_list
+    cfg = _canon_cfg()
+    cfg.strategy_list = ["sweep_fade_run", "sweep_fade_canon"]
     out = build_strategies(cfg, ["ETHUSDT"])
-    assert [s.name for s in out] == ["sweep_fade_run"]
-    r = out[0]
-    assert isinstance(r, SweepFadeRunStrategy)
-    assert isinstance(r, SweepFadeCanonStrategy)  # наследует canon-вход
-    assert r.htf_filtered is False and r.regime_gated is True  # как canon
-    assert r.symbol_scope == {"ETHUSDT"}
-    # дефолтные settings включают run в strategy_list
-    from scalp_bot.config.settings import ScalpSettings
-    assert "sweep_fade_run" in ScalpSettings().strategy_list
-    # cooldown семейства fade распространяется на run
-    s = ScalpSettings()
-    assert s.sl_cooldown_for("sweep_fade_run") == s.sweep_fade_sl_cooldown_sec
+    assert [s.name for s in out] == ["sweep_fade_canon"]  # run скипнут
 
 
-def test_run_symbol_scope_defaults_to_canon():
-    """Пустой SCALP_SWEEP_FADE_RUN_SYMBOLS → canon-список (чистый A/B)."""
-    from scalp_bot.config.settings import ScalpSettings
-    s = ScalpSettings()  # sweep_fade_run_symbols="" по дефолту
-    assert s.sweep_fade_run_symbol_list == s.sweep_fade_canon_symbol_list
-
-
-def test_run_breakeven_lock_long_moves_sl_to_entry():
-    """manage_levels: long favourable≥1.0R → SL переносится к entry−буфер
-    (ADVERSE-сторона, чуть ниже entry), биржа амендится, БД обновляется,
-    повторный перенос запрещён (_be_locked). entry=100, sl=99 → risk=1,
-    be_activate=1.0R → favourable≥1.0 (price≥101) триггерит.
-
-    Инвариант (баг #2745): be-SL длинной всегда НИЖЕ entry — winner бежит
-    к TP, и только полный разворот через entry вниз выбивает BE. Прежний
-    знак (entry+buf, прибыльная сторона) резал winners на малом ретрейсе."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
-    cl = _FakeClient()
-    db = _FakeLevelsDB()
-    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
-    # favourable 0.5R — не достиг порога → SL не трогаем
-    st.manage_levels(tr, _snap_at(100.5), cl, db)
-    assert tr.sl == 99.0 and cl.calls == [] and db.updates == []
-    assert not getattr(tr, "_be_locked", False)
-    # favourable 1.0R (price=101) → перенос на adverse-сторону (entry−buf=99.92)
-    st.manage_levels(tr, _snap_at(101.0), cl, db)
-    assert tr._be_locked is True
-    assert cl.calls and cl.calls[0]["sl"] < 100.0  # к entry−буфер (adverse, буфер 8bps)
-    assert tr.sl < 100.0 and tr.sl > 99.0  # между структурным SL(99) и entry(100)
-    assert db.updates and db.updates[0]["id"] == tr.id
-    # повторный вызов — no-op (защита уже стоит)
-    n_before = len(cl.calls)
-    st.manage_levels(tr, _snap_at(102.0), cl, db)
-    assert len(cl.calls) == n_before
-
-
-def test_run_breakeven_lock_short_moves_sl_down():
-    """short: entry=100, sl=101 → risk=1; favourable≥1.0R (price≤99) → SL
-    вниз к entry+буфер (ADVERSE-сторона, чуть выше entry).
-
-    Инвариант (баг #2745): be-SL шорта всегда ВЫШЕ entry — winner бежит к
-    TP, и только полный разворот через entry вверх выбивает BE. Прежний
-    знак (entry−buf, прибыльная сторона) ставил SL в $0.06 ниже entry и
-    резал winners на частичном ретрейсе (SOL #2745, net −$0.91 при «TP»)."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
-    cl = _FakeClient()
-    db = _FakeLevelsDB()
-    tr = _tr(side="short", entry=100.0, sl=101.0, tp=97.0)
-    st.manage_levels(tr, _snap_at(99.0), cl, db)  # favourable=1.0R
-    assert tr._be_locked is True
-    assert tr.sl > 100.0 and tr.sl < 101.0  # между entry(100) и структурным SL(101)
-    assert cl.calls and cl.calls[0]["sl"] > 100.0  # adverse-сторона (выше entry)
-
-
-def test_run_breakeven_not_weakening_sl():
-    """Если be-уровень НЕ уменьшает убыток (long: new_sl ≤ текущего SL) —
-    не ослабляем защиту, просто фиксируем _be_locked. Кейс: SL уже подтянут
-    выше entry вручную/прошлым (баг-эффект) циклом — опускать его к entry−buf
-    (adverse) было бы ослаблением."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
-    cl = _FakeClient()
-    tr = _tr(side="long", entry=100.0, sl=100.5, tp=103.0)  # SL уже выше entry
-    st.manage_levels(tr, _snap_at(101.0), cl, _FakeLevelsDB())
-    assert cl.calls == []  # не амендим (new_sl ≈ entry−buf=99.92 ≤ 100.5 → гейт)
-    assert tr._be_locked is True  # но защиту не откатываем
-
-
-def test_run_breakeven_lock_noop_when_sl_already_at_be_level():
-    """Live #2743 (BTC SHORT): tr пересоздаётся из БД каждый тик → in-memory
-    _be_locked теряется. tr.sl уже на be-уровне — повторный be-lock должен
-    быть тихим no-op (нет лишнего REST/DB-write/лога).
-
-    После фикса #2745 be-уровень шорта = entry+buf (ADVERSE, выше entry),
-    а не entry−buf. entry=60258.1, buf=8bps → raw be-SL=60258.1*1.0008=
-    60306.3065, round(BTC tick 0.1)=60306.3. tr.sl уже 60306.3 → гейт
-    `new_sl >= tr.sl` (short) срабатывает (с округлением ДО сравнения) →
-    тихий no-op. Округление-до-сравнения защищает long-сторону от float-edge
-    (raw=99.92001 vs tr.sl=99.92 → без округления гейт `<=` бы прозевал)."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-
-    class _BtcClient:
-        """round_price до тика BTC 0.1 (как прод-клиент), фиксирует REST-вызовы."""
-        def __init__(self): self.calls = []
-        def round_price(self, symbol, price): return round(price, 1)
-        def set_trading_stop(self, symbol, *, sl_price=None, tp_price=None):
-            self.calls.append((symbol, sl_price, tp_price))
-            return {"ok": True}
-
-    st = SweepFadeRunStrategy(_run_cfg(), ["BTCUSDT"])
-    cl = _BtcClient()
-    db = _FakeLevelsDB()
-    # entry=60258.1, buf=8bps → raw be-SL=60306.3065, round1=60306.3.
-    # tr.sl уже 60306.3 = корректный be-уровень (предыдущий be-lock применил
-    # его в БД). risk=|entry-sl|=48.2; favourable при price=60042.2 = 215.9 =
-    # 4.48R ≥ 1.0R → триггер, но гейт → тихий no-op.
-    tr = SimpleNamespace(id=2743, symbol="BTCUSDT", side="short",
-                         entry=60258.1, sl=60306.3, tp=59712.9032,
-                         ts_open=0.0, strategy="sweep_fade_run")
-    st.manage_levels(tr, _snap_at(60042.2, momentum_for="short"), cl, db)
-    assert cl.calls == []          # нет лишнего REST (idempotent no-op)
-    assert db.updates == []        # нет лишнего DB-write
-    assert tr._be_locked is True   # защиту зафиксировали (без spam-лога)
-
-
-def test_run_breakeven_lock_sl_always_on_adverse_side():
-    """Property-инвариант (баг #2745): после be-lock SL всегда на ADVERSE-
-    стороне entry — long: sl<entry, short: sl>entry. Иначе winner режется
-    на частичном ретрейсе (преждевременный «SL» на прибыльной стороне).
-
-    Прежний инвертированный знак ставил long→entry+buf (sl>entry) и short→
-    entry−buf (sl<entry) — оба на прибыльной стороне → winners резались."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
-
-    # long: entry=100, sl=99 (структурный ниже) → favourable 1.0R at 101
-    tr_l = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
-    st.manage_levels(tr_l, _snap_at(101.0), _FakeClient(), _FakeLevelsDB())
-    assert tr_l._be_locked is True
-    assert tr_l.sl < 100.0, "long be-SL должен быть НИЖЕ entry (adverse)"
-
-    # short: entry=100, sl=101 (структурный выше) → favourable 1.0R at 99
-    tr_s = _tr(side="short", entry=100.0, sl=101.0, tp=97.0)
-    st.manage_levels(tr_s, _snap_at(99.0), _FakeClient(), _FakeLevelsDB())
-    assert tr_s._be_locked is True
-    assert tr_s.sl > 100.0, "short be-SL должен быть ВЫШЕ entry (adverse)"
-
-
-def test_run_breakeven_lock_2745_short_winner_not_cut_at_entry_minus_buf():
-    """Регрессия live #2745 (SOLUSDT short, pnl=−$0.91 при ярлыке «цель
-    достигнута (биржевой TP)»). Канонический сценарий:
-      short entry=72.77, структурный SL выше entry; цена упала на +1R
-      (≈72.58) → be-lock активировался. Прежний (баг) знак ставил SL=
-      entry−buf=72.71 — на прибыльной стороне, в $0.06 от entry. Цена
-      откатилась на 0.68R вверх к 72.71 → «SL» сработал → gross +$2.75,
-      fees $3.66 → net −$0.91; winner, шедший к TP@3.5R (72.12), зарезан.
-
-    Фикс: be-SL = entry+buf (adverse, выше entry) → откат к 72.71 (entry−buf)
-    SL НЕ касается (он в 72.83, выше entry); winner бежит к TP. Проверяем,
-    что после be-lock SL стоит ВЫШЕ entry и ВЫШЕ старого баг-уровня 72.71."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["SOLUSDT"])
-    cl = _FakeClient()
-    db = _FakeLevelsDB()
-    # entry=72.77, sl=72.96 (структурный, выше entry), tp=72.12 (TP@3.5R)
-    tr = SimpleNamespace(id=2745, symbol="SOLUSDT", side="short",
-                         entry=72.77, sl=72.96, tp=72.12,
-                         ts_open=0.0, strategy="sweep_fade_run")
-    # favourable ≥ 1.0R: risk=tp_dist/tpr=0.65/3.0=0.2167; price=72.55 →
-    # fav=72.77-72.55=0.22 ≥ 0.2167 → триггер (как в live #2745 при ~72.584)
-    st.manage_levels(tr, _snap_at(72.55, momentum_for="short"), cl, db)
-    assert tr._be_locked is True
-    assert tr.sl > 72.77, "be-SL шорта выше entry (adverse-сторона)"
-    assert tr.sl > 72.71, "be-SL выше старого баг-уровня (entry−buf) — winner не зарежется"
-    assert cl.calls and cl.calls[0]["sl"] > 72.77  # amend на adverse-сторону
-
-
-def test_run_should_exit_no_flow_exit_for_winners():
-    """ГЛАВНОЕ отличие от base: winner (favorable>0) при развороте ленты НЕ
-    режется flow_exit. base срезал бы на 1.5R; run держит — winner защищён
-    breakeven-стопом и бежит к TP. Должен вернуть None."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
-    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
-    # price=102 → favourable=2.0R, лента развернулась против (momentum short)
-    # → base срезал бы flow_exit; run возвращает None (winner бежит)
-    assert st.should_exit(tr, _snap_at(102.0, momentum_for="short"), now=10.0) is None
-
-
-def test_run_should_exit_scratch_losing_side():
-    """Losing-side scratch: favourable<0 (в минусе) + лента против + убыток
-    достиг scratch_min_adverse_r (0.7R) → режем. price=99.3 → favourable=-0.7R."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
-    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
-    # лента против long (momentum short), favourable=-0.7R
-    res = st.should_exit(tr, _snap_at(99.3, momentum_for="short"), now=10.0)
-    assert res is not None and res[0] == "flow_scratch"
-
-
-def test_run_should_exit_no_scratch_when_flow_still_with_position():
-    """Лента ещё за позицию (не инвалидирована) → держим, даже в минусе.
-    Полагаемся на биржевой SL."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(), ["ETHUSDT"])
-    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
-    # momentum long → flow_invalidated(long)=False → держим
-    assert st.should_exit(tr, _snap_at(99.3, momentum_for="long"), now=10.0) is None
-
-
-def test_run_should_exit_scratch_disabled():
-    """sweep_fade_run_scratch_on_flow_flip=False → scratch выключен, держим до
-    биржевого SL (только breakeven + TP)."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy
-    st = SweepFadeRunStrategy(_run_cfg(sweep_fade_run_scratch_on_flow_flip=False),
-                              ["ETHUSDT"])
-    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0)
-    assert st.should_exit(tr, _snap_at(99.3, momentum_for="short"), now=10.0) is None
-
-
-def test_run_scratch_default_off():
-    """2026-07-02: дефолт scratch у run — OFF. Live-форвард: 23 flow_scratch
-    = −$257 (31% всех потерь окна), реализация −1.13R при пороге −0.7R — хуже
-    биржевого SL (−1R). Артефакт: scripts/scalp_loss_anatomy.py."""
-    from scalp_bot.config.settings import ScalpSettings
-    assert ScalpSettings().sweep_fade_run_scratch_on_flow_flip is False
-
-
-def test_run_entry_identical_to_canon():
-    """Вход — идентичен canon (изоляция exit-переменной): тот же signal side,
-    strategy name, key_pdl в reasons, taker-вход. Разница только name."""
-    from scalp_bot.analysis.strategies import SweepFadeRunStrategy, SweepFadeCanonStrategy
-    cfg = _run_cfg()
-    run = SweepFadeRunStrategy(cfg, ["ETHUSDT"])
-    run.key_levels = _FakeKeyLevels("pdl")
-    # взвод
-    assert run.update(_snap(_arm_samples(), symbol="ETHUSDT", last_price=96.5),
-                      now=100.0) is None
-    assert run.armed("ETHUSDT") is True
-    # полный reclaim → выстрел, как у canon
-    full = [CvdSample(20, 97.8, -1), CvdSample(21, 97.9, 0), CvdSample(22, 98.0, 1),
-            CvdSample(23, 98.0, 2), CvdSample(24, 98.05, 3), CvdSample(25, 98.1, 4)]
-    sig = run.update(_snap(full, symbol="ETHUSDT", last_price=98.1), now=120.0)
-    assert sig is not None and sig.side == "long"
-    assert sig.strategy == "sweep_fade_run"  # отличие только в имени
-    assert "key_pdl" in sig.reasons and sig.entry_order_type == "market"
-    # TP = 3.0R (run-override), не глобальный 2.0 из _cfg
-    assert abs(sig.tp_level - sig.entry_ref - 3.0 * abs(sig.entry_ref - sig.sl_level)) < 1e-9
-
-
-def test_run_isolated_from_base_and_canon():
-    """run-страта не трогает поведение base/canon: у них нет manage_levels,
-    их should_exit остался canon-контрактом (None для canon)."""
-    from scalp_bot.analysis.strategies import (SweepFadeStrategy,
-                                               SweepFadeCanonStrategy,
-                                               SweepFadeRunStrategy)
-    assert not hasattr(SweepFadeStrategy, "manage_levels")
-    assert not hasattr(SweepFadeCanonStrategy, "manage_levels")
-    assert hasattr(SweepFadeRunStrategy, "manage_levels")
-    # canon should_exit наследует base → None (run переопределён на scratch)
-    canon = SweepFadeCanonStrategy(_canon_cfg(), ["ETHUSDT"])
-    tr = _tr(side="long", entry=100.0, sl=99.0, tp=103.0, strategy="sweep_fade_canon")
-    assert canon.should_exit(tr, _snap_at(102.0, momentum_for="short"), now=10.0) is None
 
 
 # ─── rolling-regime (v0.18.27; страта sweep_fade_trend удалена v0.18.33,
@@ -4204,7 +3884,7 @@ def test_db_insert_regime_and_read(tmp_path):
     db = ScalpDB(str(tmp_path))
     tid = db.insert_open(symbol="BTCUSDT", side="short", qty=0.1, entry=60000.0,
                          sl=60200.0, tp=59400.0, score=4, reasons="sweep",
-                         mode="live", strategy="sweep_fade_run", ts_open=100.0)
+                         mode="live", strategy="sweep_fade_canon", ts_open=100.0)
     feat = compute_regime_features(
         _snap([CvdSample(1, 100, -1)], ts=12 * 3600.0, last_price=100.0),
         _RegimeHtf(adx=33.0), _RegimeKeyLevels(ratio=0.7, day_high=101.0,

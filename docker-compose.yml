@@ -223,17 +223,13 @@ services:
       # density_break (momentum-пробой на сносе плотности, v0.8.0) +
       # sweep_fade_canon (v0.18.20: параллельный КАНОН-вариант sweep_fade —
       # значимые уровни PDH/PDL + full reclaim + вселенная мейджоров; A/B
-      # форвард-тест, одобрено пользователем 2026-06-11) +
-      # sweep_fade_run (v0.18.27: изолированная гипотеза «дай winners бежать» —
-      # canon-вход + breakeven-lock@1.0R + TP 3.0R + scratch только лузеров;
-      # A/B против canon, одобрено пользователем 2026-06-26).
-      # sweep_fade_trend УДАЛЕНА v0.18.33 (2026-07-06, решение пользователя):
-      # форвард n=35 WR 37% net −$121.62, гипотеза range-day-fade опровергнута;
-      # оставлена run (перспективнее: R:R 2.4:1, breakeven-WR 30% vs 46%) —
-      # единственной canon-наследницей, стата копится ×2 быстрее (round-robin
-      # очередь сигналов больше не делится). Числа — BUILDLOG_SCALP 2026-07-06.
+      # форвард-тест, одобрено пользователем 2026-06-11).
+      # sweep_fade_run УДАЛЕНА v0.18.37 (2026-07-15, решение пользователя):
+      # форвард n=176 WR 12% net −$327 — гипотеза «дай winners бежать»
+      # опровергнута; возврат к канону (A/B base vs canon). Числа — BUILDLOG.
+      # sweep_fade_trend УДАЛЕНА v0.18.33 (2026-07-06): n=35 WR 37% net −$121.62.
       # Реальное значение — из .env (env_file); тут дефолт для свежего деплоя.
-      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon,sweep_fade_run}
+      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon}
       # v0.18.20: вселенная канон-страты — ликвидные мейджоры (глубокие книги,
       # рейнджи: канон fade; live ETH WR 55% vs ZEC 28%). Торгуются ТОЛЬКО
       # sweep_fade_canon (symbol_scope), авто-вселенная других страт не задета.
@@ -246,19 +242,6 @@ services:
       # Turtle Soup входит ПО reclaim, не пассивной лимиткой → taker чище по
       # канону. База sweep_fade остаётся maker (контраст A/B).
       SCALP_SWEEP_FADE_CANON_ENTRY_ORDER_TYPE: ${SCALP_SWEEP_FADE_CANON_ENTRY_ORDER_TYPE:-market}
-      # ─── v0.18.27 (2026-06-26): sweep_fade_run — изолированная гипотеза ──
-      # «дай winners бежать». Canon-вход + НОВОЕ: breakeven-lock@1.0R (перенос
-      # биржевого SL к entry), flow_exit@1.5R УБРАН (winners бегут к TP),
-      # TP 3.0R (медиана winner-MFE), scratch только лузеров. Артефакт
-      # scripts/scalp_sf_study.py (n=169, cutoff 2026-06-17): MFE winners
-      # 3.11R vs фикс base на 1.27R — flow_exit резал winners. A/B против canon.
-      # Вселенная run-страты: пусто → canon-список (чистый A/B canon vs canon+exit).
-      SCALP_SWEEP_FADE_RUN_SYMBOLS: ${SCALP_SWEEP_FADE_RUN_SYMBOLS:-}
-      SCALP_SWEEP_FADE_RUN_TAKE_PROFIT_R: ${SCALP_SWEEP_FADE_RUN_TAKE_PROFIT_R:-3.0}
-      SCALP_SWEEP_FADE_RUN_BE_ACTIVATE_R: ${SCALP_SWEEP_FADE_RUN_BE_ACTIVATE_R:-1.0}
-      # 2026-07-02: scratch OFF — live-форвард: 23 скретча = −$257 (−1.13R/шт
-      # при пороге −0.7R), хуже биржевого SL. См. scripts/scalp_loss_anatomy.py.
-      SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP: ${SCALP_SWEEP_FADE_RUN_SCRATCH_ON_FLOW_FLIP:-false}
       # rolling-regime_ratio lookback (бывш. sweep_fade_trend v0.18.27; страта
       # удалена v0.18.33, но regime_ratio остаётся в regime_features-телеметрии).
       SCALP_REGIME_RATIO_LOOKBACK_BARS: ${SCALP_REGIME_RATIO_LOOKBACK_BARS:-8}

@@ -282,214 +282,17 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
                                                     entry_order_type=otype)
 
 
-class SweepFadeRunStrategy(SweepFadeCanonStrategy):
-    """Стратегия №5 (v0.18.27, 2026-06-26): sweep_fade_run — изолированная
-    гипотеза «дай winners бежать». Параллельный форвард-тест A/B против
-    sweep_fade_canon, одобрено пользователем 2026-06-26.
-
-    ─── Research basis ───
-    Глубокий разбор базового sweep_fade (артефакт scripts/scalp_sf_study.py,
-    n=169, cutoff 2026-06-17, verified 100%) показал:
-    - ** Winners реально бегут**: MFE winners медиана **3.11R**, p25=2.42,
-      ≥1.5R ловят 92% winners, ≥3.0R — 52%.
-    - ** Но flow_exit@1.5R режет их на ~1.27R** ($15.79 vs $12.39 risk) —
-      средний win 1.27R вместо доступных ~3R. Это инверсия «Философии B»:
-      заложенный TP 3.5R ловит только 5/168 сделок, потому что flow_exit
-      срабатывает раньше и не даёт добежать.
-    - ** MFE-разделение**: 98% сделок, достигших favourable 1.0R — winners;
-      только 18% лозеров доходят до 1R favourable → чистая точка
-      breakeven-lock.
-    - ** MAE медиана 0.59R**, ни один лузер не уходит глубже до SL → стоп
-      адекватен, расширять его не нужно.
-    Итог: стратегия пограничная (WR 37.5% vs break-even 42.5%), её математика
-    не «сломана», а **перерезает winners** на плече. Источники: Sweeney 1988
-    «Maximum Favorable Excursion»; Schwager/Brooks «let winners run»
-    (Философия B, которую base нарушает); Mark Douglas.
-
-    ─── Что наследует от canon (вход НЕ трогаем — изолируем exit) ───
-    Значимые уровни PDH/PDL + дневные экстремумы (level_gate), full reclaim
-    1.0, вселенная мейджоров (symbol_scope), taker-вход по reclaim. Это уже
-    лучшие найденные решения (canon v0.18.20–24); меняя их вместе с exit, мы
-    потеряли бы изоляцию переменной. symbol_scope унаследован от canon —
-    ИЗОЛИРОВАННОЕ переопределение через sweep_fade_run_symbols (по умолчанию
-    = canon-список, чтобы A/B был чистым «canon vs canon+exit»).
-
-    ─── Что меняет (НОВОЕ — exit-контракт) ───
-    1. ** Breakeven-lock при favourable ≥ be_activate_r (1.0R)**: перенос
-       биржевого SL на entry+буфер. Реализован через manage_levels()
-       (executor вызывает перед exit-проверкой, duck-typing — у base/canon
-       этого метода нет → их поведение не меняется). Артефакт: 98% сделок на
-       1R — winners; breakeven конвертирует большинство будущих лузеров в
-       ~0, не трогая winners. Sweeney MFE; Mark Douglas.
-    2. ** Убран flow_exit@1.5R** (главный убийца winners). Winners при
-       развороте ленты теперь НЕ режутся — их защищает breakeven-стоп, а не
-       ранний фикс. Победитель бежит к биржевому TP.
-    3. ** TP = sweep_fade_run_take_profit_r (3.0R)** — по медиане winner-MFE
-       3.11R (ловит 52% winners полностью; p25=2.42 — остальные через
-       breakeven). Ниже канон-дефолта 3.5R, но по данным (не интуиция).
-    4. ** flow_scratch на losing side** (только лузеры): при развороте ленты
-       ПРОТИВ позиции И favourable < be_activate_r (ещё в минусе, breakeven
-       не сработал) — режем убыток рано. Winners не трогаем (их favourable
-       ≥ 1R → breakeven их уже защитил; scratch-порог стоит выше be).
-
-    ─── Изоляция ───
-    Новый класс с name="sweep_fade_run", своим SCALP_SWEEP_FADE_RUN_* env.
-    Атрибуция в БД по колонке strategy. Не трогает base/canon/density.
-    Копит n≥100 параллельно, решение через 2 недели + p-value (sample-size).
-    """
-
-    name = "sweep_fade_run"
-    # Вход — идентичен canon (наследуем htf_filtered=False, di_long_gated=False,
-    # regime_gated=True). symbol_scope задаётся своим env (по умолчанию = canon).
-
-    def __init__(self, cfg, symbols: list[str]) -> None:
-        # TP override через overlay: build_signal читает take_profit_r из cfg.
-        # Пер-стратегийный TP канонически передаётся через tp_r в build_signal,
-        # но canon-путь вызывает родительский SweepFadeStrategy.update → детектор
-        # → build_signal без tp_r (берёт глобальный). Чтобы не дублировать весь
-        # конвейер, оверлеим take_profit_r на cfg — _CfgOverlay прозрачен.
-        run_cfg = _CfgOverlay(
-            cfg,
-            take_profit_r=getattr(cfg, "sweep_fade_run_take_profit_r",
-                                  cfg.take_profit_r),
-        )
-        super().__init__(run_cfg, [])
-        # canon __init__ поставил self.symbol_scope из canon-списка (через
-        # overlay делегирует в base). Переопределяем нашим (изолированный env,
-        # дефолт = canon) ПОСЛЕ super — canon уже отфильтровал ensure_symbols
-        # по своему scope, но мы передали [] → детекторов нет. Создаём ниже.
-        self.symbol_scope = set(getattr(cfg, "sweep_fade_run_symbol_list",
-                                        cfg.sweep_fade_canon_symbol_list))
-        # canon __init__ зовёт ensure_symbols с [] (мы передали пусто) →
-        # детекторы не созданы. Создаём по нашему scope из реальных символов.
-        self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
-
-    def _risk_r(self, tr) -> float:
-        """R-единица = base_risk (как в SweepFadeStrategy.should_exit):
-        tp_dist/tpr, fallback |entry−sl|. Пороги выхода меряются в base_risk,
-        не в ширине SL (синхронизация с ×1.0)."""
-        cfg = self.cfg
-        tpr = getattr(cfg, "take_profit_r", 0.0) or 0.0
-        tp_dist = abs(getattr(tr, "tp", tr.entry) - tr.entry)
-        if tpr > 0 and tp_dist > 0:
-            return tp_dist / tpr
-        return abs(tr.entry - getattr(tr, "sl", tr.entry))
-
-    def manage_levels(self, tr, snap, client, db) -> None:
-        """Breakeven-lock: при favourable ≥ be_activate_r переносим биржевой
-        SL на entry+буфер (один раз за сделку). Executor вызывает перед
-        exit-проверкой, если метод есть (duck-typing). У base/canon метода
-        нет → их поведение не меняется (изоляция).
-
-        Буфер = sl_buffer_bps (тот же, что у структурного SL) — чтобы стоп
-        не стоял ровно в entry и не выбило рыночным шумом/спредом. Перенос
-        только в сторону уменьшения убытка (long → SL вверх к entry; short →
-        вниз). Повторный перенос ниже уже-поставленного be запрещён
-        (_be_locked в tr-кеше), чтобы не откатить защиту.
-        """
-        if snap is None or getattr(snap, "last_price", None) is None:
-            return
-        if getattr(tr, "_be_locked", False):
-            return
-        price = snap.last_price
-        favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
-        risk = self._risk_r(tr)
-        if risk <= 0:
-            return
-        activate = getattr(self.cfg, "sweep_fade_run_be_activate_r", 1.0) * risk
-        if favorable < activate:
-            return
-        buf = getattr(self.cfg, "sl_buffer_bps", 0.0) / 1e4
-        # BE-SL на ADVERSE-стороне entry (канон «вынос стопа в break-even»):
-        # long → entry−buf (чуть ниже entry, стоп-триггер на падение к entry),
-        # short → entry+buf (чуть выше entry, стоп-триггер на рост к entry).
-        # Структурный SL у long ниже entry (entry−1R), у short выше (entry+1R) —
-        # BE переносит его ВНИЗ/ВВЕРХ к entry, оставляя на стороне убытка. Тогда
-        # winner бежит к TP, и только полный разворот ЧЕРЕЗ entry выбивает BE
-        # (микро-убыток = buffer, как задумано «не выбило ровно в entry»).
-        #
-        # БАГ 2026-06-29 (#2745 SOLUSDT short, pnl=−$0.91 при «цель достигнута»):
-        # прежний знак был инвертирован (long→entry+buf, short→entry−buf) → be-SL
-        # стоял на ПРИБЫЛЬНОЙ стороне, в $0.06 от entry. Для short Bybit триггерит
-        # SL на рост к цене (api-docs.mdc / Bybit v5 set_trading_stop): цена
-        # откатилась на 0.68R вверх → «SL» сработал на entry−buf → gross +$2.75,
-        # но fees $3.66 → net −$0.91. Winner, шедший к TP@3.5R, зарезан в минус.
-        # Знак приведён к adverse-стороне (= собственному комментарию метода).
-        raw_sl = tr.entry * (1.0 - buf) if tr.side == "long" \
-            else tr.entry * (1.0 + buf)
-        # Округляем be-SL до тика ДО проверки «не ослабляем защиту». Иначе
-        # tiny float-разница обходила гейт: raw be-SL=60209.8935 < tr.sl=60209.9
-        # (на тике 0.1) → гейт `new_sl>=tr.sl` (short) не срабатывал, код шёл
-        # дальше, round_price возвращал обратно 60209.9 → no-op be-lock + REST
-        # + DB-write каждый тик. Усугублялось тем, что executor строит tr из
-        # db.open_trades() каждый цикл → in-memory _be_locked теряется. С
-        # округлением до сравнения: rounded(60209.9) >= tr.sl(60209.9) → тихий
-        # no-op (live #2743, 122 spam-логов до фикса 2026-06-29).
-        new_sl = (client.round_price(tr.symbol, raw_sl)
-                  if client is not None else raw_sl)
-        if tr.side == "long":
-            # не ниже уже стоящего SL (не ослабляем защиту)
-            if new_sl <= tr.sl:
-                tr._be_locked = True
-                return
-        else:
-            if new_sl >= tr.sl:
-                tr._be_locked = True
-                return
-        if client is not None:
-            res = client.set_trading_stop(tr.symbol, sl_price=new_sl, tp_price=tr.tp)
-            if not res.get("ok"):
-                play.info("⚠️ [%s] #%d be-lock: set_trading_stop отклонён (%s) — "
-                          "оставляю структурный SL", tr.symbol, tr.id,
-                          res.get("error"))
-                return
-        if db is not None:
-            db.update_levels(tr.id, sl=new_sl, tp=tr.tp)
-        play.info("🔒 [%s] #%d be-lock %s: favourable %.2fR ≥ %.1fR → SL "
-                  "%.4f→%.4f (биржевой TP %.4f сохранён, winners бегут)",
-                  tr.symbol, tr.id, tr.side.upper(), favorable / risk,
-                  getattr(self.cfg, "sweep_fade_run_be_activate_r", 1.0),
-                  tr.sl, new_sl, tr.tp)
-        tr.sl = new_sl
-        tr._be_locked = True
-
-    def should_exit(self, tr, snap: SymbolSnapshot, now: float
-                    ) -> tuple[str, float] | None:
-        """Exit-контракт sweep_fade_run:
-        - Winners (favorable ≥ be_activate_r) → НЕТ раннего фикса. Их защищает
-          breakeven-стоп (manage_levels); бегут к биржевому TP.
-        - Losing-side scratch: лента развернулась ПРОТИВ И favourable < 0
-          (ещё в минусе, breakeven не сработал) → режем убыток рано.
-        flow_exit (фикс winners по развороту ленты) УБРАН — это и есть фикс
-        главной проблемы base (MFE winners 3.11R vs фикс на 1.27R)."""
-        cfg = self.cfg
-        if not getattr(cfg, "active_exit_enabled", False) or snap is None:
-            return None
-        if getattr(snap, "last_price", None) is None:
-            return None
-        if now - tr.ts_open < getattr(cfg, "active_exit_min_age_sec", 0.0):
-            return None
-        price = snap.last_price
-        favorable = (price - tr.entry) if tr.side == "long" else (tr.entry - price)
-        risk = self._risk_r(tr)
-        if risk <= 0:
-            return None
-        flipped = flow_invalidated(snap, tr.side, cfg.momentum_window_sec)
-        if not flipped:
-            return None  # лента ещё за нас — держим (winner бежит к TP)
-        # Winners при развороте ленты НЕ режем: breakeven-стоп (manage_levels)
-        # их уже защитил. Только losing-side scratch.
-        if favorable >= 0:
-            return None
-        # scratch-порог: режем только если убыток достиг scratch_min_adverse_r
-        # и сделка созрела (анти hair-trigger, как в base).
-        adverse = getattr(cfg, "scratch_min_adverse_r", 0.7) * risk
-        scratch_on = getattr(cfg, "sweep_fade_run_scratch_on_flow_flip",
-                             True)  # у run scratch включён по умолчанию
-        if (scratch_on and favorable <= -adverse
-                and now - tr.ts_open >= getattr(cfg, "scratch_min_age_sec", 20.0)):
-            return ("flow_scratch", price)
-        return None
+# sweep_fade_run (v0.18.27) УДАЛЕНА 2026-07-15 (v0.18.37, решение
+# пользователя): форвард-тест n=176 WR 12% net −$327 — гипотеза «дай winners
+# бежать» (breakeven-lock + убранный flow_exit + scratch) ОПРОВЕРГНУТА: run хуже
+# и canon (n=15 WR 40%), и base (n=621 WR 9% но +$120 — крупные winners тянут).
+# Exit-контракт run (BE-lock, scratch) не дал winners «бежать» в плюс —
+# стратегия стабильно убыточна до и после bug-fix 058e695 (знак BE-SL). Полное
+# обоснование с числами — BUILDLOG_SCALP 2026-07-15; история сделок в БД
+# (strategy='sweep_fade_run') сохранена; код — git v0.18.27..v0.18.36.
+# Возврат к канону: sweep_fade_canon (базовый flow_exit, значимые уровни,
+# full reclaim, вселенная мейджоров) — A/B base vs canon, как в исходном
+# дизайне v0.18.20.
 
 
 # sweep_fade_trend (v0.18.27) УДАЛЕНА 2026-07-06 (v0.18.33, решение
@@ -1223,7 +1026,6 @@ def build_strategies(cfg, symbols: list[str]) -> list[Strategy]:
         DensityBounceStrategy.name: DensityBounceStrategy,
         DensityBreakStrategy.name: DensityBreakStrategy,
         SweepFadeCanonStrategy.name: SweepFadeCanonStrategy,
-        SweepFadeRunStrategy.name: SweepFadeRunStrategy,
     }
     out: list[Strategy] = []
     for name in enabled:

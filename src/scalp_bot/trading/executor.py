@@ -648,16 +648,6 @@ class Executor:
         strat = self._strategies.get(getattr(tr, "strategy", ""))
         if strat is None or snap is None:
             return None
-        # v0.18.27: breakeven-lock для sweep_fade_run (duck-typing). У base/
-        # canon этого метода нет → их поведение не меняется (изоляция). Вызов
-        # ДО should_exit: be-перенос SL может защитить winner, который should_exit
-        # иначе срезал бы. Перенос биржевого SL — только в live (paper симулируется
-        # в _manage_paper через manage_levels с client=None → только тр-кеш).
-        if hasattr(strat, "manage_levels"):
-            try:
-                strat.manage_levels(tr, snap, self._client, self._db)
-            except Exception:
-                log.exception("manage_levels %s #%d failed", tr.strategy, tr.id)
         try:
             return strat.should_exit(tr, snap, self._now())
         except Exception:

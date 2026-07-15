@@ -478,6 +478,13 @@ market-входа (density_break) SL/TP пересчитываются от ре
 
 ## sweep_fade_canon (КАНОН-вариант sweep_fade, параллельный A/B форвард-тест, v0.18.20)
 
+> **v0.18.37 (2026-07-15, решение пользователя):** эксперимент `sweep_fade_run`
+> (v0.18.27 «дай winners бежать» — BE-lock + убранный flow_exit + scratch)
+> **УДАЛЕН** — форвард n=176 WR 12% net −$327, гипотеза опровергнута (run хуже
+> canon n=15 WR 40% и base n=621 WR 9% но +$120). Возврат к исходному A/B-дизайну
+> v0.18.20: **base vs canon** (canon с базовым `flow_exit`, как задумано).
+> Артефакт: `/tmp/scalp_audit/around_0629.py` → `scalp_bot.sqlite`.
+
 Класс-флаги: `htf_filtered = False`, `di_long_gated = False`,
 `regime_gated = True`. Выходы / SL/TP / ADX-режим-гейт / sl_cooldown 60м —
 **идентичны базовому** (наследование от `SweepFadeStrategy`): A/B изолирует
