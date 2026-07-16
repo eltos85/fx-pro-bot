@@ -334,6 +334,13 @@ services:
       # v0.18.32: lifecycle треков density_bounce → density_tracks (телеметрия
       # для анализа persist-порога по данным, не влияет на торговлю).
       SCALP_DENSITY_TRACK_LOG_ENABLED: ${SCALP_DENSITY_TRACK_LOG_ENABLED:-true}
+      # v0.18.38: live-контрфактуал maker non-fill sweep_fade. После Cancelled/
+      # timeout наблюдаем first-hit 1.5R/TP vs SL + MFE/MAE на 60/180м.
+      # Только telemetry, торговлю не меняет.
+      SCALP_MAKER_NONFILL_SHADOW_ENABLED: ${SCALP_MAKER_NONFILL_SHADOW_ENABLED:-true}
+      SCALP_MAKER_NONFILL_SHADOW_HORIZON_SEC: ${SCALP_MAKER_NONFILL_SHADOW_HORIZON_SEC:-10800}
+      SCALP_MAKER_NONFILL_SHADOW_CHECKPOINT_SEC: ${SCALP_MAKER_NONFILL_SHADOW_CHECKPOINT_SEC:-3600}
+      SCALP_MAKER_NONFILL_SHADOW_FLUSH_SEC: ${SCALP_MAKER_NONFILL_SHADOW_FLUSH_SEC:-60}
       # Rolling-baseline (v0.9.0): стена vs скользящее среднее за 10–15мин (Kalena),
       # а не мгновенный top-25 (тот давал 0/502 входов — 5× недостижим).
       SCALP_DENSITY_BASELINE_SEC: ${SCALP_DENSITY_BASELINE_SEC:-900}

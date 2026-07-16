@@ -103,6 +103,40 @@ CREATE TABLE IF NOT EXISTS density_tracks (
 );
 CREATE INDEX IF NOT EXISTS idx_density_tracks_ts ON density_tracks(ts_start);
 CREATE INDEX IF NOT EXISTS idx_density_tracks_symbol ON density_tracks(symbol);
+CREATE TABLE IF NOT EXISTS maker_nonfill_shadows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id INTEGER NOT NULL UNIQUE,
+    ts_signal REAL NOT NULL,
+    ts_nonfill REAL NOT NULL,
+    ts_end REAL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    nonfill_reason TEXT NOT NULL,
+    entry REAL NOT NULL,
+    sl REAL NOT NULL,
+    tp REAL NOT NULL,
+    risk REAL NOT NULL,
+    target_r REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    outcome_1_5r TEXT,
+    ts_outcome_1_5r REAL,
+    outcome_tp TEXT,
+    ts_outcome_tp REAL,
+    mfe_r REAL NOT NULL DEFAULT 0,
+    mae_r REAL NOT NULL DEFAULT 0,
+    mfe_r_60 REAL,
+    mae_r_60 REAL,
+    mfe_r_180 REAL,
+    mae_r_180 REAL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    last_price REAL,
+    last_update REAL
+);
+CREATE INDEX IF NOT EXISTS idx_maker_shadow_status
+    ON maker_nonfill_shadows(status);
+CREATE INDEX IF NOT EXISTS idx_maker_shadow_ts
+    ON maker_nonfill_shadows(ts_nonfill);
 """
 
 
@@ -400,6 +434,76 @@ class ScalpDB:
         rows = self._conn.execute(
             "SELECT * FROM density_tracks WHERE ts_start>=? ORDER BY id",
             (since_ts,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def insert_maker_nonfill_shadow(
+        self, *, trade_id: int, ts_signal: float, ts_nonfill: float,
+        symbol: str, side: str, strategy: str, nonfill_reason: str,
+        entry: float, sl: float, tp: float, target_r: float,
+    ) -> int | None:
+        """Начать live-контрфактуал maker non-fill.
+
+        Таблица — только telemetry: хранит путь цены после Cancelled/timeout,
+        не влияет на входы, фильтры или сопровождение. Идемпотентность по
+        trade_id защищает от повторной записи одного несостоявшегося входа.
+        """
+        risk = abs(entry - sl)
+        if risk <= 0 or target_r <= 0:
+            return None
+        try:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO maker_nonfill_shadows "
+                "(trade_id,ts_signal,ts_nonfill,symbol,side,strategy,"
+                "nonfill_reason,entry,sl,tp,risk,target_r,last_update) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (trade_id, ts_signal, ts_nonfill, symbol, side, strategy,
+                 nonfill_reason, entry, sl, tp, risk, target_r, ts_nonfill),
+            )
+            self._conn.commit()
+            if cur.lastrowid:
+                return int(cur.lastrowid)
+            row = self._conn.execute(
+                "SELECT id FROM maker_nonfill_shadows WHERE trade_id=?",
+                (trade_id,),
+            ).fetchone()
+            return int(row["id"]) if row is not None else None
+        except sqlite3.Error:
+            self._conn.rollback()
+            return None
+
+    def pending_maker_nonfill_shadows(self) -> list[dict]:
+        """Незавершённые maker-контрфактуалы для resume после рестарта."""
+        rows = self._conn.execute(
+            "SELECT * FROM maker_nonfill_shadows WHERE status='pending' "
+            "ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_maker_nonfill_shadow(self, row: dict) -> None:
+        """Сохранить текущие milestones maker-контрфактуала."""
+        cols = (
+            "ts_end", "status", "outcome_1_5r", "ts_outcome_1_5r",
+            "outcome_tp", "ts_outcome_tp", "mfe_r", "mae_r",
+            "mfe_r_60", "mae_r_60", "mfe_r_180", "mae_r_180",
+            "sample_count", "last_price", "last_update",
+        )
+        vals = [row.get(c) for c in cols] + [row["id"]]
+        try:
+            self._conn.execute(
+                f"UPDATE maker_nonfill_shadows SET "
+                f"{','.join(f'{c}=?' for c in cols)} WHERE id=?",
+                tuple(vals),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            self._conn.rollback()
+
+    def maker_nonfill_shadow_rows(self, since_ts: float = 0.0) -> list[dict]:
+        """Maker non-fill telemetry, старые→новые (для анализа/тестов)."""
+        rows = self._conn.execute(
+            "SELECT * FROM maker_nonfill_shadows WHERE ts_nonfill>=? "
+            "ORDER BY id", (since_ts,)
+        ).fetchall()
         return [dict(r) for r in rows]
 
     def regime_for(self, trade_id: int) -> dict | None:

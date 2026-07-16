@@ -4,6 +4,36 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-07-16
+
+### feat(scalp/telemetry): v0.18.38 — live-контрфактуал maker non-fill
+`(хеш после коммита)`
+
+**Симптом:** после возврата `sweep_fade_canon` базовая `sweep_fade` визуально
+«молчала». Проверка показала, что сигналы есть, но maker fill-rate просел:
+после деплоя v0.18.37 — **5/17 (29.4%)**, за последние 24ч — **1/10 (10%)**,
+за 30д — 278/751 (37%). Узкое место текущего окна — ZEC: **1/13 (7.7%)**;
+все 12 текущих Cancelled/timeout пришлись на ZEC.
+
+**Предварительный контрфактуал** (Bybit public 1m klines, 12 non-fill,
+горизонт 60/180м): 6/12 достигли +1.5R раньше SL, 6/12 — SL раньше +1.5R;
+полный TP 3.5R раньше SL — 3, SL раньше TP — 8, ни один — 1. Это слишком малая
+и грубая выборка (минутные бары, сохранённый maker entry, flow_exit не
+эмулируется), поэтому менять entry type нельзя — нужен заранее объявленный
+live forward-test ≥100 non-fill.
+
+**Решение:** новая таблица `maker_nonfill_shadows`. При `entry_Cancelled` или
+`entry_timeout` базовой `sweep_fade` запускается 180-минутное live-наблюдение
+по WS snapshot (без REST): независимо фиксируются first-hit
+`flow_exit_activate_r` (сейчас 1.5R) vs SL и TP vs SL, MFE/MAE на 60/180м,
+sample count и последний price. Pending-наблюдения восстанавливаются из SQLite
+после рестарта; обычный flush раз в 60с, milestones — немедленно.
+
+Только telemetry: ордера, фильтры, sizing, SL/TP и выходы не изменены.
+
+**Файлы:** `state/db.py`, `trading/executor.py`, `config/settings.py`,
+`docker-compose.yml`, `tests/test_scalp_bot.py`.
+
 ## 2026-07-15
 
 ### refactor(scalp): v0.18.37 — удаление sweep_fade_run, возврат к канону (base vs canon A/B)

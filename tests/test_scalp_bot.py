@@ -24,7 +24,7 @@ from scalp_bot.analysis.regime import compute_regime_features
 from scalp_bot.data.aggregates import CvdSample, LiqEvent, SymbolSnapshot, SymbolState
 from scalp_bot.safety import killswitch
 from scalp_bot.trading.executor import (
-    Executor, bracket_exit_reason, paper_pnl, position_size,
+    Executor, advance_maker_nonfill_shadow, bracket_exit_reason, paper_pnl, position_size,
     position_size_by_risk, reconciled_bracket_reason, taker_pnl,
 )
 
@@ -4269,5 +4269,102 @@ def test_main_log_shadow_accepts_precomputed_feats(tmp_path):
     assert rows[0]["blocked_by"] == "dead_market"
     assert abs(rows[0]["htf_natr_pct"] - 0.33) < 1e-9
     assert rows[0]["session"] == "asia"  # прекомпьютнутые, без пересчёта
+    db.close()
+
+
+# ─── v0.18.38: live-контрфактуал maker non-fill ─────────────────────────
+
+def _maker_shadow_row(**over):
+    row = {
+        "id": 1, "trade_id": 10, "ts_signal": 90.0, "ts_nonfill": 100.0,
+        "ts_end": None, "symbol": "ZECUSDT", "side": "long",
+        "strategy": "sweep_fade", "nonfill_reason": "entry_timeout",
+        "entry": 100.0, "sl": 99.0, "tp": 103.5, "risk": 1.0,
+        "target_r": 1.5, "status": "pending",
+        "outcome_1_5r": None, "ts_outcome_1_5r": None,
+        "outcome_tp": None, "ts_outcome_tp": None,
+        "mfe_r": 0.0, "mae_r": 0.0,
+        "mfe_r_60": None, "mae_r_60": None,
+        "mfe_r_180": None, "mae_r_180": None,
+        "sample_count": 0, "last_price": None, "last_update": 100.0,
+    }
+    row.update(over)
+    return row
+
+
+def test_advance_maker_shadow_keeps_independent_1_5r_and_tp_paths():
+    """+1.5R достигнут до SL, но полный TP не достигнут и позже первым стал SL."""
+    row = _maker_shadow_row()
+    assert advance_maker_nonfill_shadow(row, 101.6, 110.0) is True
+    assert row["outcome_1_5r"] == "target"
+    assert row["outcome_tp"] is None
+    assert row["mfe_r"] == pytest.approx(1.6)
+
+    assert advance_maker_nonfill_shadow(row, 98.9, 120.0) is True
+    assert row["outcome_1_5r"] == "target"  # first-hit не переписывается
+    assert row["outcome_tp"] == "sl"
+    assert row["mae_r"] == pytest.approx(1.1)
+    assert row["sample_count"] == 2
+
+
+def test_advance_maker_shadow_checkpoints_and_finalizes():
+    row = _maker_shadow_row()
+    assert advance_maker_nonfill_shadow(
+        row, 100.5, 100.0 + 3600.0,
+        checkpoint_sec=3600.0, horizon_sec=10800.0) is True
+    assert row["mfe_r_60"] == pytest.approx(0.5)
+    assert row["mae_r_60"] == pytest.approx(0.0)
+    assert row["status"] == "pending"
+
+    assert advance_maker_nonfill_shadow(
+        row, 99.5, 100.0 + 10800.0,
+        checkpoint_sec=3600.0, horizon_sec=10800.0) is True
+    assert row["status"] == "final"
+    assert row["ts_end"] == pytest.approx(10900.0)
+    assert row["mfe_r_180"] == pytest.approx(0.5)
+    assert row["mae_r_180"] == pytest.approx(0.5)
+
+
+def test_maker_shadow_db_roundtrip_and_resume(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    sid = db.insert_maker_nonfill_shadow(
+        trade_id=10, ts_signal=90.0, ts_nonfill=100.0,
+        symbol="ZECUSDT", side="long", strategy="sweep_fade",
+        nonfill_reason="entry_timeout", entry=100.0, sl=99.0, tp=103.5,
+        target_r=1.5)
+    assert sid is not None
+    pending = db.pending_maker_nonfill_shadows()
+    assert len(pending) == 1
+    assert pending[0]["risk"] == pytest.approx(1.0)
+
+    row = pending[0]
+    advance_maker_nonfill_shadow(
+        row, 101.6, 110.0, checkpoint_sec=3600.0, horizon_sec=10800.0)
+    db.update_maker_nonfill_shadow(row)
+    got = db.maker_nonfill_shadow_rows()[0]
+    assert got["outcome_1_5r"] == "target"
+    assert got["mfe_r"] == pytest.approx(1.6)
+    assert got["sample_count"] == 1
+    db.close()
+
+
+def test_executor_starts_shadow_only_for_base_sweep_fade(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    cfg = SimpleNamespace(
+        maker_nonfill_shadow_enabled=True, flow_exit_activate_r=1.5)
+    ex = Executor(db, cfg, client=None, now=lambda: 100.0)
+    base = SimpleNamespace(
+        id=1, ts_open=90.0, symbol="ZECUSDT", side="long",
+        strategy="sweep_fade", entry=100.0, sl=99.0, tp=103.5)
+    canon = SimpleNamespace(
+        id=2, ts_open=90.0, symbol="BTCUSDT", side="long",
+        strategy="sweep_fade_canon", entry=100.0, sl=99.0, tp=103.5)
+
+    ex._start_maker_nonfill_shadow(base, "entry_timeout", 100.0)
+    ex._start_maker_nonfill_shadow(canon, "entry_timeout", 100.0)
+    rows = db.maker_nonfill_shadow_rows()
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == 1
+    assert rows[0]["target_r"] == pytest.approx(1.5)
     db.close()
 

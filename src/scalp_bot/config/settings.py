@@ -242,6 +242,17 @@ class ScalpSettings(BaseSettings):
     # выживаемости стен и post-wall цены — обоснование persist-порога по
     # данным (strategy-guard.mdc). Не влияет на торговлю.
     density_track_log_enabled: bool = Field(default=True)
+    # v0.18.38: live-контрфактуал maker non-fill для sweep_fade. После
+    # entry_Cancelled/entry_timeout наблюдаем цену ещё 180м и записываем:
+    # first-hit +flow_exit_activate_r vs SL, TP vs SL, MFE/MAE на 60/180м.
+    # Только telemetry: ордера/фильтры/выходы не меняет. 180м покрывает
+    # исторический max hold ~228м почти полностью и >p90 53.5м; checkpoint 60м
+    # соответствует основному измерительному горизонту. Flush 60с снижает
+    # SQLite-write нагрузку, milestones сохраняются немедленно.
+    maker_nonfill_shadow_enabled: bool = Field(default=True)
+    maker_nonfill_shadow_horizon_sec: float = Field(default=10800.0)
+    maker_nonfill_shadow_checkpoint_sec: float = Field(default=3600.0)
+    maker_nonfill_shadow_flush_sec: float = Field(default=60.0)
     # Анти-шум между входами по одному символу.
     signal_cooldown_sec: float = Field(default=60.0)
     # Пауза после стоп-аута перед повторным входом в ТУ ЖЕ сторону по символу.
