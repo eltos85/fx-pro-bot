@@ -6,8 +6,43 @@
 
 ## 2026-07-22
 
-### feat(scalp/telemetry): v0.18.41 — preregistered shadow meta-labels
+### feat(scalp/telemetry): v0.18.42 — causal counterfactual setup tracker
 `(хеш после коммита)`
+
+Evidence-first этап 4 добавляет только observational telemetry, без изменения
+боевых thresholds/gates/orders. Общий `CounterfactualTracker` принимает
+shadow-candidates стратегий и maker non-fill executor-а, идемпотентно хранит их
+в typed `counterfactual_setups`, восстанавливает pending после рестарта,
+flush-ит периодически/на milestones и считает first-hit 1.5R/TP vs SL,
+MFE/MAE на 60/90/120/180 мин только по будущим уникальным WS snapshots.
+Legacy `maker_nonfill_shadows` сохранена, старые строки безопасно мигрируются,
+а новые maker lifecycle dual-write-ятся для совместимости отчётов.
+
+`density_break_v2_shadow` после существующего 60с V1 close-confirm причинно
+ждёт будущий возврат к стене в пределах действующего
+`density_wall_tolerance_bps`, следующий snapshot удержания и повторный CVD
+momentum. После CVD-confirm hypothetical LIMIT@wall ждёт ещё одно будущее
+касание — прошлому retest не приписывается ретроспективный fill. Кандидат
+собирается и когда V1 CVD/OB/fee gate не создал реальный сигнал. V1 order path
+и реальные сделки не менялись.
+
+`density_bounce` на одном существующем lifecycle стены эмитит shadow-grid
+persist 60/90/120/180с при подходе цены; боевой persist **300с** неизменен.
+`canon_rejection_shadow` пишет отдельно PDH/PDL/day_high/day_low, age/touches
+из уже закрытых 15m-баров (если доступны), sweep depth, outside/reclaim time и
+CVD divergence/reversal. Добавлен read-only отчёт
+`scripts/scalp_counterfactual_report.py`; память bounded с явным terminal
+`overflow`, а не молчаливой потерей pending-наблюдений.
+
+**Файлы:** `src/scalp_bot/analysis/counterfactual.py`,
+`src/scalp_bot/analysis/strategies.py`, `src/scalp_bot/analysis/signals.py`,
+`src/scalp_bot/app/main.py`, `src/scalp_bot/config/settings.py`,
+`src/scalp_bot/data/levels.py`, `src/scalp_bot/state/db.py`,
+`src/scalp_bot/trading/executor.py`, `scripts/scalp_counterfactual_report.py`,
+`docker-compose.yml`, `tests/test_scalp_bot.py`.
+
+### feat(scalp/telemetry): v0.18.41 — preregistered shadow meta-labels
+`0f83991`
 
 Evidence-first этап 3 фиксирует **training baseline**, но не включает торговый
 фильтр: `sweep_fade` — **n=29 actual fills + 89 maker non-fill**,

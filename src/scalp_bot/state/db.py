@@ -230,6 +230,72 @@ CREATE INDEX IF NOT EXISTS idx_maker_shadow_status
     ON maker_nonfill_shadows(status);
 CREATE INDEX IF NOT EXISTS idx_maker_shadow_ts
     ON maker_nonfill_shadows(ts_nonfill);
+CREATE TABLE IF NOT EXISTS counterfactual_setups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_key TEXT NOT NULL UNIQUE,
+    setup_type TEXT NOT NULL,
+    variant TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    ts_candidate REAL NOT NULL,
+    ts_entry REAL NOT NULL,
+    ts_end REAL,
+    entry REAL NOT NULL,
+    sl REAL NOT NULL,
+    tp REAL NOT NULL,
+    risk REAL NOT NULL,
+    target_r REAL NOT NULL,
+    horizon_sec REAL NOT NULL,
+    checkpoint_sec REAL NOT NULL,
+    retest_timeout_sec REAL,
+    legacy_trade_id INTEGER UNIQUE,
+    source_trade_id INTEGER,
+    source_track_key TEXT,
+    level_type TEXT,
+    level_price REAL,
+    level_age_sec REAL,
+    level_touches INTEGER,
+    sweep_depth_bps REAL,
+    outside_duration_sec REAL,
+    reclaim_duration_sec REAL,
+    cvd_magnitude REAL,
+    cvd_divergence_magnitude REAL,
+    cvd_reversal_magnitude REAL,
+    cvd_window_sec REAL,
+    approach_ts REAL,
+    approach_distance_bps REAL,
+    retest_delay_sec REAL,
+    retest_distance_bps REAL,
+    retest_hold_sec REAL,
+    retest_tolerance_bps REAL,
+    wall_persist_sec REAL,
+    v1_signal_created INTEGER,
+    actual_gate TEXT,
+    outcome_target TEXT,
+    ts_outcome_target REAL,
+    outcome_tp TEXT,
+    ts_outcome_tp REAL,
+    mfe_r REAL NOT NULL DEFAULT 0,
+    mae_r REAL NOT NULL DEFAULT 0,
+    mfe_r_60 REAL,
+    mae_r_60 REAL,
+    mfe_r_90 REAL,
+    mae_r_90 REAL,
+    mfe_r_120 REAL,
+    mae_r_120 REAL,
+    mfe_r_180 REAL,
+    mae_r_180 REAL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    last_price REAL,
+    last_sample_ts REAL,
+    last_update REAL
+);
+CREATE INDEX IF NOT EXISTS idx_counterfactual_pending
+    ON counterfactual_setups(state, ts_entry);
+CREATE INDEX IF NOT EXISTS idx_counterfactual_setup
+    ON counterfactual_setups(setup_type, variant, ts_candidate);
 """
 
 
@@ -331,6 +397,30 @@ class ScalpDB:
             if col not in mcols:
                 self._conn.execute(
                     f"ALTER TABLE meta_label_features ADD COLUMN {col} {col_type}")
+        self._migrate_maker_shadows()
+
+    def _migrate_maker_shadows(self) -> None:
+        """Без потерь скопировать legacy maker telemetry в общий tracker.
+
+        Legacy-таблица остаётся на месте и дальше синхронизируется при flush,
+        поэтому старые отчёты и незавершённые строки продолжают работать.
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO counterfactual_setups ("
+            "candidate_key,setup_type,variant,strategy,symbol,side,state,"
+            "ts_candidate,ts_entry,ts_end,entry,sl,tp,risk,target_r,"
+            "horizon_sec,checkpoint_sec,legacy_trade_id,source_trade_id,"
+            "outcome_target,ts_outcome_target,outcome_tp,ts_outcome_tp,"
+            "mfe_r,mae_r,mfe_r_60,mae_r_60,mfe_r_180,mae_r_180,"
+            "sample_count,last_price,last_sample_ts,last_update"
+            ") SELECT "
+            "'maker_nonfill:' || trade_id,'maker_nonfill','legacy',strategy,"
+            "symbol,side,status,ts_signal,ts_nonfill,ts_end,entry,sl,tp,risk,"
+            "target_r,10800.0,3600.0,trade_id,trade_id,outcome_1_5r,"
+            "ts_outcome_1_5r,outcome_tp,ts_outcome_tp,mfe_r,mae_r,mfe_r_60,"
+            "mae_r_60,mfe_r_180,mae_r_180,sample_count,last_price,last_update,"
+            "last_update FROM maker_nonfill_shadows"
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -700,6 +790,110 @@ class ScalpDB:
         """Maker non-fill telemetry, старые→новые (для анализа/тестов)."""
         rows = self._conn.execute(
             "SELECT * FROM maker_nonfill_shadows WHERE ts_nonfill>=? "
+            "ORDER BY id", (since_ts,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    _COUNTERFACTUAL_INSERT_COLS = (
+        "candidate_key", "setup_type", "variant", "strategy", "symbol", "side",
+        "state", "ts_candidate", "ts_entry", "ts_end", "entry", "sl", "tp",
+        "risk", "target_r", "horizon_sec", "checkpoint_sec",
+        "retest_timeout_sec", "legacy_trade_id",
+        "source_trade_id", "source_track_key", "level_type", "level_price",
+        "level_age_sec", "level_touches", "sweep_depth_bps",
+        "outside_duration_sec", "reclaim_duration_sec", "cvd_magnitude",
+        "cvd_divergence_magnitude", "cvd_reversal_magnitude",
+        "cvd_window_sec",
+        "approach_ts", "approach_distance_bps",
+        "retest_delay_sec", "retest_distance_bps", "retest_hold_sec",
+        "retest_tolerance_bps",
+        "wall_persist_sec", "v1_signal_created", "actual_gate",
+        "outcome_target", "ts_outcome_target", "outcome_tp", "ts_outcome_tp",
+        "mfe_r", "mae_r", "mfe_r_60", "mae_r_60", "mfe_r_90", "mae_r_90",
+        "mfe_r_120", "mae_r_120", "mfe_r_180", "mae_r_180", "sample_count",
+        "last_price", "last_sample_ts", "last_update",
+    )
+    _COUNTERFACTUAL_UPDATE_COLS = _COUNTERFACTUAL_INSERT_COLS[6:]
+
+    def insert_counterfactual_setup(
+        self, row: dict,
+    ) -> tuple[int | None, dict | None]:
+        """Идемпотентно начать общий causal counterfactual lifecycle."""
+        cols = self._COUNTERFACTUAL_INSERT_COLS
+        values = [row.get(c) for c in cols]
+        # Typed defaults не должны зависеть от вызывающей стратегии.
+        defaults = {
+            "state": "pending", "horizon_sec": 10_800.0,
+            "checkpoint_sec": 3_600.0, "mfe_r": 0.0, "mae_r": 0.0,
+            "sample_count": 0, "last_update": row.get("ts_entry"),
+        }
+        values = [defaults.get(c) if v is None and c in defaults else v
+                  for c, v in zip(cols, values)]
+        try:
+            self._conn.execute(
+                f"INSERT OR IGNORE INTO counterfactual_setups "
+                f"({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                tuple(values),
+            )
+            stored = self._conn.execute(
+                "SELECT * FROM counterfactual_setups WHERE candidate_key=?",
+                (row["candidate_key"],),
+            ).fetchone()
+            self._conn.commit()
+            if stored is None:
+                return (None, None)
+            data = dict(stored)
+            return (int(data["id"]), data)
+        except sqlite3.Error:
+            self._conn.rollback()
+            return (None, None)
+
+    def pending_counterfactual_setups(self, *, limit: int = 5000) -> list[dict]:
+        """Pending rows для restart resume; newest bounded working set."""
+        rows = self._conn.execute(
+            "SELECT * FROM counterfactual_setups "
+            "WHERE state IN "
+            "('pending','waiting_retest','holding','waiting_entry_fill') "
+            "ORDER BY ts_entry DESC,id DESC LIMIT ?", (max(1, limit),)
+        ).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def update_counterfactual_setup(self, row: dict) -> None:
+        """Periodic/milestone flush + dual-write legacy maker row."""
+        cols = self._COUNTERFACTUAL_UPDATE_COLS
+        vals = [row.get(c) for c in cols] + [row["id"]]
+        try:
+            self._conn.execute(
+                f"UPDATE counterfactual_setups SET "
+                f"{','.join(f'{c}=?' for c in cols)} WHERE id=?",
+                tuple(vals),
+            )
+            legacy_id = row.get("legacy_trade_id")
+            if legacy_id is not None:
+                self._conn.execute(
+                    "UPDATE maker_nonfill_shadows SET "
+                    "ts_end=?,status=?,outcome_1_5r=?,ts_outcome_1_5r=?,"
+                    "outcome_tp=?,ts_outcome_tp=?,mfe_r=?,mae_r=?,"
+                    "mfe_r_60=?,mae_r_60=?,mfe_r_180=?,mae_r_180=?,"
+                    "sample_count=?,last_price=?,last_update=? WHERE trade_id=?",
+                    (
+                        row.get("ts_end"), row.get("state"),
+                        row.get("outcome_target"), row.get("ts_outcome_target"),
+                        row.get("outcome_tp"), row.get("ts_outcome_tp"),
+                        row.get("mfe_r"), row.get("mae_r"),
+                        row.get("mfe_r_60"), row.get("mae_r_60"),
+                        row.get("mfe_r_180"), row.get("mae_r_180"),
+                        row.get("sample_count"), row.get("last_price"),
+                        row.get("last_update"), legacy_id,
+                    ),
+                )
+            self._conn.commit()
+        except sqlite3.Error:
+            self._conn.rollback()
+
+    def counterfactual_rows(self, since_ts: float = 0.0) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM counterfactual_setups WHERE ts_candidate>=? "
             "ORDER BY id", (since_ts,)
         ).fetchall()
         return [dict(r) for r in rows]

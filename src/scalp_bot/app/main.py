@@ -18,6 +18,7 @@ import signal
 import time
 
 from scalp_bot.analysis.meta_labels import meta_label_for
+from scalp_bot.analysis.counterfactual import CounterfactualTracker
 from scalp_bot.analysis.regime import compute_regime_features, is_dead_market
 from scalp_bot.analysis.signals import diagnose
 from scalp_bot.analysis.strategies import build_strategies, resolve
@@ -168,7 +169,10 @@ def run() -> None:
     # пробои = bull traps (live long WR 5.9% / net −158, p<0.02).
     di_long_strats = {s.name for s in strategies
                       if getattr(s, "di_long_gated", getattr(s, "htf_filtered", True))}
-    executor = Executor(db, cfg, client, notifier=notifier, strategies=strategies)
+    counterfactual = CounterfactualTracker(db, cfg)
+    executor = Executor(
+        db, cfg, client, notifier=notifier, strategies=strategies,
+        counterfactual_tracker=counterfactual)
 
     # v0.18.20: ключевые уровни (PDH/PDL + дневные экстремумы) для канон-страты.
     # Инжектим в стратегию (ей нужен REST-клиент только опосредованно — через
@@ -374,6 +378,15 @@ def run() -> None:
                                 db.insert_density_track(row)
                         except Exception:
                             log.exception("density track lifecycle log failed")
+                    # Evidence-first shadows дренируются ДО resolve/main gates:
+                    # canon rejection и density V2 должны наблюдаться даже если
+                    # боевой сигнал позже заблокирован. Tracker не создаёт orders.
+                    if hasattr(st, "drain_shadow_candidates"):
+                        try:
+                            for candidate in st.drain_shadow_candidates():
+                                counterfactual.add(candidate)
+                        except Exception:
+                            log.exception("counterfactual candidate drain failed")
                     if s is not None:
                         candidates.append(s)
                 sig = resolve(candidates)
@@ -562,6 +575,10 @@ def run() -> None:
             elapsed = time.monotonic() - loop_start
             time.sleep(max(0.0, cfg.eval_interval_sec - elapsed))
     finally:
+        try:
+            counterfactual.flush_all()
+        except Exception:
+            log.exception("counterfactual final flush failed")
         stream.stop()
         if exec_stream is not None:
             exec_stream.stop()

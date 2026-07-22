@@ -359,9 +359,8 @@ class SweepReclaimDetector:
             "setup_type": "sweep_reclaim",
             "level_type": a.get("key_level") or "micro_extreme",
             "level_price": a.get("key_level_price") or prior,
-            # История формирования/касания уровня в live cache отсутствует.
-            "level_age_sec": None,
-            "level_touches": None,
+            "level_age_sec": a.get("key_level_age_sec"),
+            "level_touches": a.get("key_level_touches"),
             "prior_price": prior,
             "swept_price": swept,
             "sweep_depth_bps": abs(prior - swept) / prior * 1e4
@@ -418,6 +417,8 @@ class SweepReclaimDetector:
                     continue
                 key_level = None
                 key_level_price = None
+                key_level_age = None
+                key_level_touches = None
                 if self.level_gate is not None:
                     level_result = self.level_gate(self.symbol, side, swept)
                     if level_result is None:
@@ -425,14 +426,22 @@ class SweepReclaimDetector:
                     # Backward-compatible: старые/test callbacks возвращают str;
                     # canon callback v0.18.40 возвращает (type, price) для telemetry.
                     if isinstance(level_result, tuple):
-                        key_level, key_level_price = level_result
+                        key_level, key_level_price = level_result[:2]
+                        key_level_age = (
+                            level_result[2] if len(level_result) > 2 else None)
+                        key_level_touches = (
+                            level_result[3] if len(level_result) > 3 else None)
                     else:
                         key_level = level_result
+                        key_level_age = None
+                        key_level_touches = None
                 was = self._armed
                 self._armed = {"side": side, "swept": swept, "exc": exc,
                                "prior": prior, "ts": now,
                                "key_level": key_level,
                                "key_level_price": key_level_price,
+                               "key_level_age_sec": key_level_age,
+                               "key_level_touches": key_level_touches,
                                "cvd_divergence_magnitude": div_mag,
                                "momentum_window_sec": cfg.momentum_window_sec}
                 # лог только на НОВЫЙ взвод или смену уровня (не каждый тик)

@@ -262,6 +262,19 @@ class ScalpSettings(BaseSettings):
     maker_nonfill_shadow_horizon_sec: float = Field(default=10800.0)
     maker_nonfill_shadow_checkpoint_sec: float = Field(default=3600.0)
     maker_nonfill_shadow_flush_sec: float = Field(default=60.0)
+    # v0.18.42: единый causal counterfactual tracker. Все поля observational:
+    # они не читаются resolve/gates/sizing/executor order path.
+    counterfactual_enabled: bool = Field(default=True)
+    counterfactual_horizon_sec: float = Field(default=10800.0)
+    counterfactual_checkpoint_sec: float = Field(default=3600.0)
+    counterfactual_flush_sec: float = Field(default=60.0)
+    counterfactual_max_active: int = Field(default=5000)
+    density_break_v2_shadow_enabled: bool = Field(default=True)
+    density_break_v2_retest_timeout_sec: float = Field(default=180.0)
+    density_bounce_shadow_enabled: bool = Field(default=True)
+    density_bounce_shadow_persist_grid_sec: str = Field(
+        default="60,90,120,180")
+    canon_rejection_shadow_enabled: bool = Field(default=True)
     # Анти-шум между входами по одному символу.
     signal_cooldown_sec: float = Field(default=60.0)
     # Пауза после стоп-аута перед повторным входом в ТУ ЖЕ сторону по символу.
@@ -302,6 +315,19 @@ class ScalpSettings(BaseSettings):
         if strategy.startswith("sweep_fade"):
             return self.sweep_fade_sl_cooldown_sec
         return self.sl_cooldown_sec
+
+    @property
+    def density_bounce_shadow_persist_grid(self) -> tuple[int, ...]:
+        """Telemetry persist-grid, dedup/sorted; боевой 300s сюда не входит."""
+        values: set[int] = set()
+        for raw in self.density_bounce_shadow_persist_grid_sec.split(","):
+            try:
+                value = int(raw.strip())
+            except ValueError:
+                continue
+            if value > 0 and value != int(self.density_bounce_persist_sec):
+                values.add(value)
+        return tuple(sorted(values))
 
     # ─── Подтверждение разворота (sweep-and-reclaim, CAP-протокол) ────────
     # «Не входи во время свипа — жди возврата за уровень + разворота ленты».

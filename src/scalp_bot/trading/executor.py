@@ -23,6 +23,11 @@ from __future__ import annotations
 import logging
 import time
 
+from scalp_bot.analysis.counterfactual import (
+    CounterfactualCandidate,
+    CounterfactualTracker,
+    advance_counterfactual,
+)
 from scalp_bot.analysis.signals import Signal
 
 log = logging.getLogger("scalp_bot.exec")
@@ -149,76 +154,43 @@ def advance_maker_nonfill_shadow(
     row: dict, price: float | None, now: float, *,
     checkpoint_sec: float = 3600.0, horizon_sec: float = 10800.0,
 ) -> bool:
-    """Продвинуть live-контрфактуал maker non-fill на один price-sample.
-
-    Возвращает True при milestone, который нужно немедленно сохранить:
-    first-hit 1.5R/SL, TP/SL, checkpoint 60м или финал 180м. Обычные MFE/MAE
-    обновления flush-ятся Executor-ом раз в минуту, чтобы не писать SQLite
-    каждый тик. Функция только измеряет путь цены и не влияет на торговлю.
-    """
-    if row.get("status") != "pending":
-        return False
-    risk = float(row.get("risk") or 0.0)
-    if risk <= 0:
-        return False
-    milestone = False
-    if price is not None and price > 0:
-        entry = float(row["entry"])
-        if row["side"] == "long":
-            favorable = (price - entry) / risk
-            adverse = (entry - price) / risk
-        else:
-            favorable = (entry - price) / risk
-            adverse = (price - entry) / risk
-        row["mfe_r"] = max(float(row.get("mfe_r") or 0.0), favorable)
-        row["mae_r"] = max(float(row.get("mae_r") or 0.0), adverse)
-        row["sample_count"] = int(row.get("sample_count") or 0) + 1
-        row["last_price"] = price
-        row["last_update"] = now
-
-        if row.get("outcome_1_5r") is None:
-            if adverse >= 1.0:
-                row["outcome_1_5r"] = "sl"
-                row["ts_outcome_1_5r"] = now
-                milestone = True
-            elif favorable >= float(row["target_r"]):
-                row["outcome_1_5r"] = "target"
-                row["ts_outcome_1_5r"] = now
-                milestone = True
-
-        tp_r = abs(float(row["tp"]) - entry) / risk
-        if row.get("outcome_tp") is None:
-            if adverse >= 1.0:
-                row["outcome_tp"] = "sl"
-                row["ts_outcome_tp"] = now
-                milestone = True
-            elif favorable >= tp_r:
-                row["outcome_tp"] = "tp"
-                row["ts_outcome_tp"] = now
-                milestone = True
-
-    elapsed = now - float(row["ts_nonfill"])
-    if elapsed >= checkpoint_sec and row.get("mfe_r_60") is None:
-        row["mfe_r_60"] = float(row.get("mfe_r") or 0.0)
-        row["mae_r_60"] = float(row.get("mae_r") or 0.0)
-        milestone = True
-    if elapsed >= horizon_sec:
-        row["mfe_r_180"] = float(row.get("mfe_r") or 0.0)
-        row["mae_r_180"] = float(row.get("mae_r") or 0.0)
-        row["status"] = "final"
-        row["ts_end"] = now
-        milestone = True
-    return milestone
+    """Backward-compatible adapter к общему causal tracker."""
+    common = dict(row)
+    common["state"] = common.get("status")
+    common["ts_entry"] = common.get("ts_nonfill")
+    common["checkpoint_sec"] = checkpoint_sec
+    common["horizon_sec"] = horizon_sec
+    common["outcome_target"] = common.get("outcome_1_5r")
+    common["ts_outcome_target"] = common.get("ts_outcome_1_5r")
+    sample_ts = max(now, float(common["ts_entry"]))
+    changed = advance_counterfactual(common, price, sample_ts, now)
+    for old, new in (
+        ("status", "state"), ("outcome_1_5r", "outcome_target"),
+        ("ts_outcome_1_5r", "ts_outcome_target"),
+    ):
+        row[old] = common.get(new)
+    for key in (
+        "ts_end", "outcome_tp", "ts_outcome_tp", "mfe_r", "mae_r",
+        "mfe_r_60", "mae_r_60", "mfe_r_180", "mae_r_180",
+        "sample_count", "last_price", "last_update",
+    ):
+        row[key] = common.get(key)
+    return changed
 
 
 class Executor:
     def __init__(self, db, settings, client=None, *, notifier=None,
-                 strategies=None, now=time.time) -> None:
+                 strategies=None, counterfactual_tracker=None,
+                 now=time.time) -> None:
         self._db = db
         self._cfg = settings
         self._client = client
         self._notifier = notifier
         self._now = now
+        self._counterfactual = counterfactual_tracker
+        if (self._counterfactual is None and db is not None
+                and hasattr(db, "insert_counterfactual_setup")):
+            self._counterfactual = CounterfactualTracker(db, settings, now=now)
         # реестр стратегий по имени — для диспетча дискреционного выхода
         # (позицию сопровождает та же стратегия, что открыла).
         self._strategies: dict = {getattr(s, "name", ""): s
@@ -244,22 +216,6 @@ class Executor:
         # счётчик неудачных REST-сверок true-up'а (неоднозначные сделки того же
         # символа+entry не делимы по closedSize — не зацикливаем бюджет).
         self._verify_fail: dict[int, int] = {}
-        # v0.18.38: live-контрфактуал maker non-fill sweep_fade. Pending rows
-        # восстанавливаются из SQLite после рестарта; измерение не влияет на
-        # торговый контур. DB может быть None/тестовым double.
-        self._maker_shadows: dict[int, dict] = {}
-        self._maker_shadow_last_flush: dict[int, float] = {}
-        if (db is not None
-                and getattr(settings, "maker_nonfill_shadow_enabled", True)
-                and hasattr(db, "pending_maker_nonfill_shadows")):
-            try:
-                for row in db.pending_maker_nonfill_shadows():
-                    sid = int(row["id"])
-                    self._maker_shadows[sid] = row
-                    self._maker_shadow_last_flush[sid] = float(
-                        row.get("last_update") or row["ts_nonfill"])
-            except Exception:
-                log.exception("maker non-fill shadow resume failed")
 
     def _notify(self, text: str) -> None:
         if self._notifier is not None:
@@ -424,7 +380,8 @@ class Executor:
                 self._manage_paper(tr, price, snap)
             else:
                 self._manage_live(tr, price, snap)
-        self._manage_maker_nonfill_shadows(states)
+        if self._counterfactual is not None:
+            self._counterfactual.update_states(states, self._now())
         # досверка оценочных PnL с биржей (closedPnl публикуется с задержкой)
         try:
             self.reconcile()
@@ -432,85 +389,39 @@ class Executor:
             log.exception("reconcile failed")
 
     def _start_maker_nonfill_shadow(self, tr, reason: str, now: float) -> None:
-        """Начать telemetry только для maker-входов базовой sweep_fade."""
+        """Начать maker telemetry в общей таблице + legacy dual-write."""
         if (tr.strategy != "sweep_fade"
                 or not getattr(self._cfg, "maker_nonfill_shadow_enabled", True)
                 or self._db is None
-                or not hasattr(self._db, "insert_maker_nonfill_shadow")):
+                or self._counterfactual is None):
             return
         target_r = float(getattr(self._cfg, "flow_exit_activate_r", 1.5))
         try:
-            sid = self._db.insert_maker_nonfill_shadow(
-                trade_id=tr.id, ts_signal=tr.ts_open, ts_nonfill=now,
-                symbol=tr.symbol, side=tr.side, strategy=tr.strategy,
-                nonfill_reason=reason, entry=tr.entry, sl=tr.sl, tp=tr.tp,
-                target_r=target_r,
-            )
-            if sid is None:
-                return
-            row = {
-                "id": sid, "trade_id": tr.id, "ts_signal": tr.ts_open,
-                "ts_nonfill": now, "ts_end": None, "symbol": tr.symbol,
-                "side": tr.side, "strategy": tr.strategy,
-                "nonfill_reason": reason, "entry": tr.entry, "sl": tr.sl,
-                "tp": tr.tp, "risk": abs(tr.entry - tr.sl),
-                "target_r": target_r, "status": "pending",
-                "outcome_1_5r": None, "ts_outcome_1_5r": None,
-                "outcome_tp": None, "ts_outcome_tp": None,
-                "mfe_r": 0.0, "mae_r": 0.0,
-                "mfe_r_60": None, "mae_r_60": None,
-                "mfe_r_180": None, "mae_r_180": None,
-                "sample_count": 0, "last_price": None, "last_update": now,
-            }
-            self._maker_shadows[sid] = row
-            self._maker_shadow_last_flush[sid] = now
-            log.info("maker shadow #%d для trade #%d %s %s (%s) стартовал",
-                     sid, tr.id, tr.symbol, tr.side, reason)
+            # Legacy write оставлен: существующая telemetry/reporting не теряется.
+            if hasattr(self._db, "insert_maker_nonfill_shadow"):
+                self._db.insert_maker_nonfill_shadow(
+                    trade_id=tr.id, ts_signal=tr.ts_open, ts_nonfill=now,
+                    symbol=tr.symbol, side=tr.side, strategy=tr.strategy,
+                    nonfill_reason=reason, entry=tr.entry, sl=tr.sl, tp=tr.tp,
+                    target_r=target_r)
+            cid = self._counterfactual.add(CounterfactualCandidate(
+                candidate_key=f"maker_nonfill:{tr.id}",
+                setup_type="maker_nonfill", variant=reason,
+                strategy=tr.strategy, symbol=tr.symbol, side=tr.side,
+                ts_candidate=tr.ts_open, ts_entry=now, entry=tr.entry,
+                sl=tr.sl, tp=tr.tp, target_r=target_r,
+                horizon_sec=float(getattr(
+                    self._cfg, "maker_nonfill_shadow_horizon_sec", 10_800.0)),
+                checkpoint_sec=float(getattr(
+                    self._cfg, "maker_nonfill_shadow_checkpoint_sec", 3_600.0)),
+                legacy_trade_id=tr.id, source_trade_id=tr.id,
+                actual_gate=reason,
+            ))
+            if cid is not None:
+                log.info("counterfactual #%d maker non-fill trade #%d %s %s (%s)",
+                         cid, tr.id, tr.symbol, tr.side, reason)
         except Exception:
             log.exception("maker non-fill shadow start #%s failed", tr.id)
-
-    def _manage_maker_nonfill_shadows(self, states: dict) -> None:
-        """Обновить pending maker-контрфактуалы по live snapshot раз в тик."""
-        if not self._maker_shadows or self._db is None:
-            return
-        now = self._now()
-        checkpoint = float(getattr(
-            self._cfg, "maker_nonfill_shadow_checkpoint_sec", 3600.0))
-        horizon = float(getattr(
-            self._cfg, "maker_nonfill_shadow_horizon_sec", 10800.0))
-        flush_sec = float(getattr(
-            self._cfg, "maker_nonfill_shadow_flush_sec", 60.0))
-        done: list[int] = []
-        for sid, row in list(self._maker_shadows.items()):
-            st = states.get(row["symbol"])
-            snap = st.snapshot() if st is not None else None
-            price = None
-            if (snap is not None and not getattr(snap, "stale", False)
-                    and getattr(snap, "last_price", None) is not None):
-                price = float(snap.last_price)
-            milestone = advance_maker_nonfill_shadow(
-                row, price, now, checkpoint_sec=checkpoint,
-                horizon_sec=horizon)
-            due = now - self._maker_shadow_last_flush.get(
-                sid, float(row["ts_nonfill"])) >= flush_sec
-            if milestone or due:
-                try:
-                    self._db.update_maker_nonfill_shadow(row)
-                    self._maker_shadow_last_flush[sid] = now
-                except Exception:
-                    log.exception("maker non-fill shadow #%d flush failed", sid)
-            if row.get("status") == "final":
-                done.append(sid)
-                log.info("maker shadow #%d final: 1.5R=%s TP=%s "
-                         "MFE60=%.2fR MAE60=%.2fR MFE180=%.2fR MAE180=%.2fR",
-                         sid, row.get("outcome_1_5r"), row.get("outcome_tp"),
-                         float(row.get("mfe_r_60") or 0.0),
-                         float(row.get("mae_r_60") or 0.0),
-                         float(row.get("mfe_r_180") or 0.0),
-                         float(row.get("mae_r_180") or 0.0))
-        for sid in done:
-            self._maker_shadows.pop(sid, None)
-            self._maker_shadow_last_flush.pop(sid, None)
 
     def ingest_executions(self, rows: list[dict]) -> None:
         """Атрибуция филлов из приватного WS execution к сделкам (вызывается из

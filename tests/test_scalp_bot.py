@@ -8,6 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from scalp_bot.analysis.counterfactual import (
+    CounterfactualCandidate,
+    CounterfactualTracker,
+    advance_counterfactual,
+)
 from scalp_bot.analysis.meta_labels import breakout_fuel, fade_exhaustion
 from scalp_bot.analysis.signals import (
     Signal,
@@ -4723,4 +4728,237 @@ def test_meta_score_cannot_change_resolve_or_entry_size(tmp_path):
 def test_meta_label_flag_default_enabled():
     from scalp_bot.config.settings import ScalpSettings
     assert ScalpSettings().meta_label_log_enabled is True
+
+
+# ─── v0.18.42: общий causal counterfactual tracker ──────────────────────
+
+def _counter_candidate(**over):
+    base = dict(
+        candidate_key="test:1", setup_type="test_shadow", variant="v1",
+        strategy="test", symbol="SOLUSDT", side="long",
+        ts_candidate=90.0, ts_entry=100.0, entry=100.0, sl=99.0, tp=103.5,
+        target_r=1.5, horizon_sec=10_800.0, checkpoint_sec=3_600.0,
+    )
+    base.update(over)
+    return CounterfactualCandidate(**base)
+
+
+def test_counterfactual_is_causal_and_deduplicates_snapshots():
+    row = _counter_candidate().as_row()
+    # До hypothetical entry никакой sample не может изменить outcome.
+    assert advance_counterfactual(row, 102.0, sample_ts=99.0, now=101.0) is False
+    assert row.get("sample_count") is None
+    assert row.get("outcome_target") is None
+    # Первый будущий snapshot засчитывается.
+    assert advance_counterfactual(row, 101.6, sample_ts=101.0, now=101.0) is True
+    assert row["outcome_target"] == "target"
+    assert row["sample_count"] == 1
+    # Повтор того же WS snapshot не раздувает sample_count/MFE.
+    assert advance_counterfactual(row, 102.5, sample_ts=101.0, now=102.0) is False
+    assert row["sample_count"] == 1
+    assert row["mfe_r"] == pytest.approx(1.6)
+
+
+def test_counterfactual_db_idempotent_typed_and_resume(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0))
+    first = tracker.add(_counter_candidate())
+    second = tracker.add(_counter_candidate())
+    assert first == second
+    assert len(db.counterfactual_rows()) == 1
+    types = {r["name"]: r["type"] for r in
+             db._conn.execute("PRAGMA table_info(counterfactual_setups)")}
+    assert types["level_touches"] == "INTEGER"
+    assert types["retest_delay_sec"] == "REAL"
+    db.close()
+
+    db2 = ScalpDB(str(tmp_path))
+    resumed = CounterfactualTracker(
+        db2, SimpleNamespace(counterfactual_enabled=True,
+                             counterfactual_max_active=10,
+                             counterfactual_flush_sec=60.0),
+        now=lambda: 110.0)
+    assert resumed.active_count == 1
+    resumed.update_snapshot(SimpleNamespace(
+        symbol="SOLUSDT", stale=False, last_price=101.6, ts=110.0), now=110.0)
+    got = db2.counterfactual_rows()[0]
+    assert got["outcome_target"] == "target" and got["sample_count"] == 1
+    db2.close()
+
+
+def test_legacy_maker_rows_migrate_and_dual_write(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    db.insert_maker_nonfill_shadow(
+        trade_id=77, ts_signal=90.0, ts_nonfill=100.0,
+        symbol="ZECUSDT", side="long", strategy="sweep_fade",
+        nonfill_reason="entry_timeout", entry=100.0, sl=99.0, tp=103.5,
+        target_r=1.5)
+    db.close()
+    # Reopen запускает безопасную INSERT OR IGNORE migration.
+    db = ScalpDB(str(tmp_path))
+    rows = db.counterfactual_rows()
+    assert len(rows) == 1 and rows[0]["candidate_key"] == "maker_nonfill:77"
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0),
+        now=lambda: 110.0)
+    tracker.update_snapshot(SimpleNamespace(
+        symbol="ZECUSDT", stale=False, last_price=101.6, ts=110.0), now=110.0)
+    assert db.maker_nonfill_shadow_rows()[0]["outcome_1_5r"] == "target"
+    db.close()
+
+
+def test_density_bounce_shadow_grid_uses_one_track_without_real_signal():
+    cfg = _density_cfg(
+        density_bounce_persist_sec=300.0,
+        density_bounce_shadow_enabled=True,
+        density_bounce_shadow_persist_grid=(60, 90, 120, 180),
+        counterfactual_horizon_sec=10_800.0,
+        counterfactual_checkpoint_sec=3_600.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    assert st.update(snap, now=0.0) is None
+    assert st.update(snap, now=61.0) is None  # production persist=300 unchanged
+    first = st.drain_shadow_candidates()
+    assert [c.wall_persist_sec for c in first] == [60.0]
+    assert st.update(snap, now=181.0) is None
+    rest = st.drain_shadow_candidates()
+    assert [c.wall_persist_sec for c in rest] == [90.0, 120.0, 180.0]
+    assert len({c.source_track_key for c in first + rest}) == 1
+    # Повторный update не создаёт duplicate candidates.
+    st.update(snap, now=182.0)
+    assert st.drain_shadow_candidates() == []
+
+
+def test_density_break_v2_waits_future_retest_even_when_v1_gate_blocks(tmp_path):
+    cfg = _density_cfg(
+        density_break_confirm_bar_sec=60.0,
+        density_break_confirm_cvd=True, density_break_require_ob=False,
+        density_break_v2_shadow_enabled=True,
+        density_break_v2_retest_timeout_sec=180.0,
+        counterfactual_horizon_sec=10_800.0,
+        counterfactual_checkpoint_sec=3_600.0)
+    st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _ask_wall_book(50.0)
+    _persist_then(st, bids, asks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    arm = _snap(
+        [CvdSample(14, 100.3, 10), CvdSample(15, 100.3, 5)],
+        ts=16.0, last_price=100.3, best_bid=100.29, best_ask=100.31,
+        bids=flat_bids, asks=flat_asks)
+    assert st.update(arm, now=16.0) is None
+    close = _snap(
+        [CvdSample(60, 100.3, 10), CvdSample(70, 100.3, 0)],
+        ts=70.0, last_price=100.3, best_bid=100.29, best_ask=100.31,
+        bids=flat_bids, asks=flat_asks)
+    # V1 заблокирован CVD gate, но V2 retest state всё равно создан.
+    assert st.update(close, now=70.0) is None
+    waiting = st.drain_shadow_candidates()
+    assert len(waiting) == 1 and waiting[0].state == "waiting_retest"
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0))
+    tracker.add(waiting[0])
+    touch = _snap(
+        [CvdSample(70, 100.02, 0), CvdSample(71, 100.02, 0)],
+        ts=71.0, last_price=100.02, bids=flat_bids, asks=flat_asks)
+    tracker.update_snapshot(touch, now=71.0)
+    assert db.counterfactual_rows()[0]["state"] == "holding"
+    db.close()
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0))
+    hold = _snap(
+        [CvdSample(71, 100.02, 0), CvdSample(72, 100.03, 10)],
+        ts=72.0, last_price=100.03, bids=flat_bids, asks=flat_asks)
+    tracker.update_snapshot(hold, now=72.0)
+    candidate = db.counterfactual_rows()[0]
+    # CVD подтвердился после первого касания, когда цена уже выше wall.
+    # LIMIT@wall ещё не существовал на прошлом касании → ретро-fill запрещён.
+    assert candidate["state"] == "waiting_entry_fill"
+    assert candidate["retest_hold_sec"] == pytest.approx(1.0)
+    db.close()
+
+    # Restart сохраняет armed limit; только БУДУЩЕЕ касание реально «наполняет».
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0))
+    fill = _snap(
+        [CvdSample(72, 100.03, 10), CvdSample(73, 99.99, 11)],
+        ts=73.0, last_price=99.99, bids=flat_bids, asks=flat_asks)
+    tracker.update_snapshot(fill, now=73.0)
+    candidate = db.counterfactual_rows()[0]
+    assert candidate["state"] == "pending"
+    assert candidate["setup_type"] == "density_break_v2_shadow"
+    assert candidate["entry"] == pytest.approx(100.0)  # hypothetical LIMIT@wall
+    assert candidate["v1_signal_created"] == 0
+    assert candidate["retest_delay_sec"] == pytest.approx(3.0)
+    assert candidate["retest_hold_sec"] == pytest.approx(1.0)
+    assert candidate["sample_count"] == 0  # entry snapshot не стал outcome
+    db.close()
+
+
+def test_density_break_v1_signal_isolated_from_v2_shadow_flag():
+    def fire(enabled):
+        cfg = _density_cfg(
+            density_break_confirm_bar_sec=60.0,
+            density_break_confirm_cvd=False,
+            density_break_v2_shadow_enabled=enabled)
+        st = DensityBreakStrategy(cfg, ["SOLUSDT"])
+        bids, asks = _ask_wall_book(50.0)
+        _persist_then(st, bids, asks, last=99.96)
+        flat_bids, flat_asks = _flat_book_above()
+        snap = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                     bids=flat_bids, asks=flat_asks)
+        st.update(snap, now=16.0)
+        return st.update(snap, now=70.0)
+
+    enabled, disabled = fire(True), fire(False)
+    assert enabled is not None and disabled is not None
+    assert (enabled.side, enabled.entry_ref, enabled.sl_level, enabled.tp_level,
+            enabled.reasons) == (
+        disabled.side, disabled.entry_ref, disabled.sl_level, disabled.tp_level,
+        disabled.reasons)
+
+
+def test_canon_rejection_shadow_preserves_typed_geometry():
+    cfg = _canon_cfg(canon_rejection_shadow_enabled=True)
+    st = SweepFadeCanonStrategy(cfg, ["ETHUSDT"])
+    sig = Signal(
+        "ETHUSDT", "short", 100.0, 101.0, 96.5, 5, ["x"],
+        strategy="sweep_fade_canon",
+        setup={
+            "level_type": "pdh", "level_price": 100.0,
+            "level_age_sec": 7200.0, "level_touches": 3,
+            "swept_price": 100.2, "sweep_depth_bps": 20.0,
+            "outside_duration_sec": 4.0, "reclaim_duration_sec": 9.0,
+            "cvd_reversal_magnitude": 42.0,
+        })
+    st._det["ETHUSDT"].update = lambda snap, now: sig
+    assert st.update(_snap([], symbol="ETHUSDT"), now=100.0) is sig
+    candidate = st.drain_shadow_candidates()[0]
+    assert candidate.variant == "pdh"
+    assert candidate.level_age_sec == pytest.approx(7200.0)
+    assert candidate.level_touches == 3
+    assert candidate.sweep_depth_bps == pytest.approx(20.0)
+
+
+def test_counterfactual_defaults_and_bounce_grid_do_not_change_production_persist():
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = ScalpSettings()
+    assert cfg.counterfactual_enabled is True
+    assert cfg.density_bounce_shadow_persist_grid == (60, 90, 120, 180)
+    assert cfg.density_bounce_persist_sec == pytest.approx(300.0)
 

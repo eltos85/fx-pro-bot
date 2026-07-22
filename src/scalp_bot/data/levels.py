@@ -91,9 +91,36 @@ def day_levels(kline: list[list], now: float, *,
     # rolling regime по последним N закрытым барам (старые→новые)
     closed.sort(key=lambda x: x[0])
     regime_ratio = _rolling_regime(closed, lookback=regime_lookback)
-    return {"pdh": prev_hi, "pdl": prev_lo,
-            "day_high": cur_hi, "day_low": cur_lo,
-            "regime_ratio": regime_ratio}
+    levels = {"pdh": prev_hi, "pdl": prev_lo,
+              "day_high": cur_hi, "day_low": cur_lo,
+              "regime_ratio": regime_ratio}
+    # Observational metadata canon_rejection_shadow. Используются только
+    # закрытые бары: level age/touches не видят формирующийся бар и не имеют
+    # look-ahead. Touch = последующий закрытый бар, диапазон которого включал
+    # уже сформированный уровень.
+    meta: dict[str, dict] = {}
+    for name, price in levels.items():
+        if name == "regime_ratio" or price is None:
+            continue
+        is_high = name in ("pdh", "day_high")
+        source_start = prev_start if name in ("pdh", "pdl") else day_start
+        source_end = day_start if name in ("pdh", "pdl") else now
+        source = [b for b in closed if source_start <= b[0] < source_end]
+        formed = [b[0] + 900.0 for b in source
+                  if (b[2] >= price if is_high else b[3] <= price)]
+        formed_ts = min(formed) if formed else None
+        touches = None
+        if formed_ts is not None:
+            touch_bars = [b for b in closed
+                          if b[0] + 900.0 > formed_ts
+                          and b[3] <= price <= b[2]]
+            touches = len(touch_bars)
+        meta[name] = {
+            "age_sec": max(0.0, now - formed_ts) if formed_ts is not None else None,
+            "touches": touches,
+        }
+    levels["_meta"] = meta
+    return levels
 
 
 def _rolling_regime(closed: list[tuple], lookback: int = 8) -> float | None:
@@ -151,6 +178,13 @@ class KeyLevels:
         if lv is None:
             return None
         return lv.get("regime_ratio")
+
+    def level_metadata(self, symbol: str, level_type: str) -> dict | None:
+        """Age/touches из закрытых баров для observational canon telemetry."""
+        lv = self._levels.get(symbol)
+        if lv is None:
+            return None
+        return (lv.get("_meta") or {}).get(level_type)
 
     def swept_key_level(self, symbol: str, side: str, swept: float) -> str | None:
         """Имя ключевого уровня, который took out свип-экстремум, или None.

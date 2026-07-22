@@ -27,6 +27,7 @@ import logging
 import math
 from typing import Protocol
 
+from scalp_bot.analysis.counterfactual import CounterfactualCandidate
 from scalp_bot.analysis.signals import (
     Signal,
     SweepReclaimDetector,
@@ -254,10 +255,51 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
         # не взводятся (level_gate fail-closed возвращает None при нет данных).
         self.key_levels = None
         self.symbol_scope = set(cfg.sweep_fade_canon_symbol_list)
+        self._shadow_candidates: list[CounterfactualCandidate] = []
         self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
 
+    def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
+        sig = super().update(snap, now)
+        if (sig is not None and sig.setup is not None
+                and getattr(self.cfg, "canon_rejection_shadow_enabled", True)):
+            setup = sig.setup
+            self._shadow_candidates.append(CounterfactualCandidate(
+                candidate_key=(
+                    f"canon_rejection:{sig.symbol}:{sig.side}:"
+                    f"{now:.6f}:{float(setup.get('swept_price') or 0):.10g}"
+                ),
+                setup_type="canon_rejection_shadow",
+                variant=str(setup.get("level_type") or "unknown"),
+                strategy=self.name, symbol=sig.symbol, side=sig.side,
+                ts_candidate=now, ts_entry=now, entry=sig.entry_ref,
+                sl=sig.sl_level, tp=sig.tp_level,
+                target_r=float(getattr(self.cfg, "flow_exit_activate_r", 1.5)),
+                horizon_sec=float(getattr(
+                    self.cfg, "counterfactual_horizon_sec", 10_800.0)),
+                checkpoint_sec=float(getattr(
+                    self.cfg, "counterfactual_checkpoint_sec", 3_600.0)),
+                level_type=setup.get("level_type"),
+                level_price=setup.get("level_price"),
+                level_age_sec=setup.get("level_age_sec"),
+                level_touches=setup.get("level_touches"),
+                sweep_depth_bps=setup.get("sweep_depth_bps"),
+                outside_duration_sec=setup.get("outside_duration_sec"),
+                reclaim_duration_sec=setup.get("reclaim_duration_sec"),
+                cvd_magnitude=setup.get("cvd_reversal_magnitude"),
+                cvd_divergence_magnitude=setup.get(
+                    "cvd_divergence_magnitude"),
+                cvd_reversal_magnitude=setup.get("cvd_reversal_magnitude"),
+                actual_gate="pre_main_gates",
+            ))
+        return sig
+
+    def drain_shadow_candidates(self) -> list[CounterfactualCandidate]:
+        out = self._shadow_candidates
+        self._shadow_candidates = []
+        return out
+
     def _level_gate(self, symbol: str, side: str,
-                    swept: float) -> str | tuple[str, float] | None:
+                    swept: float) -> str | tuple | None:
         if self.key_levels is None:
             return None  # fail-closed: уровни ещё не прогреты — не торгуем
         name = self.key_levels.swept_key_level(symbol, side, swept)
@@ -268,7 +310,11 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
             return name
         levels = self.key_levels.levels(symbol) or {}
         price = levels.get(name)
-        return (name, float(price)) if price is not None else name
+        if price is None:
+            return name
+        meta = (self.key_levels.level_metadata(symbol, name)
+                if hasattr(self.key_levels, "level_metadata") else None) or {}
+        return (name, float(price), meta.get("age_sec"), meta.get("touches"))
 
     def ensure_symbols(self, symbols: list[str]) -> None:
         # v0.18.24: канон-вход — taker ПО КАНОНУ Turtle Soup (Connors/Raschke
@@ -422,6 +468,23 @@ def _wall_setup(cur: dict, now: float, *, setup_type: str,
         "retest_distance_bps": None,
         "retest_hold_sec": None,
     }
+
+
+def _shadow_wall_bracket(side: str, level: float, cfg,
+                         *, tp_r: float | None = None) -> tuple[float, float, float]:
+    """Hypothetical LIMIT@wall bracket без вызова торгового build_signal."""
+    risk = max(
+        level * float(getattr(cfg, "sl_buffer_bps", 0.0)) / 1e4,
+        level * float(getattr(cfg, "min_risk_fee_mult", 0.0))
+        * float(getattr(cfg, "round_trip_fee_frac", 0.0)),
+    )
+    if risk <= 0:
+        risk = level * 1e-8
+    target = float(tp_r if tp_r is not None
+                   else getattr(cfg, "take_profit_r", 3.5))
+    if side == "long":
+        return (level, level - risk, level + target * risk)
+    return (level, level + risk, level - target * risk)
 
 
 class RollingBaseline:
@@ -586,6 +649,7 @@ class DensityBounceStrategy:
         # БД). Стратегия не пишет в БД сама (чистый signal-generator); main
         # loop вызывает drain_lifecycle() после update().
         self._lifecycle: list[dict] = []
+        self._shadow_candidates: list[CounterfactualCandidate] = []
 
     def _new_base(self) -> dict[str, RollingBaseline]:
         w = getattr(self.cfg, "density_baseline_sec", 900.0)
@@ -684,7 +748,10 @@ class DensityBounceStrategy:
                             # v0.18.32: lifecycle-телеметрия
                             "price_start": last, "persisted_ts": None,
                             "price_persist": None, "did_price_approach": 0,
-                            "max_size": size}
+                            "max_size": size,
+                            "track_key": (
+                                f"{sym}:{book_side}:{now:.6f}:{price:.10g}"),
+                            "shadow_emitted": set()}
             return
         # ── трек есть: жив, если у ЯКОРЯ есть уровень ≥mult×base (v0.18.30:
         # допуск tolerance_bps, НЕ обязан быть максимумом книги) ──
@@ -738,6 +805,7 @@ class DensityBounceStrategy:
         self._update_track(sym, "bid", snap.bids, now, last)
         self._update_track(sym, "ask", snap.asks, now, last)
         near = cfg.density_near_bps / 1e4
+        self._emit_persist_grid(sym, last, now, near)
         # v0.18.15: пер-стратегийный persist (канон density-фейда 20–30+ мин).
         persist = self._persist()
         # bid-стена → отскок ВВЕРХ (long); ask-стена → отскок ВНИЗ (short)
@@ -787,6 +855,55 @@ class DensityBounceStrategy:
                       sig.sl_level, sig.tp_level)
             return sig
         return None
+
+    def _emit_persist_grid(self, sym: str, last: float, now: float,
+                           near: float) -> None:
+        """60/90/120/180s shadows из того же lifecycle, что боевой 300s."""
+        if not getattr(self.cfg, "density_bounce_shadow_enabled", True):
+            return
+        grid = tuple(getattr(
+            self.cfg, "density_bounce_shadow_persist_grid", (60, 90, 120, 180)))
+        for book_side, side in (("bid", "long"), ("ask", "short")):
+            wall = self._track[sym][book_side]
+            if wall is None or wall.get("miss_since") is not None:
+                continue
+            if abs(last - wall["price"]) > near * wall["price"]:
+                continue
+            life = now - wall["first_seen"]
+            emitted = wall.setdefault("shadow_emitted", set())
+            for persist in grid:
+                persist_f = float(persist)
+                if persist in emitted or life < persist_f:
+                    continue
+                entry, sl, tp = _shadow_wall_bracket(
+                    side, wall["price"], self.cfg)
+                emitted.add(persist)
+                wall["did_price_approach"] = 1
+                self._shadow_candidates.append(CounterfactualCandidate(
+                    candidate_key=(
+                        f"density_bounce:{wall['track_key']}:{persist:g}"),
+                    setup_type="density_bounce_persist_shadow",
+                    variant=f"persist_{persist:g}s", strategy=self.name,
+                    symbol=sym, side=side, ts_candidate=now, ts_entry=now,
+                    entry=entry, sl=sl, tp=tp, target_r=1.5,
+                    horizon_sec=float(getattr(
+                        self.cfg, "counterfactual_horizon_sec", 10_800.0)),
+                    checkpoint_sec=float(getattr(
+                        self.cfg, "counterfactual_checkpoint_sec", 3_600.0)),
+                    source_track_key=wall["track_key"],
+                    level_type=wall.get("round") or "orderbook_wall",
+                    level_price=wall["price"], level_age_sec=life,
+                    approach_ts=now,
+                    approach_distance_bps=(
+                        abs(last - wall["price"]) / wall["price"] * 1e4),
+                    wall_persist_sec=persist_f,
+                    actual_gate="shadow_only",
+                ))
+
+    def drain_shadow_candidates(self) -> list[CounterfactualCandidate]:
+        out = self._shadow_candidates
+        self._shadow_candidates = []
+        return out
 
     def should_exit(self, tr, snap: SymbolSnapshot, now: float
                     ) -> tuple[str, float] | None:
@@ -885,6 +1002,8 @@ class DensityBreakStrategy:
         # текущего confirm-бара по символу (граница = закрытие свечи).
         self._pending: dict[str, dict] = {}
         self._bar: dict[str, int] = {}
+        # V2 waiting_retest/holding живут в SQLite CounterfactualTracker.
+        self._shadow_candidates: list[CounterfactualCandidate] = []
         # v0.18.29: per-strategy no-trade blacklist (изолировано от вселенной).
         # См. density_break_no_trade_symbols в settings — data-justified.
         self._no_trade: set[str] = set(getattr(cfg, "density_break_no_trade_list", []))
@@ -914,6 +1033,48 @@ class DensityBreakStrategy:
         for s in symbols:
             self._track.setdefault(s, {"bid": None, "ask": None})
             self._base.setdefault(s, self._new_base())
+
+    def _arm_retest(self, snap: SymbolSnapshot, side: str, wall: dict,
+                    now: float, break_ts: float,
+                    v1_signal_created: bool) -> None:
+        if not getattr(self.cfg, "density_break_v2_shadow_enabled", True):
+            return
+        level = float(wall["price"])
+        entry, sl, tp = _shadow_wall_bracket(
+            side, level, self.cfg,
+            tp_r=float(getattr(self.cfg, "density_break_take_profit_r", 3.5)))
+        self._shadow_candidates.append(CounterfactualCandidate(
+            candidate_key=(
+                f"density_break_v2:{snap.symbol}:{side}:"
+                f"{break_ts:.6f}:{level:.10g}"),
+            setup_type="density_break_v2_shadow", variant="retest_limit",
+            strategy=self.name, symbol=snap.symbol, side=side,
+            state="waiting_retest", ts_candidate=now, ts_entry=now,
+            entry=entry, sl=sl, tp=tp, target_r=1.5,
+            horizon_sec=float(getattr(
+                self.cfg, "counterfactual_horizon_sec", 10_800.0)),
+            checkpoint_sec=float(getattr(
+                self.cfg, "counterfactual_checkpoint_sec", 3_600.0)),
+            retest_timeout_sec=float(getattr(
+                self.cfg, "density_break_v2_retest_timeout_sec", 180.0)),
+            source_track_key=(
+                f"{snap.symbol}:{side}:{break_ts:.6f}:{level:.10g}"),
+            level_type="orderbook_wall", level_price=level,
+            level_age_sec=max(
+                0.0, break_ts - wall["first_seen"]),
+            retest_tolerance_bps=float(getattr(
+                self.cfg, "density_wall_tolerance_bps", 5.0)),
+            cvd_window_sec=float(getattr(
+                self.cfg, "momentum_window_sec", 30.0)),
+            v1_signal_created=v1_signal_created,
+            actual_gate=("v1_signal_created" if v1_signal_created
+                         else "v1_flow_ob_or_fee_gate"),
+        ))
+
+    def drain_shadow_candidates(self) -> list[CounterfactualCandidate]:
+        out = self._shadow_candidates
+        self._shadow_candidates = []
+        return out
 
     def _track_side(self, sym: str, book_side: str,
                     levels: list[tuple[float, float]], now: float) -> dict | None:
@@ -1076,6 +1237,9 @@ class DensityBreakStrategy:
                     sig = self._try_fire(
                         snap, p_side, pend["wall"], now,
                         break_ts=pend.get("break_ts"))
+                    self._arm_retest(
+                        snap, p_side, pend["wall"], now,
+                        float(pend.get("break_ts") or now), sig is not None)
                     if sig is not None:
                         return sig
             else:
