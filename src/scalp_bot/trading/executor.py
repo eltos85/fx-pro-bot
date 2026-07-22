@@ -290,6 +290,18 @@ class Executor:
         except Exception:
             log.exception("setup features log #%s failed", tid)
 
+    def _log_meta_label(self, tid: int, sig: Signal) -> None:
+        """Записать отдельный shadow meta-score; строго fail-open."""
+        if (not getattr(self._cfg, "meta_label_log_enabled", True)
+                or getattr(sig, "meta_label", None) is None):
+            return
+        try:
+            self._db.insert_meta_label_features(
+                trade_id=tid, strategy=sig.strategy, features=sig.meta_label,
+                ts=self._now())
+        except Exception:
+            log.exception("meta-label features log #%s failed", tid)
+
     def on_signal(self, sig: Signal) -> int | None:
         cfg = self._cfg
         qty_step = min_qty = 0.0
@@ -327,6 +339,7 @@ class Executor:
                          f"SL {sig.sl_level:.4f} TP {sig.tp_level:.4f} [{reasons}]")
             self._log_regime(tid, sig)
             self._log_setup(tid, sig)
+            self._log_meta_label(tid, sig)
             return tid
 
         # LIVE (demo)
@@ -350,6 +363,7 @@ class Executor:
             ts_open=self._now())
         self._log_regime(tid, sig)
         self._log_setup(tid, sig)
+        self._log_meta_label(tid, sig)
         # регистрируем тег входа → атрибуция филлов из приватного WS execution
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,

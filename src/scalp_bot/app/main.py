@@ -17,6 +17,7 @@ import logging
 import signal
 import time
 
+from scalp_bot.analysis.meta_labels import meta_label_for
 from scalp_bot.analysis.regime import compute_regime_features, is_dead_market
 from scalp_bot.analysis.signals import diagnose
 from scalp_bot.analysis.strategies import build_strategies, resolve
@@ -535,6 +536,16 @@ def run() -> None:
                 except Exception:
                     log.exception("regime features %s failed", sym)
                     sig.regime = None
+                # Preregistered meta-label — только observational payload.
+                # Вычисляется после resolve и всех continue-гейтов, поэтому не
+                # может изменить выбор/допуск сигнала; executor только пишет БД.
+                sig.meta_label = None
+                if getattr(cfg, "meta_label_log_enabled", True):
+                    try:
+                        sig.meta_label = meta_label_for(
+                            sig.strategy, sig.side, sig.regime, sig.setup)
+                    except Exception:
+                        log.exception("meta-label features %s failed", sym)
                 if executor.on_signal(sig) is not None:
                     cooldown[(sig.strategy, sym)] = now
                     open_symbols.add(sym)
@@ -623,6 +634,18 @@ def _log_shadow(db, cfg, sig, blocked_by: str, snap, htf, key_levels,
             db.insert_setup_features(
                 shadow_signal_id=shadow_id, strategy=sig.strategy,
                 features=sig.setup, ts=now)
+        if (shadow_id is not None
+                and getattr(cfg, "meta_label_log_enabled", True)):
+            try:
+                meta = meta_label_for(
+                    sig.strategy, sig.side, feats, getattr(sig, "setup", None))
+            except Exception:
+                log.exception("shadow meta-label features %s failed", sig.symbol)
+                meta = None
+            if meta is not None:
+                db.insert_meta_label_features(
+                    shadow_signal_id=shadow_id, strategy=sig.strategy,
+                    features=meta, ts=now)
     except Exception:
         log.exception("shadow log %s failed", sig.symbol)
 

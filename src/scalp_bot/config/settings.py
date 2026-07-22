@@ -240,6 +240,11 @@ class ScalpSettings(BaseSettings):
     # setup_features. Только observational telemetry: Signal.setup нигде не
     # читается торговой логикой; сбои вычисления/SQLite fail-open.
     setup_features_log_enabled: bool = Field(default=True)
+    # v0.18.41: preregistered fade_exhaustion/breakout_fuel shadow score.
+    # SCALP_META_LABEL_LOG_ENABLED управляет ТОЛЬКО observational записью в
+    # отдельную meta_label_features. Score/would_keep не читаются resolve,
+    # gates, sizing, orders или сопровождением.
+    meta_label_log_enabled: bool = Field(default=True)
     # v0.18.32: lifecycle-телеметрия треков density_bounce → таблица
     # density_tracks (symbol/side/anchor/life/death_reason/reached_persist/
     # price_start/persist/end/did_price_approach). Для офлайн-анализа

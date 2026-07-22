@@ -71,6 +71,34 @@ _SETUP_FEATURE_COLS = tuple(_SETUP_FEATURE_TYPES)
 _SETUP_FEATURE_DDL = ",\n    ".join(
     f"{c} {t}" for c, t in _SETUP_FEATURE_TYPES.items())
 
+# v0.18.41: отдельный typed shadow meta-score. Имена намеренно не пересекаются
+# с trades.score: этот score observational и никогда не участвует в торговле.
+_META_LABEL_FEATURE_TYPES = {
+    "label_type": "TEXT",
+    "ret_autocorr_value": "REAL",
+    "aligned_adverse_slope_bps_min": "REAL",
+    "cvd_reversal_value": "REAL",
+    "tape_accel_value": "REAL",
+    "natr_pct_value": "REAL",
+    "bb_width_pct_value": "REAL",
+    "oi_expansion_pct_value": "REAL",
+    "cvd_follow_through_value": "REAL",
+    "ret_autocorr_component": "INTEGER",
+    "adverse_slope_component": "INTEGER",
+    "cvd_reversal_component": "INTEGER",
+    "tape_accel_component": "INTEGER",
+    "natr_component": "INTEGER",
+    "bb_width_component": "INTEGER",
+    "oi_expansion_component": "INTEGER",
+    "cvd_follow_through_component": "INTEGER",
+    "component_count": "INTEGER",
+    "meta_score": "INTEGER",
+    "would_keep": "INTEGER",
+}
+_META_LABEL_FEATURE_COLS = tuple(_META_LABEL_FEATURE_TYPES)
+_META_LABEL_FEATURE_DDL = ",\n    ".join(
+    f"{c} {t}" for c, t in _META_LABEL_FEATURE_TYPES.items())
+
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,6 +160,22 @@ CREATE TABLE IF NOT EXISTS setup_features (
 CREATE INDEX IF NOT EXISTS idx_setup_features_ts ON setup_features(ts);
 CREATE INDEX IF NOT EXISTS idx_setup_features_strategy
     ON setup_features(strategy);
+CREATE TABLE IF NOT EXISTS meta_label_features (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    strategy TEXT NOT NULL,
+    trade_id INTEGER UNIQUE,
+    shadow_signal_id INTEGER UNIQUE,
+    {_META_LABEL_FEATURE_DDL},
+    CHECK (
+        (trade_id IS NOT NULL AND shadow_signal_id IS NULL)
+        OR (trade_id IS NULL AND shadow_signal_id IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_meta_label_features_ts
+    ON meta_label_features(ts);
+CREATE INDEX IF NOT EXISTS idx_meta_label_features_strategy
+    ON meta_label_features(strategy);
 CREATE TABLE IF NOT EXISTS density_tracks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_start REAL NOT NULL,
@@ -278,6 +322,15 @@ class ScalpDB:
             if col not in scols:
                 self._conn.execute(
                     f"ALTER TABLE setup_features ADD COLUMN {col} {col_type}")
+        # v0.18.41: meta_label_features migration также идемпотентно поддерживает
+        # промежуточную dev-схему. XOR обеспечен DDL новой таблицы; SQLite не
+        # позволяет добавить CHECK через ALTER для уже созданной таблицы.
+        mcols = {r["name"] for r in
+                 self._conn.execute("PRAGMA table_info(meta_label_features)")}
+        for col, col_type in _META_LABEL_FEATURE_TYPES.items():
+            if col not in mcols:
+                self._conn.execute(
+                    f"ALTER TABLE meta_label_features ADD COLUMN {col} {col_type}")
 
     def close(self) -> None:
         self._conn.close()
@@ -379,6 +432,40 @@ class ScalpDB:
                 f"VALUES ({placeholders})", tuple(vals))
             row = self._conn.execute(
                 "SELECT id FROM setup_features WHERE trade_id IS ? "
+                "AND shadow_signal_id IS ?",
+                (trade_id, shadow_signal_id),
+            ).fetchone()
+            self._conn.commit()
+            return int(row["id"]) if row is not None else None
+        except sqlite3.Error:
+            self._conn.rollback()
+            return None
+
+    def insert_meta_label_features(
+        self, *, strategy: str, features: dict | None,
+        trade_id: int | None = None, shadow_signal_id: int | None = None,
+        ts: float | None = None,
+    ) -> int | None:
+        """Сохранить shadow meta-score ровно для одного owner, fail-open.
+
+        Отдельная таблица и отдельное имя ``meta_score`` предотвращают случайное
+        смешение с торговым ``trades.score``. UNIQUE owner делает write
+        идемпотентным, CHECK гарантирует XOR для новой схемы.
+        """
+        if not features or ((trade_id is None) == (shadow_signal_id is None)):
+            return None
+        t = ts if ts is not None else time.time()
+        head = ("ts", "strategy", "trade_id", "shadow_signal_id")
+        cols = head + _META_LABEL_FEATURE_COLS
+        vals = [t, strategy, trade_id, shadow_signal_id] + [
+            features.get(c) for c in _META_LABEL_FEATURE_COLS]
+        placeholders = ",".join("?" for _ in cols)
+        try:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO meta_label_features "
+                f"({','.join(cols)}) VALUES ({placeholders})", tuple(vals))
+            row = self._conn.execute(
+                "SELECT id FROM meta_label_features WHERE trade_id IS ? "
                 "AND shadow_signal_id IS ?",
                 (trade_id, shadow_signal_id),
             ).fetchone()
@@ -510,6 +597,14 @@ class ScalpDB:
         """Setup-specific telemetry, старые→новые (для анализа/тестов)."""
         rows = self._conn.execute(
             "SELECT * FROM setup_features WHERE ts>=? ORDER BY id",
+            (since_ts,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def meta_label_feature_rows(self, since_ts: float = 0.0) -> list[dict]:
+        """Shadow meta-label telemetry, старые→новые (для анализа/тестов)."""
+        rows = self._conn.execute(
+            "SELECT * FROM meta_label_features WHERE ts>=? ORDER BY id",
             (since_ts,),
         ).fetchall()
         return [dict(r) for r in rows]

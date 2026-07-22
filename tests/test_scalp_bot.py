@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scalp_bot.analysis.meta_labels import breakout_fuel, fade_exhaustion
 from scalp_bot.analysis.signals import (
     Signal,
     SweepReclaimDetector,
@@ -4545,4 +4546,181 @@ def test_executor_and_shadow_log_setup_features_with_fail_open(tmp_path):
 def test_setup_features_flag_default_enabled():
     from scalp_bot.config.settings import ScalpSettings
     assert ScalpSettings().setup_features_log_enabled is True
+
+
+# ─── v0.18.41: preregistered shadow meta-labels (никаких trading effects) ───
+
+def test_fade_exhaustion_pure_score_and_missing_is_unknown():
+    regime = {
+        "ret_autocorr": -0.20,
+        "price_slope_bps_min": -3.0,  # adverse для long
+        "tape_accel": 1.4,
+    }
+    setup = {"cvd_reversal_magnitude": 12.0}
+    out = fade_exhaustion(regime, setup, "long")
+    assert out["label_type"] == "fade_exhaustion"
+    assert out["aligned_adverse_slope_bps_min"] == pytest.approx(3.0)
+    assert out["component_count"] == 4
+    assert out["meta_score"] == 4 and out["would_keep"] == 1
+    # Pure: входы не мутируются.
+    assert regime["price_slope_bps_min"] == -3.0
+    missing = fade_exhaustion({}, {}, "long")
+    assert missing["component_count"] == 0
+    assert missing["meta_score"] == 0 and missing["would_keep"] is None
+
+
+def test_breakout_fuel_side_aligns_cvd_and_scores_components():
+    regime = {
+        "htf_natr_pct": 0.8,
+        "htf_bb_width_pct": 1.5,
+        "oi_delta_pct": 0.2,
+        "cvd_slope": -4.0,
+    }
+    short = breakout_fuel(regime, None, "short")
+    assert short["cvd_follow_through_value"] == pytest.approx(4.0)
+    assert short["meta_score"] == 4 and short["would_keep"] == 1
+    long = breakout_fuel(regime, None, "long")
+    assert long["cvd_follow_through_component"] == 0
+    assert long["meta_score"] == 3 and long["would_keep"] == 1
+
+
+def test_meta_label_db_typed_xor_idempotence_and_migration(tmp_path):
+    import sqlite3
+
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(
+        symbol="SOLUSDT", side="long", qty=1.0, entry=100.0, sl=99.0,
+        tp=103.0, score=4, reasons="x", mode="paper", ts_open=1.0)
+    first = db.insert_meta_label_features(
+        trade_id=tid, strategy="sweep_fade",
+        features={"label_type": "fade_exhaustion", "meta_score": 2,
+                  "would_keep": 0}, ts=1.0)
+    second = db.insert_meta_label_features(
+        trade_id=tid, strategy="sweep_fade",
+        features={"label_type": "fade_exhaustion", "meta_score": 4,
+                  "would_keep": 1}, ts=2.0)
+    rows = db.meta_label_feature_rows()
+    assert first is not None and second is not None and len(rows) == 1
+    assert rows[0]["meta_score"] == 4 and rows[0]["would_keep"] == 1
+    types = {r["name"]: r["type"] for r in
+             db._conn.execute("PRAGMA table_info(meta_label_features)")}
+    assert types["meta_score"] == "INTEGER"
+    assert types["aligned_adverse_slope_bps_min"] == "REAL"
+    with pytest.raises(sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO meta_label_features "
+            "(ts,strategy,trade_id,shadow_signal_id,label_type) "
+            "VALUES (1,'x',NULL,NULL,'x')")
+    with pytest.raises(sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO meta_label_features "
+            "(ts,strategy,trade_id,shadow_signal_id,label_type) "
+            "VALUES (1,'x',1,1,'x')")
+    db._migrate()
+    db._migrate()  # повторная migration идемпотентна
+    db.close()
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    conn = sqlite3.connect(legacy / "scalp_bot.sqlite")
+    conn.execute(
+        "CREATE TABLE meta_label_features ("
+        "id INTEGER PRIMARY KEY, ts REAL NOT NULL, strategy TEXT NOT NULL,"
+        "trade_id INTEGER UNIQUE, shadow_signal_id INTEGER UNIQUE,"
+        "label_type TEXT)")
+    conn.commit()
+    conn.close()
+    migrated = ScalpDB(str(legacy))
+    migrated_cols = {r["name"]: r["type"] for r in migrated._conn.execute(
+        "PRAGMA table_info(meta_label_features)")}
+    assert migrated_cols["meta_score"] == "INTEGER"
+    assert migrated_cols["cvd_follow_through_value"] == "REAL"
+    migrated._migrate()
+    migrated.close()
+
+
+def test_meta_label_actual_shadow_and_failure_are_fail_open(tmp_path):
+    from scalp_bot.app.main import _log_shadow
+
+    db = ScalpDB(str(tmp_path))
+    sig = _live_sig()
+    sig.meta_label = breakout_fuel(
+        {"htf_natr_pct": 1.0, "htf_bb_width_pct": 2.0,
+         "oi_delta_pct": 0.1, "cvd_slope": 1.0},
+        None, "long")
+    tid = Executor(
+        db, _live_cfg(meta_label_log_enabled=True),
+        client=_FakeLiveClient(db)).on_signal(sig)
+    assert tid is not None
+    assert db.meta_label_feature_rows()[0]["trade_id"] == tid
+
+    blocked = Signal(
+        "SOLUSDT", "long", 100.0, 99.0, 103.0, 4, ["x"],
+        strategy="sweep_fade",
+        setup={"cvd_reversal_magnitude": 2.0},
+    )
+    cfg = SimpleNamespace(
+        shadow_log_enabled=True, setup_features_log_enabled=False,
+        meta_label_log_enabled=True)
+    _log_shadow(
+        db, cfg, blocked, "htf_align",
+        _snap([CvdSample(1, 100, 0)]), None, None, 100.0,
+        feats={"ret_autocorr": -0.2, "price_slope_bps_min": -2.0,
+               "tape_accel": 1.2})
+    shadow_meta = db.meta_label_feature_rows()[1]
+    assert shadow_meta["trade_id"] is None
+    assert shadow_meta["shadow_signal_id"] == db.shadow_rows()[0]["id"]
+
+    class _BoomDB:
+        def insert_open(self, **kwargs):
+            return 88
+
+        def insert_meta_label_features(self, **kwargs):
+            raise RuntimeError("telemetry down")
+
+    paper_cfg = SimpleNamespace(
+        trading_enabled=False, risk_based_sizing=False, position_usd=100.0,
+        min_position_usd=0.0, setup_features_log_enabled=False,
+        meta_label_log_enabled=True)
+    assert Executor(_BoomDB(), paper_cfg, now=lambda: 1.0).on_signal(sig) == 88
+    db.close()
+
+
+def test_meta_score_cannot_change_resolve_or_entry_size(tmp_path):
+    from scalp_bot.analysis.strategies import resolve, resolve_reset_state
+
+    low_trading = Signal(
+        "SOLUSDT", "long", 100.0, 99.0, 103.0, 4, ["a"],
+        strategy="sweep_fade",
+        meta_label={"meta_score": 4, "would_keep": 1},
+    )
+    high_trading = Signal(
+        "SOLUSDT", "long", 100.0, 99.0, 103.0, 5, ["b"],
+        strategy="density_break",
+        meta_label={"meta_score": 0, "would_keep": 0},
+    )
+    resolve_reset_state()
+    assert resolve([low_trading, high_trading]) is high_trading
+
+    db = ScalpDB(str(tmp_path))
+    cfg = SimpleNamespace(
+        trading_enabled=False, risk_based_sizing=True, risk_per_trade_usd=10.0,
+        min_position_usd=0.0, setup_features_log_enabled=False,
+        meta_label_log_enabled=True)
+    first = Executor(db, cfg, now=lambda: 1.0).on_signal(low_trading)
+    second = Executor(db, cfg, now=lambda: 2.0).on_signal(
+        Signal(
+            "ETHUSDT", "long", 100.0, 99.0, 103.0, 4, ["a"],
+            strategy="sweep_fade",
+            meta_label={"meta_score": 0, "would_keep": 0},
+        ))
+    qtys = [row["qty"] for row in db._conn.execute(
+        "SELECT qty FROM trades WHERE id IN (?,?) ORDER BY id", (first, second))]
+    assert qtys == pytest.approx([10.0, 10.0])
+    db.close()
+
+
+def test_meta_label_flag_default_enabled():
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().meta_label_log_enabled is True
 

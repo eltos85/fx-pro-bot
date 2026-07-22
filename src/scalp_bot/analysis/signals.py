@@ -65,6 +65,10 @@ class Signal:
     # Executor/main только сохраняют словарь в setup_features; ни один гейт,
     # resolve, sizing или торговое решение его не читает.
     setup: dict | None = None
+    # v0.18.41: отдельный preregistered shadow meta-score. Заполняется main
+    # ПОСЛЕ resolve/режим-гейтов и только сохраняется executor; не является
+    # Signal.score и не читается торговым контуром.
+    meta_label: dict | None = None
 
 
 def _split_halves(samples: list[CvdSample]) -> tuple[list[CvdSample], list[CvdSample]]:

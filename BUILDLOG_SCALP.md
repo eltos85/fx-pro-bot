@@ -6,8 +6,51 @@
 
 ## 2026-07-22
 
-### feat(scalp/telemetry): v0.18.40 — setup geometry для evidence-first анализа
+### feat(scalp/telemetry): v0.18.41 — preregistered shadow meta-labels
 `(хеш после коммита)`
+
+Evidence-first этап 3 фиксирует **training baseline**, но не включает торговый
+фильтр: `sweep_fade` — **n=29 actual fills + 89 maker non-fill**,
+`density_break` — **n=40 actual fills**. Эти малые выборки используются только
+для объявления гипотез и схемы наблюдения; решения о continue/resolve/sizing/
+orders/gates запрещены до независимой post-cutoff выборки по `sample-size.mdc`.
+
+Заранее объявлены два pure shadow-score:
+
+- `fade_exhaustion`: `ret_autocorr <= -0.05`, side-aligned adverse
+  `price_slope >= 1.0 bps/min`, side-adjusted `cvd_reversal > 0`,
+  `tape_accel >= 1.0`; `would_keep=1` при score ≥3/4;
+- `breakout_fuel`: `htf_natr >= 0.50%`, `htf_bb_width >= 1.00%`,
+  `oi_delta > 0%`, side-adjusted `cvd_slope > 0`; `would_keep=1` при
+  score ≥3/4.
+
+При неполном наборе компонентов `would_keep=NULL` (не трактуется как reject).
+Компоненты, raw values, `meta_score` и `would_keep` пишутся в отдельную typed
+таблицу `meta_label_features`, связанную XOR с `trade_id` либо
+`shadow_signal_id`. Миграция и запись идемпотентны; вычисление и SQLite
+fail-open. Флаг `SCALP_META_LABEL_LOG_ENABLED=true` управляет только telemetry.
+Торговый `Signal.score` не менялся и остаётся единственным score для resolve.
+
+Новый read-only `scripts/scalp_meta_label_report.py` использует отдельный
+observational cutoff **2026-07-22 13:30:00 UTC**, не меняя прежние strategy
+behavior cutoffs. Отчёт разделяет actual fills и terminal maker non-fill,
+показывает strategy/day/session, rank-biserial и WR effect size,
+Mann–Whitney/Fisher с BH-FDR и chronological walk-forward только post-cutoff.
+
+**Ограничения baseline:** `setup_features` отсутствуют до этапа 2; maker
+non-fill есть только для maker-входов и только когда успел сформироваться
+terminal outcome; `level_age/touches` и retest-поля пока NULL; NATR/BB/OI/CVD
+могут быть NULL до прогрева источника. Поэтому baseline не используется для
+оценки объявленных порогов — первая допустимая оценка строго post-cutoff.
+
+**Файлы:** `src/scalp_bot/analysis/meta_labels.py`,
+`src/scalp_bot/analysis/signals.py`, `src/scalp_bot/app/main.py`,
+`src/scalp_bot/config/settings.py`, `src/scalp_bot/state/db.py`,
+`src/scalp_bot/trading/executor.py`, `scripts/scalp_meta_label_report.py`,
+`docker-compose.yml`, `tests/test_scalp_bot.py`.
+
+### feat(scalp/telemetry): v0.18.40 — setup geometry для evidence-first анализа
+`c074ff3`
 
 Добавлен необязательный `Signal.setup` и typed SQLite-слой `setup_features`.
 Строка через `CHECK` ссылается ровно на одного владельца: исполненную/paper
