@@ -7,7 +7,7 @@
 ## 2026-07-22
 
 ### chore(scalp/research): v0.18.43 — fail-closed forward checkpoint
-`(хеш после коммита)`
+`ffd3a91`
 
 Этап 5 нельзя активировать в день запуска observational pipeline: после cutoff
 **2026-07-22 14:08 UTC** ещё нет ни 14 дней, ни 100 релевантных исходов на
