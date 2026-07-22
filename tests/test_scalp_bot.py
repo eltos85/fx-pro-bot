@@ -4390,3 +4390,159 @@ def test_executor_starts_shadow_only_for_base_sweep_fade(tmp_path):
     assert rows[0]["target_r"] == pytest.approx(1.5)
     db.close()
 
+
+# ─── v0.18.40: Evidence-first setup-specific observational telemetry ────────
+
+def test_signal_setup_is_optional_and_detector_populates_sweep_geometry():
+    plain = Signal("SOLUSDT", "long", 100.0, 99.0, 103.0, 4, ["x"])
+    assert plain.setup is None
+
+    det = SweepReclaimDetector("SOLUSDT", _cfg())
+    det.update(_snap(_arm_samples(), last_price=96.5), now=100.0)
+    sig = det.update(_snap(_fire_samples(), last_price=97.6), now=130.0)
+    assert sig is not None
+    f = sig.setup
+    assert f["setup_type"] == "sweep_reclaim"
+    assert f["level_type"] == "micro_extreme"
+    assert f["prior_price"] == pytest.approx(98.0)
+    assert f["swept_price"] == pytest.approx(96.5)
+    assert f["sweep_depth_bps"] == pytest.approx((1.5 / 98.0) * 1e4)
+    assert f["reclaim_duration_sec"] == pytest.approx(30.0)
+    assert f["level_age_sec"] is None and f["level_touches"] is None
+    assert f["cvd_divergence_magnitude"] > 0
+    assert f["cvd_reversal_magnitude"] > 0
+
+
+def test_density_setups_capture_wall_and_break_geometry():
+    bounce = DensityBounceStrategy(_density_cfg(), ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    bounce.update(snap, now=0.0)
+    bsig = bounce.update(snap, now=11.0)
+    assert bsig is not None and bsig.setup["setup_type"] == "density_bounce"
+    assert bsig.setup["wall_age_sec"] == pytest.approx(11.0)
+    assert bsig.setup["wall_initial_size"] == pytest.approx(50.0)
+    assert bsig.setup["wall_max_size"] == pytest.approx(50.0)
+    assert bsig.setup["wall_baseline"] == pytest.approx(1.0)
+    assert bsig.setup["wall_ratio"] == pytest.approx(50.0)
+    assert bsig.setup["retest_delay_sec"] is None
+
+    brk = DensityBreakStrategy(
+        _density_cfg(density_break_confirm_bar_sec=60.0), ["SOLUSDT"])
+    abids, aasks = _ask_wall_book(50.0)
+    _persist_then(brk, abids, aasks, last=99.96)
+    flat_bids, flat_asks = _flat_book_above()
+    arm = _snap([], last_price=100.3, best_bid=100.29, best_ask=100.31,
+                bids=flat_bids, asks=flat_asks)
+    assert brk.update(arm, now=16.0) is None
+    sig = brk.update(arm, now=70.0)
+    assert sig is not None and sig.setup["setup_type"] == "density_break"
+    assert sig.setup["break_depth_bps"] == pytest.approx(30.0)
+    assert sig.setup["confirm_duration_sec"] == pytest.approx(54.0)
+    assert sig.setup["wall_removal_speed"] is not None
+
+
+def test_setup_features_db_typed_xor_and_idempotent(tmp_path):
+    import sqlite3
+
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(
+        symbol="SOLUSDT", side="long", qty=1.0, entry=100.0, sl=99.0,
+        tp=103.0, score=4, reasons="x", mode="paper", ts_open=1.0)
+    features = {
+        "setup_type": "sweep_reclaim", "level_type": "pdl",
+        "level_price": 99.0, "level_touches": None,
+        "sweep_depth_bps": 12.5, "cvd_reversal_magnitude": 42.0,
+    }
+    first = db.insert_setup_features(
+        trade_id=tid, strategy="sweep_fade", features=features, ts=1.0)
+    second = db.insert_setup_features(
+        trade_id=tid, strategy="sweep_fade",
+        features={**features, "sweep_depth_bps": 20.0}, ts=2.0)
+    assert first is not None and second is not None
+    rows = db.setup_feature_rows()
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == tid and rows[0]["shadow_signal_id"] is None
+    assert rows[0]["sweep_depth_bps"] == 20.0
+    types = {r["name"]: r["type"] for r in
+             db._conn.execute("PRAGMA table_info(setup_features)")}
+    assert types["level_touches"] == "INTEGER"
+    assert types["setup_type"] == "TEXT"
+    assert types["sweep_depth_bps"] == "REAL"
+    with pytest.raises(sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO setup_features "
+            "(ts,strategy,trade_id,shadow_signal_id,setup_type) "
+            "VALUES (1,'x',NULL,NULL,'x')")
+    with pytest.raises(sqlite3.IntegrityError):
+        db._conn.execute(
+            "INSERT INTO setup_features "
+            "(ts,strategy,trade_id,shadow_signal_id,setup_type) "
+            "VALUES (1,'x',1,1,'x')")
+    db.close()
+
+
+def test_setup_features_migration_adds_missing_typed_columns(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / "scalp_bot.sqlite")
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE setup_features (
+            id INTEGER PRIMARY KEY, ts REAL NOT NULL, strategy TEXT NOT NULL,
+            trade_id INTEGER UNIQUE, shadow_signal_id INTEGER UNIQUE,
+            setup_type TEXT);
+    """)
+    conn.close()
+    db = ScalpDB(str(tmp_path))
+    cols = {r["name"]: r["type"] for r in
+            db._conn.execute("PRAGMA table_info(setup_features)")}
+    assert cols["wall_age_sec"] == "REAL"
+    assert cols["level_touches"] == "INTEGER"
+    db._migrate()  # повторный запуск идемпотентен
+    db.close()
+
+
+def test_executor_and_shadow_log_setup_features_with_fail_open(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    sig = _live_sig()
+    sig.setup = {"setup_type": "density_break", "wall_age_sec": 15.0}
+    tid = Executor(
+        db, _live_cfg(setup_features_log_enabled=True),
+        client=_FakeLiveClient(db)).on_signal(sig)
+    assert tid is not None
+    row = db.setup_feature_rows()[0]
+    assert row["trade_id"] == tid and row["shadow_signal_id"] is None
+
+    from scalp_bot.app.main import _log_shadow
+    cfg = SimpleNamespace(
+        shadow_log_enabled=True, setup_features_log_enabled=True)
+    blocked = Signal("SOLUSDT", "long", 100.0, 99.0, 103.0, 4, ["x"],
+                     strategy="density_bounce",
+                     setup={"setup_type": "density_bounce", "wall_age_sec": 20.0})
+    _log_shadow(db, cfg, blocked, "htf_align",
+                _snap([CvdSample(1, 100, 0)]), None, None, 100.0)
+    rows = db.setup_feature_rows()
+    assert len(rows) == 2
+    assert rows[1]["trade_id"] is None
+    assert rows[1]["shadow_signal_id"] == db.shadow_rows()[0]["id"]
+
+    class _BoomDB:
+        def insert_open(self, **kwargs):
+            return 77
+
+        def insert_setup_features(self, **kwargs):
+            raise RuntimeError("telemetry down")
+
+    paper_cfg = SimpleNamespace(
+        trading_enabled=False, risk_based_sizing=False, position_usd=100.0,
+        min_position_usd=0.0, setup_features_log_enabled=True)
+    assert Executor(_BoomDB(), paper_cfg, now=lambda: 1.0).on_signal(blocked) == 77
+    db.close()
+
+
+def test_setup_features_flag_default_enabled():
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().setup_features_log_enabled is True
+

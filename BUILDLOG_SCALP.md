@@ -6,8 +6,37 @@
 
 ## 2026-07-22
 
-### feat(scalp/telemetry): v0.18.39 — regime coverage всей WS-вселенной
+### feat(scalp/telemetry): v0.18.40 — setup geometry для evidence-first анализа
 `(хеш после коммита)`
+
+Добавлен необязательный `Signal.setup` и typed SQLite-слой `setup_features`.
+Строка через `CHECK` ссылается ровно на одного владельца: исполненную/paper
+сделку (`trade_id`) либо заблокированный режим-гейтом сигнал
+(`shadow_signal_id`). Запись идемпотентна по owner и полностью fail-open.
+
+Для `sweep_fade`/`sweep_fade_canon` сохраняются тип и цена уровня, prior/swept,
+глубина свипа, длительность outside/reclaim, magnitude CVD-divergence и
+reversal. Возраст/число касаний уровня остаются typed `NULL`, поскольку текущий
+level-cache не хранит историю формирования. Для `density_bounce`/
+`density_break` сохраняются возраст стены, initial/max size, baseline/ratio,
+скорости absorption/removal, глубина пробоя и confirm duration. Будущая
+retest-геометрия заведена typed `NULL` placeholders до отдельного post-entry
+sampler.
+
+Флаг `SCALP_SETUP_FEATURES_LOG_ENABLED` (default `true`) управляет только
+телеметрией. `Signal.setup` не читается `resolve`, гейтами, sizing, executor
+решений или сопровождением; сбой вычисления/SQLite не блокирует вход.
+Торговые параметры и логика не изменены, поэтому
+`STRATEGY_RATIONALE_SCALP.md` не обновлялся.
+
+**Файлы:** `src/scalp_bot/analysis/signals.py`,
+`src/scalp_bot/analysis/strategies.py`, `src/scalp_bot/state/db.py`,
+`src/scalp_bot/trading/executor.py`, `src/scalp_bot/app/main.py`,
+`src/scalp_bot/config/settings.py`, `docker-compose.yml`,
+`tests/test_scalp_bot.py`.
+
+### feat(scalp/telemetry): v0.18.39 — regime coverage всей WS-вселенной
+`296235f`
 
 **Симптом:** анализ после v0.18.38 показал, что у `sweep_fade` (ZEC) и
 `density_break` (HYPE/NEAR pins) колонки `regime_ratio`, `day_range_pct`,

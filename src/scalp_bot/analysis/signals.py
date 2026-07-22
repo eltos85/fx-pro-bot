@@ -61,6 +61,10 @@ class Signal:
     # в таблицу regime_features (meta-labeling, Lopez de Prado AFML Ch3). На торговую
     # логику НЕ влияет. Заполняется в main loop (где есть snap+htf+key_levels).
     regime: dict | None = None
+    # v0.18.40: setup-specific observational telemetry (геометрия sweep/wall).
+    # Executor/main только сохраняют словарь в setup_features; ни один гейт,
+    # resolve, sizing или торговое решение его не читает.
+    setup: dict | None = None
 
 
 def _split_halves(samples: list[CvdSample]) -> tuple[list[CvdSample], list[CvdSample]]:
@@ -333,6 +337,37 @@ class SweepReclaimDetector:
             return a["swept"] + self._rf() * a["exc"]
         return a["swept"] - self._rf() * a["exc"]
 
+    @staticmethod
+    def _setup_features(a: dict, samples: list[CvdSample], now: float,
+                        last: float) -> dict:
+        """Снимок геометрии sweep/reclaim; только observational telemetry."""
+        side = a["side"]
+        prior = a["prior"]
+        swept = a["swept"]
+        cutoff = samples[-1].ts - a["momentum_window_sec"]
+        recent = [x for x in samples if x.ts >= cutoff]
+        reversal = None
+        if len(recent) >= 2:
+            raw = recent[-1].cvd - recent[0].cvd
+            reversal = raw if side == "long" else -raw
+        crossed_level = last >= prior if side == "long" else last <= prior
+        return {
+            "setup_type": "sweep_reclaim",
+            "level_type": a.get("key_level") or "micro_extreme",
+            "level_price": a.get("key_level_price") or prior,
+            # История формирования/касания уровня в live cache отсутствует.
+            "level_age_sec": None,
+            "level_touches": None,
+            "prior_price": prior,
+            "swept_price": swept,
+            "sweep_depth_bps": abs(prior - swept) / prior * 1e4
+            if prior > 0 else None,
+            "outside_duration_sec": now - a["ts"] if crossed_level else None,
+            "reclaim_duration_sec": now - a["ts"],
+            "cvd_divergence_magnitude": a.get("cvd_divergence_magnitude"),
+            "cvd_reversal_magnitude": reversal,
+        }
+
     def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
         cfg = self.cfg
         if snap.stale or snap.last_price is None or len(snap.cvd_samples) < 6:
@@ -369,18 +404,33 @@ class SweepReclaimDetector:
                 prior = max(x.price for x in early)
                 exc = swept - prior
             if exc > 0:
+                if side == "long":
+                    div_mag = min(x.cvd for x in late) - min(x.cvd for x in early)
+                else:
+                    div_mag = max(x.cvd for x in early) - max(x.cvd for x in late)
                 # v0.18.26 (B): база sweep_fade не фейдит у round-уровня (хуже
                 # микро). canon round_gate=None → не задет; density детектор не юзает.
                 if self.round_gate is not None and self.round_gate(swept):
                     continue
                 key_level = None
+                key_level_price = None
                 if self.level_gate is not None:
-                    key_level = self.level_gate(self.symbol, side, swept)
-                    if key_level is None:
+                    level_result = self.level_gate(self.symbol, side, swept)
+                    if level_result is None:
                         continue  # свип не took out значимый уровень — не взводимся
+                    # Backward-compatible: старые/test callbacks возвращают str;
+                    # canon callback v0.18.40 возвращает (type, price) для telemetry.
+                    if isinstance(level_result, tuple):
+                        key_level, key_level_price = level_result
+                    else:
+                        key_level = level_result
                 was = self._armed
                 self._armed = {"side": side, "swept": swept, "exc": exc,
-                               "ts": now, "key_level": key_level}
+                               "prior": prior, "ts": now,
+                               "key_level": key_level,
+                               "key_level_price": key_level_price,
+                               "cvd_divergence_magnitude": div_mag,
+                               "momentum_window_sec": cfg.momentum_window_sec}
                 # лог только на НОВЫЙ взвод или смену уровня (не каждый тик)
                 if was is None or was["side"] != side or abs(was["swept"] - swept) > 1e-9:
                     absorb = "продавцов выдыхают" if side == "long" else "покупателей выдыхают"
@@ -464,6 +514,11 @@ class SweepReclaimDetector:
                       self.symbol, _SIDE_RU.get(side, side))
             self._armed = None
             return None
+        try:
+            sig.setup = self._setup_features(a, s, now, last)
+        except Exception:
+            # Телеметрия не должна менять факт выстрела или ломать вход.
+            sig.setup = None
         play.info("🔫 [%s] ВЫСТРЕЛ %s: reclaim ✓ (%.4f≥%.4f) + CVD развернулся ✓ | "
                   "бонусы: %s | score=%d → сигнал на вход @%.4f SL %.4f TP %.4f",
                   self.symbol, _SIDE_RU.get(side, side), last, target,

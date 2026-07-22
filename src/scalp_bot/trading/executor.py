@@ -278,6 +278,18 @@ class Executor:
         except Exception:
             log.exception("regime log #%s failed", tid)
 
+    def _log_setup(self, tid: int, sig: Signal) -> None:
+        """Записать setup-specific geometry сделки; строго fail-open."""
+        if (not getattr(self._cfg, "setup_features_log_enabled", True)
+                or getattr(sig, "setup", None) is None):
+            return
+        try:
+            self._db.insert_setup_features(
+                trade_id=tid, strategy=sig.strategy, features=sig.setup,
+                ts=self._now())
+        except Exception:
+            log.exception("setup features log #%s failed", tid)
+
     def on_signal(self, sig: Signal) -> int | None:
         cfg = self._cfg
         qty_step = min_qty = 0.0
@@ -314,6 +326,7 @@ class Executor:
                          f"${qty * sig.entry_ref:.0f} @{sig.entry_ref:.4f} "
                          f"SL {sig.sl_level:.4f} TP {sig.tp_level:.4f} [{reasons}]")
             self._log_regime(tid, sig)
+            self._log_setup(tid, sig)
             return tid
 
         # LIVE (demo)
@@ -336,6 +349,7 @@ class Executor:
             mode="live", strategy=sig.strategy, entry_order_id=link,
             ts_open=self._now())
         self._log_regime(tid, sig)
+        self._log_setup(tid, sig)
         # регистрируем тег входа → атрибуция филлов из приватного WS execution
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,

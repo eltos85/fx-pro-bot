@@ -256,10 +256,19 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
         self.symbol_scope = set(cfg.sweep_fade_canon_symbol_list)
         self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
 
-    def _level_gate(self, symbol: str, side: str, swept: float) -> str | None:
+    def _level_gate(self, symbol: str, side: str,
+                    swept: float) -> str | tuple[str, float] | None:
         if self.key_levels is None:
             return None  # fail-closed: уровни ещё не прогреты — не торгуем
-        return self.key_levels.swept_key_level(symbol, side, swept)
+        name = self.key_levels.swept_key_level(symbol, side, swept)
+        if name is None:
+            return None
+        # Test/legacy level providers may expose only swept_key_level().
+        if not hasattr(self.key_levels, "levels"):
+            return name
+        levels = self.key_levels.levels(symbol) or {}
+        price = levels.get(name)
+        return (name, float(price)) if price is not None else name
 
     def ensure_symbols(self, symbols: list[str]) -> None:
         # v0.18.24: канон-вход — taker ПО КАНОНУ Turtle Soup (Connors/Raschke
@@ -366,6 +375,53 @@ def _baseline_avg(sizes: list[float]) -> float:
     others = list(sizes)
     others.remove(mx)
     return sum(others) / len(others)
+
+
+def _effective_baseline(levels: list[tuple[float, float]],
+                        rolling: float | None) -> float | None:
+    """Фактический знаменатель wall-ratio (rolling либо warmup fallback)."""
+    base = rolling if rolling is not None and rolling > 0 \
+        else _baseline_avg([sz for _, sz in levels])
+    return base if base > 0 else None
+
+
+def _wall_setup(cur: dict, now: float, *, setup_type: str,
+                break_depth_bps: float | None = None,
+                confirm_duration_sec: float | None = None,
+                removal_speed: float | None = None) -> dict:
+    """Typed setup payload стены; будущий retest намеренно пока NULL."""
+    # Для break возраст стены заканчивается в момент её удаления, а не после
+    # ожидания close-confirm бара. Bounce снимается непосредственно на сигнале.
+    age = max(0.0, cur.get("end_ts", now) - cur["first_seen"])
+    initial = cur.get("size0")
+    maximum = cur.get("max_size", initial)
+    last_size = cur.get("last_size", initial)
+    baseline = cur.get("baseline")
+    absorption = None
+    if age > 0 and maximum is not None and last_size is not None:
+        absorption = max(0.0, maximum - last_size) / age
+    return {
+        "setup_type": setup_type,
+        "level_type": cur.get("round") or "orderbook_wall",
+        "level_price": cur.get("price"),
+        "level_age_sec": age,
+        "level_touches": None,
+        "wall_book_side": cur.get("book_side"),
+        "wall_age_sec": age,
+        "wall_initial_size": initial,
+        "wall_max_size": maximum,
+        "wall_baseline": baseline,
+        "wall_ratio": (maximum / baseline)
+        if maximum is not None and baseline is not None and baseline > 0 else None,
+        "wall_absorption_speed": absorption,
+        "wall_removal_speed": removal_speed,
+        "break_depth_bps": break_depth_bps,
+        "confirm_duration_sec": confirm_duration_sec,
+        # Post-entry geometry requires a future sampler; typed placeholders.
+        "retest_delay_sec": None,
+        "retest_distance_bps": None,
+        "retest_hold_sec": None,
+    }
 
 
 class RollingBaseline:
@@ -614,11 +670,13 @@ class DensityBounceStrategy:
             if wall is None:
                 return
             price, size = wall
+            effective_base = _effective_baseline(levels, base)
             # v0.18.15: near_round НЕ гейт → score-бонус (Bookmap/Secret
             # Terminal/QuantStrategy.io: гейт = размер+persist+absorption;
             # прежний AND-гейт резал 83.5% стен — C-05,
             # data/scalp_density_nearround_audit.txt).
             t[book_side] = {"price": price, "size0": size, "last_size": size,
+                            "book_side": book_side, "baseline": effective_base,
                             "first_seen": now, "miss_since": None,
                             # скользящее окно (ts, size) для анти-абсорбции
                             "recent": [(now, size)],
@@ -646,6 +704,9 @@ class DensityBounceStrategy:
         price, size = lvl
         cur["miss_since"] = None
         cur["last_size"] = size
+        current_base = _effective_baseline(levels, base)
+        if current_base is not None:
+            cur["baseline"] = current_base
         cur["round"] = near_round_hier(price, cfg.density_round_frac)
         if size > cur.get("max_size", size):
             cur["max_size"] = size
@@ -714,6 +775,11 @@ class DensityBounceStrategy:
             if sig is None:
                 continue  # fee-guard / risk не прошли
             sig.strategy = self.name
+            try:
+                sig.setup = _wall_setup(
+                    w, now, setup_type="density_bounce")
+            except Exception:
+                sig.setup = None
             play.info("🧱 [%s] ОТСКОК %s от стены %.6f (выстояла %.0fс, цена "
                       "%.6f) → вход @%.4f SL %.4f TP %.4f", sym,
                       _SIDE_RU.get(side, side), w["price"],
@@ -850,7 +916,7 @@ class DensityBreakStrategy:
             self._base.setdefault(s, self._new_base())
 
     def _track_side(self, sym: str, book_side: str,
-                    levels: list[tuple[float, float]], now: float) -> float | None:
+                    levels: list[tuple[float, float]], now: float) -> dict | None:
         """Сопровождаем стену на стороне книги; помечаем «выстоявшую» (persisted).
         Возвращает уровень стены, если она ТОЛЬКО ЧТО исчезла, выстояв ≥persist
         (кандидат на пробой), иначе None. Спуфинг (<persist) → тихо снимаем."""
@@ -863,11 +929,21 @@ class DensityBreakStrategy:
         if cur is None:
             if wall is not None and near_round(wall[0], cfg.density_round_frac):
                 t[book_side] = {"price": wall[0], "size0": wall[1],
-                                "first_seen": now, "persisted": False}
+                                "last_size": wall[1], "max_size": wall[1],
+                                "book_side": book_side, "round": "round",
+                                "baseline": _effective_baseline(levels, base),
+                                "last_seen": now, "first_seen": now,
+                                "persisted": False}
             return None
         same = (wall is not None
                 and abs(wall[0] - cur["price"]) <= cfg.density_round_frac * cur["price"])
         if same:
+            cur["last_size"] = wall[1]
+            cur["max_size"] = max(cur.get("max_size", wall[1]), wall[1])
+            cur["last_seen"] = now
+            current_base = _effective_baseline(levels, base)
+            if current_base is not None:
+                cur["baseline"] = current_base
             if (not cur["persisted"]
                     and now - cur["first_seen"] >= cfg.density_persist_sec):
                 cur["persisted"] = True
@@ -876,19 +952,26 @@ class DensityBreakStrategy:
                           cfg.density_persist_sec)
             return None
         # стены на cur.price больше нет → снятие/поглощение
-        level = cur["price"]
         persisted = cur["persisted"]
         t[book_side] = None
-        return level if persisted else None
+        if not persisted:
+            return None
+        cur["end_ts"] = now
+        vanished_for = max(now - cur.get("last_seen", now), 1e-9)
+        cur["removal_speed"] = (
+            cur.get("last_size") / vanished_for
+            if cur.get("last_size") is not None else None)
+        return cur
 
-    def _try_fire(self, snap: SymbolSnapshot, side: str, level: float,
-                  now: float) -> Signal | None:
+    def _try_fire(self, snap: SymbolSnapshot, side: str, wall: dict,
+                  now: float, *, break_ts: float | None = None) -> Signal | None:
         """Гейты подтверждения пробоя (CVD follow-through + ob-абсорбция) и
         построение сигнала. Вызывается на ПОДТВЕРЖДЁННОМ пробое (после
         close-confirm, либо сразу в legacy-режиме bar_sec=0)."""
         cfg = self.cfg
         sym = snap.symbol
         last = snap.last_price
+        level = wall["price"]
         # v0.18.16 (C-06): confirmation ложного пробоя по FOLLOW-THROUGH потоку.
         # Канон (eplanetbrokers/fntradinglab/GrandAlgo): настоящий пробой держит
         # объём/CVD в свою сторону; liquidity-grab = спайк с затуханием и возврат.
@@ -935,6 +1018,16 @@ class DensityBreakStrategy:
                       "комиссия не покрыта", sym, _SIDE_RU.get(side, side), level)
             return None
         sig.strategy = self.name
+        try:
+            depth = abs(last - level) / level * 1e4 if level > 0 else None
+            sig.setup = _wall_setup(
+                wall, now, setup_type="density_break",
+                break_depth_bps=depth,
+                confirm_duration_sec=(now - break_ts)
+                if break_ts is not None else 0.0,
+                removal_speed=wall.get("removal_speed"))
+        except Exception:
+            sig.setup = None
         play.info("🚀 [%s] ПРОБОЙ %s: плотность %.6f выстояла и пробита (цена "
                   "%.6f) → вход @%.4f SL %.4f TP %.4f", sym,
                   _SIDE_RU.get(side, side), level, last, sig.entry_ref,
@@ -980,7 +1073,9 @@ class DensityBreakStrategy:
                               "пропускаю", sym, _SIDE_RU.get(p_side, p_side),
                               p_level, last)
                 else:
-                    sig = self._try_fire(snap, p_side, p_level, now)
+                    sig = self._try_fire(
+                        snap, p_side, pend["wall"], now,
+                        break_ts=pend.get("break_ts"))
                     if sig is not None:
                         return sig
             else:
@@ -988,9 +1083,10 @@ class DensityBreakStrategy:
         # ask-стена пробита ВВЕРХ → LONG; bid-стена пробита ВНИЗ → SHORT
         for book_side, levels, side in (("ask", snap.asks, "long"),
                                         ("bid", snap.bids, "short")):
-            level = self._track_side(sym, book_side, levels, now)
-            if level is None:
+            wall = self._track_side(sym, book_side, levels, now)
+            if wall is None:
                 continue
+            level = wall["price"]
             broke = last > level if side == "long" else last < level
             if not broke:
                 play.info("🧱 [%s] плотность %s %.6f снята, но цена %.6f не пробила "
@@ -999,13 +1095,15 @@ class DensityBreakStrategy:
                 continue
             if bar_sec > 0:
                 # АРМ: ждём закрытия бара за уровнем (не входим по first-touch)
-                self._pending[sym] = {"side": side, "level": level, "bar": cur_bar}
+                self._pending[sym] = {
+                    "side": side, "level": level, "bar": cur_bar,
+                    "wall": wall, "break_ts": now}
                 play.info("🧱 [%s] %s пробой уровня %.6f (цена %.6f) — жду ЗАКРЫТИЯ "
                           "%.0fс-бара за уровнем (канон: не входим по first-touch)",
                           sym, _SIDE_RU.get(side, side), level, last, bar_sec)
                 return None
             # legacy (bar_sec=0): вход на первом тике пробоя
-            sig = self._try_fire(snap, side, level, now)
+            sig = self._try_fire(snap, side, wall, now, break_ts=now)
             if sig is not None:
                 return sig
         return None

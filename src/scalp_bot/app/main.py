@@ -611,11 +611,18 @@ def _log_shadow(db, cfg, sig, blocked_by: str, snap, htf, key_levels,
             log.exception("shadow regime features %s failed", sig.symbol)
             feats = None
     try:
-        db.insert_shadow(symbol=sig.symbol, side=sig.side,
-                         strategy=sig.strategy, blocked_by=blocked_by,
-                         features=feats, ts=now, entry_ref=sig.entry_ref,
-                         sl_level=sig.sl_level, tp_level=sig.tp_level,
-                         score=sig.score)
+        shadow_id = db.insert_shadow(
+            symbol=sig.symbol, side=sig.side,
+            strategy=sig.strategy, blocked_by=blocked_by,
+            features=feats, ts=now, entry_ref=sig.entry_ref,
+            sl_level=sig.sl_level, tp_level=sig.tp_level,
+            score=sig.score)
+        if (shadow_id is not None
+                and getattr(cfg, "setup_features_log_enabled", True)
+                and getattr(sig, "setup", None) is not None):
+            db.insert_setup_features(
+                shadow_signal_id=shadow_id, strategy=sig.strategy,
+                features=sig.setup, ts=now)
     except Exception:
         log.exception("shadow log %s failed", sig.symbol)
 

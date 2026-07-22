@@ -236,6 +236,10 @@ class ScalpSettings(BaseSettings):
     # пишутся с regime-фичами в shadow_signals. ТОЛЬКО телеметрия — лечит
     # range restriction в оценке гейтов (видим и то, что гейт отрезал).
     shadow_log_enabled: bool = Field(default=True)
+    # v0.18.40: setup-specific geometry для sweep/canon/density в typed
+    # setup_features. Только observational telemetry: Signal.setup нигде не
+    # читается торговой логикой; сбои вычисления/SQLite fail-open.
+    setup_features_log_enabled: bool = Field(default=True)
     # v0.18.32: lifecycle-телеметрия треков density_bounce → таблица
     # density_tracks (symbol/side/anchor/life/death_reason/reached_persist/
     # price_start/persist/end/did_price_approach). Для офлайн-анализа

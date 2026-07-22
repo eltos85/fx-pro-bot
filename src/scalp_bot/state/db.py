@@ -37,6 +37,40 @@ def _feature_col_type(col: str) -> str:
 _FEATURE_DDL = ",\n    ".join(
     f"{c} {_feature_col_type(c)}" for c in _FEATURE_COLS)
 
+# v0.18.40: setup-specific observational telemetry. Явные SQLite-типы нужны
+# для стабильного офлайн-анализа; поля разных семейств в общей строке остаются
+# NULL (например wall_* у sweep и swept_* у density).
+_SETUP_FEATURE_TYPES = {
+    "setup_type": "TEXT",
+    "level_type": "TEXT",
+    "level_price": "REAL",
+    "level_age_sec": "REAL",
+    "level_touches": "INTEGER",
+    "prior_price": "REAL",
+    "swept_price": "REAL",
+    "sweep_depth_bps": "REAL",
+    "outside_duration_sec": "REAL",
+    "reclaim_duration_sec": "REAL",
+    "cvd_divergence_magnitude": "REAL",
+    "cvd_reversal_magnitude": "REAL",
+    "wall_book_side": "TEXT",
+    "wall_age_sec": "REAL",
+    "wall_initial_size": "REAL",
+    "wall_max_size": "REAL",
+    "wall_baseline": "REAL",
+    "wall_ratio": "REAL",
+    "wall_absorption_speed": "REAL",
+    "wall_removal_speed": "REAL",
+    "break_depth_bps": "REAL",
+    "confirm_duration_sec": "REAL",
+    "retest_delay_sec": "REAL",
+    "retest_distance_bps": "REAL",
+    "retest_hold_sec": "REAL",
+}
+_SETUP_FEATURE_COLS = tuple(_SETUP_FEATURE_TYPES)
+_SETUP_FEATURE_DDL = ",\n    ".join(
+    f"{c} {t}" for c, t in _SETUP_FEATURE_TYPES.items())
+
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +117,21 @@ CREATE TABLE IF NOT EXISTS shadow_signals (
 );
 CREATE INDEX IF NOT EXISTS idx_shadow_ts ON shadow_signals(ts);
 CREATE INDEX IF NOT EXISTS idx_shadow_strategy ON shadow_signals(strategy);
+CREATE TABLE IF NOT EXISTS setup_features (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    strategy TEXT NOT NULL,
+    trade_id INTEGER UNIQUE,
+    shadow_signal_id INTEGER UNIQUE,
+    {_SETUP_FEATURE_DDL},
+    CHECK (
+        (trade_id IS NOT NULL AND shadow_signal_id IS NULL)
+        OR (trade_id IS NULL AND shadow_signal_id IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_setup_features_ts ON setup_features(ts);
+CREATE INDEX IF NOT EXISTS idx_setup_features_strategy
+    ON setup_features(strategy);
 CREATE TABLE IF NOT EXISTS density_tracks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_start REAL NOT NULL,
@@ -221,6 +270,14 @@ class ScalpDB:
                 self._conn.execute(
                     f"ALTER TABLE regime_features ADD COLUMN "
                     f"{col} {_feature_col_type(col)}")
+        # v0.18.40: setup_features новая, но миграция также терпит промежуточную
+        # dev-схему и идемпотентно досоздаёт typed feature-колонки.
+        scols = {r["name"] for r in
+                 self._conn.execute("PRAGMA table_info(setup_features)")}
+        for col, col_type in _SETUP_FEATURE_TYPES.items():
+            if col not in scols:
+                self._conn.execute(
+                    f"ALTER TABLE setup_features ADD COLUMN {col} {col_type}")
 
     def close(self) -> None:
         self._conn.close()
@@ -270,7 +327,7 @@ class ScalpDB:
                       ts: float | None = None, entry_ref: float | None = None,
                       sl_level: float | None = None,
                       tp_level: float | None = None,
-                      score: int | None = None) -> None:
+                      score: int | None = None) -> int | None:
         """Shadow-лог ОТВЕРГНУТОГО гейтом сигнала (v0.18.31): те же regime-
         фичи + причина блокировки + уровни несостоявшейся сделки (entry/SL/TP
         — чтобы офлайн по клинам восстановить would-be исход и честно измерить
@@ -289,9 +346,47 @@ class ScalpDB:
             self._conn.execute(
                 f"INSERT INTO shadow_signals ({','.join(cols)}) "
                 f"VALUES ({placeholders})", tuple(vals))
+            shadow_id = int(self._conn.execute(
+                "SELECT last_insert_rowid()").fetchone()[0])
             self._conn.commit()
+            return shadow_id
         except sqlite3.Error:
             self._conn.rollback()
+            return None
+
+    def insert_setup_features(
+        self, *, strategy: str, features: dict | None,
+        trade_id: int | None = None, shadow_signal_id: int | None = None,
+        ts: float | None = None,
+    ) -> int | None:
+        """Сохранить setup geometry ровно для одного owner.
+
+        CHECK в SQLite гарантирует XOR ``trade_id``/``shadow_signal_id``.
+        ``INSERT OR REPLACE`` делает запись идемпотентной по UNIQUE owner.
+        Любая ошибка fail-open: telemetry не влияет на торговый контур.
+        """
+        if not features or ((trade_id is None) == (shadow_signal_id is None)):
+            return None
+        t = ts if ts is not None else time.time()
+        head = ("ts", "strategy", "trade_id", "shadow_signal_id")
+        cols = head + _SETUP_FEATURE_COLS
+        vals = [t, strategy, trade_id, shadow_signal_id] + [
+            features.get(c) for c in _SETUP_FEATURE_COLS]
+        placeholders = ",".join("?" for _ in cols)
+        try:
+            self._conn.execute(
+                f"INSERT OR REPLACE INTO setup_features ({','.join(cols)}) "
+                f"VALUES ({placeholders})", tuple(vals))
+            row = self._conn.execute(
+                "SELECT id FROM setup_features WHERE trade_id IS ? "
+                "AND shadow_signal_id IS ?",
+                (trade_id, shadow_signal_id),
+            ).fetchone()
+            self._conn.commit()
+            return int(row["id"]) if row is not None else None
+        except sqlite3.Error:
+            self._conn.rollback()
+            return None
 
     def mark_closed(
         self, trade_id: int, *, exit_price: float, pnl_usd: float,
@@ -408,6 +503,14 @@ class ScalpDB:
         """Shadow-лог отвергнутых сигналов (для анализа/тестов), старые→новые."""
         rows = self._conn.execute(
             "SELECT * FROM shadow_signals WHERE ts>=? ORDER BY id", (since_ts,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def setup_feature_rows(self, since_ts: float = 0.0) -> list[dict]:
+        """Setup-specific telemetry, старые→новые (для анализа/тестов)."""
+        rows = self._conn.execute(
+            "SELECT * FROM setup_features WHERE ts>=? ORDER BY id",
+            (since_ts,),
         ).fetchall()
         return [dict(r) for r in rows]
 
