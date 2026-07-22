@@ -4962,3 +4962,14 @@ def test_counterfactual_defaults_and_bounce_grid_do_not_change_production_persis
     assert cfg.density_bounce_shadow_persist_grid == (60, 90, 120, 180)
     assert cfg.density_bounce_persist_sec == pytest.approx(300.0)
 
+
+def test_forward_checkpoint_requires_both_sample_and_time():
+    from scripts.scalp_forward_checkpoint import Readiness
+
+    cutoff = 1_000_000.0
+    assert not Readiness("x", 99, cutoff, cutoff + 20 * 86_400).ready
+    assert not Readiness("x", 100, cutoff, cutoff + 13.99 * 86_400).ready
+    ready = Readiness("x", 100, cutoff, cutoff + 14 * 86_400)
+    assert ready.ready
+    assert ready.span_days == pytest.approx(14.0)
+

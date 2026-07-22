@@ -6,8 +6,29 @@
 
 ## 2026-07-22
 
-### feat(scalp/telemetry): v0.18.42 — causal counterfactual setup tracker
+### chore(scalp/research): v0.18.43 — fail-closed forward checkpoint
 `(хеш после коммита)`
+
+Этап 5 нельзя активировать в день запуска observational pipeline: после cutoff
+**2026-07-22 14:08 UTC** ещё нет ни 14 дней, ни 100 релевантных исходов на
+гипотезу. Активация сейчас нарушила бы `sample-size.mdc` и превратила
+preregistered forward-test в подгонку.
+
+Добавлен read-only `scripts/scalp_forward_checkpoint.py`. Он отдельно считает
+готовность `sweep_fade_meta_gate`, `density_break_meta_gate`, causal
+`density_break_v2_retest`, каждого bounce persist 60/90/120/180 и
+`canon_rejection_redesign`. Статус `READY_FOR_STATS` требует одновременно
+≥100 terminal outcomes и ≥14 дней; до этого статус `COLLECTING`.
+
+Даже `READY_FOR_STATS` не активирует торговлю: после него обязательны OOS
+PF/expectancy, разница WR ≥10 п.п. или R:R ≥0.3, `p<0.05`, BH-FDR/CI из
+специализированных отчётов. Изменения включаются вручную строго по одному с
+новым cutoff; текущие gates/orders/sizing не изменены.
+
+**Файлы:** `scripts/scalp_forward_checkpoint.py`, `tests/test_scalp_bot.py`.
+
+### feat(scalp/telemetry): v0.18.42 — causal counterfactual setup tracker
+`4b5b043`
 
 Evidence-first этап 4 добавляет только observational telemetry, без изменения
 боевых thresholds/gates/orders. Общий `CounterfactualTracker` принимает
