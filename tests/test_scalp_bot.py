@@ -3602,6 +3602,28 @@ def test_day_levels_regime_lookback_plumbed():
     assert kl.regime_ratio("ETHUSDT") == pytest.approx(2.0)
 
 
+def test_refresh_key_levels_covers_and_deduplicates_full_universe():
+    """v0.18.39: level/regime cache прогревается для auto-universe и density
+    pins, а не только для canon whitelist; это telemetry, level_gate не меняется."""
+    from scalp_bot.app.main import _refresh_key_levels
+
+    class _Levels:
+        def __init__(self):
+            self.calls = []
+
+        def refresh(self, client, symbols):
+            self.calls.append((client, symbols))
+
+    levels = _Levels()
+    client = object()
+    _refresh_key_levels(
+        client, levels,
+        ["BTCUSDT", "ZECUSDT", "HYPEUSDT", "ZECUSDT", ""])
+    assert levels.calls == [
+        (client, ["BTCUSDT", "ZECUSDT", "HYPEUSDT"])
+    ]
+
+
 def test_key_levels_swept_gate_sides():
     from scalp_bot.data.levels import KeyLevels
     kl = KeyLevels()

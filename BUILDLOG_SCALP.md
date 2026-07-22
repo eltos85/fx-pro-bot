@@ -4,6 +4,32 @@
 `fx_pro_bot`/`fx_ai_trader` (strategy-guard.mdc). Решения детерминированные,
 по микроструктуре в реалтайме, БЕЗ LLM.
 
+## 2026-07-22
+
+### feat(scalp/telemetry): v0.18.39 — regime coverage всей WS-вселенной
+`(хеш после коммита)`
+
+**Симптом:** анализ после v0.18.38 показал, что у `sweep_fade` (ZEC) и
+`density_break` (HYPE/NEAR pins) колонки `regime_ratio`, `day_range_pct`,
+`dist_high_pct`, `dist_low_pct` систематически `NULL`. Причина техническая:
+`KeyLevels` создавался и refresh-ился только для `canon_syms`, хотя
+`compute_regime_features` использует этот же кэш для всех стратегий.
+
+**Решение:** KeyLevels теперь прогревается для всей активной WS-вселенной на
+старте, периодическом HTF refresh и сразу для новых символов после ротации.
+Canon `symbol_scope` и `_level_gate` не менялись: наличие кэша у alt-symbol
+заполняет только telemetry и не включает торговый гейт у base/density.
+
+Public REST cadence соответствует официальной Bybit V5 документации:
+`GET /v5/market/kline`, limit 1..1000; общий IP limit 600 запросов/5с.
+Активная вселенная ~10–20 символов раз в 120с, с дедупликацией.
+
+Добавлен read-only `scripts/scalp_regime_coverage.py`: post-cutoff coverage
+ключевых полей по стратегиям, `GAP` при <95%.
+
+**Файлы:** `app/main.py`, `scripts/scalp_regime_coverage.py`,
+`tests/test_scalp_bot.py`.
+
 ## 2026-07-16
 
 ### feat(scalp/telemetry): v0.18.38 — live-контрфактуал maker non-fill

@@ -49,6 +49,21 @@ def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
     log.info("Получен сигнал %d, завершаю...", signum)
 
 
+def _refresh_key_levels(client, key_levels: KeyLevels,
+                        symbols: list[str]) -> None:
+    """Прогреть level/regime cache для всей активной WS-вселенной.
+
+    Дедуп сохраняет порядок и не тратит повторные public market-kline запросы.
+    Bybit V5: GET /v5/market/kline, limit 1..1000; общий IP limit 600/5s.
+    Наша вселенная ~10–20 символов раз в htf_refresh_sec, далеко от лимита.
+    https://bybit-exchange.github.io/docs/v5/market/kline
+    https://bybit-exchange.github.io/docs/v5/rate-limit
+    """
+    unique = list(dict.fromkeys(s for s in symbols if s))
+    if unique:
+        key_levels.refresh(client, unique)
+
+
 def run() -> None:
     cfg = load_settings()
     logging.basicConfig(
@@ -160,7 +175,12 @@ def run() -> None:
     key_levels = None
     levels_strats = [s for s in strategies if hasattr(s, "key_levels")]
     last_levels = 0.0
-    if levels_strats:
+    # v0.18.39: KeyLevels нужен не только canon-гейту, но и regime telemetry
+    # ВСЕХ стратегий (regime_ratio/day_range/dist_*). Раньше кэш создавался и
+    # прогревался только для canon_syms → у sweep_fade(ZEC) и density pins эти
+    # поля были систематически NULL. Наличие уровней не включает level_gate у
+    # base/density: торговая логика остаётся изолированной в классах стратегий.
+    if client is not None or levels_strats:
         # v0.18.27→v0.18.33: KeyLevels считает rolling-regime_ratio для
         # regime_features-телеметрии (страта sweep_fade_trend удалена).
         lookback = getattr(cfg, "regime_ratio_lookback_bars", 8)
@@ -169,7 +189,7 @@ def run() -> None:
             s.key_levels = key_levels
         if client is not None:
             try:
-                key_levels.refresh(client, canon_syms)
+                _refresh_key_levels(client, key_levels, symbols)
                 last_levels = time.time()
             except Exception:
                 log.exception("key levels initial refresh failed")
@@ -236,6 +256,10 @@ def run() -> None:
                         new_syms = [s for s in symbols if s not in prev_syms]
                         if new_syms:
                             htf.refresh(client, new_syms)
+                    else:
+                        new_syms = [s for s in symbols if s not in prev_syms]
+                    if new_syms and key_levels is not None:
+                        _refresh_key_levels(client, key_levels, new_syms)
                 except Exception:
                     log.exception("rotate_universe failed")
 
@@ -248,13 +272,13 @@ def run() -> None:
                 except Exception:
                     log.exception("htf refresh failed")
 
-            # 0a3) ключевые уровни канон-страты (PDH/PDL + дневные экстремумы;
-            # 15m-клины, та же каденция, что HTF)
+            # 0a3) ключевые уровни + regime telemetry для ВСЕЙ WS-вселенной
+            # (PDH/PDL + дневные экстремумы; 15m-клины, cadence HTF).
             if (client is not None and key_levels is not None
                     and now - last_levels >= cfg.htf_refresh_sec):
                 last_levels = now
                 try:
-                    key_levels.refresh(client, canon_syms)
+                    _refresh_key_levels(client, key_levels, symbols)
                 except Exception:
                     log.exception("key levels refresh failed")
 
