@@ -29,7 +29,7 @@ from flowzone_bot.analysis.swings import Swing, find_swings
 from flowzone_bot.analysis.telemetry import DirectionTelemetry
 from flowzone_bot.analysis.volume_profile import build_profile
 from flowzone_bot.config.settings import load_settings
-from flowzone_bot.data.aggregates import SymbolState
+from flowzone_bot.data.aggregates import SymbolState, TradePrint
 from flowzone_bot.data.exec_stream import BybitExecStream
 from flowzone_bot.data.market_stream import BybitMarketStream
 from flowzone_bot.data.momentum_universe import select_momentum_universe
@@ -196,6 +196,13 @@ def run() -> None:
             # session gate (§6.1): входы только в активные сессии London/NY
             in_active_session = in_session(now, session_windows)
 
+            # DirectionTelemetry обновляется для ВСЕХ символов до open/cooldown
+            # гейтов. Это наблюдаемость (не торговый фильтр): shock/dwell должны
+            # видеть непрерывную ленту, иначе интервалы пропадают именно во время
+            # открытой позиции или cooldown.
+            _update_direction_telemetry(
+                states, client, cfg, swing_cache, telemetry, now)
+
             # killswitch: блокирует новые входы
             killed = killswitch.is_killed(db, cfg, now)
             if killed.allowed and in_active_session:
@@ -246,11 +253,6 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         # swings нужны и для латча направления (структурный пробой), и для цели,
         # и для per-swing якоря профиля зоны (A2).
         swings = _swings_for(client, cfg, sym, swing_cache, now)
-        if telemetry is not None:
-            try:
-                telemetry.update(sym, now, snap, swings)
-            except Exception:
-                log.exception("telemetry update %s failed", sym)
         prev_dir = auction.peek(sym)
         _ctx_profile, ctx = _context_for(snap, cfg, auction=auction,
                                          swings=swings, now=now)
@@ -258,6 +260,8 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         # 06.07: кейсы #531/#532 — ложный переворот после volume-shock).
         cur_dir = auction.peek(sym)
         if telemetry is not None and cur_dir != prev_dir and cur_dir is not None:
+            _refresh_preceding_initiative(
+                db, cfg, telemetry, sym, now)
             log.info("auction flip %s: %s → %s | %s", sym,
                      prev_dir or "none", cur_dir,
                      telemetry.fmt(sym, now,
@@ -283,6 +287,10 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         # mining на ≥100 сделках; вход НЕ гейтит).
         if telemetry is not None:
             try:
+                # Initiative берём из ЗАВЕРШЁННОЙ предыдущей M5-ноги
+                # [now-2×window, now-window), не из текущего absorption-окна.
+                _refresh_preceding_initiative(
+                    db, cfg, telemetry, sym, now)
                 sig.reasons.append(telemetry.fmt(sym, now, sig.side,
                                                  snap.last_price))
             except Exception:
@@ -294,6 +302,47 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         if executor.on_signal(sig) is not None:
             cooldown[sym] = now
             open_symbols.add(sym)
+
+
+def _update_direction_telemetry(
+        states: dict[str, SymbolState], client, cfg,
+        swing_cache: dict[str, tuple[float, list[Swing]]],
+        telemetry: DirectionTelemetry, now: float) -> None:
+    """Обновить непрерывные telemetry-фичи для всех символов.
+
+    Не гейтит вход. ``_swings_for`` использует существующий TTL-cache, поэтому
+    REST вызывается не чаще ``swing_cache_sec`` на символ.
+    """
+    for sym, st in states.items():
+        try:
+            snap = st.snapshot()
+            swings = _swings_for(client, cfg, sym, swing_cache, now)
+            telemetry.update(sym, now, snap, swings)
+        except Exception:
+            log.exception("telemetry update %s failed", sym)
+
+
+def _refresh_preceding_initiative(
+        db: FlowzoneDB, cfg, telemetry: DirectionTelemetry,
+        symbol: str, now: float) -> None:
+    """Initiative предшествующей ноги: persisted prints предыдущего M5-окна.
+
+    Текущее окно ``[now-window, now]`` используется absorption entry-trigger и
+    намеренно исключено. Функция вызывается только на signal/auction-flip, а не
+    каждый eval-loop, поэтому SQLite не получает лишнюю нагрузку.
+    """
+    window = float(cfg.absorption_window_sec)
+    if window <= 0:
+        telemetry.refresh_preceding_initiative(symbol, [])
+        return
+    try:
+        rows = db.prints_since(symbol, now - 2.0 * window, now - window)
+        trades = [TradePrint(float(ts), float(price), float(size), str(side))
+                  for ts, price, size, side in rows]
+        telemetry.refresh_preceding_initiative(symbol, trades)
+    except Exception:
+        log.exception("telemetry preceding initiative %s failed", symbol)
+        telemetry.refresh_preceding_initiative(symbol, [])
 
 
 def _swings_for(client, cfg, symbol: str,

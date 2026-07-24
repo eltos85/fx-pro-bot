@@ -51,6 +51,41 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-07-24
+
+### fix(flowzone): telemetry v2 — preceding initiative, structural dwell, shock TTL
+
+Аудит direction-telemetry на 81 закрытой сделке (#534–614, 06–23.07,
+17 календарных дней; 73/81 `pnl_verified`). Это **ниже порога n≥100**, поэтому
+торговые гейты/AuctionTracker НЕ менялись. P&L из локальной SQLite использован
+только сравнительно, не как биржевой ground truth.
+
+Найдены три дефекта самой наблюдаемости:
+
+1. **`initiative` смешивал импульс с absorption.** Детектор работал на текущем
+   300-сек entry-окне, где стратегия специально ищет поглощаемую контр-агрессию.
+   Поэтому 64/81 сделок получили `counter`, включая все top-10 wins; это не
+   направление предшествующей ноги. Исправлено: `init_prev` считается только
+   на persisted prints завершённого предыдущего M5-окна
+   `[now−2×300s, now−300s)`. SQLite читается лишь на signal/auction-flip.
+2. **`dwell` почти отсутствовал (aligned 5/81)** и считался за ближайшим
+   M5-фракталом, который не представляет значимую структуру. Исправлено:
+   `dwell_struct_up/down` использует max confirmed swing highs / min swing lows
+   всего M5-lookback; дополнительно логируются `dStructHi/dStructLo` в bps.
+3. **`shock` не истекал.** 50/81 сделок имели возраст >6ч, максимум ≈194 тыс.
+   секунд — фича не описывала пост-шоковый режим. Добавлены TTL=3600с и reset
+   при смене `vp_session_start`; устаревший shock исключается из reasons.
+
+Также `DirectionTelemetry.update` перенесён из signal-scan до open/cooldown
+гейтов: теперь все символы обновляются каждый eval-loop, поэтому открытая
+позиция/cooldown не создают пропуски shock/dwell. Изменения строго non-gating:
+входы, пороги и направление аукциона не меняются.
+
+**Файлы:** `analysis/telemetry.py`, `app/main.py`,
+`tests/test_flowzone_bot.py`.
+
+---
+
 ## 2026-07-06
 
 ### feat(flowzone): direction-telemetry — наблюдаемость устойчивости аукциона (non-gating)

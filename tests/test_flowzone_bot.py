@@ -1678,8 +1678,9 @@ def test_detect_initiative_and_exhaustion_no_data_on_short_input():
 # ─── DirectionTelemetry: наблюдаемость устойчивости направления (06.07) ───
 # Не гейтит вход; пишет init/dwell/day-extremes/shock в reasons для mining.
 
-def _tele_snap(price, trades):
-    return type("S", (), {"last_price": price, "trades": trades})()
+def _tele_snap(price, trades, session_anchor=700.0):
+    return type("S", (), {"last_price": price, "trades": trades,
+                          "vp_session_start": session_anchor})()
 
 
 def _make_telemetry():
@@ -1701,17 +1702,23 @@ def test_telemetry_day_extremes_distance_bps():
     assert f2["day_hi_bps"] == 0.0 and f2["day_lo_bps"] == 0.0
 
 
-def test_telemetry_dwell_tracks_time_beyond_swing_extreme():
+def test_telemetry_dwell_tracks_time_beyond_major_structural_extreme():
     t = _make_telemetry()
-    swings = [Swing(0, 110.0, "high", ts=100.0), Swing(1, 90.0, "low", ts=200.0)]
-    t.update("X", 1000.0, _tele_snap(111.0, []), swings)   # выше swing high
+    # Ближайший high=105 уже пробит, но значимая структура=max highs=110.
+    swings = [Swing(0, 110.0, "high", ts=100.0),
+              Swing(1, 90.0, "low", ts=200.0),
+              Swing(2, 105.0, "high", ts=300.0)]
+    t.update("X", 990.0, _tele_snap(106.0, []), swings)
+    assert "dwell_struct_up_sec" not in t.features("X", 991.0, 106.0)
+    t.update("X", 1000.0, _tele_snap(111.0, []), swings)   # выше major high
     t.update("X", 1030.0, _tele_snap(112.0, []), swings)   # держится
     f = t.features("X", 1060.0, 112.0)
-    assert abs(f["dwell_up_sec"] - 60.0) < 1e-6
-    assert "dwell_dn_sec" not in f
+    assert abs(f["dwell_struct_up_sec"] - 60.0) < 1e-6
+    assert "dwell_struct_dn_sec" not in f
+    assert f["struct_hi_bps"] < 0   # цена уже выше major high
     # возврат под уровень → dwell сбрасывается
     t.update("X", 1090.0, _tele_snap(109.0, []), swings)
-    assert "dwell_up_sec" not in t.features("X", 1091.0, 109.0)
+    assert "dwell_struct_up_sec" not in t.features("X", 1091.0, 109.0)
 
 
 def test_telemetry_shock_detected_on_tick_burst_and_ages():
@@ -1728,21 +1735,76 @@ def test_telemetry_shock_detected_on_tick_burst_and_ages():
     assert abs(f["shock_age_sec"] - 60.0) < 1e-6
 
 
-def test_telemetry_initiative_alignment_in_fmt():
+def test_telemetry_shock_expires_after_ttl_and_resets_on_session_change():
     t = _make_telemetry()
-    up = [TradePrint(i, 100.0 + i * 0.5, 2.0, "Buy") for i in range(25)]
-    t.update("X", 1000.0, _tele_snap(112.0, up), [])
+    calm = [TradePrint(i, 100.0, 1.0, "Buy") for i in range(100)]
+    burst = [TradePrint(i, 100.0 - i * 0.001, 1.0, "Sell") for i in range(1200)]
+    t.update("X", 0.0, _tele_snap(100.0, calm), [])
+    t.update("X", 130.0, _tele_snap(100.0, calm), [])
+    t.update("X", 140.0, _tele_snap(98.8, burst), [])
+    assert t.features("X", 3740.0, 98.8)["shock_age_sec"] == 3600.0
+    assert "shock_dir" not in t.features("X", 3740.1, 98.8)
+    # Новый session anchor очищает shock немедленно, даже если TTL не истёк.
+    t.update("X", 5000.0, _tele_snap(100.0, calm, session_anchor=4900.0), [])
+    t.update("X", 5130.0, _tele_snap(100.0, calm, session_anchor=4900.0), [])
+    t.update("X", 5140.0, _tele_snap(98.8, burst, session_anchor=4900.0), [])
+    assert "shock_dir" in t.features("X", 5200.0, 98.8)
+    t.update("X", 5210.0, _tele_snap(99.0, calm, session_anchor=5200.0), [])
+    assert "shock_dir" not in t.features("X", 5211.0, 99.0)
+
+
+def test_telemetry_initiative_uses_explicit_preceding_window():
+    t = _make_telemetry()
+    # Текущее absorption-окно = Sell, но initiative должен прийти только из
+    # явно переданной предыдущей ноги = Buy.
+    current = [TradePrint(1001 + i, 112.0 - i * 0.1, 2.0, "Sell")
+               for i in range(25)]
+    previous = [TradePrint(976 + i, 100.0 + i * 0.5, 2.0, "Buy")
+                for i in range(25)]
+    t.update("X", 1000.0, _tele_snap(112.0, current), [])
+    assert "init_dir" not in t.features("X", 1010.0, 112.0)
+    t.refresh_preceding_initiative("X", previous)
     f = t.features("X", 1010.0, 112.0)
     assert f["init_dir"] == "up"
     assert abs(f["init_age_sec"] - 10.0) < 1e-6
     s_long = t.fmt("X", 1010.0, "long", 112.0)
     s_short = t.fmt("X", 1010.0, "short", 112.0)
-    assert "init:up:10s:same" in s_long
-    assert "init:up:10s:counter" in s_short
+    assert "init_prev:up:10s:same" in s_long
+    assert "init_prev:up:10s:counter" in s_short
     assert s_long.startswith("tele=")
 
 
 def test_telemetry_fmt_none_when_no_data():
     t = _make_telemetry()
     assert t.fmt("X", 0.0, None, None) == "tele=none"
+
+
+def test_refresh_preceding_initiative_reads_previous_window_only():
+    from flowzone_bot.app.main import _refresh_preceding_initiative
+
+    class _DB:
+        def __init__(self):
+            self.args = None
+
+        def prints_since(self, symbol, since, until):
+            self.args = (symbol, since, until)
+            return [(ts, 100.0 + i * 0.5, 2.0, "Buy")
+                    for i, ts in enumerate(range(676, 701))]
+
+    class _Telemetry:
+        def __init__(self):
+            self.trades = None
+
+        def refresh_preceding_initiative(self, symbol, trades):
+            self.symbol = symbol
+            self.trades = trades
+
+    db, tele = _DB(), _Telemetry()
+    cfg = type("C", (), {"absorption_window_sec": 300.0})()
+    _refresh_preceding_initiative(db, cfg, tele, "BTCUSDT", now=1000.0)
+    # Предыдущая нога [now-600, now-300), текущее окно [700,1000] исключено.
+    assert db.args == ("BTCUSDT", 400.0, 700.0)
+    assert tele.symbol == "BTCUSDT"
+    assert all(isinstance(t, TradePrint) for t in tele.trades)
+    assert tele.trades[-1].ts == 700.0
 
