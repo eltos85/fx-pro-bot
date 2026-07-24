@@ -924,6 +924,9 @@ def run() -> None:
 
                 sym_news_block = news_blocks.get(symbol)
                 sym_session_block = session_skips.get(symbol)
+                # Контекст входа (observability + ADX-фильтр с 2026-07-24).
+                # Поднимаем выше ADX-блока: он читает ctx.adx.
+                ctx = ctx_by_symbol.get(symbol)
 
                 last_direction = store.get_last_direction(symbol)
                 # Per-symbol гард: уже есть открытая позиция символа в эту же
