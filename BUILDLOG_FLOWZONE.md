@@ -54,6 +54,7 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 ## 2026-07-24
 
 ### fix(flowzone): telemetry v2 — preceding initiative, structural dwell, shock TTL
+`dd41adc`
 
 Аудит direction-telemetry на 81 закрытой сделке (#534–614, 06–23.07,
 17 календарных дней; 73/81 `pnl_verified`). Это **ниже порога n≥100**, поэтому
