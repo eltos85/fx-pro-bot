@@ -69,6 +69,29 @@ context_metrics}.py`, `src/fx_momentum_bot/app/main.py`,
 `STRATEGIES.md`, `MOMENTUM_FIX_PLAN_2026_07_24.md`. Деплой — отдельным решением
 пользователя (selective rebuild `fx-momentum-bot` по SSH, deploy-vps.mdc).
 
+### fix(momentum): ctx присваивается до ADX-блока (UnboundLocalError на VPS)
+`a523e6f`
+
+Симптом: после деплоя `60f386c` контейнер падал каждый цикл с
+`UnboundLocalError: cannot access local variable 'ctx' where it is not
+associated with a value` (`main.py:1010`, `adx_block_reason(ctx, ...)`).
+
+Причина: ADX-фильтр (новый в `60f386c`) читал `ctx` до того, как
+`ctx = ctx_by_symbol.get(symbol)` присваивался ниже (в observability-блоке).
+Unit-тесты не ловили — они гоняют чистые функции, не полный цикл.
+
+Решение: поднять `ctx = ctx_by_symbol.get(symbol)` выше ADX-блока (после
+`sym_session_block`). Старое присваивание оставлено как безвредный
+reassignment. После redeploy первый цикл отработал чисто, `UnboundLocalError`
+ушёл, ошибок в логах нет.
+
+**Деплой:** selective rebuild `fx-momentum-bot` на VPS (ветка
+`feat/ai-trader-v0.30-institutional`, VPS был на `74476a2` → `git pull` подтянул
+только 2 моих коммита, не 224 чужих). Контейнер Up, cTrader demo подключён,
+сигналы по 4 символам вычисляются. Остальные боты не тронуты (`--no-deps`).
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`
+
 ## 2026-07-22
 
 ### revert(momentum): отключён эксперимент profit-protect 80%
