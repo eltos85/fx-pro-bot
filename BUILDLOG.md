@@ -4,6 +4,90 @@
 
 ---
 
+## 2026-07-24
+
+### fix(momentum): exit-hysteresis + NY-open block + ADX-фильтр + gap-защита
+`<pending commit>`
+
+Evidence-based правки по итогам loss-аудита окна с последней правки логики
+(`83f8a2a`, 13.07, per-symbol guard re-apply) по 24.07: 34 сделки, net −$141.85,
+WR 44%, avgR −0.30, PF 0.32. Источник правды — cTrader deal-list
+(`scripts/momentum_loss_audit.py`), контекст входа — `momentum_decisions`.
+Research источников — subagent (Menkhoff/Sarno 2012, Moskowitz 2012,
+Daniel&Moskowitz 2016, Chan, AQR, López de Prado, r/algotrading, Wikibit, FX
+Foundations). Решающий тест H9 (Hurst на H1, `/tmp/hurst_h1.py`): H≈0.535 у
+EURUSD/GBPUSD/USDJPY/AUDUSD → слабо trending, НЕ mean-reverting → edge есть,
+но тонкий, проблема в логике выхода/входа, не в фундаменте.
+
+Пользователь (24.07 11:05) снял правило `sample-size.mdc` (набор 100 сделок
+займёт месяцы) и одобрил все правки. Все изменения обратимы через env,
+research-цитаты в docstring, `STRATEGIES.md` §8 обновлён.
+
+**Симптом → причина → решение:**
+
+1. **Exit-асимметрия (главная)**: avg win +0.48R vs avg loss −0.92R (ratio
+   2.45×), EXP −0.30R. Победители режутся sign-decay на шумовых zero-crossing
+   досрочно, не доживая до BE@1R/partial@1.5R/trailing; проигрыши доезжают до SL.
+   **Решение**: sign-decay exit на −threshold вместо zero-cross (полный
+   гистерезис: вход на +threshold, выход на −threshold) через
+   `MOMENTUM_BOT_DECAY_EXIT_THRESHOLD_MULT` (1.0 = гистерезис, 0.0 = старое).
+   Research: Chan (momentum требует persistence); Moskowitz 2012 (sign-rule база).
+
+2. **NY-open катастрофа**: входы 14-16h UTC WR 0-20%, net −$109 (London-open
+   08h WR 62% ~0). **Решение**: блок входов в часы `MOMENTUM_BOT_NY_OPEN_BLOCK_HOURS`
+   (default "14,15,16") — `hour_blocklist_skip_reason` в session_filter.py.
+   Research: TheTradersLegacy (first 90 min NY = liquidity trap); Andersen 2003.
+   Порог data-driven из 34 сделок (n=5,3,2) → переоценить на ≥100.
+
+3. **Рейндж**: ADX<20 — 19/34 сделок, PF 0.24, −$119. **Решение**: блок входа
+   при ADX(14) < `MOMENTUM_BOT_ADX_MIN` (default 20) — `adx_block_reason` в
+   context_metrics.py (ctx.adx из observability → блокирующий; ctx=None → НЕ
+   блокировать, холодный старт). Research: Wilder 1978; Chan/AQR.
+
+4. **HTF EMA200**: with-trend PF 0.21 vs counter 0.75 на 11/23 сделках.
+   **Решение**: НЕ инвертировать (overfit на малой выборке, López de Prado DSR);
+   оставить `ctx.with_htf`/`ctx.ema_dist_atr` observability-only (они и так не
+   блокировали — grep main.py). Зафиксировано решение в STRATEGIES.md §8.
+
+5. **Gap через SL**: 2 beyond_sl (07-14 12:30 UTC, обе в одну минуту) R −1.39/−2.45
+   = −$51.6 = 36% убытка. Event-guard блокирует только входы, открытые позиции
+   ловят шип релиза. **Решение**: gap-защита — `high_impact_event_upcoming` в
+   event_guard.py + закрытие открытых позиций scoped-символов за
+   `MOMENTUM_BOT_NEWS_CLOSE_BEFORE_MIN` (default 5) мин до HIGH-релиза, симметрично
+   friday_flat. Research: Andersen 2003 (news overreaction + gap); FX Foundations.
+
+**Что НЕ причина** (подтверждено метриками): транзакционные издержки (4% net-лосса,
+gross уже −$201), Asia-сессия (уже отфильтрована), фундаментальная неверность
+momentum на H1 (Hurst H≈0.535 опровергает).
+
+**Тесты:** `tests/test_fx_momentum_bot.py` — 71 passed (+11: hysteresis ×3,
+NY-open ×3, ADX ×4, gap-защита ×4). Весь suite — 1266 passed.
+
+**Файлы:** `src/fx_momentum_bot/strategy/{momentum,session_filter,event_guard,
+context_metrics}.py`, `src/fx_momentum_bot/app/main.py`,
+`src/fx_momentum_bot/config/settings.py`, `tests/test_fx_momentum_bot.py`,
+`STRATEGIES.md`, `MOMENTUM_FIX_PLAN_2026_07_24.md`. Деплой — отдельным решением
+пользователя (selective rebuild `fx-momentum-bot` по SSH, deploy-vps.mdc).
+
+## 2026-07-22
+
+### revert(momentum): отключён эксперимент profit-protect 80%
+
+По прямому решению пользователя эксперимент с долларовым trailing-stop прекращён:
+в 12:25 UTC на VPS `MOMENTUM_BOT_PROFIT_PROTECT_ENABLED=false`, пересоздан только
+контейнер `fx-momentum-bot`. Пользователь оценил итог как отрицательный
+(убытки превысили сохранённую прибыль); отдельный статистический вывод об edge
+не делаем без полной выборки и broker-level атрибуции.
+
+Из кода удалены настройки `profit_protect_*`, расчёт gross-PnL, перенос SL на
+80% текущей прибыли и соответствующие unit-тесты. Бот возвращён к прежнему
+каноническому управлению позициями: break-even, partial take и ATR trailing.
+Уже выставленные на брокере SL не расширялись и не удалялись: исходные уровни
+до эксперимента надёжно восстановить нельзя.
+
+**Файлы:** `.env` (VPS), `src/fx_momentum_bot/config/settings.py`,
+`src/fx_momentum_bot/app/main.py`, `tests/test_fx_momentum_bot.py`
+
 ## 2026-07-16
 
 ### ops(momentum): profit-protect порог активации $2 → $5

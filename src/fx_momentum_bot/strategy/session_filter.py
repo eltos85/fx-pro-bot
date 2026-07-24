@@ -65,3 +65,34 @@ def session_skip_reason(
 def current_hour_utc(now: datetime | None = None) -> int:
     """Текущий час UTC (для логов/тестов; точка входа использует час сигнала)."""
     return (now or datetime.now(timezone.utc)).hour
+
+
+def hour_blocklist_skip_reason(
+    *,
+    hour_utc: int,
+    enabled: bool,
+    blocked_hours: tuple[int, ...],
+    label: str = "ny_open",
+) -> str | None:
+    """Причина скипа входа для часов, эмпирически враждебных momentum.
+
+    None == вход разрешён. Строка == вход блокируется (текст для лога).
+    Обобщает session-filter: вместо одного непрерывного окна — список конкретных
+    часов UTC (для тонкой блокировки внутри ликвидной сессии, напр. NY-open).
+
+    ─── Research basis (BUILDLOG 2026-07-24) ───
+    - TheTradersLegacy «Liquidity Trap / Stop Hunting»: первые ~90 мин NY-сессии
+      — highest-probability liquidity sweeps / stop-hunt, momentum-входы там
+      ловят фейкаут → reversal → stop-loss cascade.
+    - Andersen/Bollerslev/Diebold/Vega (2003, AER): пик NY-волатильности и
+      избыточная реакция на макро-анонсы в окне 12-16 UTC.
+    - Эмпирика (loss-audit 13.07-24.07, 34 сделки): входы 14-16h UTC — WR 0-20%,
+      net −$109 (n=5,3,2); London-open 08h — WR 62%, ~0. МАЛАЯ ВЫБОРКА — порог
+      data-driven, переоценить на ≥100 сделках (no-data-fitting.mdc). Обратимо
+      через env (enabled=False или пустой blocked_hours).
+    """
+    if not enabled or not blocked_hours:
+        return None
+    if hour_utc in blocked_hours:
+        return f"{label}_block(h={hour_utc:02d}UTC, blocked={sorted(blocked_hours)})"
+    return None

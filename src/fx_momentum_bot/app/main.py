@@ -12,11 +12,21 @@ import yfinance as yf
 from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_pro_bot.config.settings import calc_lot_size
 from fx_momentum_bot.state.store import MomentumStore
-from fx_momentum_bot.strategy.context_metrics import EntryContext, compute_entry_context
-from fx_momentum_bot.strategy.event_guard import high_impact_event_near
+from fx_momentum_bot.strategy.context_metrics import (
+    EntryContext,
+    adx_block_reason,
+    compute_entry_context,
+)
+from fx_momentum_bot.strategy.event_guard import (
+    high_impact_event_near,
+    high_impact_event_upcoming,
+)
 from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked, friday_flat_due
 from fx_momentum_bot.strategy.momentum import MomentumSignal, build_signal
-from fx_momentum_bot.strategy.session_filter import session_skip_reason
+from fx_momentum_bot.strategy.session_filter import (
+    hour_blocklist_skip_reason,
+    session_skip_reason,
+)
 from fx_pro_bot.trading.auth import TokenData
 from fx_pro_bot.trading.client import CTraderClient
 from fx_pro_bot.trading.executor import TradeExecutor
@@ -366,47 +376,6 @@ def _has_same_side_position(
     return any(p.side == direction for p in positions)
 
 
-def _profit_protect_sl(
-    *,
-    side: str,
-    entry_price: float,
-    current_price: float,
-    gross_usd: float,
-    ratio: float,
-    activate_usd: float,
-    digits: int,
-) -> float | None:
-    """Цена SL, защищающая ``ratio``× текущей gross-прибыли (трейлинг по PnL).
-
-    Эксперимент «profit protect» (BUILDLOG 2026-07-15). Защита ratio× gross
-    = SL на ratio пути от entry к current (PnL линейна по цене, swap в gross
-    не входит). Формула не зависит от точности K (USD/price-unit), gross нужен
-    только для порога активации:
-      long:  entry + ratio × (current − entry)
-      short: entry − ratio × (entry − current)
-
-    Пример (ratio 0.8): gross $4 → SL защищает $3.2; gross $5 → $4. Движение
-    только в прибыльную сторону обеспечивает вызывающий код через max/min с
-    prev_SL — при откате gross SL не опускается.
-
-    Возвращает цену, округлённую до ``digits``, или ``None`` если защита не
-    активна: gross < activate_usd, либо позиция не в плюсе (signed_move ≤ 0),
-    либо ratio вне (0, 1].
-    """
-    if gross_usd < activate_usd or not (0.0 < ratio <= 1.0):
-        return None
-    signed_move = (
-        current_price - entry_price if side == "long" else entry_price - current_price
-    )
-    if signed_move <= 0:
-        return None
-    protect_signed = ratio * signed_move
-    sl_price = (
-        entry_price + protect_signed if side == "long" else entry_price - protect_signed
-    )
-    return round(sl_price, digits)
-
-
 def _is_market_closed_error(err: str | None) -> bool:
     """Ошибка закрытия/открытия = рынок закрыт (выходные, maintenance break).
 
@@ -417,8 +386,8 @@ def _is_market_closed_error(err: str | None) -> bool:
     return bool(err) and "MARKET_CLOSED" in err
 
 
-def _momentum_sign_direction(momentum_value: float) -> str:
-    """Направление, которое поддерживает ЗНАК momentum ('' если ровно 0).
+def _momentum_sign_direction(momentum_value: float, threshold: float = 0.0) -> str:
+    """Направление, в сторону которого указывает ЗНАК momentum ('' если в мёртвой зоне).
 
     TSMOM sign rule (Moskowitz/Ooi/Pedersen 2012, «Time Series Momentum»,
     J. Financial Economics): позиция удерживается, пока знак momentum
@@ -426,10 +395,18 @@ def _momentum_sign_direction(momentum_value: float) -> str:
     сделки умер → выход, не дожидаясь полного флипа за -threshold или SL.
     Вход остаётся на ±threshold → гистерезис (вход на импульсе, выход на
     его затухании), защита прибыли «когда дальше роста не будет».
+
+    При ``threshold>0`` — гистерезисный выход (BUILDLOG 2026-07-24): сторона
+    считается «живой» только когда |momentum| > threshold. Выход — на
+    развороте за -threshold, а не на шумовом колебании вокруг нуля. На H1
+    Hurst≈0.535 (тонкий trending edge), zero-cut закрывал победителей
+    досрочно (avg win +0.48R, не доживая до BE@1R). threshold=0.0 = чистый
+    sign-rule (старое поведение). См. ``decay_exit_threshold_mult`` в settings.
+    Research: Chan — momentum требует persistence; Moskowitz 2012 — sign-rule.
     """
-    if momentum_value > 0:
+    if momentum_value > threshold:
         return "long"
-    if momentum_value < 0:
+    if momentum_value < -threshold:
         return "short"
     return ""
 
@@ -556,16 +533,6 @@ def _manage_positions(
     # - Linda Raschke discretionary pattern: partial take + runner.
     # - Turtle/LeBeau ATR-family trailing to hold trend legs.
     active_ids: set[int] = set()
-    # Эксперимент «profit protect» (BUILDLOG 2026-07-15): gross-PnL per
-    # position в USD от брокера (точный, с учётом contract_size/quote-
-    # conversion для USDJPY/CFD).
-    pnl_map: dict[int, tuple[float, float]] = {}
-    if settings.profit_protect_enabled:
-        try:
-            pnl_map = executor.get_unrealized_pnl() or {}
-        except Exception as exc:  # noqa: BLE001
-            log.warning("PROFIT_PROTECT: get_unrealized_pnl failed: %s", exc)
-            pnl_map = {}
     for symbol, positions in positions_by_symbol.items():
         signal_data = signal_by_symbol.get(symbol)
         if signal_data is None:
@@ -685,67 +652,6 @@ def _manage_positions(
                         r_now,
                         atr,
                     )
-
-            # ── Эксперимент «profit protect» (BUILDLOG 2026-07-15): трейлинг
-            # по долларовой прибыли. После BE/partial/trailing — гарантировать
-            # что SL защищает ratio× текущего gross-PnL. SL = entry ± ratio×
-            # signed_move; max/min с prev_SL → двигаем только в прибыльную
-            # сторону (при откате gross SL не опускается).
-            if settings.profit_protect_enabled and pnl_map:
-                pnl_entry = pnl_map.get(pos.position_id)
-                gross = float(pnl_entry[0]) if pnl_entry else None
-                if gross is not None and gross >= settings.profit_protect_activate_usd:
-                    protect_price = _profit_protect_sl(
-                        side=pos.side,
-                        entry_price=pos.entry_price,
-                        current_price=current_price,
-                        gross_usd=gross,
-                        ratio=settings.profit_protect_ratio,
-                        activate_usd=settings.profit_protect_activate_usd,
-                        digits=pos.digits,
-                    )
-                    if protect_price is not None:
-                        if pos.side == "long":
-                            target_sl = max(
-                                pos.stop_loss or float("-inf"), protect_price
-                            )
-                        else:
-                            target_sl = min(
-                                pos.stop_loss or float("inf"), protect_price
-                            )
-                        target_sl = round(target_sl, pos.digits)
-                        prev_sl = (
-                            round(pos.stop_loss, pos.digits)
-                            if pos.stop_loss is not None
-                            else None
-                        )
-                        # Только если выгоднее текущего SL (двигаем в
-                        # прибыльную сторону, никогда не опускаем).
-                        better = prev_sl is None or (
-                            target_sl > prev_sl
-                            if pos.side == "long"
-                            else target_sl < prev_sl
-                        )
-                        if better and target_sl != prev_sl:
-                            prot_ok = executor.amend_sl_tp(
-                                pos.position_id,
-                                sl_price=target_sl,
-                                tp_price=None,
-                                yf_symbol=symbol,
-                                current_price=current_price,
-                            )
-                            if prot_ok:
-                                pos.stop_loss = target_sl
-                                log.info(
-                                    "MANAGE %s #%d: profit-protect SL -> "
-                                    "%.5f (gross=$%.2f, protect=%.0f%%=$%.2f)",
-                                    symbol,
-                                    pos.position_id,
-                                    target_sl,
-                                    gross,
-                                    settings.profit_protect_ratio * 100,
-                                    gross * settings.profit_protect_ratio,
-                                )
 
     cleaned = store.cleanup_position_state(active_ids)
     if cleaned > 0:
@@ -894,6 +800,52 @@ def run() -> None:
                             )
                     if sym in positions_by_symbol:
                         positions_by_symbol[sym] = remaining
+            # Gap-защита (BUILDLOG 2026-07-24): HIGH-impact релиз в следующие
+            # news_close_before_min минут → закрыть открытые позиции scoped-
+            # символов, чтобы не нести gap за SL через шип релиза. Сопровождение
+            # (BE/partial/trailing) выше уже отработало. Симметрично friday_flat
+            # по retry/MARKET_CLOSED-дедупу. Scoping: US-релизы — все символы;
+            # ECB — только EUR-пары; BoJ — только JPY-пары (внутри high_impact_event_upcoming).
+            if (
+                executor is not None
+                and settings.news_close_enabled
+                and settings.news_close_before_min > 0
+            ):
+                for sym in settings.symbols:
+                    reason = high_impact_event_upcoming(
+                        symbol=sym,
+                        before_min=settings.news_close_before_min,
+                    )
+                    if reason is None:
+                        continue
+                    remaining: list[ManagedPosition] = []
+                    for pos in positions_by_symbol.get(sym, []):
+                        close_res = executor.close_position(
+                            pos.position_id, pos.volume
+                        )
+                        if close_res.success:
+                            market_closed_pids.discard(pos.position_id)
+                            log.info(
+                                "NEWS CLOSE %s #%d %s vol=%d closed (%s: "
+                                "gap-защита, не нести шип релиза за SL)",
+                                sym, pos.position_id, pos.side, pos.volume, reason,
+                            )
+                        elif _is_market_closed_error(close_res.error):
+                            if pos.position_id not in market_closed_pids:
+                                market_closed_pids.add(pos.position_id)
+                                log.info(
+                                    "NEWS CLOSE отложен %s #%d: рынок закрыт",
+                                    sym, pos.position_id,
+                                )
+                            remaining.append(pos)
+                        else:
+                            remaining.append(pos)
+                            log.error(
+                                "NEWS CLOSE failed %s #%d: %s (повтор в цикле)",
+                                sym, pos.position_id, close_res.error,
+                            )
+                    if sym in positions_by_symbol:
+                        positions_by_symbol[sym] = remaining
             if executor is not None:
                 open_count = _count_open_positions_for_symbols(
                     executor, settings.symbols, labels=settings.managed_labels
@@ -943,6 +895,27 @@ def run() -> None:
                     for symbol in settings.symbols:
                         session_skips[symbol] = skip_reason
                     log.info("SESSION-FILTER: входы заблокированы — %s", skip_reason)
+            # NY-open block: конкретные часы UTC внутри ликвидной сессии
+            # (BUILDLOG 2026-07-24): NY-open 14-16h UTC — liquidity trap,
+            # WR 0-20% net −$109 на 34 сделках. Тот же signal_hour, что и у
+            # session-filter (час закрытого бара).
+            if settings.ny_open_block_enabled and settings.ny_open_block_hours:
+                now_h = datetime.now(timezone.utc).hour
+                try:
+                    interval_h = _INTERVAL_SEC.get(settings.yfinance_interval, 3600) // 3600
+                except Exception:  # noqa: BLE001
+                    interval_h = 1
+                signal_hour = (now_h - max(1, interval_h)) % 24
+                ny_skip = hour_blocklist_skip_reason(
+                    hour_utc=signal_hour,
+                    enabled=settings.ny_open_block_enabled,
+                    blocked_hours=settings.ny_open_block_hours,
+                )
+                if ny_skip:
+                    for symbol in settings.symbols:
+                        # Не перетираем более раннюю причину session-filter.
+                        session_skips.setdefault(symbol, ny_skip)
+                    log.info("NY-OPEN-BLOCK: входы заблокированы — %s", ny_skip)
 
             for symbol in settings.symbols:
                 signal_data = signal_by_symbol.get(symbol)
@@ -974,7 +947,17 @@ def run() -> None:
                 # позиции (включая полный флип за -threshold) → закрываем.
                 # Выполняем каждый цикл, независимо от max_positions —
                 # выход важнее входа (и освобождает слот).
-                sign_dir = _momentum_sign_direction(signal_data.momentum_value)
+                #
+                # Гистерезис (BUILDLOG 2026-07-24): порог выхода = signal_threshold
+                # × decay_exit_threshold_mult. mult=1.0 → выход на -threshold
+                # (полный гистерезис, победители доживают до BE/partial/trailing);
+                # mult=0.0 → выход на пересечении нуля (старый sign-rule).
+                decay_threshold = (
+                    settings.signal_threshold * settings.decay_exit_threshold_mult
+                )
+                sign_dir = _momentum_sign_direction(
+                    signal_data.momentum_value, decay_threshold
+                )
                 decay_closed = 0
                 if executor is not None and sign_dir:
                     targets = _flip_close_targets(
@@ -1019,11 +1002,20 @@ def run() -> None:
                             if p.side == sign_dir
                         ]
 
+                # ADX-фильтр входа (BUILDLOG 2026-07-24): рейндж (ADX<adx_min)
+                # → momentum не работает. ctx.adx считается compute_entry_context
+                # (раньше observability-only, теперь блокирующий). ctx=None
+                # (мало данных / холодный старт) → НЕ блокировать.
+                sym_adx_block = adx_block_reason(
+                    ctx, enabled=settings.adx_filter_enabled, adx_min=settings.adx_min
+                )
+
                 should_open = (
                     wants_open
                     and open_count < settings.max_open_positions
                     and sym_news_block is None
                     and sym_session_block is None
+                    and sym_adx_block is None
                     and not friday_entry_block
                 )
 
@@ -1052,10 +1044,14 @@ def run() -> None:
                     # окна, пока сигнал актуален. Сигнал не теряется.
                     note = f"skip:news_window({sym_news_block})"
                 elif sym_session_block is not None:
-                    # Session-фильтр: вход отложен до ликвидной сессии,
-                    # direction НЕ фиксируется → попытка повторится в
-                    # London/NY окне, пока сигнал актуален.
+                    # Session-фильтр / NY-open block: вход отложен до
+                    # ликвидной сессии / вне враждебных часов, direction НЕ
+                    # фиксируется → попытка повторится, пока сигнал актуален.
                     note = f"skip:off_session({sym_session_block})"
+                elif sym_adx_block is not None:
+                    # ADX-фильтр: вход в рейндже отложен, direction НЕ
+                    # фиксируется → повторится, когда ADX поднимется над min.
+                    note = f"skip:{sym_adx_block}"
                 elif not should_open:
                     note = "skip:max_positions"
                 else:

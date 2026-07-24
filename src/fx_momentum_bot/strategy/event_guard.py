@@ -79,3 +79,47 @@ def high_impact_event_near(
             )
             return f"{e.name} {when}"
     return None
+
+
+def high_impact_event_upcoming(
+    now_utc: datetime | None = None,
+    *,
+    symbol: str | None = None,
+    before_min: int = 5,
+) -> str | None:
+    """Описание HIGH-impact события в следующие ``before_min`` минут, либо None.
+
+    Для gap-защиты (BUILDLOG 2026-07-24): закрытие ОТКРЫТЫХ позиций перед
+    high-impact релизом, чтобы не нести проскальзывание за SL через шип релиза
+    (event_guard блокирует только ВХОДЫ, открытые позиции он не трогает).
+    Отличается от high_impact_event_near: окно строго [now, now+before_min]
+    (только предстоящие, без пост-релизного хвоста). Scoping по symbol тот же
+    (US-релизы — все; ECB — EUR-пары; BoJ — JPY-пары).
+
+    ─── Research basis ───
+    - Andersen/Bollerslev/Diebold/Vega (2003, AER): шип цены и волатильности в
+      первые минуты после анонса; избыточная реакция → reversal. Открытая
+      позиция ловит шип, SL не гарантирует исполнение в точке → gap за SL.
+    - FX Foundations «News Trading»: slippage on fill, wide spreads during event
+      → выходить ДО релиза, а не во время.
+    - Эмпирика (loss-audit 13.07-24.07, 34 сделки): 2 beyond_sl-сделки
+      (07-14 12:30 UTC, обе закрыты в одну минуту) R −1.39/−2.45 = −$51.6 =
+      36% всего убытка — gap через SL в окне релиза. МАЛАЯ ВЫБОРКА.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    try:
+        scope = (symbol,) if symbol else ("*",)
+        # horizon чуть шире before_min, чтобы захватить событие на правой границе.
+        events = upcoming_events(
+            now, scope, horizon_hours=before_min / 60.0 + 0.1
+        )
+    except Exception:
+        log.exception("event_guard: calendar failed (gap-защита НЕ блокирую)")
+        return None
+    for e in events:
+        if e.impact != "HIGH":
+            continue
+        delta_min = (e.when_utc - now).total_seconds() / 60.0
+        if 0 <= delta_min <= before_min:
+            return f"{e.name} in {delta_min:.0f}min"
+    return None

@@ -10,7 +10,6 @@ from fx_momentum_bot.app.main import (
     _flip_close_targets,
     _has_same_side_position,
     _momentum_sign_direction,
-    _profit_protect_sl,
     _r_multiple,
     _should_record_direction,
 )
@@ -114,58 +113,6 @@ def test_has_same_side_position_allows_opposite_or_empty() -> None:
     assert not _has_same_side_position([_pos(1, "long")], "flat")
 
 
-def test_profit_protect_sl_long_80pct() -> None:
-    # gross $4, ratio 0.8, activate $2 → SL защищает $3.2 = 80% пути entry→cur.
-    # entry 1.10, current 1.12, signed_move 0.02 → SL = 1.10 + 0.8·0.02 = 1.116.
-    sl = _profit_protect_sl(
-        side="long", entry_price=1.10, current_price=1.12,
-        gross_usd=4.0, ratio=0.8, activate_usd=2.0, digits=5,
-    )
-    assert sl == round(1.116, 5)
-
-
-def test_profit_protect_sl_short_80pct() -> None:
-    # short: entry 1.12, current 1.10, gross $5, ratio 0.8 → SL = 1.12 - 0.8·0.02 = 1.104.
-    sl = _profit_protect_sl(
-        side="short", entry_price=1.12, current_price=1.10,
-        gross_usd=5.0, ratio=0.8, activate_usd=2.0, digits=5,
-    )
-    assert sl == round(1.104, 5)
-
-
-def test_profit_protect_sl_below_activate_returns_none() -> None:
-    # gross < activate_usd → защита не активна.
-    sl = _profit_protect_sl(
-        side="long", entry_price=1.10, current_price=1.111,
-        gross_usd=1.0, ratio=0.8, activate_usd=2.0, digits=5,
-    )
-    assert sl is None
-
-
-def test_profit_protect_sl_not_in_profit_returns_none() -> None:
-    # Позиция в убытке (signed_move ≤ 0) → None даже при gross ≥ activate.
-    assert _profit_protect_sl(
-        side="long", entry_price=1.12, current_price=1.10,
-        gross_usd=5.0, ratio=0.8, activate_usd=2.0, digits=5,
-    ) is None
-    assert _profit_protect_sl(
-        side="long", entry_price=1.10, current_price=1.10,
-        gross_usd=2.0, ratio=0.8, activate_usd=2.0, digits=5,
-    ) is None
-
-
-def test_profit_protect_sl_bad_ratio_returns_none() -> None:
-    # ratio вне (0, 1] → None.
-    assert _profit_protect_sl(
-        side="long", entry_price=1.10, current_price=1.12,
-        gross_usd=4.0, ratio=0.0, activate_usd=2.0, digits=5,
-    ) is None
-    assert _profit_protect_sl(
-        side="long", entry_price=1.10, current_price=1.12,
-        gross_usd=4.0, ratio=1.5, activate_usd=2.0, digits=5,
-    ) is None
-
-
 def test_momentum_sign_direction() -> None:
     # TSMOM sign rule: знак momentum определяет, какая сторона «жива».
     assert _momentum_sign_direction(0.0008) == "long"
@@ -180,6 +127,41 @@ def test_decay_close_selection_via_sign() -> None:
     sign_dir = _momentum_sign_direction(-0.0004)
     targets = _flip_close_targets(positions, sign_dir)
     assert [p.position_id for p in targets] == [1]
+
+
+def test_sign_direction_hysteresis_dead_zone_keeps_position() -> None:
+    # Гистерезис (BUILDLOG 2026-07-24): momentum в мёртвой зоне (-T, +T) →
+    # ни одна сторона не «жива» → sign-decay НЕ закрывает ничего. Победитель
+    # получает room до реального разворота за -T.
+    positions = [_pos(1, "long"), _pos(2, "short")]
+    T = 0.0015
+    # momentum = -0.0004: |m| < T → мёртвая зона → "" → ничего не закрывается.
+    sign_dir = _momentum_sign_direction(-0.0004, threshold=T)
+    assert sign_dir == ""
+    assert _flip_close_targets(positions, sign_dir) == []
+
+
+def test_sign_direction_hysteresis_closes_only_beyond_threshold() -> None:
+    # momentum < -T → «short» жива → закрываем лонги (side != short).
+    # momentum > +T → «long» жива → закрываем шорты.
+    positions = [_pos(1, "long"), _pos(2, "short")]
+    T = 0.0015
+    assert _momentum_sign_direction(-0.0020, threshold=T) == "short"
+    assert _momentum_sign_direction(0.0020, threshold=T) == "long"
+    # За -T: закрываются лонги (id=1), шорт (id=2) живёт.
+    targets = _flip_close_targets(positions, _momentum_sign_direction(-0.0020, T))
+    assert [p.position_id for p in targets] == [1]
+    # За +T: закрываются шорты (id=2), лонг (id=1) живёт.
+    targets = _flip_close_targets(positions, _momentum_sign_direction(0.0020, T))
+    assert [p.position_id for p in targets] == [2]
+
+
+def test_sign_direction_hysteresis_zero_mult_preserves_old_behavior() -> None:
+    # mult=0 (threshold=0) → чистый sign-rule: любое ненулевое momentum
+    # определяет «живую» сторону (старое поведение до гистерезиса).
+    assert _momentum_sign_direction(0.0001, threshold=0.0) == "long"
+    assert _momentum_sign_direction(-0.0001, threshold=0.0) == "short"
+    assert _momentum_sign_direction(0.0, threshold=0.0) == ""
 
 
 def test_r_multiple_for_long_and_short() -> None:
@@ -290,6 +272,38 @@ def test_event_guard_symbol_scoping_ecb_boj() -> None:
     assert high_impact_event_near(boj_near, symbol="USDJPY=X") is not None
     assert high_impact_event_near(boj_near, symbol="EURUSD=X") is None
     assert high_impact_event_near(boj_near, symbol="GC=F") is None
+
+
+# ─── Gap-защита: high_impact_event_upcoming (BUILDLOG 2026-07-24) ───────────
+
+def test_news_close_upcoming_within_window() -> None:
+    from fx_momentum_bot.strategy.event_guard import high_impact_event_upcoming
+    # CPI 2026-06-10 12:30 UTC. За 3 мин до релиза, before_min=5 → upcoming.
+    reason = high_impact_event_upcoming(_at(12, 27), before_min=5)
+    assert reason is not None and "CPI" in reason and "in 3min" in reason
+
+
+def test_news_close_upcoming_outside_window() -> None:
+    from fx_momentum_bot.strategy.event_guard import high_impact_event_upcoming
+    # За 10 мин до релиза, before_min=5 → НЕ upcoming (слишком далеко).
+    assert high_impact_event_upcoming(_at(12, 20), before_min=5) is None
+    # После релиза (12:40) → НЕ upcoming (окно строго [now, now+before]).
+    assert high_impact_event_upcoming(_at(12, 40), before_min=5) is None
+
+
+def test_news_close_upcoming_symbol_scoping() -> None:
+    from fx_momentum_bot.strategy.event_guard import high_impact_event_upcoming
+    # ECB 2026-06-11 12:15 UTC: upcoming для EUR-пар, не для JPY/золота.
+    ecb_near = datetime(2026, 6, 11, 12, 10, tzinfo=timezone.utc)
+    assert high_impact_event_upcoming(ecb_near, symbol="EURUSD=X", before_min=10) is not None
+    assert high_impact_event_upcoming(ecb_near, symbol="USDJPY=X", before_min=10) is None
+    assert high_impact_event_upcoming(ecb_near, symbol="GC=F", before_min=10) is None
+
+
+def test_news_close_upcoming_disabled_when_before_zero() -> None:
+    from fx_momentum_bot.strategy.event_guard import high_impact_event_upcoming
+    # before_min=0 → окно пустое → никогда не upcoming (выключено).
+    assert high_impact_event_upcoming(_at(12, 29), before_min=0) is None
 
 
 def test_event_guard_us_events_block_all_symbols() -> None:
@@ -451,6 +465,38 @@ def test_session_filter_wraparound_window() -> None:
     assert session_skip_reason(
         hour_utc=12, enabled=True, start_hour_utc=21, end_hour_utc=7
     ) is not None
+
+
+# ─── NY-open block: блок входов в конкретные часы UTC (BUILDLOG 2026-07-24) ──
+
+def test_ny_open_block_blocks_listed_hours() -> None:
+    from fx_momentum_bot.strategy.session_filter import hour_blocklist_skip_reason
+    # 14,15,16 UTC — враждебные NY-open часы (loss-audit 34 сделки, WR 0-20%).
+    for h in (14, 15, 16):
+        assert hour_blocklist_skip_reason(
+            hour_utc=h, enabled=True, blocked_hours=(14, 15, 16)
+        ) is not None, f"hour {h} должен блокироваться"
+
+
+def test_ny_open_block_allows_other_hours() -> None:
+    from fx_momentum_bot.strategy.session_filter import hour_blocklist_skip_reason
+    # London-open 08h, mid-London 12h — разрешены.
+    for h in (7, 8, 10, 12, 17, 19, 20):
+        assert hour_blocklist_skip_reason(
+            hour_utc=h, enabled=True, blocked_hours=(14, 15, 16)
+        ) is None, f"hour {h} должен быть разрешён"
+
+
+def test_ny_open_block_disabled_and_empty() -> None:
+    from fx_momentum_bot.strategy.session_filter import hour_blocklist_skip_reason
+    # enabled=False → не блокирует даже listed часы.
+    assert hour_blocklist_skip_reason(
+        hour_utc=15, enabled=False, blocked_hours=(14, 15, 16)
+    ) is None
+    # Пустой список → не блокирует.
+    assert hour_blocklist_skip_reason(
+        hour_utc=15, enabled=True, blocked_hours=()
+    ) is None
 
 
 # ─── Friday-flat (закрытие перед выходными, 2026-06-26) ─────────────────
@@ -616,6 +662,45 @@ def test_entry_context_not_enough_bars_returns_none() -> None:
     from fx_momentum_bot.strategy.context_metrics import compute_entry_context
     assert compute_entry_context(_trend_df(n=150), "long") is None
     assert compute_entry_context(None, "long") is None
+
+
+# ─── ADX-фильтр входа (BUILDLOG 2026-07-24) ─────────────────────────────────
+
+def test_adx_block_reason_blocks_range() -> None:
+    from fx_momentum_bot.strategy.context_metrics import (
+        EntryContext,
+        adx_block_reason,
+    )
+    # ADX=15 < 20 → рейндж → вход блокируется.
+    ctx = EntryContext(ema_dist_atr=0.5, adx=15.0, with_htf=True)
+    reason = adx_block_reason(ctx, enabled=True, adx_min=20.0)
+    assert reason is not None and "low_adx" in reason and "15.0" in reason
+
+
+def test_adx_block_reason_allows_trend() -> None:
+    from fx_momentum_bot.strategy.context_metrics import (
+        EntryContext,
+        adx_block_reason,
+    )
+    # ADX=25 >= 20 → трендовость есть → вход разрешён.
+    ctx = EntryContext(ema_dist_atr=0.5, adx=25.0, with_htf=True)
+    assert adx_block_reason(ctx, enabled=True, adx_min=20.0) is None
+
+
+def test_adx_block_reason_none_ctx_not_blocked() -> None:
+    from fx_momentum_bot.strategy.context_metrics import adx_block_reason
+    # ctx=None (холодный старт / мало данных) → НЕ блокировать.
+    assert adx_block_reason(None, enabled=True, adx_min=20.0) is None
+
+
+def test_adx_block_reason_disabled() -> None:
+    from fx_momentum_bot.strategy.context_metrics import (
+        EntryContext,
+        adx_block_reason,
+    )
+    # enabled=False → не блокирует даже в рейндже.
+    ctx = EntryContext(ema_dist_atr=0.5, adx=10.0, with_htf=True)
+    assert adx_block_reason(ctx, enabled=False, adx_min=20.0) is None
 
 
 # ─── store: миграция ctx_* колонок и персист контекста ────────────────────────

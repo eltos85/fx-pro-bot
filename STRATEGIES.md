@@ -1083,6 +1083,78 @@ Leaders: 20 всего, win-rate 60%, +125 gross, -15 издержки, +110 net
 
 ---
 
+## 8. fx_momentum_bot — Time-Series Momentum (FX, изолированный бот)
+
+Изолированный rule-based TSMOM-бот на FX-мажорах (cTrader/FxPro demo). Отдельный
+runtime, свои `MOMENTUM_BOT_*` env, своя SQLite. Не входит в advisor-ансамбль;
+торговая логика независима (strategy-guard.mdc, «Изоляция кодовых баз»).
+
+**Файлы:** `src/fx_momentum_bot/strategy/momentum.py`, `session_filter.py`,
+`event_guard.py`, `context_metrics.py`, `friday_flat.py`, `app/main.py`,
+`config/settings.py`.
+
+### Логика
+
+- **Сигнал**: `momentum = close[-1]/close[-1-lookback] − 1` на H1, lookback=24,
+  ATR(14). Вход при `|momentum| > threshold` (0.0015), edge-trigger (на смене
+  направления). Канон: Moskowitz/Ooi/Pedersen 2012 «Time Series Momentum».
+- **Сопровождение**: BE@+1R, partial@+1.5R (50%), ATR-trailing (1.5 ATR) с
+  активацией @+1.5R. Van Tharp (R-discipline), Raschke (partial+runner),
+  LeBeau (Chandelier). Брокерский TP не ставится (runner — сопровождением).
+- **Выход sign-decay** (гистерезис, см. ниже): позиция живёт, пока momentum не
+  пересёк −threshold против направления.
+
+### Фильтры входа (все обратимы через env)
+
+| Фильтр | Условие | Research |
+|--------|---------|----------|
+| Session-фильтр | вход только London 07–12 + NY 12–21 UTC | Lyons 2001; BIS triennial |
+| NY-open block | блок входов 14–16h UTC (liquidity trap) | TheTradersLegacy; Andersen 2003 |
+| ADX-фильтр | блок входа при ADX(14) < 20 (рейндж) | Wilder 1978; Chan/AQR |
+| Event-guard | блок входов ±60 мин вокруг HIGH-impact релизов | Andersen et al. 2003 |
+| Friday-flat | закрытие позиций перед выходными + блок входов в Пт | Dalton 2007; Lyons 2001 |
+| Gap-защита | закрытие открытых позиций за 5 мин до HIGH-релиза | Andersen 2003; FX Foundations |
+| Per-symbol гард | одна позиция на символ (анти-дубль) | бэктест-инвариант |
+| Spread-guard | спред < max_fraction от SL-дистанции | Harris 2003 |
+
+### Ключевые параметры и research-источники
+
+- **lookback=24 (H1), ATR(14), threshold=0.0015, SL=2.5 ATR** — TSMOM-канон
+  (Moskowitz 2012); ATR-stop — LeBeau.
+- **Sign-decay exit hysteresis** (`decay_exit_threshold_mult`, default 1.0):
+  выход на −threshold (полный гистерезис), не на пересечении нуля. На H1
+  Hurst≈0.535 (тонкий trending edge, /tmp/hurst_h1.py), zero-cut закрывал
+  победителей досрочно (avg win +0.48R, не доживая до BE@1R — loss-audit
+  13.07-24.07, 34 сделки). mult=0.0 = старый sign-rule. Research: Chan
+  (momentum требует persistence); Moskowitz 2012 (sign-rule база).
+- **NY-open block 14-16h UTC** (`ny_open_block_hours`, default "14,15,16"):
+  data-driven из 34 сделок (WR 0-20%, net −$109). МАЛАЯ ВЫБОРКА — переоценить
+  на ≥100 сделках (no-data-fitting.mdc). Research: TheTradersLegacy
+  (first 90 min NY = liquidity trap); Andersen 2003.
+- **ADX-фильтр, adx_min=20** (`adx_filter_enabled`): блок входа в рейндже.
+  ctx.adx — observability → блокирующий (инвариант «never blocks» снят для ADX,
+  сохранён для ema_dist/with_htf). ctx=None → НЕ блокировать (холодный старт).
+  Research: Wilder 1978; Chan/AQR. Эмпирика: ADX<20 PF 0.24.
+- **HTF EMA200** (`ctx.with_htf`, `ctx.ema_dist_atr`): observability-only, НЕ
+  блокирует. Инверсия фильтра отвергнута как overfit на 11/23 сделках (López de
+  Prado DSR). Research: Murphy 1999; Asness 2013.
+- **Gap-защита** (`news_close_before_min`, default 5): закрытие открытых позиций
+  scoped-символов перед HIGH-релизом (event_guard блокирует только входы).
+  Research: Andersen 2003 (news overreaction + gap); FX Foundations.
+- **ATR-scaled sizing**, риск $15/сделку (1% от $1500) — Van K. Tharp ch.11.
+
+### Каноничные исследования
+
+- Moskowitz, Ooi, Pedersen (2012) «Time Series Momentum», JFE — sign-rule, горизонты.
+- Wilder (1978) «New Concepts…» — ADX(14), ATR.
+- Chan «Algorithmic Trading» + epchan.blogspot (2016) — Hurst, momentum persistence.
+- Andersen/Bollerslev/Diebold/Vega (2003, AER) — macro-news overreaction + gap.
+- Lyons (2001) «The Microstructure Approach…» — FX-ликвидность по сессиям.
+- Van K. Tharp (2007) «Trade Your Way…» ch.11 — fixed-fractional risk.
+- López de Prado / Bailey — Deflated Sharpe (малая выборка, multiple testing).
+
+---
+
 ## Инструменты
 
 ### Forex (7 пар, + NZD для скальпинга stat_arb)

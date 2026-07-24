@@ -128,6 +128,22 @@ class MomentumBotSettings(BaseSettings):
         default=60, validation_alias="MOMENTUM_BOT_NEWS_BLOCK_AFTER_MIN"
     )
 
+    # ─── Gap-защита: закрытие открытых позиций перед high-impact новостями ──
+    # (BUILDLOG 2026-07-24). Event-guard блокирует только ВХОДЫ; открытая
+    # позиция ловит шип релиза → SL не исполняется в точке → gap за SL (beyond_sl).
+    # Loss-audit 13.07-24.07: 2 beyond_sl (07-14 12:30 UTC) = −$51.6 = 36% убытка.
+    # Если HIGH-релиз в следующие news_close_before_min минут → закрыть открытые
+    # позиции scoped-символов (US — все; ECB — EUR-пары; BoJ — JPY-пары), как
+    # friday_flat. Сопровождение (BE/partial/trailing) отрабатывает до закрытия.
+    # Research: Andersen et al. 2003 (news overreaction + gap); FX Foundations
+    # (slippage on fill). Обратимо: enabled=False. before_min=0 → выключено.
+    news_close_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_NEWS_CLOSE_ENABLED"
+    )
+    news_close_before_min: int = Field(
+        default=5, validation_alias="MOMENTUM_BOT_NEWS_CLOSE_BEFORE_MIN"
+    )
+
     # ─── Session-фильтр входов (liquid sessions only) ───────────────────
     # Блок НОВЫХ входов вне ликвидных FX-сессий (London 07–12 UTC / NY
     # 12–21 UTC). Asian session (00–07 UTC) и Late (21–24) — тонкая
@@ -146,6 +162,37 @@ class MomentumBotSettings(BaseSettings):
     )
     session_filter_end_hour_utc: int = Field(
         default=21, validation_alias="MOMENTUM_BOT_SESSION_FILTER_END_HOUR_UTC"
+    )
+
+    # ─── NY-open entry block (BUILDLOG 2026-07-24) ───────────────────────
+    # Блок НОВЫХ входов в конкретные часы UTC внутри ликвидной сессии —
+    # эмпирически враждебные momentum-окна (NY-open liquidity trap / stop-hunt).
+    # Loss-audit 13.07-24.07 (34 сделки): 14-16h UTC WR 0-20%, net −$109 vs
+    # London-open 08h WR 62%. МАЛАЯ ВЫБОРКА — переоценить на ≥100 сделках.
+    # Список часов через запятую. Пустая строка / enabled=False → выключено.
+    # Research: TheTradersLegacy (first 90 min NY = liquidity trap);
+    # Andersen et al. 2003 (NY volatility peak). См. session_filter.hour_blocklist_skip_reason.
+    ny_open_block_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_NY_OPEN_BLOCK_ENABLED"
+    )
+    ny_open_block_hours_raw: str = Field(
+        default="14,15,16", validation_alias="MOMENTUM_BOT_NY_OPEN_BLOCK_HOURS"
+    )
+
+    # ─── ADX-фильтр входа (BUILDLOG 2026-07-24) ──────────────────────────
+    # Блок НОВЫХ входов в рейндже: ADX(14) < adx_min → нет трендовости →
+    # momentum не работает. Loss-audit 13.07-24.07 (34 сделки): ADX<20 —
+    # 19/34 сделок, PF 0.24, net −$119; ADX 20-30 — ~ноль. ctx.adx считается
+    # compute_entry_context (раньше observability-only, теперь блокирующий
+    # фильтр — инвариант «never blocks» снят). ctx=None (мало данных / холодный
+    # старт) → НЕ блокировать (не ломать старт и не подгонять).
+    # Research: Wilder 1978 (ADX<20 = range); Chan/AQR (momentum needs trend).
+    # Обратимо: enabled=False.
+    adx_filter_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_ADX_FILTER_ENABLED"
+    )
+    adx_min: float = Field(
+        default=20.0, validation_alias="MOMENTUM_BOT_ADX_MIN"
     )
 
     # ─── Friday-flat: закрытие momentum-позиций перед выходными ─────────
@@ -194,21 +241,18 @@ class MomentumBotSettings(BaseSettings):
         default=1.5, validation_alias="MOMENTUM_BOT_TRAILING_ATR_MULT"
     )
 
-    # ── Эксперимент «profit protect» (BUILDLOG 2026-07-15): трейлинг-стоп по
-    # долларовой прибыли с защитой ratio× текущего gross-PnL. При достижении
-    # gross ≥ profit_protect_activate_usd ставит SL на цену, дающую ровно
-    # ratio× текущей прибыли, и двигает только в прибыльную сторону. При
-    # росте PnL SL едет вверх, при откате — max/min с prev_SL держит его,
-    # закрытие по брокерному SL в realtime. Пример (ratio 0.8): $4 → SL $3.2,
-    # $5 → SL $4. Не канон: режет тренды раньше 3R-TP (Carter 2012). Opt-in.
-    profit_protect_enabled: bool = Field(
-        default=False, validation_alias="MOMENTUM_BOT_PROFIT_PROTECT_ENABLED"
-    )
-    profit_protect_ratio: float = Field(
-        default=0.8, validation_alias="MOMENTUM_BOT_PROFIT_PROTECT_RATIO"
-    )
-    profit_protect_activate_usd: float = Field(
-        default=2.0, validation_alias="MOMENTUM_BOT_PROFIT_PROTECT_ACTIVATE_USD"
+    # ─── Sign-decay exit hysteresis (BUILDLOG 2026-07-24) ─────────────────
+    # Порог выхода sign-decay как доля от signal_threshold. 0.0 = чистый
+    # TSMOM sign-rule (выход на пересечении нуля — старое поведение). 1.0 =
+    # полный гистерезис: вход на +threshold, выход на -threshold. На H1
+    # Hurst≈0.535 (тонкий trending edge, /tmp/hurst_h1.py), zero-cut закрывает
+    # победителей на шумовых колебаниях вокруг нуля досрочно (avg win +0.48R,
+    # не доживая до BE@1R/partial@1.5R/trailing — loss-audit 13.07-24.07,
+    # 34 сделки). Гистерезис даёт победителям room до реального разворота.
+    # Research: Moskowitz/Ooi/Pedersen 2012 (sign-rule база) + Chan (momentum
+    # требует persistence, не noise-exit). Обратимо: 0.0 = старое поведение.
+    decay_exit_threshold_mult: float = Field(
+        default=1.0, validation_alias="MOMENTUM_BOT_DECAY_EXIT_THRESHOLD_MULT"
     )
 
     # Dedicated cTrader credentials for this bot only.
@@ -253,6 +297,21 @@ class MomentumBotSettings(BaseSettings):
     @property
     def symbols(self) -> tuple[str, ...]:
         return tuple(s.strip() for s in self.symbols_raw.split(",") if s.strip())
+
+    @property
+    def ny_open_block_hours(self) -> tuple[int, ...]:
+        """Кортеж часов UTC для блокировки входов (NY-open block)."""
+        hours: list[int] = []
+        for tok in self.ny_open_block_hours_raw.split(","):
+            tok = tok.strip()
+            if tok:
+                try:
+                    h = int(tok)
+                    if 0 <= h <= 23:
+                        hours.append(h)
+                except ValueError:
+                    continue
+        return tuple(hours)
 
     @property
     def db_path(self) -> Path:

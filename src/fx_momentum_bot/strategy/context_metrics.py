@@ -41,6 +41,31 @@ class EntryContext:
                              # (None для flat — сравнивать нечего)
 
 
+def adx_block_reason(
+    ctx: EntryContext | None, *, enabled: bool, adx_min: float
+) -> str | None:
+    """Причина скипа входа в рейндже (ADX < adx_min), либо None (вход разрешён).
+
+    None == вход разрешён (в т.ч. при ctx=None — холодный старт / мало данных:
+    не блокируем, чтобы не ломать старт и не подгонять). Строка == вход
+    блокируется (текст для лога).
+
+    ─── Research basis (BUILDLOG 2026-07-24) ───
+    - Wilder «New Concepts…» (1978): ADX(14) < 20 ≈ рейндж (нет трендовости).
+    - Chan / AQR (Hurst, Ooi, Pedersen 2017, «A Century of Evidence…»):
+      time-series momentum требует трендового режима; в chop/рейндже edge
+      отсутствует.
+    - Эмпирика (loss-audit 13.07-24.07, 34 сделки): ADX<20 — 19/34 сделок,
+      PF 0.24, net −$119; ADX 20-30 — ~ноль. МАЛАЯ ВЫБОРКА — переоценить на
+      ≥100 сделках (no-data-fitting.mdc). Обратимо: enabled=False.
+    """
+    if not enabled or ctx is None:
+        return None
+    if ctx.adx < adx_min:
+        return f"low_adx(adx={ctx.adx:.1f}<{adx_min:.0f})"
+    return None
+
+
 def _wilder_smooth(series: pd.Series, period: int) -> pd.Series:
     """Сглаживание Уайлдера = EWM с alpha=1/period (Wilder 1978)."""
     return series.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
@@ -52,7 +77,10 @@ def compute_entry_context(
     """Контекст входа по df свечей (тот же, что видит build_signal).
 
     None, если данных мало (< EMA_SPAN баров) или в хвосте NaN — контекст
-    опционален и НИКОГДА не блокирует решение (observability-инвариант).
+    опционален. EMA-dist/with_htf остаются observability-only (НЕ блокируют);
+    ADX с 2026-07-24 стал блокирующим фильтром (settings.adx_filter_enabled,
+    BUILDLOG 2026-07-24) — но ctx=None по-прежнему НЕ блокирует (холодный
+    старт, мало данных).
     """
     if candles is None or candles.empty or len(candles) < EMA_SPAN:
         return None
