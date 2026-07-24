@@ -796,8 +796,11 @@ services:
       TRADECARD_MOMENTUM_MOMENTUM_DB_DIR: /bots/momentum
       TRADECARD_MOMENTUM_REPORTS_DIR: /data/tradecard
       TRADECARD_MOMENTUM_LOG_LEVEL: ${TRADECARD_MOMENTUM_LOG_LEVEL:-INFO}
-      # Baseline анализа = дата последней правки логики бота (UTC, YYYY-MM-DD).
-      TRADECARD_MOMENTUM_BASELINE_DATE: ${TRADECARD_MOMENTUM_BASELINE_DATE:-}
+      # Baseline анализа = дата последней правки логики бота (UTC, YYYY-MM-DD
+      # или YYYY-MM-DD HH:MM). Сделки до неё не анализируются (разные стратегии
+      # нельзя смешивать). 2026-07-24 — деплой exit-hysteresis + NY-open block
+      # + ADX-фильтр + gap-защита (commits 60f386c/a523e6f, BUILDLOG 2026-07-24).
+      TRADECARD_MOMENTUM_BASELINE_DATE: ${TRADECARD_MOMENTUM_BASELINE_DATE:-2026-07-24 08:27}
       # DeepSeek (5 Why) — общий ключ.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       TRADECARD_MOMENTUM_DEEPSEEK_API_KEY: ${TRADECARD_MOMENTUM_DEEPSEEK_API_KEY:-${DEEPSEEK_API_KEY:-}}
