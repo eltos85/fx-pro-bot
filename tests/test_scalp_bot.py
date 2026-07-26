@@ -1044,6 +1044,90 @@ def test_verify_pnl_marks_verified_and_clears_provisional(tmp_path):
     db.close()
 
 
+# ─── fees_usd: комиссия как самостоятельная метрика издержек ───────────────
+# Аудит 2026-07-26: колонка fees_usd была нулевой у ВСЕХ live-сделок (live-путь
+# хардкодил fees_usd=0.0, а verify_pnl/finalize_pnl её вовсе не писали), хотя
+# ΣexecFee уже копился в WS-леджере. Из-за этого издержки исполнения нельзя
+# было отделить от качества сигнала и приходилось восстанавливать косвенно.
+def test_fee_sum_parses_open_and_close_fee():
+    """openFee+closeFee — официальные поля close-pnl, приходят строками.
+    https://bybit-exchange.github.io/docs/v5/position/close-pnl"""
+    from scalp_bot.trading.client import _fee_sum
+    assert _fee_sum({"openFee": "1.5", "closeFee": "1.7"}) == pytest.approx(3.2)
+    assert _fee_sum({"openFee": "1.5"}) == pytest.approx(1.5)
+    # ни одного поля → None, а НЕ 0.0: «не знаем» ≠ «комиссии не было»
+    assert _fee_sum({"closedPnl": "5"}) is None
+
+
+def test_closed_pnl_detail_exposes_fees():
+    rec = _rec(2000.0, 1.0, 5.0, 2010.0, 100)
+    rec.update({"openFee": "0.55", "closeFee": "0.60"})
+    cl = _mk_client([[rec]])
+    d = cl.closed_pnl_detail("ETHUSDT", qty=1.0, entry_price=2000.0)
+    assert d is not None and d["fees"] == pytest.approx(1.15)
+
+
+def test_closed_pnl_position_sums_fees_over_partials():
+    a = _rec_x(2.0, 0.6, 3.0, 2.1)
+    b = _rec_x(2.0, 0.4, 2.0, 2.2)
+    a.update({"openFee": "0.3", "closeFee": "0.3"})
+    b.update({"openFee": "0.2", "closeFee": "0.2"})
+    cl = _mk_client([[a, b]])
+    d = cl.closed_pnl_position("AAAUSDT", qty=1.0, entry_price=2.0,
+                               since_ms=0, until_ms=10**13)
+    assert d is not None and d["fees"] == pytest.approx(1.0)
+
+
+def test_verify_pnl_writes_fees_and_none_leaves_column_intact(tmp_path):
+    """fees_usd=None не должен затирать уже записанную комиссию нулём —
+    иначе WS-значение терялось бы при последующем REST true-up без openFee."""
+    db = ScalpDB(str(tmp_path))
+
+    def _mk():
+        tid = db.insert_open(symbol="ZECUSDT", side="long", qty=0.19,
+                             entry=518.14, sl=517.0, tp=519.0, score=4,
+                             reasons="x", mode="live", strategy="sweep_fade",
+                             ts_open=1000.0)
+        db.mark_closed(tid, exit_price=519.0, pnl_usd=0.07, fees_usd=1.25,
+                       close_reason="tp_hit", ts_close=1090.0,
+                       provisional=True)
+        return tid
+
+    def _fees(tid):
+        return db._conn.execute(
+            "SELECT fees_usd FROM trades WHERE id=?", (tid,)).fetchone()[0]
+
+    written = _mk()
+    db.verify_pnl(written, pnl_usd=0.0398, fees_usd=2.5)
+    assert _fees(written) == pytest.approx(2.5)
+
+    kept = _mk()
+    db.verify_pnl(kept, pnl_usd=0.0398)          # комиссия неизвестна
+    assert _fees(kept) == pytest.approx(1.25)    # прежнее значение уцелело
+
+    fin = _mk()
+    db.finalize_pnl(fin, pnl_usd=0.04, fees_usd=3.0)
+    assert _fees(fin) == pytest.approx(3.0)
+    db.close()
+
+
+def test_fees_from_rest_falls_back_to_ws_ledger_on_explicit_none():
+    """Bybit не прислал openFee/closeFee → detail['fees'] это явный None,
+    и dict.get(default) тут бы не сработал. Откатываемся на ΣexecFee из WS."""
+    from scalp_bot.trading.executor import Executor
+    ex = Executor.__new__(Executor)
+    ex._fills = {7: {"fee": 1.8, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0}}
+
+    class _Tr:
+        id = 7
+
+    tr = _Tr()
+    assert ex._fees_from_rest({"fees": None}, tr) == pytest.approx(1.8)
+    assert ex._fees_from_rest({"fees": 2.4}, tr) == pytest.approx(2.4)
+    # комиссия честно нулевая (rebate/промо) — не подменяем WS-значением
+    assert ex._fees_from_rest({"fees": 0.0}, tr) == pytest.approx(0.0)
+
+
 def test_unverified_selector_excludes_paper_tech_and_verified(tmp_path):
     db = ScalpDB(str(tmp_path))
 

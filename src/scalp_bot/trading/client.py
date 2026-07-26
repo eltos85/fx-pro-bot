@@ -28,6 +28,18 @@ def _as_float(v: object) -> float | None:
         return None
 
 
+def _fee_sum(item: dict) -> float | None:
+    """Round-turn комиссия записи close-pnl: openFee + closeFee.
+
+    Оба поля официальные и приходят строками; если ни одного нет — None
+    (не подменяем нулём, иначе «комиссии не было» неотличимо от «не знаем»).
+    https://bybit-exchange.github.io/docs/v5/position/close-pnl
+    """
+    parts = [_as_float(item.get(k)) for k in ("openFee", "closeFee")]
+    known = [p for p in parts if p is not None]
+    return sum(known) if known else None
+
+
 def _qty_decimals(step: float) -> int:
     """Число знаков после запятой в шаге лота."""
     if step <= 0:
@@ -494,9 +506,14 @@ class ScalpBybitClient:
                         "entry=%s) — не атрибутирую", symbol, order_id, qty,
                         entry_price)
             return None
+        # openFee/closeFee — официальные поля ответа close-pnl; closedPnl уже
+        # net (= gross − openFee − closeFee), поэтому комиссию храним отдельно
+        # как самостоятельную метрику издержек, а не вычитаем повторно.
+        # https://bybit-exchange.github.io/docs/v5/position/close-pnl
         return {
             "pnl": _as_float(chosen.get("closedPnl")),
             "exit": _as_float(chosen.get("avgExitPrice")),
+            "fees": _fee_sum(chosen),
             "order_id": str(chosen.get("orderId", "")),
             "created": _as_float(chosen.get("createdTime")),
         }
@@ -546,6 +563,8 @@ class ScalpBybitClient:
         sum_pnl = 0.0
         sum_qty = 0.0
         sum_exit_val = 0.0
+        sum_fees = 0.0
+        fees_known = False
         n = 0
         for it in items:
             if str(it.get("execType", "Trade")) not in ("Trade", "BustTrade"):
@@ -564,12 +583,17 @@ class ScalpBybitClient:
             sum_pnl += pnl
             sum_qty += cs
             sum_exit_val += ex * cs
+            fee = _fee_sum(it)
+            if fee is not None:
+                sum_fees += fee
+                fees_known = True
             n += 1
         if n == 0 or abs(sum_qty - qty) > max(qty * qty_tol_frac, 1e-9):
             return None
         return {
             "pnl": sum_pnl,
             "exit": (sum_exit_val / sum_qty) if sum_qty > 0 else None,
+            "fees": sum_fees if fees_known else None,
             "count": n,
         }
 

@@ -535,6 +535,20 @@ class Executor:
         complete = acc["close_qty"] >= tr.qty * 0.98
         return (net, exit_px, complete)
 
+    def _fees_from_fills(self, tr) -> float | None:
+        """ΣexecFee сделки по WS-филлам (вход + выход) или None, если филлов
+        ещё нет. Комиссия уже вычтена из net, но без отдельной метрики нельзя
+        отделить издержки исполнения от качества сигнала."""
+        acc = self._fills.get(getattr(tr, "id", None))
+        return acc["fee"] if acc else None
+
+    def _fees_from_rest(self, detail: dict, tr) -> float | None:
+        """Комиссия из ответа биржи, с откатом на WS-леджер. Ключ ``fees``
+        всегда присутствует, но может быть None (Bybit не прислал openFee/
+        closeFee), поэтому default у ``dict.get`` тут не сработал бы."""
+        fees = detail.get("fees")
+        return fees if fees is not None else self._fees_from_fills(tr)
+
     def _realized_or_estimate(self, tr, exit_price: float
                               ) -> tuple[float, float, bool]:
         """net PnL → (pnl, exit_price, is_real) из приватного WS execution.
@@ -607,7 +621,8 @@ class Executor:
                     reason = reconciled_bracket_reason(
                         getattr(tr, "close_reason", None), net)
                     self._db.finalize_pnl(tr.id, pnl_usd=net, exit_price=exit_px,
-                                          close_reason=reason)
+                                          close_reason=reason,
+                                          fees_usd=self._fees_from_fills(tr))
                     log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)"
                              "%s", tr.id, tr.symbol, tr.pnl_usd or 0.0, net,
                              f" reason→{reason}" if reason else "")
@@ -705,7 +720,8 @@ class Executor:
         old = tr.pnl_usd or 0.0
         reason = reconciled_bracket_reason(getattr(tr, "close_reason", None), net)
         self._db.verify_pnl(tr.id, pnl_usd=net, exit_price=d.get("exit"),
-                            close_reason=reason)
+                            close_reason=reason,
+                            fees_usd=self._fees_from_rest(d, tr))
         self._rest_recon_attempts.pop(tr.id, None)
         self._verify_fail.pop(tr.id, None)
         if abs(net - old) >= 0.01:
@@ -730,7 +746,8 @@ class Executor:
                                            d["pnl"])
         # REST closedPnl авторитетен → сразу verified (не нужен второй true-up).
         self._db.verify_pnl(tr.id, pnl_usd=d["pnl"], exit_price=d.get("exit"),
-                            close_reason=reason)
+                            close_reason=reason,
+                            fees_usd=self._fees_from_rest(d, tr))
         log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (REST)%s",
                  tr.id, tr.symbol, tr.pnl_usd or 0.0, d["pnl"],
                  f" reason→{reason}" if reason else "")
@@ -839,7 +856,8 @@ class Executor:
                 tr, pos.mark_price or tr.entry)
             reason = bracket_exit_reason(tr.side, tr.entry, exitp)
             self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,
-                                 fees_usd=0.0, close_reason=reason,
+                                 fees_usd=self._fees_from_fills(tr) or 0.0,
+                                 close_reason=reason,
                                  ts_close=self._now(), provisional=not is_real)
             if is_real:
                 self._forget_trade(tr.id)
@@ -859,7 +877,8 @@ class Executor:
             pnl, exitp, is_real = self._realized_or_estimate(
                 tr, pos.mark_price or tr.entry)
             self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,
-                                 fees_usd=0.0, close_reason=close_reason,
+                                 fees_usd=self._fees_from_fills(tr) or 0.0,
+                                 close_reason=close_reason,
                                  ts_close=self._now(), provisional=not is_real)
             if is_real:
                 self._forget_trade(tr.id)

@@ -607,7 +607,8 @@ class ScalpDB:
 
     def finalize_pnl(self, trade_id: int, *, pnl_usd: float,
                      exit_price: float | None = None,
-                     close_reason: str | None = None) -> None:
+                     close_reason: str | None = None,
+                     fees_usd: float | None = None) -> None:
         """Заменить предварительный (оценочный) PnL реальным closedPnl с биржи
         и снять флаг pnl_provisional (после сверки в reconcile).
 
@@ -615,6 +616,10 @@ class ScalpDB:
         провизорном закрытии exit≈entry → ``bracket_exit_reason`` всегда выдаёт
         ``tp_hit`` (favorable=0). Реальный знак closedPnl это исправляет, иначе
         залипает «tp_hit при минусе» (см. BUILDLOG v0.18.12).
+
+        ``fees_usd`` (опц.): round-turn комиссия сделки. ``pnl_usd`` уже net,
+        комиссия хранится отдельной метрикой издержек. None — не трогаем
+        колонку (нет данных ≠ комиссии не было).
         """
         sets = ["pnl_usd=?", "pnl_provisional=0"]
         args: list = [pnl_usd]
@@ -624,6 +629,9 @@ class ScalpDB:
         if close_reason is not None:
             sets.append("close_reason=?")
             args.append(close_reason)
+        if fees_usd is not None:
+            sets.append("fees_usd=?")
+            args.append(fees_usd)
         args.append(trade_id)
         self._conn.execute(
             f"UPDATE trades SET {', '.join(sets)} WHERE id=?", tuple(args))
@@ -631,10 +639,14 @@ class ScalpDB:
 
     def verify_pnl(self, trade_id: int, *, pnl_usd: float,
                    exit_price: float | None = None,
-                   close_reason: str | None = None) -> None:
+                   close_reason: str | None = None,
+                   fees_usd: float | None = None) -> None:
         """Авторитетный true-up против биржевого closedPnl: ставит net, снимает
         provisional И помечает verified (больше не пересверяем — rate-limit).
-        closedPnl уже net (офдок close-pnl: gross − openFee − closeFee)."""
+        closedPnl уже net (офдок close-pnl: gross − openFee − closeFee).
+
+        ``fees_usd`` (опц.) — та самая openFee+closeFee: net её уже учитывает,
+        но без отдельной колонки издержки не отделить от качества сигнала."""
         sets = ["pnl_usd=?", "pnl_provisional=0", "pnl_verified=1"]
         args: list = [pnl_usd]
         if exit_price is not None:
@@ -643,6 +655,9 @@ class ScalpDB:
         if close_reason is not None:
             sets.append("close_reason=?")
             args.append(close_reason)
+        if fees_usd is not None:
+            sets.append("fees_usd=?")
+            args.append(fees_usd)
         args.append(trade_id)
         self._conn.execute(
             f"UPDATE trades SET {', '.join(sets)} WHERE id=?", tuple(args))
