@@ -7,7 +7,7 @@
 ## 2026-07-26
 
 ### fix(scalp/counterfactual): v0.18.46 — рассинхрон часов убивал всю shadow-телеметрию
-`ХЕШ`
+`aafacc4`
 
 **Симптом.** Плановая проверка бота: контейнер здоров, ошибок в логах нет, но в
 `counterfactual_setups` **4927 строк висят в `pending` с нулём сэмплов**,
@@ -60,7 +60,7 @@ persisted-дедуп заблокировал бы поток заново). К�
 `src/scalp_bot/state/db.py`, `tests/test_scalp_bot.py`
 
 ### fix(scalp/universe): v0.18.46 — отсев commodity-перпов (CL/BZ/XAU/XAG)
-`ХЕШ`
+`aafacc4`
 
 v0.18.35 отсекал `symbolType == "stock"`, но Bybit держит ещё и класс
 `commodity` — нефть `CLUSDT`/`BZUSDT`, металлы `XAUUSDT`/`XAGUSDT`. Требование
