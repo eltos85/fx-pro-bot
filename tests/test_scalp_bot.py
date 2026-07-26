@@ -5057,3 +5057,160 @@ def test_forward_checkpoint_requires_both_sample_and_time():
     assert ready.ready
     assert ready.span_days == pytest.approx(14.0)
 
+
+# ─── v0.18.45: shadow-grid ширины стопа (observational) ────────────────────
+# Аудит 2026-07-26: комиссия в R = fee_rate / SL%, при SL 0.300% это 0.34R и
+# она съедает gross edge +0.114R. Ветки меряют, что даёт более широкий стоп
+# при фиксированном $-риске. Торговлю не трогают.
+
+def _sl_widen_cfg(**over):
+    base = dict(sl_widen_shadow_enabled=True, flow_exit_activate_r=1.5,
+                sl_widen_shadow_multipliers=(1.0, 2.0),
+                sl_widen_shadow_horizon_sec=21_600.0,
+                counterfactual_enabled=True, counterfactual_max_active=100)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def test_sl_widen_grid_keeps_control_arm_and_rejects_garbage():
+    """×1.0 обязана остаться в сетке (контроль), мусор и ≤0 отбрасываются."""
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = ScalpSettings()
+    assert cfg.sl_widen_shadow_multipliers == (1.0, 1.5, 2.0, 3.0)
+
+    parsed = ScalpSettings(sl_widen_shadow_grid="2.0, 1.0,оп, -1, 0, 2.0")
+    assert parsed.sl_widen_shadow_multipliers == (1.0, 2.0)
+
+
+def test_sl_widen_shadow_geometry_scales_risk_and_keeps_rr(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    ex = Executor(db, _sl_widen_cfg(), client=None, now=lambda: 500.0)
+    # risk=1.0, TP=3.5R — боевая геометрия scalp_bot
+    sig = Signal("ZECUSDT", "long", 100.0, 99.0, 103.5, 4, ["x"],
+                 strategy="density_break")
+    ex._start_sl_widen_shadows(7, sig, 100.0)
+
+    rows = {r["variant"]: r for r in db.counterfactual_rows()
+            if r["setup_type"] == "sl_widen"}
+    assert set(rows) == {"x1", "x2"}
+    control, wide = rows["x1"], rows["x2"]
+    # контроль воспроизводит боевые уровни ровно
+    assert control["sl"] == pytest.approx(99.0)
+    assert control["tp"] == pytest.approx(103.5)
+    # ×2: риск вдвое шире, R:R сохранён (TP тоже уезжает вдвое)
+    assert wide["sl"] == pytest.approx(98.0)
+    assert wide["tp"] == pytest.approx(107.0)
+    assert wide["risk"] == pytest.approx(2.0)
+    for row in rows.values():
+        assert row["source_trade_id"] == 7
+        assert row["horizon_sec"] == pytest.approx(21_600.0)
+        assert (abs(row["tp"] - row["entry"])
+                / row["risk"] == pytest.approx(3.5))
+    db.close()
+
+
+def test_sl_widen_shadow_mirrors_geometry_for_short(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    ex = Executor(db, _sl_widen_cfg(), client=None, now=lambda: 500.0)
+    sig = Signal("ETHUSDT", "short", 100.0, 101.0, 96.5, 4, ["x"],
+                 strategy="sweep_fade")
+    ex._start_sl_widen_shadows(9, sig, 100.0)
+
+    rows = {r["variant"]: r for r in db.counterfactual_rows()
+            if r["setup_type"] == "sl_widen"}
+    assert rows["x1"]["sl"] == pytest.approx(101.0)
+    assert rows["x1"]["tp"] == pytest.approx(96.5)
+    # шорт: стоп уезжает ВВЕРХ, цель — ВНИЗ
+    assert rows["x2"]["sl"] == pytest.approx(102.0)
+    assert rows["x2"]["tp"] == pytest.approx(93.0)
+    db.close()
+
+
+def test_sl_widen_shadow_is_idempotent_and_can_be_disabled(tmp_path):
+    db = ScalpDB(str(tmp_path))
+    sig = Signal("ZECUSDT", "long", 100.0, 99.0, 103.5, 4, ["x"],
+                 strategy="density_break")
+
+    off = Executor(db, _sl_widen_cfg(sl_widen_shadow_enabled=False),
+                   client=None, now=lambda: 500.0)
+    off._start_sl_widen_shadows(1, sig, 100.0)
+    assert [r for r in db.counterfactual_rows()
+            if r["setup_type"] == "sl_widen"] == []
+
+    on = Executor(db, _sl_widen_cfg(), client=None, now=lambda: 500.0)
+    on._start_sl_widen_shadows(2, sig, 100.0)
+    on._start_sl_widen_shadows(2, sig, 100.0)   # повтор того же tid
+    rows = [r for r in db.counterfactual_rows() if r["setup_type"] == "sl_widen"]
+    assert len(rows) == 2      # по одной строке на множитель, дублей нет
+    db.close()
+
+
+def test_sl_widen_shadow_never_blocks_trade_on_failure(tmp_path):
+    """Падение shadow-ветки не должно ронять открытие сделки (fail-open)."""
+    db = ScalpDB(str(tmp_path))
+    ex = Executor(db, _sl_widen_cfg(), client=None, now=lambda: 500.0)
+
+    class _Boom:
+        def add(self, candidate):
+            raise RuntimeError("counterfactual down")
+
+    ex._counterfactual = _Boom()
+    sig = Signal("ZECUSDT", "long", 100.0, 99.0, 103.5, 4, ["x"],
+                 strategy="density_break")
+    ex._start_sl_widen_shadows(3, sig, 100.0)   # не должно бросить
+    db.close()
+
+
+def test_sl_widen_report_expectancy_and_pairing():
+    """Ключевая арифметика отчёта: комиссия в R = fee% / SL%, netR =
+    grossR − комиссия, а парное сравнение считает исходы на ОДНИХ сделках."""
+    from scripts.scalp_sl_widen_report import _summarise, _paired
+
+    def row(variant, risk, outcome, tid):
+        # entry=100, TP=3.5R — боевая геометрия
+        return {"variant": variant, "entry": 100.0, "risk": risk,
+                "tp": 100.0 + 3.5 * risk, "state": "final",
+                "outcome_tp": outcome, "source_trade_id": tid}
+
+    # x1: SL 0.3% цены; x2 вдвое шире. По 4 исхода в каждой ветке.
+    rows = [
+        row("x1", 0.3, "tp", 1), row("x1", 0.3, "sl", 2),
+        row("x1", 0.3, "sl", 3), row("x1", 0.3, "sl", 4),
+        row("x2", 0.6, "tp", 1), row("x2", 0.6, "tp", 2),
+        row("x2", 0.6, "sl", 3), row("x2", 0.6, "sl", 4),
+    ]
+    arms = _summarise(rows, fee_pct=0.1016)
+
+    control = arms["x1"]
+    assert control["decided"] == 4 and control["tp"] == 1
+    assert control["sl_pct"] == pytest.approx(0.3)
+    assert control["fee_r"] == pytest.approx(0.1016 / 0.3)
+    # gross = 0.25×3.5 − 0.75×1.0 = 0.125
+    assert control["gross_r"] == pytest.approx(0.125)
+    assert control["net_r"] == pytest.approx(0.125 - 0.1016 / 0.3)
+
+    wide = arms["x2"]
+    # вдвое шире стоп ⇒ вдвое меньше комиссия в R
+    assert wide["fee_r"] == pytest.approx(control["fee_r"] / 2)
+    # gross = 0.5×3.5 − 0.5×1.0 = 1.25
+    assert wide["gross_r"] == pytest.approx(1.25)
+
+    pairs = _paired(rows, control="x1")
+    both, wins, losses = pairs["x2"]
+    assert both == 4        # все четыре сделки решены в обеих ветках
+    assert wins == 1        # сделка #2: x2 взяла TP там, где x1 словила SL
+    assert losses == 0
+
+
+def test_sl_widen_shadow_skips_degenerate_geometry(tmp_path):
+    """Нулевой риск или нулевая цель → ветку не заводим (нечего мерить)."""
+    db = ScalpDB(str(tmp_path))
+    ex = Executor(db, _sl_widen_cfg(), client=None, now=lambda: 500.0)
+    ex._start_sl_widen_shadows(
+        4, Signal("XUSDT", "long", 100.0, 100.0, 103.5, 4, ["x"]), 100.0)
+    ex._start_sl_widen_shadows(
+        5, Signal("XUSDT", "long", 100.0, 99.0, 100.0, 4, ["x"]), 100.0)
+    assert [r for r in db.counterfactual_rows()
+            if r["setup_type"] == "sl_widen"] == []
+    db.close()
+

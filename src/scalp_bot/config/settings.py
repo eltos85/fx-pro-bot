@@ -275,6 +275,20 @@ class ScalpSettings(BaseSettings):
     density_bounce_shadow_persist_grid_sec: str = Field(
         default="60,90,120,180")
     canon_rejection_shadow_enabled: bool = Field(default=True)
+    # v0.18.45: shadow-grid ширины стопа. Аудит 2026-07-26 (1977 сделок):
+    # при фиксированном $-риске комиссия в R-единицах = fee_rate / SL%, то есть
+    # `0.1016% / 0.300% = 0.34R` — она и съедает gross edge +0.114R/сделку.
+    # Более широкий стоп уменьшает qty (риск в $ константа) → меньше ноционал
+    # → меньше комиссия в R. Но он же меняет hit-rate: стоп выбивает реже, а TP
+    # (тот же R-мультипликатор) уезжает дальше. Знак суммарного эффекта
+    # НЕИЗВЕСТЕН, поэтому измеряем, а не подкручиваем (no-data-fitting.mdc).
+    # `1.0` в сетке — контрольная рука: она меряется тем же механизмом, что и
+    # остальные, поэтому сравнение рук не смещено методикой измерения.
+    # Горизонт 6ч > 3ч у прочих shadow: широкий стоп разрешается дольше
+    # (исторический max hold до TP — 529 мин).
+    sl_widen_shadow_enabled: bool = Field(default=True)
+    sl_widen_shadow_grid: str = Field(default="1.0,1.5,2.0,3.0")
+    sl_widen_shadow_horizon_sec: float = Field(default=21600.0)
     # Анти-шум между входами по одному символу.
     signal_cooldown_sec: float = Field(default=60.0)
     # Пауза после стоп-аута перед повторным входом в ТУ ЖЕ сторону по символу.
@@ -326,6 +340,25 @@ class ScalpSettings(BaseSettings):
             except ValueError:
                 continue
             if value > 0 and value != int(self.density_bounce_persist_sec):
+                values.add(value)
+        return tuple(sorted(values))
+
+    @property
+    def sl_widen_shadow_multipliers(self) -> tuple[float, ...]:
+        """Множители ширины стопа для shadow-веток, dedup/sorted.
+
+        В отличие от persist-grid боевое значение (×1.0) НЕ выбрасывается: это
+        контрольная рука, без неё разница между ветками мешалась бы с разницей
+        между методами измерения (bracket-only shadow vs живой выход, который
+        может сработать через flow_exit).
+        """
+        values: set[float] = set()
+        for raw in self.sl_widen_shadow_grid.split(","):
+            try:
+                value = round(float(raw.strip()), 4)
+            except ValueError:
+                continue
+            if value > 0:
                 values.add(value)
         return tuple(sorted(values))
 

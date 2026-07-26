@@ -296,6 +296,7 @@ class Executor:
             self._log_regime(tid, sig)
             self._log_setup(tid, sig)
             self._log_meta_label(tid, sig)
+            self._start_sl_widen_shadows(tid, sig, sig.entry_ref)
             return tid
 
         # LIVE (demo)
@@ -320,6 +321,9 @@ class Executor:
         self._log_regime(tid, sig)
         self._log_setup(tid, sig)
         self._log_meta_label(tid, sig)
+        # Отсчёт shadow-веток идёт от limit_price — той же цены, что уйдёт на
+        # биржу, иначе контроль ×1.0 не совпал бы с боевой геометрией.
+        self._start_sl_widen_shadows(tid, sig, limit_price)
         # регистрируем тег входа → атрибуция филлов из приватного WS execution
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
@@ -422,6 +426,49 @@ class Executor:
                          cid, tr.id, tr.symbol, tr.side, reason)
         except Exception:
             log.exception("maker non-fill shadow start #%s failed", tr.id)
+
+    def _start_sl_widen_shadows(self, tid: int, sig, entry: float) -> None:
+        """Shadow-ветки «а если бы стоп был шире» на момент открытия сделки.
+
+        Геометрия каждой ветки: risk×m, а TP отодвигается на тот же
+        R-мультипликатор, что и у боевой сделки. При фиксированном $-риске это
+        эквивалентно уменьшению qty в m раз — то есть ноционал и комиссия в
+        R-единицах падают в m раз, а вот вероятности дойти до TP/SL меняются
+        неизвестно как. Именно эту разницу и меряем.
+
+        Ветка ×1.0 — контроль: тот же измеритель, что у остальных, поэтому
+        разница между ветками не смешивается с разницей методик. Никакого
+        влияния на ордера/гейты/sizing: только запись в counterfactual_setups.
+        """
+        if (not getattr(self._cfg, "sl_widen_shadow_enabled", True)
+                or self._counterfactual is None):
+            return
+        risk = abs(entry - sig.sl_level)
+        if risk <= 0:
+            return
+        tp_r = abs(sig.tp_level - entry) / risk
+        if tp_r <= 0:
+            return
+        now = self._now()
+        target_r = float(getattr(self._cfg, "flow_exit_activate_r", 1.5))
+        horizon = float(getattr(
+            self._cfg, "sl_widen_shadow_horizon_sec", 21_600.0))
+        sign = 1.0 if sig.side == "long" else -1.0
+        for mult in getattr(self._cfg, "sl_widen_shadow_multipliers", ()):
+            widened = risk * mult
+            try:
+                self._counterfactual.add(CounterfactualCandidate(
+                    candidate_key=f"sl_widen:{tid}:{mult:g}",
+                    setup_type="sl_widen", variant=f"x{mult:g}",
+                    strategy=sig.strategy, symbol=sig.symbol, side=sig.side,
+                    ts_candidate=now, ts_entry=now, entry=entry,
+                    sl=entry - sign * widened,
+                    tp=entry + sign * widened * tp_r,
+                    target_r=target_r, horizon_sec=horizon,
+                    source_trade_id=tid,
+                ))
+            except Exception:
+                log.exception("sl-widen shadow #%s x%g failed", tid, mult)
 
     def ingest_executions(self, rows: list[dict]) -> None:
         """Атрибуция филлов из приватного WS execution к сделкам (вызывается из

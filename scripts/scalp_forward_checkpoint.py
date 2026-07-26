@@ -125,6 +125,22 @@ def collect_readiness(con: sqlite3.Connection,
         row = by_variant.get(variant, (0, None, None))
         result.append(Readiness(
             f"density_bounce_{variant}", int(row[0]), row[1], row[2]))
+
+    # v0.18.45: ширина стопа. Считаем по outcome_tp (TP vs SL), а не по
+    # outcome_target: гипотеза именно про исход брекета целиком, ведь комиссия
+    # в R зависит от ширины стопа, а не от промежуточного +1.5R.
+    # Контрольная ×1.0 тоже проходит checkpoint — сравнивать не с чем, пока
+    # у контроля нет собственной выборки.
+    rows = con.execute(
+        """SELECT variant,COUNT(*),MIN(ts_candidate),MAX(ts_candidate)
+           FROM counterfactual_setups
+           WHERE ts_candidate>=? AND setup_type='sl_widen'
+             AND outcome_tp IN ('tp','sl')
+           GROUP BY variant ORDER BY variant""",
+        (cutoff,),
+    ).fetchall()
+    for variant, n, first, last in rows:
+        result.append(Readiness(f"sl_widen_{variant}", int(n), first, last))
     return result
 
 
