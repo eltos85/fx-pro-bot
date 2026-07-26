@@ -153,14 +153,18 @@ class ScalpBybitClient:
 
     _STOCK_TYPE_TTL_SEC = 3600.0
 
-    def stock_type_symbols(self) -> set[str]:
-        """Множество linear-символов с ``symbolType == "stock"`` (перпы на
-        акции/ETF: SKHYNIXUSDT, SOXLUSDT, ...). На demo Bybit требует по ним
-        отдельного Trading Terms (ErrCode 110126 — «must sign required
-        agreement before trading this contract»), а demo-API не предоставляет
-        endpoint для принятия соглашения → ордер отклоняется. Дополнительно
-        stock-перпы торгуются по сессиям реальных бирж (KRX/NYSE), а не 24/7
-        крипто-флоу — это ломает скальп-логику (свипы/лонгации/CVD).
+    # symbolType, недоступные скальпу. По обоим Bybit требует отдельного
+    # Trading Terms (ErrCode 110126), которого demo-API принять не даёт:
+    #   stock     — перпы на акции/ETF (SKHYNIXUSDT, SOXLUSDT, AAPLUSDT, ...)
+    #   commodity — перпы на сырьё (CLUSDT, BZUSDT, XAUUSDT, XAGUSDT)
+    # Плюс оба класса торгуются по сессиям реальных бирж (KRX/NYSE/NYMEX),
+    # а не 24/7 крипто-флоу — это ломает скальп-логику (свипы/CVD/плотности).
+    # Крипто-перпы приходят с symbolType=None либо "innovation" — их не трогаем.
+    _NON_CRYPTO_SYMBOL_TYPES = frozenset({"stock", "commodity"})
+
+    def non_crypto_type_symbols(self) -> set[str]:
+        """Множество linear-символов, неторгуемых на demo (см.
+        ``_NON_CRYPTO_SYMBOL_TYPES``).
 
         Пагинация обязательна: на Bybit >500 linear-символов, без cursor
         API вернёт первую страницу и символы после 500 будут пропущены
@@ -185,7 +189,8 @@ class ScalpBybitClient:
                 resp = self._session.get_instruments_info(**kw)
                 res = resp.get("result", {}) or {}
                 for it in res.get("list", []) or []:
-                    if (it.get("symbolType") or "").lower() == "stock":
+                    stype = (it.get("symbolType") or "").lower()
+                    if stype in self._NON_CRYPTO_SYMBOL_TYPES:
                         s = it.get("symbol") or ""
                         if s:
                             out.add(s)
@@ -193,7 +198,7 @@ class ScalpBybitClient:
                 if not cursor:
                     break
         except Exception:
-            log.exception("get_instruments_info(stock) failed")
+            log.exception("get_instruments_info(non-crypto) failed")
             return out  # частичный/пустой — fail-open
         self._stock_syms = out
         self._stock_syms_ts = now

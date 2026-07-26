@@ -167,7 +167,9 @@ def advance_retest_entry(row: dict, snap, now: float) -> bool:
         return True
     level = float(row["level_price"])
     price = float(getattr(snap, "last_price"))
-    sample_ts = float(getattr(snap, "ts", now) or now)
+    # Момент наблюдения — wall-clock `now`, а НЕ snap.ts (см. контракт часов в
+    # CounterfactualTracker.update_snapshot).
+    sample_ts = now
     tol_bps = float(row.get("retest_tolerance_bps") or 5.0)
     tol = tol_bps / 1e4 * level
     side = row["side"]
@@ -288,7 +290,17 @@ class CounterfactualTracker:
             return
         current = self._now() if now is None else now
         price = getattr(snap, "last_price", None)
-        sample_ts = float(getattr(snap, "ts", current) or current)
+        # ─── Контракт часов ───────────────────────────────────────────────
+        # ts_candidate/ts_entry/outcome-таймстемпы живут в wall-clock
+        # (time.time), а SymbolSnapshot.ts идёт по time.monotonic: окна
+        # CVD/liquidation намеренно защищены от прыжков NTP. Смешивать эти
+        # шкалы нельзя — monotonic всегда меньше epoch, поэтому causality-guard
+        # `sample_ts < ts_entry` отбрасывал бы КАЖДЫЙ sample (баг v0.18.42,
+        # 4927 строк зависли в pending с нулём сэмплов).
+        # snap.ts — это момент снятия снимка, а не время тика, поэтому «когда мы
+        # посмотрели» корректно выражается через current: те же микросекунды,
+        # но в правильной шкале и без разрыва при рестарте.
+        sample_ts = current
         flush_sec = float(getattr(
             self._cfg, "counterfactual_flush_sec", 60.0))
         done: list[int] = []
@@ -322,6 +334,35 @@ class CounterfactualTracker:
             state = states.get(symbol)
             if state is not None:
                 self.update_snapshot(state.snapshot(), current)
+        self._sweep_unobserved(states, current)
+
+    def _sweep_unobserved(self, states: dict, now: float) -> None:
+        """Закрыть кандидатов, за которыми больше некому наблюдать.
+
+        Символ мог уйти из вселенной при ротации — тогда update_snapshot по нему
+        не вызовется уже никогда, и строка висела бы pending вечно, занимая слот
+        в counterfactual_max_active. Закрываем как ``abandoned`` и только после
+        истечения горизонта: outcome_* остаются как есть, поэтому недонаблюдённая
+        строка не попадёт в статистику (отчёты фильтруют по outcome_*).
+        """
+        done: list[int] = []
+        for cid, row in list(self._rows.items()):
+            if row["symbol"] in states:
+                continue
+            horizon = float(row.get("horizon_sec") or 10_800.0)
+            if now - float(row["ts_entry"]) < horizon:
+                continue
+            row["state"] = "abandoned"
+            row["ts_end"] = now
+            row["last_update"] = now
+            try:
+                self._db.update_counterfactual_setup(row)
+            except Exception:
+                log.exception("counterfactual abandon #%s failed", cid)
+            done.append(cid)
+        for cid in done:
+            self._rows.pop(cid, None)
+            self._last_flush.pop(cid, None)
 
     def flush_all(self) -> None:
         for row in self._rows.values():

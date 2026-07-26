@@ -398,6 +398,45 @@ class ScalpDB:
                 self._conn.execute(
                     f"ALTER TABLE meta_label_features ADD COLUMN {col} {col_type}")
         self._migrate_maker_shadows()
+        self._void_clock_bug_setups()
+
+    # Момент выкатки фикса часов (2026-07-26 12:00:00 UTC). Всё, что заведено
+    # трекером ДО него и не собрало ни одного sample, наблюдению уже не подлежит.
+    _CLOCK_BUG_CUTOFF_TS = 1_785_067_200.0
+    _SCHEMA_VERSION_CLOCK_FIX = 1
+
+    def _void_clock_bug_setups(self) -> None:
+        """Разово закрыть строки, осиротевшие из-за рассинхрона часов (v0.18.46).
+
+        В v0.18.42–v0.18.45 tracker сравнивал monotonic-время снимка с
+        wall-clock ``ts_entry``, поэтому causality-guard отбрасывал каждый
+        sample: ~4.9k строк зависли в ``pending`` с нулём наблюдений. Досчитать
+        их задним числом нельзя — цены тех минут не сохранялись, а рисовать
+        нулевые исходы значило бы подделать выборку (no-data-fitting.mdc).
+
+        Помечаем терминальным ``void_clock_bug``: outcome_* остаются NULL, так
+        что в отчёты и forward-checkpoint (фильтр по outcome_*) строки не
+        попадут, но аудит-след сохраняется. Заодно освобождается лимит
+        ``counterfactual_max_active`` — иначе resume забил бы его мёртвыми
+        строками и вытеснил живых кандидатов.
+
+        Ремонт исторический, поэтому одноразовый: защёлка ``PRAGMA
+        user_version`` не даёт ему сработать повторно и задеть живые строки,
+        которые просто ещё не успели набрать sample.
+        """
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= self._SCHEMA_VERSION_CLOCK_FIX:
+            return
+        self._conn.execute(
+            "UPDATE counterfactual_setups SET state='void_clock_bug',"
+            "ts_end=COALESCE(ts_end,last_update,ts_entry) "
+            "WHERE state='pending' AND ts_candidate < ? "
+            "  AND COALESCE(sample_count,0)=0 "
+            "  AND outcome_target IS NULL AND outcome_tp IS NULL",
+            (self._CLOCK_BUG_CUTOFF_TS,),
+        )
+        self._conn.execute(
+            f"PRAGMA user_version = {self._SCHEMA_VERSION_CLOCK_FIX:d}")
 
     def _migrate_maker_shadows(self) -> None:
         """Без потерь скопировать legacy maker telemetry в общий tracker.

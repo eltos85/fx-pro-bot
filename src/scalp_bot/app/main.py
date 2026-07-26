@@ -819,17 +819,18 @@ def _select_universe(client, cfg) -> list[str]:
       intraday RVOL-гейт+ранжирование (что «в игре сейчас», v0.14.0) → floor
       «минимум N монет» (P-4, v0.18.19) → пины. См. data/universe.py."""
     tickers = client.get_tickers()
-    # Отсев stock-перпов (перпы на акции/ETF): на demo требуют Trading Terms
+    # Отсев перпов на акции/ETF и на сырьё: на demo требуют Trading Terms
     # (ErrCode 110126), который нельзя принять через API, плюс торгуются по
     # сессиям реальных бирж, а не 24/7 крипто-флоу. fail-open: пустое множество
     # при ошибке API → не блокируем вселенную.
-    stock = client.stock_type_symbols()
-    if stock:
+    non_crypto = client.non_crypto_type_symbols()
+    if non_crypto:
         before = len(tickers)
-        tickers = [t for t in tickers if (t.get("symbol") or "") not in stock]
+        tickers = [t for t in tickers
+                   if (t.get("symbol") or "") not in non_crypto]
         if before != len(tickers):
-            log.info("отсев stock-перпов из вселенной: %d → %d тикеров",
-                     before, len(tickers))
+            log.info("отсев не-крипто перпов (stock/commodity) из вселенной: "
+                     "%d → %d тикеров", before, len(tickers))
     if cfg.universe_method.strip().lower() == "momentum":
         picked = select_momentum_universe(
             tickers,

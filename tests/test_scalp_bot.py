@@ -2850,11 +2850,11 @@ def _mk_instr_client(pages):
     return cl
 
 
-def test_stock_type_symbols_pagination_and_filter():
-    """v0.18.35: stock_type_symbols собирает ВСЕ stock-перпы через пагинацию
-    (>500 linear-символов на Bybit — без cursor API вернёт первую страницу и
-    символы после 500 будут пропущены, правило stats-collection.mdc). Крипто-
-    и innovation-перпы в множество НЕ попадают."""
+def test_non_crypto_type_symbols_pagination_and_filter():
+    """v0.18.35: non_crypto_type_symbols собирает ВСЕ неторгуемые перпы через
+    пагинацию (>500 linear-символов на Bybit — без cursor API вернёт первую
+    страницу и символы после 500 будут пропущены, правило stats-collection.mdc).
+    Крипто- и innovation-перпы в множество НЕ попадают."""
     pages = [
         [_instr("BTCUSDT", ""), _instr("SKHYNIXUSDT", "stock"),
          _instr("SOXLUSDT", "stock"), _instr("NEARUSDT", "")],
@@ -2862,22 +2862,37 @@ def test_stock_type_symbols_pagination_and_filter():
          _instr("HYPEUSDT", "innovation")],
     ]
     cl = _mk_instr_client(pages)
-    stock = cl.stock_type_symbols()
+    stock = cl.non_crypto_type_symbols()
     assert stock == {"SKHYNIXUSDT", "SOXLUSDT", "NVDLUSDT"}
     assert cl._session.calls == 2  # прошли обе страницы, остановились на пустом cursor
 
 
-def test_stock_type_symbols_cached_within_ttl():
+def test_non_crypto_type_symbols_include_commodity_perps():
+    """v0.18.46: commodity-перпы (CL/BZ нефть, XAU/XAG металлы) требуют того же
+    Trading Terms, что и stock (ErrCode 110126), и на demo его принять нельзя —
+    отсекаем вместе со stock. Диагноз: 21 отказ по CLUSDT (symbolType=commodity
+    проскакивал мимо фильтра, который проверял только 'stock').
+
+    innovation — обычная крипта из innovation-зоны, торгуется нормально и в
+    множество попадать НЕ должна."""
+    pages = [[_instr("CLUSDT", "commodity"), _instr("XAUUSDT", "commodity"),
+              _instr("AAPLUSDT", "stock"), _instr("ENAUSDT", "innovation"),
+              _instr("BTCUSDT", "")]]
+    cl = _mk_instr_client(pages)
+    assert cl.non_crypto_type_symbols() == {"CLUSDT", "XAUUSDT", "AAPLUSDT"}
+
+
+def test_non_crypto_type_symbols_cached_within_ttl():
     """Повторный вызов в пределах TTL не бьёт по API (листинги редки, селектор
     крутится каждые universe_refresh_sec — кэш 1ч сберегает rate-limit)."""
     cl = _mk_instr_client([[_instr("TSLAUSDT", "stock")]])
-    cl.stock_type_symbols()
+    cl.non_crypto_type_symbols()
     assert cl._session.calls == 1
-    cl.stock_type_symbols()  # из кэша
+    cl.non_crypto_type_symbols()  # из кэша
     assert cl._session.calls == 1
 
 
-def test_stock_type_symbols_fail_open_on_api_error():
+def test_non_crypto_type_symbols_fail_open_on_api_error():
     """При ошибке API возвращаем пустое множество (fail-open): не блокируем
     вселенную целиком из-за временного хиккапа instruments-info."""
     class _ErrSess:
@@ -2890,14 +2905,14 @@ def test_stock_type_symbols_fail_open_on_api_error():
     cl._stock_syms = None
     cl._stock_syms_ts = 0.0
     cl._session = _ErrSess()
-    assert cl.stock_type_symbols() == set()
+    assert cl.non_crypto_type_symbols() == set()
 
 
-def test_select_universe_drops_stock_perps():
-    """v0.18.35: _select_universe отсекает stock-перпы ДО фильтра/ранжирования
-    — они не попадают ни в rows, ни в padding-pool. На demo Bybit требует по
-    ним Trading Terms (ErrCode 110126), который нельзя принять через API;
-    плюс торгуются по сессиям реальных бирж, а не 24/7 крипто-флоу."""
+def test_select_universe_drops_stock_and_commodity_perps():
+    """v0.18.35/v0.18.46: _select_universe отсекает не-крипто перпы ДО
+    фильтра/ранжирования — они не попадают ни в rows, ни в padding-pool. На
+    demo Bybit требует по ним Trading Terms (ErrCode 110126), который нельзя
+    принять через API; плюс торгуются по сессиям реальных бирж, а не 24/7."""
     from scalp_bot.app.main import _select_universe
     from scalp_bot.config.settings import ScalpSettings
 
@@ -2907,14 +2922,15 @@ def test_select_universe_drops_stock_perps():
                 _ticker("NEARUSDT", 100, 108, 100, 250e6),       # крипто — годен
                 _ticker("SKHYNIXUSDT", 100, 112, 100, 400e6),    # stock — отсечь
                 _ticker("SOXLUSDT", 100, 115, 100, 500e6),       # stock — отсечь
+                _ticker("CLUSDT", 100, 118, 100, 600e6),         # нефть — отсечь
                 _ticker("ZECUSDT", 100, 110, 100, 130e6),        # крипто — годен
             ]
 
         def get_tickers(self):
             return self.tickers
 
-        def stock_type_symbols(self):
-            return {"SKHYNIXUSDT", "SOXLUSDT"}
+        def non_crypto_type_symbols(self):
+            return {"SKHYNIXUSDT", "SOXLUSDT", "CLUSDT"}
 
         def get_kline(self, *a, **k):  # для _fresh_rvol (universe_min_rvol>0)
             return []
@@ -2924,6 +2940,7 @@ def test_select_universe_drops_stock_perps():
     picked = _select_universe(_Client(), cfg)
     assert "SKHYNIXUSDT" not in picked
     assert "SOXLUSDT" not in picked
+    assert "CLUSDT" not in picked
     # крипто-перпы остаются в вселенной
     assert "NEARUSDT" in picked or "ZECUSDT" in picked
 
@@ -2957,7 +2974,7 @@ def test_density_break_pins_do_not_pollute_auto_universe():
         def get_tickers(self):
             return self.tickers
 
-        def stock_type_symbols(self):
+        def non_crypto_type_symbols(self):
             return set()
 
         def get_kline(self, *a, **k):
@@ -4871,6 +4888,134 @@ def test_counterfactual_db_idempotent_typed_and_resume(tmp_path):
     got = db2.counterfactual_rows()[0]
     assert got["outcome_target"] == "target" and got["sample_count"] == 1
     db2.close()
+
+
+def test_counterfactual_advances_when_snapshot_clock_is_monotonic(tmp_path):
+    """v0.18.46 регрессия: SymbolSnapshot.ts идёт по time.monotonic (окна
+    CVD/liq защищены от прыжков NTP), а ts_entry — по wall-clock. Трекер брал
+    sample_ts из snap.ts, поэтому guard `sample_ts < ts_entry` резал КАЖДЫЙ
+    sample: 4927 строк зависли в pending с нулём наблюдений при горизонте 3ч.
+
+    Момент наблюдения обязан браться из wall-clock `now`, а не из часов снимка.
+    """
+    wall = 1_785_100_000.0
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0),
+        now=lambda: wall)
+    tracker.add(_counter_candidate(
+        ts_candidate=wall - 10.0, ts_entry=wall, candidate_key="mono:1"))
+    # snap.ts — монотонные «11 млн секунд аптайма», на 9 порядков меньше epoch.
+    tracker.update_snapshot(
+        SimpleNamespace(symbol="SOLUSDT", stale=False, last_price=101.6,
+                        ts=11_221_865.4),
+        now=wall + 5.0)
+    got = db.counterfactual_rows()[0]
+    assert got["sample_count"] == 1, "sample с монотонного снимка отброшен"
+    assert got["outcome_target"] == "target"
+    # Записанный таймстемп исхода — в wall-clock, иначе отчёты по датам врут.
+    assert got["ts_outcome_target"] == pytest.approx(wall + 5.0)
+    db.close()
+
+
+def test_counterfactual_reaches_final_after_horizon(tmp_path):
+    """Полный путь до терминального состояния: без фикса часов строка не
+    доходила даже до checkpoint, поэтому forward-checkpoint вечно показывал
+    n=0 и READY_FOR_STATS был недостижим в принципе."""
+    wall = 1_785_100_000.0
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0),
+        now=lambda: wall)
+    tracker.add(_counter_candidate(
+        ts_candidate=wall, ts_entry=wall, candidate_key="mono:2",
+        horizon_sec=3_600.0))
+    tracker.update_snapshot(
+        SimpleNamespace(symbol="SOLUSDT", stale=False, last_price=100.2,
+                        ts=5.0),
+        now=wall + 3_601.0)
+    got = db.counterfactual_rows()[0]
+    assert got["state"] == "final"
+    assert tracker.active_count == 0  # терминальные выселяются из памяти
+    db.close()
+
+
+def test_counterfactual_abandons_candidates_of_rotated_out_symbols(tmp_path):
+    """Символ мог уйти из вселенной при ротации — тогда update_snapshot по нему
+    не вызовется уже никогда. Такие строки закрываем как abandoned после
+    горизонта: иначе они копятся и вытесняют живых кандидатов из лимита
+    counterfactual_max_active. outcome_* остаются NULL → в статистику не идут."""
+    wall = 1_785_100_000.0
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0),
+        now=lambda: wall)
+    tracker.add(_counter_candidate(
+        ts_candidate=wall, ts_entry=wall, candidate_key="rot:1",
+        horizon_sec=3_600.0))
+    # SOLUSDT больше не в states — наблюдать некому, но горизонт ещё не вышел.
+    tracker.update_states({"BTCUSDT": object()}, now=wall + 100.0)
+    assert tracker.active_count == 1
+    tracker.update_states({"BTCUSDT": object()}, now=wall + 3_601.0)
+    got = db.counterfactual_rows()[0]
+    assert got["state"] == "abandoned"
+    assert got["outcome_target"] is None and got["outcome_tp"] is None
+    assert tracker.active_count == 0
+    db.close()
+
+
+def test_clock_bug_rows_voided_once_and_live_rows_untouched(tmp_path):
+    """v0.18.46: одноразовый ремонт помечает осиротевшие строки, но не рисует
+    им исходы (no-data-fitting) и не трогает строки с наблюдениями.
+
+    Защёлка user_version обязательна: без неё ремонт срабатывал бы при каждом
+    старте и гасил живых кандидатов, которые просто ещё не набрали sample.
+    """
+    db = ScalpDB(str(tmp_path))
+    old = ScalpDB._CLOCK_BUG_CUTOFF_TS - 3_600.0
+    for key, samples in (("dead:1", 0), ("alive:1", 4)):
+        db.insert_counterfactual_setup(_counter_candidate(
+            candidate_key=key, ts_candidate=old, ts_entry=old).as_row())
+        if samples:
+            db._conn.execute(
+                "UPDATE counterfactual_setups SET sample_count=? "
+                "WHERE candidate_key=?", (samples, key))
+    # Строка уже после cutoff — свежая, ремонт её не касается.
+    db.insert_counterfactual_setup(_counter_candidate(
+        candidate_key="fresh:1", ts_candidate=ScalpDB._CLOCK_BUG_CUTOFF_TS + 60,
+        ts_entry=ScalpDB._CLOCK_BUG_CUTOFF_TS + 60).as_row())
+    db._conn.execute("PRAGMA user_version = 0")  # эмулируем БД до ремонта
+    db._conn.commit()
+    db.close()
+
+    db2 = ScalpDB(str(tmp_path))
+    states = {r["candidate_key"]: r["state"] for r in db2.counterfactual_rows()}
+    assert states["dead:1"] == "void_clock_bug"
+    assert states["alive:1"] == "pending"
+    assert states["fresh:1"] == "pending"
+    voided = [r for r in db2.counterfactual_rows()
+              if r["candidate_key"] == "dead:1"][0]
+    # Исходы НЕ дорисованы: строка выпадает из отчётов по фильтру outcome_*.
+    assert voided["outcome_target"] is None and voided["outcome_tp"] is None
+    assert int(db2._conn.execute("PRAGMA user_version").fetchone()[0]) == 1
+    db2.close()
+
+    # Повторный старт: ремонт не перезапускается, живые строки целы.
+    db3 = ScalpDB(str(tmp_path))
+    db3._conn.execute(
+        "UPDATE counterfactual_setups SET sample_count=0 "
+        "WHERE candidate_key='alive:1'")
+    db3.close()
+    db4 = ScalpDB(str(tmp_path))
+    again = {r["candidate_key"]: r["state"] for r in db4.counterfactual_rows()}
+    assert again["alive:1"] == "pending"
+    db4.close()
 
 
 def test_legacy_maker_rows_migrate_and_dual_write(tmp_path):
