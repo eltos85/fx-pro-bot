@@ -139,8 +139,13 @@ def collect_readiness(con: sqlite3.Connection,
            GROUP BY variant ORDER BY variant""",
         (cutoff,),
     ).fetchall()
-    for variant, n, first, last in rows:
-        result.append(Readiness(f"sl_widen_{variant}", int(n), first, last))
+    by_variant = {row[0]: row[1:] for row in rows}
+    # Ветки перечисляем явно (как persist-grid): гипотеза должна быть видна в
+    # отчёте с n=0, иначе про неё легко забыть до появления первых исходов.
+    for variant in ("x1", "x1.5", "x2", "x3"):
+        row = by_variant.get(variant, (0, None, None))
+        result.append(Readiness(
+            f"sl_widen_{variant}", int(row[0]), row[1], row[2]))
     return result
 
 
