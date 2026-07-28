@@ -7,7 +7,7 @@
 ## 2026-07-28
 
 ### fix(scalp/shadow): v0.18.47 — canon-тени завышали выборку в 25 раз
-`хеш коммита`
+`844ebae`
 
 Промежуточный анализ собранных данных (запрос пользователя) вскрыл дефект в
 самой методике сбора: выводы по `canon_rejection_shadow` строились на
@@ -58,6 +58,14 @@ level_price)`; окно повторного взвода = `cfg.sl_cooldown_for
 **Файлы:** `src/scalp_bot/analysis/strategies.py`,
 `scripts/scalp_episodes.py` (новый), `scripts/scalp_counterfactual_report.py`,
 `scripts/scalp_forward_checkpoint.py`, `tests/test_scalp_bot.py` (+6 тестов).
+
+**Проверка после деплоя.** `forward_checkpoint`: `canon_rejection_redesign`
+n=2260 → **n=51** (порог 100 больше не набирается дублями). Smoke-прогон на
+боевом образе (`docker exec`, `/tmp/scalp_dedup_smoke.py`): 120 тиков одного
+сетапа → 1 кандидат `canon_rejection:ETHUSDT:short:pdh:100:0`, внутри окна 0,
+за окном 1 с новым бакетом. Живого canon-сигнала в первые 30 минут после
+рестарта не было (рынок тихий: 0 shadow_signals по ВСЕМ стратегиям), поэтому
+подтверждение — тестами и прогоном на образе, а не наблюдением потока.
 
 ### observe(scalp): промежуточный срез телеметрии за 1.7 суток после фикса часов
 
