@@ -256,18 +256,56 @@ class SweepFadeCanonStrategy(SweepFadeStrategy):
         self.key_levels = None
         self.symbol_scope = set(cfg.sweep_fade_canon_symbol_list)
         self._shadow_candidates: list[CounterfactualCandidate] = []
+        self._shadow_last: dict[tuple, float] = {}
         self.ensure_symbols([s for s in symbols if s in self.symbol_scope])
+
+    def _shadow_episode(self, sig: Signal, setup: dict,
+                        now: float) -> str | None:
+        """Ключ эпизода свипа или None, если это повтор уже записанного.
+
+        Детектор возвращает сигнал на КАЖДОМ тике, пока сетап валиден, поэтому
+        наивная запись давала ~25 строк на одно событие (замер 2026-07-28:
+        3076 строк = 120 эпизодов, 77.7% соседних кандидатов в 1–5с друг от
+        друга). Дубли ломают статистику: наблюдения внутри эпизода почти
+        полностью скоррелированы, а Wilson-CI считает их независимыми — WR по
+        строкам выходил 48.1%, по эпизодам 33.7%.
+
+        Окно повторного взвода = ``sl_cooldown_for(name)`` (для sweep_fade-
+        семейства 3600с, v0.18.14, sweep n=829): ровно тот интервал, после
+        которого сам бот считает тот же уровень и сторону свежей возможностью.
+        Своего порога не вводим, чтобы не плодить некалиброванных констант.
+        """
+        resolver = getattr(self.cfg, "sl_cooldown_for", None)
+        window = float(resolver(self.name) if callable(resolver)
+                       else getattr(self.cfg, "sweep_fade_sl_cooldown_sec",
+                                    3600.0))
+        level = setup.get("level_price") or setup.get("swept_price") or 0.0
+        ident = (sig.symbol, sig.side,
+                 str(setup.get("level_type") or "unknown"), f"{float(level):.10g}")
+        prev = self._shadow_last.get(ident)
+        if prev is not None and now - prev < window:
+            return None
+        self._shadow_last[ident] = now
+        if len(self._shadow_last) > 512:  # ротация вселенной копит мёртвые ключи
+            cutoff = now - window
+            self._shadow_last = {k: v for k, v in self._shadow_last.items()
+                                 if v >= cutoff}
+        # Бакет по окну в ключе — вторая линия защиты: после рестарта
+        # _shadow_last пуст, а UNIQUE(candidate_key) не даст задвоить эпизод.
+        bucket = int(now // window) if window > 0 else int(now)
+        return (f"canon_rejection:{ident[0]}:{ident[1]}:{ident[2]}:"
+                f"{ident[3]}:{bucket}")
 
     def update(self, snap: SymbolSnapshot, now: float) -> Signal | None:
         sig = super().update(snap, now)
         if (sig is not None and sig.setup is not None
                 and getattr(self.cfg, "canon_rejection_shadow_enabled", True)):
             setup = sig.setup
+            key = self._shadow_episode(sig, setup, now)
+            if key is None:
+                return sig
             self._shadow_candidates.append(CounterfactualCandidate(
-                candidate_key=(
-                    f"canon_rejection:{sig.symbol}:{sig.side}:"
-                    f"{now:.6f}:{float(setup.get('swept_price') or 0):.10g}"
-                ),
+                candidate_key=key,
                 setup_type="canon_rejection_shadow",
                 variant=str(setup.get("level_type") or "unknown"),
                 strategy=self.name, symbol=sig.symbol, side=sig.side,

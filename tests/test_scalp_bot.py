@@ -5184,6 +5184,124 @@ def test_canon_rejection_shadow_preserves_typed_geometry():
     assert candidate.sweep_depth_bps == pytest.approx(20.0)
 
 
+def _canon_with_signal(**over):
+    """Канон-страта, детектор которой отдаёт один и тот же сетап на любом тике."""
+    from scalp_bot.analysis.strategies import SweepFadeCanonStrategy
+    cfg = _canon_cfg(canon_rejection_shadow_enabled=True,
+                     sweep_fade_sl_cooldown_sec=3600.0, **over)
+    st = SweepFadeCanonStrategy(cfg, ["ETHUSDT"])
+    sig = Signal(
+        "ETHUSDT", "short", 100.0, 101.0, 96.5, 5, ["x"],
+        strategy="sweep_fade_canon",
+        setup={"level_type": "pdh", "level_price": 100.0,
+               "level_age_sec": 7200.0, "level_touches": 3,
+               "swept_price": 100.2, "sweep_depth_bps": 20.0})
+    st._det["ETHUSDT"].update = lambda snap, now: sig
+    return st
+
+
+def test_canon_rejection_shadow_emits_once_per_sweep_episode():
+    """v0.18.47: детектор отдаёт сигнал на каждом тике, тень — раз на эпизод.
+
+    Замер 2026-07-28: 3076 строк = 120 эпизодов (25.6 дубля на событие), из-за
+    чего WR по строкам 48.1% против 33.7% по эпизодам.
+    """
+    st = _canon_with_signal()
+    snap = _snap([], symbol="ETHUSDT")
+    for tick in range(0, 60, 2):  # 30 тиков живого сетапа за минуту
+        st.update(snap, now=100.0 + tick)
+    assert len(st.drain_shadow_candidates()) == 1
+
+
+def test_canon_rejection_shadow_rearms_after_cooldown_window():
+    """Повторный свип того же уровня спустя окно — НОВОЕ независимое событие."""
+    st = _canon_with_signal()
+    snap = _snap([], symbol="ETHUSDT")
+    st.update(snap, now=100.0)
+    st.update(snap, now=100.0 + 3599.0)   # внутри окна — дубль
+    st.update(snap, now=100.0 + 3601.0)   # за окном — свежая возможность
+    candidates = st.drain_shadow_candidates()
+    assert len(candidates) == 2
+    assert candidates[0].candidate_key != candidates[1].candidate_key
+
+
+def test_canon_rejection_shadow_separates_distinct_levels():
+    """Разные уровни и стороны — независимые эпизоды даже в один тик."""
+    from scalp_bot.analysis.strategies import SweepFadeCanonStrategy
+    cfg = _canon_cfg(canon_rejection_shadow_enabled=True,
+                     sweep_fade_sl_cooldown_sec=3600.0)
+    st = SweepFadeCanonStrategy(cfg, ["ETHUSDT"])
+    setups = [("pdh", "short", 100.0), ("pdl", "long", 90.0),
+              ("pdh", "short", 105.0)]
+    snap = _snap([], symbol="ETHUSDT")
+    for i, (level_type, side, price) in enumerate(setups):
+        sig = Signal("ETHUSDT", side, price, price + 1, price - 3, 5, ["x"],
+                     strategy="sweep_fade_canon",
+                     setup={"level_type": level_type, "level_price": price,
+                            "swept_price": price})
+        st._det["ETHUSDT"].update = lambda snap, now, s=sig: s
+        st.update(snap, now=100.0 + i)
+    assert len(st.drain_shadow_candidates()) == 3
+
+
+def test_canon_rejection_shadow_key_stable_within_window_after_restart():
+    """После рестарта _shadow_last пуст — от задвоения спасает UNIQUE-ключ."""
+    keys = []
+    for _ in range(2):  # два «процесса» видят один и тот же эпизод
+        st = _canon_with_signal()
+        st.update(_snap([], symbol="ETHUSDT"), now=100.0)
+        keys.append(st.drain_shadow_candidates()[0].candidate_key)
+    assert keys[0] == keys[1]
+
+
+def test_collapse_episodes_only_touches_duplicated_setup_types():
+    from scripts.scalp_episodes import (DEDUPED_SETUP_TYPES,
+                                        collapse_episodes, episode_counts)
+
+    # Один свип, записанный тиками по 2с, плюс повторный свип за окном.
+    rows = [{"symbol": "ETHUSDT", "side": "short", "level_type": "pdh",
+             "level_price": 100.0, "ts_candidate": 1000.0 + 2 * i}
+            for i in range(25)]
+    rows.append({"symbol": "ETHUSDT", "side": "short", "level_type": "pdh",
+                 "level_price": 100.0, "ts_candidate": 1000.0 + 7200.0})
+    # Другой уровень в то же время — самостоятельное событие.
+    rows.append({"symbol": "ETHUSDT", "side": "long", "level_type": "pdl",
+                 "level_price": 90.0, "ts_candidate": 1004.0})
+    raw, episodes = episode_counts(rows)
+    assert (raw, episodes) == (27, 3)
+    assert [r["ts_candidate"] for r in collapse_episodes(rows)] == [
+        1000.0, 1004.0, 8200.0]
+    # Схлопывание применяем ТОЛЬКО к canon: у остальных ключ уже событийный.
+    assert DEDUPED_SETUP_TYPES == ("canon_rejection_shadow",)
+
+
+def test_forward_checkpoint_counts_canon_episodes_not_rows(tmp_path):
+    """Порог MIN_OUTCOMES не должен набираться дублями одного свипа."""
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import collect_readiness
+
+    db = tmp_path / "cp.sqlite"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE counterfactual_setups (setup_type TEXT,variant TEXT,"
+        "symbol TEXT,side TEXT,level_type TEXT,level_price REAL,"
+        "ts_candidate REAL,outcome_target TEXT,outcome_tp TEXT,"
+        "source_trade_id INTEGER)")
+    con.execute("CREATE TABLE trades (id INTEGER,ts_open REAL,strategy TEXT,"
+                "status TEXT,pnl_usd REAL,close_reason TEXT)")
+    con.execute("CREATE TABLE meta_label_features (trade_id INTEGER,"
+                "label_type TEXT,would_keep INTEGER)")
+    con.executemany(
+        "INSERT INTO counterfactual_setups VALUES "
+        "('canon_rejection_shadow','pdh','ETHUSDT','short','pdh',100.0,?,"
+        "'target',NULL,NULL)",
+        [(2_000.0 + 2 * i,) for i in range(40)])
+    con.commit()
+    readiness = {r.hypothesis: r for r in collect_readiness(con, 0.0)}
+    con.close()
+    assert readiness["canon_rejection_redesign"].outcomes == 1
+
+
 def test_counterfactual_defaults_and_bounce_grid_do_not_change_production_persist():
     from scalp_bot.config.settings import ScalpSettings
     cfg = ScalpSettings()

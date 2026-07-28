@@ -14,8 +14,13 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from scalp_episodes import DEDUPED_SETUP_TYPES, collapse_episodes  # noqa: E402
 
 
 DEFAULT_CUTOFF = "2026-07-22T14:08:00Z"
@@ -100,6 +105,24 @@ def collect_readiness(con: sqlite3.Connection,
         ("density_break_v2_shadow", "density_break_v2_retest"),
         ("canon_rejection_shadow", "canon_rejection_redesign"),
     ):
+        if setup_type in DEDUPED_SETUP_TYPES:
+            # Считаем эпизоды, а не строки: до v0.18.47 один свип писался
+            # десятками кандидатов, и порог MIN_OUTCOMES брался бы дублями.
+            rows = con.execute(
+                """SELECT symbol,side,level_type,level_price,ts_candidate
+                   FROM counterfactual_setups
+                   WHERE ts_candidate>=? AND setup_type=?
+                     AND outcome_target IN ('target','sl')""",
+                (cutoff, setup_type),
+            ).fetchall()
+            episodes = collapse_episodes(
+                [dict(zip(("symbol", "side", "level_type", "level_price",
+                           "ts_candidate"), r)) for r in rows])
+            times = [float(e["ts_candidate"]) for e in episodes]
+            result.append(Readiness(
+                hypothesis, len(episodes),
+                min(times) if times else None, max(times) if times else None))
+            continue
         n, first, last = _aggregate(
             con,
             """SELECT COUNT(*),MIN(ts_candidate),MAX(ts_candidate)
