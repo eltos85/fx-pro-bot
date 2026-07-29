@@ -3,7 +3,7 @@
 ## 2026-07-29
 
 ### feat(prompts): authoritative runtime active universe + мелкие фиксы prompt-данных
-`<pending>`
+`86e0f5f`
 
 **Контекст:** после возврата к GOLD-only (2026-06-25) в prompt оставались
 dormant-секции каталога (BZ/NG framework'и, NG MODE V2, BZ MOMENTUM MODE)
