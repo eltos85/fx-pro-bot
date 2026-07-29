@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-07-29
+
+### fix(momentum): не доверять пустому reconcile при обрыве коннекта (гейт broker_ready)
+`<pending commit>`
+
+**Симптом** (найден при проверке работы бота 29.07): cTrader-коннект
+momentum-бота флапает с деплоя 24.07 — 3470 отключений за 5 дней,
+`reconnect #129`, `uptime 0s` (сервер чисто закрывает сессию сразу после
+подключения). Из ~25 edge-triggered входов исполнились только 3; 222 раза
+`live_open: нет подключения`, 13 таймаутов/disconnect'ов. Плюс каждый час
+`Momentum state cleanup: removed 2 stale positions` — трекинг живых
+позиций (USDJPY 152861348, AUDUSD 152861359) вытирался из SQLite.
+
+**Причина (двойная)**:
+
+1. **Архитектурная (root)**: momentum и fx_ai_trader сидят на ОДНОМ
+   cTrader app (client_id/secret совпадают) и ОДНОМ demo-аккаунте.
+   Офиц. дока (<https://help.ctrader.com/open-api/connection/>, Best
+   practices): «At most, you should create two connections: one for demo
+   accounts and one for live accounts». Два бота = два коннекта на demo =
+   на лимите; reconnect-churn momentum создаёт транзиентный 3-й коннект →
+   сервер гасит новейшую сессию → self-sustaining flap (fx_ai_trader
+   стабилен, 0 отключений/сутки — он «первый»). Кейс симметричен
+   BUILDLOG 2026-05-07 (244 reconnect'а → server-side throttle).
+2. **Кодовая (bug)**: `get_open_positions()` на exception отдаёт `[]`
+   (executor.py:570 — «нет подключения»), а цикл воспринимал пустой
+   reconcile как «позиций нет»: `cleanup_position_state` вытирал state
+   (break_even_done/partial_done/risk_price сбрасывались), per-symbol
+   гард не видел живых позиций → 27.07 13:01 повторный вход AUDUSD long
+   ушёл в работу поверх живой позиции (спас таймаут ордера).
+
+**Решение**: гейт `broker_ready = executor.client.is_ready` на все
+брокерские действия цикла: сбор позиций, `_manage_positions` (и его
+cleanup), friday-flat, NEWS CLOSE (gap-защита), sign-decay exit,
+open_count, `should_open`. При дауне коннекта — цикл считает сигналы,
+но не торгует и не трогает state; вход помечается `skip:no_connection`,
+direction НЕ фиксируется → попытка повторится после reconnect.
+Технический bug-fix исполнения (не стратегия) — класс «допустимые правки»
+по `no-data-fitting.mdc`. Root-фикс (отдельный demo-аккаунт/app для
+momentum) — отдельное решение с пользователем.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`
+
+---
+
 ## 2026-07-24
 
 ### fix(momentum): exit-hysteresis + NY-open block + ADX-фильтр + gap-защита

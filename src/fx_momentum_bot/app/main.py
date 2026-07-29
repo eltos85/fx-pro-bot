@@ -694,12 +694,25 @@ def run() -> None:
         try:
             signal_by_symbol: dict[str, MomentumSignal] = {}
             ctx_by_symbol: dict[str, EntryContext | None] = {}
+            # Пустой reconcile при обрыве коннекта — «не знаем», а не
+            # «позиций нет»: get_open_positions() на exception отдаёт []
+            # (executor.py), и без гейта cleanup_position_state вытирал
+            # трекинг ЖИВЫХ позиций, а per-symbol гард не видел их
+            # (VPS 2026-07-24→29: 3470 реконнектов, "removed 2 stale
+            # positions" каждый час). Брокерские действия — только при
+            # живом коннекте.
+            broker_ready = executor is not None and executor.client.is_ready
             positions_by_symbol: dict[str, list[ManagedPosition]] = {}
-            if executor is not None:
+            if broker_ready:
                 # Позиции нужны не только management'у: exit-on-flip у momentum
                 # читает их независимо от флага position_management_enabled.
                 positions_by_symbol = _collect_managed_positions(
                     executor, settings.symbols, labels=settings.managed_labels
+                )
+            elif executor is not None:
+                log.info(
+                    "cTrader: нет подключения — брокерские действия цикла "
+                    "пропущены (management/exits/entries)"
                 )
             for symbol in settings.symbols:
                 candles = _drop_forming_bar(
@@ -754,7 +767,7 @@ def run() -> None:
                 flat_start=settings.friday_flat_start,
             )
 
-            if executor is not None and settings.position_management_enabled:
+            if broker_ready and settings.position_management_enabled:
                 _manage_positions(
                     executor=executor,
                     store=store,
@@ -768,7 +781,7 @@ def run() -> None:
             # остаток, чтобы не везти через Сб/Вс (гэп понедельника вне 1R).
             # Retry в следующем цикле внутри окна; MARKET_CLOSED-дедуп через
             # market_closed_pids ниже по коду переиспользуется для логов.
-            if friday_flat_now:
+            if friday_flat_now and broker_ready:
                 for sym in settings.symbols:
                     remaining: list[ManagedPosition] = []
                     for pos in positions_by_symbol.get(sym, []):
@@ -807,7 +820,7 @@ def run() -> None:
             # по retry/MARKET_CLOSED-дедупу. Scoping: US-релизы — все символы;
             # ECB — только EUR-пары; BoJ — только JPY-пары (внутри high_impact_event_upcoming).
             if (
-                executor is not None
+                broker_ready
                 and settings.news_close_enabled
                 and settings.news_close_before_min > 0
             ):
@@ -846,7 +859,7 @@ def run() -> None:
                             )
                     if sym in positions_by_symbol:
                         positions_by_symbol[sym] = remaining
-            if executor is not None:
+            if broker_ready:
                 open_count = _count_open_positions_for_symbols(
                     executor, settings.symbols, labels=settings.managed_labels
                 )
@@ -962,7 +975,7 @@ def run() -> None:
                     signal_data.momentum_value, decay_threshold
                 )
                 decay_closed = 0
-                if executor is not None and sign_dir:
+                if broker_ready and sign_dir:
                     targets = _flip_close_targets(
                         positions_by_symbol.get(symbol, []), sign_dir
                     )
@@ -1015,6 +1028,7 @@ def run() -> None:
 
                 should_open = (
                     wants_open
+                    and broker_ready
                     and open_count < settings.max_open_positions
                     and sym_news_block is None
                     and sym_session_block is None
@@ -1055,6 +1069,14 @@ def run() -> None:
                     # ADX-фильтр: вход в рейндже отложен, direction НЕ
                     # фиксируется → повторится, когда ADX поднимется над min.
                     note = f"skip:{sym_adx_block}"
+                elif not broker_ready:
+                    # Коннект в дауне: вход не предлагаем — per-symbol гард
+                    # на пустом reconcile не видит живых позиций → риск
+                    # дубля при flicker'е коннекта (27.07: повторный вход
+                    # AUDUSD ушёл в таймаут поверх живой позиции). Direction
+                    # НЕ фиксируется (wants_open=True, executed=False) →
+                    # попытка повторится после reconnect.
+                    note = "skip:no_connection"
                 elif not should_open:
                     note = "skip:max_positions"
                 else:
