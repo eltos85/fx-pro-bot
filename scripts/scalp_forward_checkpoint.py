@@ -169,6 +169,20 @@ def collect_readiness(con: sqlite3.Connection,
         row = by_variant.get(variant, (0, None, None))
         result.append(Readiness(
             f"sl_widen_{variant}", int(row[0]), row[1], row[2]))
+
+    # v0.18.48: стоил ли чего-то порог оборота. Группируем по стратегии —
+    # порог мог быть вреден для одной и полезен для другой, агрегат это скрыл бы.
+    rows = con.execute(
+        """SELECT variant,COUNT(*),MIN(ts_candidate),MAX(ts_candidate)
+           FROM counterfactual_setups
+           WHERE ts_candidate>=? AND setup_type='shadow_universe'
+             AND outcome_tp IN ('tp','sl')
+           GROUP BY variant ORDER BY variant""",
+        (cutoff,),
+    ).fetchall()
+    for variant, n, first, last in rows:
+        result.append(Readiness(
+            f"shadow_universe_{variant}", int(n or 0), first, last))
     return result
 
 

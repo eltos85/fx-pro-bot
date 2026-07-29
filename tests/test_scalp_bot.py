@@ -3021,6 +3021,182 @@ def test_db_pin_gate_blocks_other_strategies():
     assert gated("sweep_fade_canon", "BTCUSDT", {"BTCUSDT", "ETHUSDT"}) is False
 
 
+# ─── v0.18.48: теневая вселенная (отсечённые оборотом, только наблюдение) ──
+
+def _shadow_client(extra=()):
+    class _Client:
+        def __init__(self):
+            self.tickers = [
+                # боевые: оборот выше $100M
+                _ticker("ZECUSDT", 100, 110, 100, 130e6, bid=99.99, ask=100.01),
+                # отсечены ТОЛЬКО оборотом, спред нормальный → в тень
+                _ticker("TAOUSDT", 100, 107, 100, 22e6, bid=99.99, ask=100.01),
+                _ticker("ONDOUSDT", 100, 108, 100, 45e6, bid=99.99, ask=100.01),
+                _ticker("XPLUSDT", 100, 109, 100, 12e6, bid=99.99, ask=100.01),
+                # оборот ниже, но спред ШИРОКИЙ (>5bps) → тенью тоже не берём
+                _ticker("WIDEUSDT", 100, 108, 100, 40e6, bid=99.0, ask=100.5),
+                # ниже пола теней ($10M) → пыль, не наблюдаем
+                _ticker("DUSTUSDT", 100, 108, 100, 2e6, bid=99.99, ask=100.01),
+                # range вне коридора 6-20% → не наблюдаем (страж не ослаблен)
+                _ticker("FLATUSDT", 100, 102, 100, 30e6, bid=99.99, ask=100.01),
+                _ticker("PUMPEDUSDT", 100, 160, 100, 30e6, bid=99.99, ask=100.01),
+                *extra,
+            ]
+
+        def get_tickers(self):
+            return self.tickers
+
+        def non_crypto_type_symbols(self):
+            return set()
+
+        def get_kline(self, *a, **k):
+            return []
+
+    return _Client()
+
+
+def _shadow_cfg(**over):
+    from scalp_bot.config.settings import ScalpSettings
+    cfg = ScalpSettings()
+    cfg.universe_min_rvol = 0.0
+    for k, v in over.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def test_shadow_universe_takes_only_symbols_cut_by_turnover():
+    """Тень ослабляет РОВНО один страж — оборот. range/spread остаются боевыми,
+    иначе наблюдение смешивало бы три разных вопроса в один."""
+    from scalp_bot.app.main import _select_shadow_universe
+
+    picked = _select_shadow_universe(_shadow_client(), _shadow_cfg(),
+                                     {"ZECUSDT"})
+    assert set(picked) == {"TAOUSDT", "ONDOUSDT", "XPLUSDT"}
+    assert "WIDEUSDT" not in picked, "spread-страж должен остаться боевым"
+    assert "DUSTUSDT" not in picked, "ниже пола теней — пыль"
+    assert "FLATUSDT" not in picked and "PUMPEDUSDT" not in picked, \
+        "range-страж (floor и анти-памп cap) должен остаться боевым"
+    assert "ZECUSDT" not in picked, "боевую монету наблюдать не нужно"
+
+
+def test_shadow_universe_respects_symbol_cap():
+    """Кэп символов — защита CPU/WS (Bybit: args ≤21000 символов на коннект)."""
+    from scalp_bot.app.main import _select_shadow_universe
+
+    picked = _select_shadow_universe(
+        _shadow_client(), _shadow_cfg(shadow_universe_max_symbols=2), set())
+    assert len(picked) == 2
+
+
+def test_shadow_universe_disabled_and_zero_cap_return_empty():
+    from scalp_bot.app.main import _select_shadow_universe
+
+    assert _select_shadow_universe(
+        _shadow_client(), _shadow_cfg(shadow_universe_enabled=False), set()) == []
+    assert _select_shadow_universe(
+        _shadow_client(), _shadow_cfg(shadow_universe_max_symbols=0), set()) == []
+
+
+def test_shadow_universe_fail_open_on_client_error():
+    """Сбой REST не должен ронять бота: тень необязательна."""
+    from scalp_bot.app.main import _select_shadow_universe
+
+    class _Broken:
+        def get_tickers(self):
+            raise RuntimeError("bybit down")
+
+    assert _select_shadow_universe(_Broken(), _shadow_cfg(), set()) == []
+
+
+def test_shadow_only_gate_keeps_signal_out_of_trading():
+    """Ключевая гарантия: сигнал по наблюдаемому символу НЕ попадает в
+    candidates → не доходит до resolve и executor. Воспроизводим гейт."""
+    shadow_only = {"TAOUSDT"}
+    emitted, candidates = [], []
+
+    def loop(sym, sig):
+        if sym in shadow_only:
+            emitted.append(sig)
+            return
+        candidates.append(sig)
+
+    loop("TAOUSDT", "sig-shadow")
+    loop("ZECUSDT", "sig-live")
+    assert candidates == ["sig-live"], "тень не должна попадать в торговлю"
+    assert emitted == ["sig-shadow"]
+
+
+def test_shadow_candidate_deduped_per_strategy_symbol():
+    """Пока кандидат жив, новых по (страта, символ) не эмитим: живой бот держал
+    бы позицию и не взводился заново. Без этого — дубли на каждом тике."""
+    from scalp_bot.app.main import _add_shadow_universe_candidate
+
+    class _Tracker:
+        def __init__(self):
+            self.added = []
+            self.alive = set()
+
+        def add(self, candidate):
+            cid = len(self.added) + 1
+            self.added.append(candidate)
+            self.alive.add(cid)
+            return cid
+
+        def is_active(self, cid):
+            return cid in self.alive
+
+    sig = SimpleNamespace(strategy="sweep_fade", symbol="TAOUSDT", side="short",
+                          entry_ref=100.0, sl_level=101.0, tp_level=98.0)
+    tracker, shadow_open = _Tracker(), {}
+    cfg = _shadow_cfg()
+    for _ in range(20):
+        _add_shadow_universe_candidate(tracker, shadow_open, cfg, sig, 1000.0)
+    assert len(tracker.added) == 1, "20 тиков одного сетапа = 1 наблюдение"
+    # исход зафиксирован → связка снова свободна
+    tracker.alive.clear()
+    _add_shadow_universe_candidate(tracker, shadow_open, cfg, sig, 2000.0)
+    assert len(tracker.added) == 2
+    # другая страта по тому же символу — независимое наблюдение
+    other = SimpleNamespace(strategy="density_break", symbol="TAOUSDT",
+                            side="long", entry_ref=100.0, sl_level=99.0,
+                            tp_level=103.0)
+    _add_shadow_universe_candidate(tracker, shadow_open, cfg, other, 2001.0)
+    assert len(tracker.added) == 3
+    row = tracker.added[0].as_row()
+    assert row["setup_type"] == "shadow_universe"
+    assert row["variant"] == "sweep_fade"
+    assert row["actual_gate"] == "below_turnover_floor"
+
+
+def test_shadow_candidate_fail_open_on_tracker_error():
+    from scalp_bot.app.main import _add_shadow_universe_candidate
+
+    class _Broken:
+        def add(self, candidate):
+            raise RuntimeError("db down")
+
+        def is_active(self, cid):
+            return False
+
+    sig = SimpleNamespace(strategy="sweep_fade", symbol="TAOUSDT", side="short",
+                          entry_ref=100.0, sl_level=101.0, tp_level=98.0)
+    shadow_open = {}
+    _add_shadow_universe_candidate(_Broken(), shadow_open, _shadow_cfg(), sig,
+                                   1000.0)
+    assert shadow_open == {}
+
+
+def test_tracker_is_active_reflects_terminal_rows():
+    """is_active опирается на _rows: терминальные строки оттуда удаляются."""
+    from scalp_bot.analysis.counterfactual import CounterfactualTracker
+
+    tracker = CounterfactualTracker(None, _shadow_cfg())
+    assert tracker.is_active(None) is False
+    assert tracker.is_active(42) is False
+    tracker._rows[42] = {"symbol": "TAOUSDT"}
+    assert tracker.is_active(42) is True
+
+
 def test_pad_pool_respects_range_floor_suitability():
     """v0.18.29 (запрос пользователя 2026-06-28): padding pool использует canon
     range-floor (6%), а не 0.0 — добор не тащит непригодные майоры (BTC/ETH/SOL,
@@ -5463,6 +5639,106 @@ def test_sl_widen_report_expectancy_and_pairing():
     assert both == 4        # все четыре сделки решены в обеих ветках
     assert wins == 1        # сделка #2: x2 взяла TP там, где x1 словила SL
     assert losses == 0
+
+
+def _shadow_universe_db(tmp_path, rows, trades=()):
+    """Мини-БД со схемой, достаточной для read-only отчётов."""
+    import sqlite3
+    path = tmp_path / "shadow.sqlite"
+    con = sqlite3.connect(path)
+    con.execute("""CREATE TABLE counterfactual_setups (
+        id INTEGER PRIMARY KEY, setup_type TEXT, variant TEXT, symbol TEXT,
+        side TEXT, ts_candidate REAL, outcome_tp TEXT, outcome_target TEXT,
+        mfe_r REAL, mae_r REAL, state TEXT, level_type TEXT, level_price REAL,
+        source_trade_id INTEGER)""")
+    con.execute("""CREATE TABLE trades (
+        id INTEGER PRIMARY KEY, ts_open REAL, strategy TEXT, pnl_usd REAL,
+        entry REAL, sl REAL, qty REAL, close_reason TEXT, status TEXT)""")
+    # нужна checkpoint-скрипту: он считает и meta-гейты
+    con.execute("""CREATE TABLE meta_label_features (
+        trade_id INTEGER, ts REAL, label_type TEXT, would_keep INTEGER)""")
+    con.executemany(
+        "INSERT INTO counterfactual_setups (setup_type,variant,symbol,side,"
+        "ts_candidate,outcome_tp,mfe_r,mae_r,state) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows)
+    con.executemany(
+        "INSERT INTO trades (ts_open,strategy,pnl_usd,entry,sl,qty,"
+        "close_reason) VALUES (?,?,?,?,?,?,?)", trades)
+    con.commit()
+    con.close()
+    return str(path)
+
+
+def test_shadow_universe_report_separates_arms_and_control(tmp_path, capsys):
+    """Отчёт считает TP-rate по решённым исходам и сравнивает с боевыми
+    сделками ТОЙ ЖЕ стратегии: у страт разные R:R, агрегат смешал бы их."""
+    from scripts.scalp_shadow_universe_report import (live_control,
+                                                      shadow_arms)
+    import sqlite3
+
+    base = 1_785_000_000.0
+    rows = [
+        ("shadow_universe", "sweep_fade", "TAOUSDT", "short", base, "tp",
+         2.0, -0.4, "final"),
+        ("shadow_universe", "sweep_fade", "TAOUSDT", "short", base + 3600,
+         "sl", 0.3, -1.0, "final"),
+        ("shadow_universe", "sweep_fade", "ONDOUSDT", "long", base + 7200,
+         "sl", 0.2, -1.0, "final"),
+        # ещё не решён — в decided не попадает, но в N попадает
+        ("shadow_universe", "sweep_fade", "XPLUSDT", "long", base + 10800,
+         None, 0.5, -0.2, "pending"),
+        ("shadow_universe", "density_break", "TAOUSDT", "long", base + 1800,
+         "tp", 3.0, -0.5, "final"),
+        # чужой setup_type не должен просочиться
+        ("sl_widen", "x2", "ZECUSDT", "long", base, "tp", 1.0, -0.1, "final"),
+    ]
+    trades = [
+        (base + 100, "sweep_fade", 20.0, 100.0, 99.0, 10.0, "tp_hit"),
+        (base + 200, "sweep_fade", -10.0, 100.0, 99.0, 10.0, "sl_hit"),
+        # отклонённый вход — не сделка, в контроль не берём
+        (base + 300, "sweep_fade", 0.0, 100.0, 99.0, 10.0, "entry_Rejected"),
+    ]
+    db = _shadow_universe_db(tmp_path, rows, trades)
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    arms = shadow_arms(con, base - 1)
+    control = live_control(con, base - 1)
+    con.close()
+
+    assert set(arms) == {"sweep_fade", "density_break"}, "только свой setup_type"
+    sweep = arms["sweep_fade"]
+    assert sweep["n"] == 4 and sweep["decided"] == 3
+    assert sweep["tp"] == 1 and sweep["sl"] == 2
+    assert sweep["symbols"]["TAOUSDT"] == 2
+    assert sweep["last"] - sweep["first"] == pytest.approx(10800.0)
+
+    assert control["sweep_fade"]["n"] == 2, "entry_Rejected не сделка"
+    assert control["sweep_fade"]["wins"] == 1
+    # R = pnl / (|entry-sl| × qty): +20/10 = +2.0 и −10/10 = −1.0
+    assert sorted(control["sweep_fade"]["r"]) == pytest.approx([-1.0, 2.0])
+
+
+def test_forward_checkpoint_tracks_shadow_universe_per_strategy(tmp_path):
+    """Чекпоинт видит теневую вселенную и группирует по стратегии: порог мог
+    быть вреден одной страте и полезен другой."""
+    from scripts.scalp_forward_checkpoint import collect_readiness
+    import sqlite3
+
+    base = 1_785_000_000.0
+    rows = [("shadow_universe", "sweep_fade", "TAOUSDT", "short",
+             base + i * 86_400, "tp" if i % 2 else "sl", 1.0, -0.5, "final")
+            for i in range(20)]
+    rows += [("shadow_universe", "density_break", "ONDOUSDT", "long",
+              base, "tp", 1.0, -0.5, "final")]
+    db = _shadow_universe_db(tmp_path, rows)
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    got = {r.hypothesis: r for r in collect_readiness(con, base - 1)}
+    con.close()
+    assert got["shadow_universe_sweep_fade"].outcomes == 20
+    assert got["shadow_universe_sweep_fade"].span_days == pytest.approx(19.0)
+    assert got["shadow_universe_sweep_fade"].ready is False, "19 дней, но n<100"
+    assert got["shadow_universe_density_break"].outcomes == 1
+    # ветка без исходов не должна выдумывать строку
+    assert "shadow_universe_x2" not in got
 
 
 def test_sl_widen_shadow_skips_degenerate_geometry(tmp_path):

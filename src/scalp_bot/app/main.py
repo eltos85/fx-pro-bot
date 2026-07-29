@@ -18,7 +18,8 @@ import signal
 import time
 
 from scalp_bot.analysis.meta_labels import meta_label_for
-from scalp_bot.analysis.counterfactual import CounterfactualTracker
+from scalp_bot.analysis.counterfactual import (CounterfactualCandidate,
+                                               CounterfactualTracker)
 from scalp_bot.analysis.regime import compute_regime_features, is_dead_market
 from scalp_bot.analysis.signals import diagnose
 from scalp_bot.analysis.strategies import build_strategies, resolve
@@ -126,6 +127,18 @@ def run() -> None:
         symbols = list(dict.fromkeys(symbols + canon_syms))
     if db_pins:
         symbols = list(dict.fromkeys(symbols + db_pins))
+    # v0.18.48: теневая вселенная — монеты, отсечённые ТОЛЬКО порогом оборота.
+    # В WS-подписках ради детекторов, но НИ ОДНА стратегия их не торгует
+    # (гейт shadow_only ниже): сигнал по ним уходит в counterfactual как
+    # наблюдение. Так измеряем, чего стоит порог, не рискуя деньгами.
+    shadow_syms: list[str] = []
+    if client is not None:
+        shadow_syms = _select_shadow_universe(client, cfg, set(symbols))
+        if shadow_syms:
+            symbols = list(dict.fromkeys(symbols + shadow_syms))
+            log.info("теневая вселенная (отсечены оборотом < $%.0fM, "
+                     "НЕ торгуются): %s",
+                     cfg.universe_min_turnover_usd / 1e6, ",".join(shadow_syms))
 
     log.info("scalp_bot старт | mode=%s | symbols=%s | lot=$%.0f (min $%.0f) | "
              "kill day/total=$%.0f/$%.0f | strats=%s", mode, ",".join(symbols),
@@ -203,6 +216,14 @@ def run() -> None:
     canon_only = set(canon_syms) - universe_syms
     # db_pin-множество для гейта: density_break торгует db_pins, остальные — нет.
     db_pin_set = set(db_pins)
+    # v0.18.48: shadow_only — символы ТОЛЬКО под наблюдение. Ни одна стратегия
+    # не выставляет по ним ордера; сигнал конвертируется в counterfactual.
+    shadow_only = set(shadow_syms) - universe_syms - set(canon_syms) - db_pin_set
+    # (стратегия, символ) → id активного теневого кандидата. Пока он не дошёл до
+    # терминала, новых по этой связке не эмитим: живой бот в это время держал бы
+    # позицию и не взводился заново (open_symbols-гейт), поэтому одна связка =
+    # одна гипотетическая сделка за раз, а не десятки дублей на каждом тике.
+    shadow_open: dict[tuple[str, str], int] = {}
 
     # HTF-bias: трендовый фильтр старшего ТФ (EMA200 1H). Первичный прогрев на
     # старте, далее refresh раз в htf_refresh_sec (метрика медленная).
@@ -243,15 +264,29 @@ def run() -> None:
                 last_universe = now
                 try:
                     prev_syms = set(symbols)
+                    # v0.18.48: теневой набор пересматриваем вместе с боевым —
+                    # монета могла перерасти порог оборота (тогда ниже она уйдёт
+                    # из shadow_only и станет торговаться штатно) или наоборот.
+                    fresh_shadow = _select_shadow_universe(
+                        client, cfg,
+                        universe_syms | set(canon_syms) | set(db_pins))
+                    if fresh_shadow:
+                        shadow_syms = fresh_shadow
                     stream, states, symbols, picked = _rotate_universe(
                         client, cfg, db, stream, states, strategies, symbols,
                         notifier,
-                        extra_syms=list(dict.fromkeys(canon_syms + db_pins)))
+                        extra_syms=list(dict.fromkeys(
+                            canon_syms + db_pins + shadow_syms)))
                     if picked:
                         universe_syms = set(picked)
                         canon_only = set(canon_syms) - universe_syms
                         # db_pins не зависят от авто-вселенной (всегда force-include)
                         db_pin_set = set(db_pins)
+                    # Пересчёт shadow_only ПОСЛЕ ротации: если теневая монета
+                    # попала в боевую вселенную, вычитание уберёт её отсюда и
+                    # она начнёт торговаться — наблюдение больше не нужно.
+                    shadow_only = (set(shadow_syms) - universe_syms
+                                   - set(canon_syms) - db_pin_set)
                     funding.refresh(client, symbols)  # новые символы → их график
                     # v0.18.2: прогрев HTF новых символов СРАЗУ (до того как они
                     # смогут торговаться) — закрываем fail-open окно ≤htf_refresh_sec.
@@ -387,8 +422,17 @@ def run() -> None:
                                 counterfactual.add(candidate)
                         except Exception:
                             log.exception("counterfactual candidate drain failed")
-                    if s is not None:
-                        candidates.append(s)
+                    if s is None:
+                        continue
+                    # v0.18.48: символ только под наблюдение — сигнал НЕ идёт
+                    # в resolve и дальше к executor, а становится counterfactual.
+                    # Единственная точка, где тень могла бы утечь в торговлю,
+                    # поэтому отсекаем ДО candidates.append.
+                    if sym in shadow_only:
+                        _add_shadow_universe_candidate(
+                            counterfactual, shadow_open, cfg, s, now)
+                        continue
+                    candidates.append(s)
                 sig = resolve(candidates)
                 if sig is None:
                     continue
@@ -879,6 +923,89 @@ def _select_universe(client, cfg) -> list[str]:
                      ",".join(padded[len(ranked):]))
         ranked = padded
     return apply_pins(ranked, cfg.universe_pin_list, cfg.universe_top_n)
+
+
+def _add_shadow_universe_candidate(tracker, shadow_open: dict, cfg, sig,
+                                   now: float) -> None:
+    """Сигнал по наблюдаемому символу → counterfactual. Ордеров не создаёт.
+
+    Дедуп по связке (стратегия, символ): пока предыдущий кандидат жив, новые не
+    эмитим — живой бот в это время держал бы позицию и не взводился бы заново.
+    Без этого детектор писал бы кандидата на каждом тике (баг v0.18.47 у
+    canon-теней: 25 строк на одно событие).
+    """
+    if tracker is None:
+        return
+    key = (sig.strategy, sig.symbol)
+    previous = shadow_open.get(key)
+    if previous is not None and tracker.is_active(previous):
+        return
+    try:
+        cid = tracker.add(CounterfactualCandidate(
+            candidate_key=f"shadow_universe:{sig.strategy}:{sig.symbol}:"
+                          f"{sig.side}:{now:.0f}",
+            setup_type="shadow_universe", variant=sig.strategy,
+            strategy=sig.strategy, symbol=sig.symbol, side=sig.side,
+            ts_candidate=now, ts_entry=now, entry=sig.entry_ref,
+            sl=sig.sl_level, tp=sig.tp_level,
+            target_r=float(getattr(cfg, "flow_exit_activate_r", 1.5)),
+            horizon_sec=float(getattr(
+                cfg, "counterfactual_horizon_sec", 10_800.0)),
+            checkpoint_sec=float(getattr(
+                cfg, "counterfactual_checkpoint_sec", 3_600.0)),
+            actual_gate="below_turnover_floor",
+        ))
+    except Exception:
+        log.exception("shadow universe candidate %s %s failed",
+                      sig.strategy, sig.symbol)
+        return
+    if cid is not None:
+        shadow_open[key] = cid
+        play.info("👁 [%s] %s %s — только наблюдение (оборот ниже порога), "
+                  "ордер НЕ выставляется", sig.symbol, sig.strategy, sig.side)
+
+
+def _select_shadow_universe(client, cfg, live: set[str]) -> list[str]:
+    """Монеты для НАБЛЮДЕНИЯ: прошли range/spread, но отсечены оборотом.
+
+    Ровно один шаг в сторону от боевого отбора: ослаблен ТОЛЬКО
+    ``universe_min_turnover_usd`` (до ``shadow_universe_min_turnover_usd``),
+    range-floor, range-cap и spread-страж остаются боевыми. Так тень отвечает на
+    один вопрос — «стоил ли чего-то порог оборота» — и не смешивает его с
+    вопросами про волатильность и исполнение.
+
+    Возвращает символы, которых НЕТ в боевой вселенной: торговать их нельзя
+    (гейт ``shadow_only`` в главном цикле), они нужны только чтобы детекторы
+    увидели сетапы и counterfactual записал исходы.
+    """
+    if not getattr(cfg, "shadow_universe_enabled", False):
+        return []
+    cap = int(getattr(cfg, "shadow_universe_max_symbols", 6))
+    if cap <= 0:
+        return []
+    try:
+        tickers = client.get_tickers()
+        non_crypto = client.non_crypto_type_symbols()
+        if non_crypto:
+            tickers = [t for t in tickers
+                       if (t.get("symbol") or "") not in non_crypto]
+        rows = filter_tickers(
+            tickers,
+            min_turnover=float(getattr(
+                cfg, "shadow_universe_min_turnover_usd", 10e6)),
+            min_range_pct=cfg.universe_min_range_pct,
+            max_range_pct=cfg.universe_max_range_pct,
+            max_spread_bps=cfg.universe_max_spread_bps)
+        # Боевой порог оборота — граница «торгуем / наблюдаем». Отсекаем ДО
+        # ранжирования: иначе score считался бы в пуле вместе с боевыми
+        # монетами и min-max нормировка ликвидности поехала бы.
+        live_floor = float(cfg.universe_min_turnover_usd)
+        rows = [r for r in rows
+                if r["turnover"] < live_floor and r["symbol"] not in live]
+        return rank_rows(rows, top_n=cap)
+    except Exception:
+        log.exception("shadow universe select failed")
+        return []  # fail-open: тень необязательна, боевой отбор не задет
 
 
 def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,

@@ -379,6 +379,16 @@ services:
       # сутки, концентрация + sl_cooldown запирает бота). Добор из liquidity-
       # pool (turnover/spread/range-cap НЕ ослабляются) по range24h. 0 = выкл.
       SCALP_UNIVERSE_MIN_SYMBOLS: ${SCALP_UNIVERSE_MIN_SYMBOLS:-3}
+      # v0.18.48: теневая вселенная — монеты, отсечённые ТОЛЬКО порогом оборота
+      # (range/spread-стражи остаются боевыми). НЕ торгуются: сигнал по ним идёт
+      # в counterfactual_setups как наблюдение. Повод: авто-вселенная выродилась
+      # хронически (07-08..07-23 один ZECUSDT, с 07-28 отдаёт 0 монет), при этом
+      # 94 из 299 отсечённых оборотом проходят spread-страж, а гипотеза «на
+      # низколиквидных теряем» ни разу не проверялась (93% сделок при спреде
+      # <1 bps). Кэп 6 символов — по замеру CPU (9 символов = 19.5% при 2 ядрах).
+      SCALP_SHADOW_UNIVERSE_ENABLED: ${SCALP_SHADOW_UNIVERSE_ENABLED:-true}
+      SCALP_SHADOW_UNIVERSE_MAX_SYMBOLS: ${SCALP_SHADOW_UNIVERSE_MAX_SYMBOLS:-6}
+      SCALP_SHADOW_UNIVERSE_MIN_TURNOVER_USD: ${SCALP_SHADOW_UNIVERSE_MIN_TURNOVER_USD:-10000000}
       # Bybit — ОТДЕЛЬНЫЕ ключи (или те же что ai-trader/bybit-bot, но
       # рекомендуется отдельный subaccount для аудита PnL).
       SCALP_BYBIT_API_KEY: ${SCALP_BYBIT_API_KEY:-}

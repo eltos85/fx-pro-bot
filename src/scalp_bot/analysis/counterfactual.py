@@ -260,6 +260,11 @@ class CounterfactualTracker:
     def active_count(self) -> int:
         return len(self._rows)
 
+    def is_active(self, candidate_id: int | None) -> bool:
+        """Наблюдаем ли ещё за кандидатом. Терминальные строки из ``_rows``
+        удаляются, поэтому отсутствие ключа = исход уже зафиксирован."""
+        return candidate_id is not None and candidate_id in self._rows
+
     def add(self, candidate: CounterfactualCandidate | dict) -> int | None:
         if not getattr(self._cfg, "counterfactual_enabled", True):
             return None
