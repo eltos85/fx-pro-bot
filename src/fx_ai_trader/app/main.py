@@ -24,7 +24,7 @@ from fx_ai_trader.data.macro_rates import MacroRatesProvider
 from fx_ai_trader.data.risk_regime import RiskRegimeProvider
 from fx_ai_trader.llm.client import DeepSeekClient
 from fx_ai_trader.llm.prompts import (
-    SYSTEM_PROMPT,
+    build_system_prompt,
     build_system_prompt_review,
     build_user_prompt,
     build_user_prompt_review,
@@ -620,12 +620,17 @@ def _run_full_cycle(
     symbol_side_stats = store.get_pnl_by_symbol_side(
         list(settings.symbols), since=since
     )
-    recent_trades = store.get_recent_closed_trades(limit=10, since=since)
+    recent_trades = store.get_recent_closed_trades(
+        limit=10, since=since, symbols=settings.symbols
+    )
     # Persistent lessons (2026-06-02): уроки НЕ фильтруются окном — они
     # дистиллированы из исходов и должны переживать regime-cutoff/last-10.
-    lessons = store.get_active_lessons(limit=settings.lessons_max_active)
+    lessons = store.get_active_lessons(
+        limit=settings.lessons_max_active, symbols=settings.symbols
+    )
     user_prompt = build_user_prompt(
         format_context_for_prompt(ctx),
+        active_symbols=settings.symbols,
         performance_by_symbol=format_performance_by_symbol(
             symbol_stats, window_label=window_label
         ),
@@ -656,13 +661,14 @@ def _run_full_cycle(
         len(recent_trades),
         len(lessons),
     )
-    resp = llm.ask(SYSTEM_PROMPT, user_prompt)
+    system_prompt = build_system_prompt(settings)
+    resp = llm.ask(system_prompt, user_prompt)
     store.add_api_cost(resp.cost_usd)
 
     if resp.error:
         store.log_decision(
             cycle=cycle, cycle_type="full",
-            prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+            prompt_system=system_prompt, prompt_user=user_prompt,
             response_raw=None, parsed_action=None, sentiment=None,
             executed=False, error=f"llm_error: {resp.error}",
             tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
@@ -687,7 +693,7 @@ def _run_full_cycle(
         )
         store.log_decision(
             cycle=cycle, cycle_type="full",
-            prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+            prompt_system=system_prompt, prompt_user=user_prompt,
             response_raw=resp.text, parsed_action=None, sentiment=None,
             executed=False, error="llm_truncated_at_max_tokens",
             tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
@@ -700,7 +706,7 @@ def _run_full_cycle(
     if isinstance(parsed, str):
         store.log_decision(
             cycle=cycle, cycle_type="full",
-            prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+            prompt_system=system_prompt, prompt_user=user_prompt,
             response_raw=resp.text, parsed_action=None, sentiment=None,
             executed=False, error=f"parse_error: {parsed}",
             tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,
@@ -717,7 +723,7 @@ def _run_full_cycle(
     )
     store.log_decision(
         cycle=cycle, cycle_type="full",
-        prompt_system=SYSTEM_PROMPT, prompt_user=user_prompt,
+        prompt_system=system_prompt, prompt_user=user_prompt,
         response_raw=resp.text, parsed_action=parsed.raw, sentiment=sentiment,
         executed=apply.executed, error=apply.error,
         tokens_input=resp.tokens_input, tokens_output=resp.tokens_output,

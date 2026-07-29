@@ -92,6 +92,18 @@ class TestParseActionSchema:
         assert result.model.symbol == "BZ=F"
         assert result.model.side == "SELL"
 
+    def test_open_without_sentiment_is_rejected(self):
+        """OPEN cannot bypass the uncertainty gate by omitting sentiment."""
+        text = (
+            '{"action":"open","symbol":"XAUUSD","side":"BUY",'
+            '"volume_lots":0.05,"stop_loss":2380.00,"take_profit":2410.00,'
+            '"reason":"missing uncertainty audit"}'
+        )
+        result = parse_action(text, ALLOWED)
+        assert isinstance(result, str)
+        assert "schema validation" in result.lower()
+        assert "sentiment" in result.lower()
+
     def test_open_sentiment_out_of_range_clamped(self):
         """LLM иногда даёт forwardness=-0.3 (путает с polarity).
         Pydantic BeforeValidator делает clamp, не отвергает решение.
@@ -202,7 +214,8 @@ class TestParseActionSchema:
     def test_open_unknown_symbol(self):
         text = (
             '{"action":"open","symbol":"EURUSD","side":"BUY",'
-            '"volume_lots":0.05,"stop_loss":1.07,"take_profit":1.09,"reason":"x"}'
+            '"volume_lots":0.05,"stop_loss":1.07,"take_profit":1.09,"reason":"x",'
+            '"sentiment":{"aggregate_uncertainty":0.3,"items":[]}}'
         )
         result = parse_action(text, ALLOWED)
         assert isinstance(result, str)

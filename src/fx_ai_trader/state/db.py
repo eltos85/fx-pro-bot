@@ -24,7 +24,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -285,7 +285,7 @@ class AiFxTraderStore:
                     position_id,
                 ),
             )
-            today = date.today().isoformat()
+            today = datetime.now(tz=UTC).date().isoformat()
             won = 1 if realized_pnl_usd > 0 else 0
             c.execute(
                 """
@@ -326,7 +326,7 @@ class AiFxTraderStore:
     # ─── PnL для killswitch ──────────────────────────────────────────────
 
     def get_today_pnl(self) -> float:
-        today = date.today().isoformat()
+        today = datetime.now(tz=UTC).date().isoformat()
         with self._conn() as c:
             row = c.execute(
                 "SELECT realized_pnl_usd FROM daily_pnl WHERE day = ?", (today,)
@@ -341,7 +341,7 @@ class AiFxTraderStore:
         return float(row[0]) if row else 0.0
 
     def add_api_cost(self, cost_usd: float) -> None:
-        today = date.today().isoformat()
+        today = datetime.now(tz=UTC).date().isoformat()
         with self._conn() as c:
             c.execute(
                 """
@@ -580,6 +580,7 @@ class AiFxTraderStore:
         limit: int = 10,
         reason_clamp: int = 180,
         since: str | None = None,
+        symbols: tuple[str, ...] | list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Последние ``limit`` закрытых live-трейдов, отсортированы
         по ``closed_at`` ASC (oldest → newest для USER_PROMPT).
@@ -599,6 +600,10 @@ class AiFxTraderStore:
         — другая стратегия, не должно влиять на SELF-REFLECTION.
         ``None`` или пустая строка → без фильтра. См.
         ``AiFxTraderSettings.stats_window_start``.
+
+        ``symbols`` ограничивает self-reflection текущим runtime universe.
+        Это не удаляет историю из БД: неактивные инструменты просто не
+        загрязняют prompt бота, который сейчас не может ими торговать.
         """
         with self._conn() as c:
             params: list[Any] = []
@@ -606,6 +611,11 @@ class AiFxTraderStore:
             if since:
                 since_clause = " AND opened_at >= ?"
                 params.append(since)
+            symbols_clause = ""
+            if symbols:
+                placeholders = ",".join("?" for _ in symbols)
+                symbols_clause = f" AND symbol IN ({placeholders})"
+                params.extend(symbols)
             params.append(int(limit))
             rows = c.execute(
                 f"""
@@ -614,7 +624,7 @@ class AiFxTraderStore:
                        close_reason
                 FROM positions
                 WHERE closed_at IS NOT NULL
-                  AND is_paper = 0{since_clause}
+                  AND is_paper = 0{since_clause}{symbols_clause}
                 ORDER BY closed_at DESC
                 LIMIT ?
                 """,
@@ -720,22 +730,37 @@ class AiFxTraderStore:
                     )
             return new_id
 
-    def get_active_lessons(self, limit: int = 12) -> list[dict[str, Any]]:
+    def get_active_lessons(
+        self,
+        limit: int = 12,
+        symbols: tuple[str, ...] | list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Активные уроки, oldest → newest (LLM сильнее взвешивает последние).
 
         Источник для блока `=== LESSONS LEARNED ===` в full-cycle prompt.
+        Symbol-specific lessons ограничиваются runtime universe; общие уроки
+        с ``symbol IS NULL`` сохраняются.
         """
         with self._conn() as c:
+            params: list[Any] = []
+            symbols_clause = ""
+            if symbols:
+                placeholders = ",".join("?" for _ in symbols)
+                symbols_clause = (
+                    f" AND (symbol IS NULL OR symbol IN ({placeholders}))"
+                )
+                params.extend(symbols)
+            params.append(int(limit))
             rows = c.execute(
-                """
+                f"""
                 SELECT id, created_at, symbol, side, trade_id, outcome_usd,
                        lesson_text
                 FROM lessons
-                WHERE active = 1
+                WHERE active = 1{symbols_clause}
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
                 """,
-                (int(limit),),
+                params,
             ).fetchall()
         out: list[dict[str, Any]] = [
             {

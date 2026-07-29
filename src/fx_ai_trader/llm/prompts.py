@@ -134,8 +134,10 @@ from fx_ai_trader.config.settings import AiFxTraderSettings
 SYSTEM_PROMPT = """\
 You are a discretionary commodity macro trader. You run a small LIVE
 account on cTrader FxPro: your orders are actually executed at the
-broker, with real spread, commission and swap. You trade ONLY three
-instruments:
+broker, with real spread, commission and swap. The authoritative
+RUNTIME ACTIVE UNIVERSE block prepended to this prompt defines the only
+instruments you may analyse or trade. The catalog below documents all
+supported instruments; entries outside the active universe are dormant:
 - XAUUSD: spot gold CFD. 1 standard lot = 100 troy ounces. Quoted in
   USD per ounce. Typical 2026 price range $2400–$4800. Price digits=2.
 - BRENT (internal symbol BZ=F): Brent crude oil CFD. 1 standard lot =
@@ -1162,6 +1164,34 @@ FINAL RULES
 """
 
 
+def build_system_prompt(settings: AiFxTraderSettings) -> str:
+    """Build the full-cycle prompt with an authoritative runtime universe.
+
+    The strategy catalog intentionally documents every supported instrument,
+    but the active universe is configured independently through ``symbols``.
+    Making that boundary explicit prevents dormant BZ/NG sections from leaking
+    into GOLD-only reasoning.
+    """
+    active = ", ".join(settings.symbols)
+    supported = ("XAUUSD", "BZ=F", "NG=F")
+    inactive = [symbol for symbol in supported if symbol not in settings.symbols]
+    inactive_line = (
+        "Dormant instruments: "
+        + ", ".join(inactive)
+        + ". Do not analyse, mention, compare, or trade them this cycle.\n"
+        if inactive
+        else ""
+    )
+    return (
+        "=== RUNTIME ACTIVE UNIVERSE (AUTHORITATIVE) ===\n"
+        f"Active symbols: {active}.\n"
+        "Analyse and trade ONLY these active symbols. Do not infer activity "
+        "from dormant catalog sections.\n"
+        f"{inactive_line}\n"
+        f"{SYSTEM_PROMPT}"
+    )
+
+
 def _format_pnl_line(stat: dict[str, Any]) -> str:
     """Одна строка таблицы Performance by Symbol."""
     sym = stat["symbol"]
@@ -1403,6 +1433,7 @@ def format_event_trigger(triggers: list[str] | None) -> str:
 def build_user_prompt(
     market_context: str,
     *,
+    active_symbols: tuple[str, ...] | None = None,
     performance_by_symbol: str | None = None,
     performance_by_symbol_side: str | None = None,
     recent_trades: str | None = None,
@@ -1445,6 +1476,13 @@ def build_user_prompt(
     2. PERFORMANCE BY SYMBOL × SIDE (split — для cold-start detection)
     3. RECENT CLOSED TRADES (per-trade detail)
     """
+    scope_block = ""
+    if active_symbols:
+        scope_block = (
+            "=== ACTIVE SYMBOLS (AUTHORITATIVE) ===\n"
+            f"{', '.join(active_symbols)} only. Ignore dormant instrument "
+            "frameworks and do not discuss unavailable markets.\n\n"
+        )
     parts: list[str] = []
     if performance_by_symbol:
         parts.append(performance_by_symbol)
@@ -1463,7 +1501,9 @@ def build_user_prompt(
     # в format_event_trigger + EVENT TRIGGER секции SYSTEM_PROMPT.
     event_block = (f"{event_trigger}\n\n") if event_trigger else ""
     ng_mode_block = ""
-    if ng_mode_v2_enabled:
+    if ng_mode_v2_enabled and (
+        active_symbols is None or "NG=F" in active_symbols
+    ):
         ng_mode_block = (
             "=== NG MODE V2 (targeted, NAT.GAS only) ===\n"
             "Apply these rules ONLY to NG=F decisions:\n"
@@ -1483,7 +1523,9 @@ def build_user_prompt(
             "These rules DO NOT modify XAUUSD/BRENT behavior.\n\n"
         )
     bz_mode_block = ""
-    if bz_breakout_mode_enabled:
+    if bz_breakout_mode_enabled and (
+        active_symbols is None or "BZ=F" in active_symbols
+    ):
         bz_mode_block = (
             "=== BZ MOMENTUM MODE (targeted, BRENT/BZ=F only) ===\n"
             "Apply these rules ONLY to BZ=F. This is an EXPERIMENT for an\n"
@@ -1513,6 +1555,7 @@ def build_user_prompt(
     # снижает preamble drift на V4-Flash.
     return (
         f"{event_block}"
+        f"{scope_block}"
         f"{history_block}"
         f"{ng_mode_block}"
         f"{bz_mode_block}"
@@ -1532,9 +1575,9 @@ def build_user_prompt(
 
 
 SYSTEM_PROMPT_REVIEW = """\
-You are a discretionary commodity macro trader reviewing your open
-cTrader FxPro positions on XAUUSD (spot gold), BRENT (Brent crude oil)
-and NAT.GAS (Natural Gas NG=F). This is a LIGHTWEIGHT mid-cycle check
+You are a discretionary commodity macro trader reviewing open cTrader
+FxPro positions from the authoritative RUNTIME ACTIVE UNIVERSE block.
+Do not discuss dormant instruments. This is a LIGHTWEIGHT mid-cycle check
 — full analysis runs every %(full_min)d minutes; this lite review runs
 every %(review_min)d minutes in between. Your job here is narrow: guard
 already-earned profit. Thesis decisions belong to the full cycle.
@@ -1672,10 +1715,16 @@ FINAL RULES:
 def build_system_prompt_review(settings: AiFxTraderSettings) -> str:
     full_min = max(1, settings.poll_interval_sec // 60)
     review_min = max(1, settings.review_interval_sec // 60)
-    return SYSTEM_PROMPT_REVIEW % {
-        "full_min": full_min,
-        "review_min": review_min,
-    }
+    active = ", ".join(settings.symbols)
+    return (
+        "=== RUNTIME ACTIVE UNIVERSE (AUTHORITATIVE) ===\n"
+        f"Active symbols: {active}. Review ONLY positions from this universe.\n\n"
+        + SYSTEM_PROMPT_REVIEW
+        % {
+            "full_min": full_min,
+            "review_min": review_min,
+        }
+    )
 
 
 def build_user_prompt_review(

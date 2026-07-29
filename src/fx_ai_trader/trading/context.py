@@ -38,6 +38,7 @@ from fx_ai_trader.news.rss import CommodityRssNewsProvider, NewsItem
 from fx_ai_trader.news.weather import NoaaOutlookProvider, format_noaa_snapshot
 from fx_ai_trader.state.db import AiFxPosition, AiFxTraderStore
 from fx_ai_trader.trading.client_adapter import Bar, CTraderFxAdapter
+from fx_ai_trader.trading.price_sensor import compute_unrealised_r
 
 log = logging.getLogger(__name__)
 
@@ -381,7 +382,26 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
                     if n.source_weight < 1.0
                     else ""
                 )
-                parts.append(f"  • [{n.source}]{weight_tag} {n.title}")
+                published_tag = "published=unknown age=unknown"
+                if n.published_iso:
+                    try:
+                        published = datetime.fromisoformat(n.published_iso)
+                        if published.tzinfo is None:
+                            published = published.replace(tzinfo=UTC)
+                        age_hours = max(
+                            0.0, (now - published).total_seconds() / 3600.0
+                        )
+                        published_tag = (
+                            f"published={published.astimezone(UTC).isoformat(timespec='minutes')} "
+                            f"age={age_hours:.1f}h"
+                        )
+                    except ValueError:
+                        published_tag = (
+                            f"published={n.published_iso} age=unparseable"
+                        )
+                parts.append(
+                    f"  • [{n.source}]{weight_tag} [{published_tag}] {n.title}"
+                )
                 if n.summary and n.summary != n.title:
                     summary = n.summary[:240].replace("\n", " ")
                     parts.append(f"    {summary}")
@@ -420,14 +440,24 @@ def format_context_for_prompt(ctx: MarketContext) -> str:
     if not ctx.open_positions:
         parts.append("(none)")
     else:
+        current_by_symbol = {
+            snapshot.symbol: snapshot.current_price for snapshot in ctx.snapshots
+        }
         for p in ctx.open_positions:
             mode = "PAPER" if p.is_paper else "LIVE"
             sl_str = f"${p.sl_price:.6g}" if p.sl_price else "—"
             tp_str = f"${p.tp_price:.6g}" if p.tp_price else "—"
+            unrealised_r = compute_unrealised_r(
+                p.side,
+                p.entry_price,
+                p.sl_price,
+                current_by_symbol.get(p.symbol),
+            )
+            r_str = f" unrealised_R={unrealised_r:+.2f}R" if unrealised_r is not None else ""
             parts.append(
                 f"  id={p.id} [{mode}] {p.side} {p.symbol} lots={p.volume_lots} "
                 f"entry=${p.entry_price:.6g} SL={sl_str} TP={tp_str} "
-                f"label={p.broker_order_label}"
+                f"label={p.broker_order_label}{r_str}"
             )
 
     return "\n".join(parts)
@@ -466,13 +496,23 @@ def format_context_for_review(ctx: MarketContext) -> str:
     if not ctx.open_positions:
         parts.append("(none)")
     else:
+        current_by_symbol = {
+            snapshot.symbol: snapshot.current_price for snapshot in ctx.snapshots
+        }
         for p in ctx.open_positions:
             mode = "PAPER" if p.is_paper else "LIVE"
             sl_str = f"${p.sl_price:.6g}" if p.sl_price else "—"
             tp_str = f"${p.tp_price:.6g}" if p.tp_price else "—"
+            unrealised_r = compute_unrealised_r(
+                p.side,
+                p.entry_price,
+                p.sl_price,
+                current_by_symbol.get(p.symbol),
+            )
+            r_str = f" unrealised_R={unrealised_r:+.2f}R" if unrealised_r is not None else ""
             parts.append(
                 f"  id={p.id} [{mode}] {p.side} {p.symbol} lots={p.volume_lots} "
-                f"entry=${p.entry_price:.6g} SL={sl_str} TP={tp_str}"
+                f"entry=${p.entry_price:.6g} SL={sl_str} TP={tp_str}{r_str}"
             )
 
     return "\n".join(parts)

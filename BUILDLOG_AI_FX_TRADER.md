@@ -1,5 +1,43 @@
 # BUILDLOG — FX AI Trader (DeepSeek-V4 на cTrader FxPro: GOLD-only)
 
+## 2026-07-29
+
+### feat(prompts): authoritative runtime active universe + мелкие фиксы prompt-данных
+`<pending>`
+
+**Контекст:** после возврата к GOLD-only (2026-06-25) в prompt оставались
+dormant-секции каталога (BZ/NG framework'и, NG MODE V2, BZ MOMENTUM MODE)
+и self-reflection подгружал историю/уроки по неактивным инструментам —
+LLM мог «вспоминать» рынки, которыми сейчас не может торговать.
+
+**Что изменено:**
+- `llm/prompts.py`: `build_system_prompt(settings)` — prepends
+  «=== RUNTIME ACTIVE UNIVERSE (AUTHORITATIVE) ===» с явным списком
+  активных символов и запретом анализировать dormant; то же для
+  review-промпта. В user-prompt добавлен `scope_block`, NG/BZ mode-блоки
+  включаются только если символ в active universe.
+- `state/db.py`: `get_recent_closed_trades` и `get_active_lessons`
+  принимают `symbols` — self-reflection ограничен runtime universe
+  (общие уроки с `symbol IS NULL` сохраняются). История в БД не тронута.
+- `state/db.py`: `date.today()` → `datetime.now(tz=UTC).date()` —
+  killswitch/daily_pnl/API-cost раньше считали «сегодня» в локальной
+  таймзоне контейнера (см. stats-collection.mdc про смешение TZ).
+- `trading/context.py`: news-строки получили тег `published=... age=...h`
+  (LLM видел заголовки без возраста → риск реакции на stale-новости);
+  open-позиции получили `unrealised_R` через `compute_unrealised_r`.
+- `trading/executor.py`: `sentiment` стал обязательным для OPEN-action —
+  пропуск блока раньше байпасил anti-hallucination гейт по
+  aggregate_uncertainty.
+
+**Тесты:** `tests/test_fx_ai_trader_active_universe.py` (новый) +
+обновлённый `test_fx_ai_trader.py` — 89 passed.
+
+**Файлы:** `app/main.py`, `llm/prompts.py`, `state/db.py`,
+`trading/context.py`, `trading/executor.py`, `tests/test_fx_ai_trader.py`,
+`tests/test_fx_ai_trader_active_universe.py`
+
+---
+
 ## 2026-06-25
 
 ### refactor(symbols): возврат к GOLD-ONLY — сняты нефть (BZ=F) и газ (NG=F)

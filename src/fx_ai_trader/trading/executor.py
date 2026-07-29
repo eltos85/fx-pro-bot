@@ -188,7 +188,9 @@ class OpenAction(BaseModel):
     stop_loss: float = Field(gt=0.0)
     take_profit: float = Field(gt=0.0)
     reason: ClampedReason = ""
-    sentiment: Optional[SentimentBlock] = None
+    # Required for OPEN: otherwise omitting the block bypasses the
+    # aggregate-uncertainty anti-hallucination gate below.
+    sentiment: SentimentBlock
 
 
 class CloseAction(BaseModel):
@@ -335,10 +337,7 @@ def parse_action(
             # Anti-hallucination gate: LLM сам должен был вернуть hold
             # при высокой uncertainty (так указано в SYSTEM_PROMPT),
             # но если попытался open — режем.
-            if (
-                model.sentiment is not None
-                and model.sentiment.aggregate_uncertainty > max_uncertainty
-            ):
+            if model.sentiment.aggregate_uncertainty > max_uncertainty:
                 return (
                     f"high aggregate_uncertainty "
                     f"({model.sentiment.aggregate_uncertainty:.2f} > "
