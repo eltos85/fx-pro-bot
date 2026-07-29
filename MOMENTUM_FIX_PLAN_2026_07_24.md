@@ -126,7 +126,8 @@
 - [x] (E) news-close — `news_close_before_min` (5), `high_impact_event_upcoming`
 - [x] Тесты — 71 (momentum) / 1266 (весь suite) passed
 - [x] STRATEGIES.md §8 + BUILDLOG.md (2026-07-24) обновлены
-- [ ] Коммит + деплой — отдельным решением пользователя
+- [x] Коммит + push (ветка feat/ai-trader-v0.30-institutional): 60f386c → a523e6f (ctx fix) → 02b4a68 (docs)
+- [x] Деплой — selective rebuild fx-momentum-bot на VPS, контейнер Up, ошибок нет
 
 ## Итоговые env-флаги (все обратимы, дефолты = правки включены)
 
