@@ -155,20 +155,36 @@ def build_profile(buckets: dict[int, tuple[float, float]], bucket_size: float,
     )
 
 
+def value_areas_overlap(a: VolumeProfile, b: VolumeProfile) -> bool:
+    """Стоят ли профили «на одном горизонтальном уровне» (C1, канон 31:14).
+
+    Канон сливает не любые соседние сессии, а те, что перекрываются: *«when
+    they are overlapping on the same level they are just telling you that they
+    stayed in this balance area for two days»*. Критерий перекрытия — value
+    area, а не полный диапазон: хвосты-отвержения выходят далеко за область
+    принятия и пересекались бы почти всегда.
+    """
+    return a.val <= b.vah and b.val <= a.vah
+
+
 def merge_profiles(profiles: list[VolumeProfile],
                    value_area_pct: float = 0.68) -> VolumeProfile | None:
-    """Composite / double-day profile (D3, канон-автор «The Only Orderflow
-    Guide»: *«merge them… double day profile… merge»*).
+    """Composite / double-day profile (C1, канон-автор «The Only Orderflow
+    Guide» 31:14-32:50: *«these two profile can be merged. You can merge
+    them»*, *«do a double day profile on a single level and you can have a
+    really precise value area low point»*, *«you have three profile on an
+    horizontal level also we can merge them»*).
 
     Сливает несколько `VolumeProfile` (одинакового `bucket_size`) в один
     composite: суммирует (buy, sell) по корзинам цен и пересчитывает POC / Value
-    Area «двухрядным» алгоритмом `build_profile`. Сильные VAH/VAL, подтверждённые
-    несколькими профилями, — мощные зоны reload (канон).
+    Area «двухрядным» алгоритмом `build_profile`. Смысл по канону — уточнение
+    границы: VAH/VAL, подтверждённые несколькими перекрывающимися сессиями,
+    дают «really precise value area low point» и являются сильными зонами
+    reload.
 
-    [НАШЕ] инфра-утилита: в live-путь НЕ подключена по умолчанию
-    (`FLOWZONE_PROFILE_MERGE_ENABLED=false`); включение composite-зон как
-    торгового критерия требует OOS-валидации (`no-data-fitting.mdc`,
-    `strategy-guard.mdc`). Возвращает None при пустом/несовместимом входе.
+    Подключение в live-путь — ``FLOWZONE_PROFILE_MERGE_ENABLED`` (по умолчанию
+    включено с 2026-07-29; до этого утилита ошибочно считалась [НАШЕ]-инфрой и
+    была выключена). Возвращает None при пустом/несовместимом входе.
     """
     profiles = [p for p in profiles if p is not None]
     if not profiles:

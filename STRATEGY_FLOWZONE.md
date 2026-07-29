@@ -5,9 +5,19 @@
 <https://youtu.be/06R-ebyOhDI>; «The Only Orderflow Guide You'll Ever Need»
 (Trade Management BE/trail 39:00, Value Area 68% 28:50) —
 <https://youtu.be/Pz8f0wWW12M>; «The Simplest Orderflow Trading Model»
-(R:R 1:2) — <https://youtu.be/cUTsoU-15Tc>. Доп.: winkler.expert Fabervaale
-rulebook (68% VA); tradezella AMT-playbook (Fabio, BE по CVD-pressure);
-forex.in.rs World-Cup strategy (trail to last absorption, never re-widen).
+(R:R 1:2) — <https://youtu.be/cUTsoU-15Tc>; «My Signature Orderflow Model»
+(фиксация на exhaustion) — sozai.app/transcript/signature-orderflow-model.
+Доп.: winkler.expert Fabervaale rulebook (68% VA); tradezella AMT-playbook
+(Fabio, BE по CVD-pressure); forex.in.rs World-Cup strategy (trail to last
+absorption, never re-widen).
+
+**Тайм-коды и цитаты в этом документе — из полных транскриптов** (sozai.app,
+канал Fabervaale ENG), полученных 2026-07-29. Прямой доступ к YouTube для
+`yt-dlp`/fetch закрыт (`LOGIN_REQUIRED`), поэтому до этой даты сверка шла по
+выдержкам — что и дало ошибки атрибуции, исправленные в §11.8. Тайм-коды
+раздела §11.8 и далее соответствуют транскрипту «The Only Orderflow Guide»
+(41:04) и могут отличаться на десятки секунд от прежних ссылок вида «28:50»,
+проставленных по выдержкам.
 
 Этот документ описывает стратегию **полностью и автономно**, строго по
 первоисточникам (роликам автора). Он НЕ сравнивает методику с другими ботами
@@ -90,11 +100,33 @@ forex.in.rs World-Cup strategy (trail to last absorption, never re-widen).
 - **Balance / bell** — симметричный колокол вокруг POC → баланс, не торгуем.
 - **Shift** — POC сместился относительно предыдущего профиля → миграция value.
 
-Реализация (`context.classify_shape`) — **[НАШЕ] операционализация**: `classify`
-по-прежнему даёт бинарный тренд/баланс (acceptance вне VA) и **гейтит вход**;
-`shape` — обогащение (метаданные контекста, логируется), **не гейтит** вход
-согласно `no-data-fitting.mdc`/`strategy-guard.mdc` (новая классификация не
-меняет торговое решение без OOS-валидации).
+**C3 (2026-07-29): форма ГЕЙТИТ направление — [КАНОН].** Одного acceptance вне
+value area недостаточно. Разбирая профиль, который развернулся вверх, автор
+говорит:
+
+> *«So from a down profile, you go in an up profile. Is not a P shape. So it's
+> still balance. You can use this as indecision. You can put blue instead of
+> green.»* (34:32)
+
+То есть отсутствие P-формы **отменяет** направленность, даже когда value
+мигрировала. И наоборот, P-shape сам по себе даёт ожидание: *«This is what we
+call the Pshapes where the buyers are really aggressive and you close the cash
+session on the upside. So you can expect a directional move also on the day
+after»* (26:49).
+
+Правило в коде (`context.classify`, параметр `shape_gate`): тренд остаётся
+только если форма подтверждает — P-shape в ту же сторону (тяжёлый хвост **плюс
+направленная дельта в самом хвосте**: направление приняли агрессоры) либо
+double distribution (канон 31:31 — направленный день с тонким LVN). Тяжёлый
+хвост без подтверждающей дельты классифицируется как `normal` → баланс, входов
+не берём.
+
+Флаг `FLOWZONE_PROFILE_SHAPE_ENABLED` (по умолчанию **включено**); `false`
+возвращает прежнее поведение «только acceptance вне VA» для A/B.
+
+> **История атрибуции.** До 2026-07-29 `shape` был лишь обогащением
+> (`ctx.shape` логировался, вход гейтил бинарный тренд/баланс). Это и было
+> расхождение: канон использует форму как часть определения bias.
 
 ---
 
@@ -150,20 +182,39 @@ forex.in.rs World-Cup strategy (trail to last absorption, never re-widen).
 
 **На зону ставим алерт** и ждём, когда цена к ней подойдёт.
 
-### 3.5 Composite / double-day profile (merge) — [НАШЕ] расширение
+### 3.5 Composite / double-day profile (merge) — [КАНОН]
 
-Канон-автор («The Only Orderflow Guide») описывает объединение перекрывающихся
-профилей сессий/дней в **composite** для усиления VA-уровней: *«merge them…
-double day profile… three profile on horizontal level, merge»*. Сильные
-VAH/VAL, подтверждённые несколькими профилями, — мощные зоны reload.
+Автор сливает перекрывающиеся профили сессий/дней в **composite**, и это не
+приём «на всякий случай», а способ уточнить границу value area. В ролике он
+делает это четырежды подряд, разбирая двухмесячную историю NQ:
 
-Реализация (`volume_profile.merge_profiles`) — **[НАШЕ] инфра-утилита**: суммирует
-корзины нескольких `VolumeProfile`, пересчитывает POC/VA «двухрядным»
-алгоритмом. В live-путь **не подключена** по умолчанию
-(`FLOWZONE_PROFILE_MERGE_ENABLED=false`): включение composite-зон как
-торгового критерия требует OOS-валидации (`no-data-fitting.mdc`,
-`strategy-guard.mdc`); на крипто (24/7, нет cash-session gap) merge менее
-критичен, чем на NQ. Утилита готова к форвард-эксперименту.
+> *«So these two profile can be merged. You can merge them and you can see one
+> piece of information because when they are overlapping on the same level they
+> are just telling you that they stayed in this balance area for two days.»*
+> (31:14)
+>
+> *«you can do from here merge and do a double day profile on a single level and
+> you can have a really precise value area low point.»* (31:59)
+>
+> *«these two profile that you can see here are on the horizontal level so you
+> can also merge both of them»* (32:33); *«you have three profile on an
+> horizontal level also we can merge them»* (32:50).
+
+Критерий слияния — **перекрытие по value area** («overlapping on the same
+level»), а не соседство по времени: хвосты-отвержения уходят далеко за область
+принятия и пересекались бы почти всегда.
+
+Реализация: `volume_profile.merge_profiles` + `value_areas_overlap`, подключение
+в live-путь — `_merged_session_profile` в `app/main.py`
+(`FLOWZONE_PROFILE_MERGE_ENABLED`, по умолчанию **включено**, глубина
+`FLOWZONE_PROFILE_MERGE_LOOKBACK=3`). Профили прошлых сессий не восстановимы из
+`prints` (retention 6ч), поэтому сессионный профиль периодически сохраняется в
+таблицу `session_profiles`.
+
+> **История атрибуции.** До 2026-07-29 этот раздел помечал merge как «[НАШЕ]
+> инфра-утилита», а флаг стоял в `false`. Это была ошибка разметки: в ролике
+> merge звучит как базовая практика профильного фрейминга. Исправлено в рамках
+> аудита C1-C5.
 
 ---
 
@@ -196,24 +247,79 @@ VAH/VAL, подтверждённые несколькими профилями,
 > Цитата канона: *«after this candle the situation is super clear, so you can
 > already put a limit order here… from here the market collapse.»*
 
-### 4.1 Initiative auction / exhaustion — [НАШЕ] доп. паттерны
+### 4.1 Initiative auction / exhaustion — [КАНОН]
 
-Канон («The Only Orderflow Guide») описывает два дополнительных order-flow
-паттерна помимо absorption-reload:
+Подводя итог исполнению, автор перечисляет **три** равноправных паттерна, а не
+один: *«we saw the absorption, we saw the exhaustion, we saw the initiative
+auction»* (37:03).
 
-- **Initiative auction** — сильная направленная дельта + цена закрывается в
-  сторону агрессии → continuation-вход по тренду (инициатива доминирующей
-  стороны). *«initiative… strong delta… close in direction»*.
-- **Exhaustion** — затухающий объём + contrarian imbalance (встречная агрессия
-  на экстремуме) → разворот. *«exhaustion… decreasing volume… contrarian
-  imbalance»*.
+- **Initiative auction** — высокая агрессия И результат: *«constant aggression
+  of the buyer… one side print that is also called imbalance… a strong delta and
+  a candle that close on the upside… the delta that is leading the price»*
+  (15:43-16:31), вывод: *«an amazing signal if you are a trend following
+  trader»* (17:02). Это **второй триггер входа** рядом с absorption — берётся,
+  когда рынок не даёт теста зоны с поглощением («The Simplest Orderflow Trading
+  Model»: *«we can use this as a confirmation trigger to go long… you can take a
+  momentum trade with a really tight stop-loss»*).
+- **Exhaustion** — затухающий объём + contrarian imbalance на экстремуме:
+  *«decreasing volume… a contrarian imbalance… the price snap back to the value…
+  usually amazing opportunities to capitalize on a reversal trade»* (18:28).
+  У нас это **не вход**: бот торгует только continuation, а разворотный сигнал
+  канон в такой ситуации использует для **фиксации прибыли** — «My Signature
+  Orderflow Model» (06:04): *«you can understand that now this selling pressure
+  is almost exhausted… it's not worth to risk all this profit… So I take out my
+  position, and what I do, I consider putting stop below. So if the market wants
+  to continue, I'm into the position again»*. Повторный вход у нас —
+  `reload_cooldown_sec`, отдельной сделкой.
 
-Реализация (`orderflow.detect_initiative`, `detect_exhaustion`) — **[НАШЕ]
-детекторы**: возвращают результат-объект с признаком и причинами. В live-вход
-**не гейтят** по умолчанию (`FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED=false`):
-основной канон-сетап — absorption-reload (§4), новые триггеры как торговые
-требуют OOS-валидации (`no-data-fitting.mdc`, `strategy-guard.mdc`). Детекторы
-готовы к форвард-эксперименту и логированию.
+Порядок триггеров входа: absorption приоритетнее (основной reload-сетап §4),
+initiative — momentum-вариант. В `Signal.reasons` пишется `trigger=absorption`
+или `trigger=initiative`.
+
+Реализация: `orderflow.detect_initiative` / `detect_exhaustion`, вход —
+`strategy._evaluate_reload`, фиксация — `executor._maybe_exhaustion_exit`
+(стадия 3 сопровождения, закрытие с `close_reason=exhaustion_exit`).
+Флаг `FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED`, по умолчанию **включено**.
+
+> **История атрибуции.** До 2026-07-29 раздел помечал оба паттерна как «[НАШЕ]
+> детекторы» с флагом `false`, то есть работал только absorption. Исправлено в
+> рамках аудита C1-C5.
+
+### 4.2 Hook / failed auction — [КАНОН]
+
+Отдельный сетап, который автор прямо называет самым надёжным по win rate. Цена
+выходит за границу value area, **не принимается** там и возвращается внутрь:
+
+> *«when we go back to the value area low and down, we do what we call the hook.
+> So they do a failed auction, they try to break, they get rejected. So all this
+> it's a rejection area. And when you go back inside, you have your continuation
+> trade»* (26:17)
+>
+> *«it also hook the value area high from the downside. And this is what we like
+> to call a fake out, a failed auction trap traders… usually the price slice
+> through the value area to go to seek orders on the value area low. This is one
+> really profitable setup with high win rate»* (27:20)
+
+Правила:
+
+- Неудачная вылазка идёт **против** направления аукциона: для лонга — ниже VAL,
+  для шорта — выше VAH. Вход — по направлению аукциона (continuation, §5.4).
+- «Failed» = за границей **не построили value**. Порог берём из канон-константы
+  Value Area: доля объёма за границей должна быть меньше нейтральной вне-VA
+  массы `1 − 68% = 32%`. Отдельного подобранного числа не вводим.
+- Вход только после возврата цены **внутрь** value area («when you go back
+  inside»).
+- Стоп — за экстремумом неудачной вылазки: принятие цены снаружи опровергает сам
+  тезис failed auction. Цель — как везде, ближайшая swing-точка (§5.3) с
+  R:R-фильтром (§5.1).
+
+Реализация: `analysis/hook.py` (`detect_hook`) + `strategy._evaluate_hook`.
+Ищется по persisted-принтам (`prints`), а не по 5-минутному окну снапшота: hook
+разворачивается дольше одной M5-свечи. Флаг `FLOWZONE_HOOK_ENABLED`, окно
+поиска `FLOWZONE_HOOK_LOOKBACK_SEC=3600` (операционный лимит свежести и объёма
+чтения из SQLite, не торговый порог).
+
+> До 2026-07-29 сетапа в боте не было вообще.
 
 ---
 
@@ -323,15 +429,25 @@ VAH/VAL, подтверждённые несколькими профилями,
 
 > Цитата канона: *«one in London session and one in New York session.»*
 
-> **[НАШЕ] адаптация под крипто (D2).** Канон-автор в «The Only Orderflow Guide»
-> уточняет: *«I only use the cash session profile… London not so valuable for US
-> indices»* — то есть для NQ автор держит **одно NY cash-окно**. На крипто
-> (BTC/ETH/SOL) cash-сессии нет (24/7), поэтому мы используем **London + NY**
-> как два ликвидных окна и per-session профиль, сбрасываемый при смене окна. Это
-> оправданная адаптация под крипто-ликвидность (не канон-буква), фрагментирует
-> профиль на два окна. Aльтернатива (одно окно) на крипто проигрывает по
-> числу читаемых сетапов. Решение — [НАШЕ], reversible через
-> `FLOWZONE_SESSION_WINDOWS`.
+> **C4 (2026-07-29): одна сессия, выбранная по объёму — [КАНОН].** Автор
+> формулирует правило явно: *«I only trade in the New York session for US
+> indices because it's where the majority of the volume get traded and I find it
+> from statistical validation the London session to be usually for US indices
+> not so valuable to add to the profile. So I only use the cash session
+> profile»* (28:54). То есть сессия **одна**, и выбрана она по доле объёма.
+>
+> Для крипты (24/7, cash-сессии нет) окно выбрано **измерением**, а не
+> аналогией: `scripts/flowzone_session_volume.py`, 1000 часовых баров ≈41 день,
+> среднее по BTC/ETH/SOL с нормировкой внутри символа — пик приходится на
+> 13:00 (8.9%), 14:00 (8.3%), 15:00 (7.6%) UTC; окно **NY 12:00–21:00 держит
+> 51.4%** оборота за 9ч против 46.8% у London 07:00–16:00. Объединение
+> 07:00–21:00 даёт 67.2%, но за 14ч — то есть разбавляет профиль пятью часами
+> низкой активности ради 15.8 п.п.
+>
+> Итог: `session_windows_utc = "12:00-21:00"`. Раньше окна London и NY
+> склеивались в непрерывный блок 07:00–21:00 (`merged_segments`), и профиль
+> строился по 14 часам — это и было расхождение с каноном, задокументированное
+> как «[НАШЕ] адаптация D2». Reversible через `FLOWZONE_SESSION_WINDOWS_UTC`.
 
 ### 6.2 Масштаб профиля и входа
 Канон задаёт масштаб НЕ числом баров, а структурно:
@@ -693,5 +809,55 @@ D1-D8 (согласовано с пользователем — «все пер�
 форвард-эксперименту, live-гейтинг — отдельной правкой по данным. Файлы:
 `config/settings.py`, `analysis/context.py`, `analysis/volume_profile.py`,
 `analysis/orderflow.py`, `tests/test_flowzone_bot.py`, `STRATEGY_FLOWZONE.md`.
+
+### 11.8 Строгий канон по дословным транскриптам (2026-07-29, C1-C5)
+
+Аудит D1-D8 (§11.7) опирался на выдержки. 2026-07-29 удалось получить **полные
+транскрипты** роликов Fabervaale ENG (sozai.app; сам YouTube отдаёт
+`LOGIN_REQUIRED` для yt-dlp и прямого fetch). Сверка по дословному тексту
+показала, что часть решений §11.7 была основана на неверной атрибуции: три
+механики, помеченные как «[НАШЕ]» и **выключенные**, в ролике звучат как
+базовые практики автора, а один сетап отсутствовал целиком.
+
+Пользователь подтвердил приведение к строгому канону со всеми пунктами.
+
+- **C1 — merge профилей включён в live-путь (§3.5).** Канон 31:14-32:50, четыре
+  повтора, критерий «overlapping on the same level». Добавлены
+  `value_areas_overlap`, `_merged_session_profile`, таблица `session_profiles`
+  (профили прошлых сессий не восстановимы из `prints` — retention 6ч).
+  `profile_merge_enabled` false → **true**.
+- **C2 — initiative и exhaustion включены (§4.1).** Канон 37:03 перечисляет три
+  паттерна исполнения. Initiative стал вторым триггером входа рядом с
+  absorption; exhaustion — стадией 3 сопровождения (фиксация прибыли, канон
+  «Signature Model» 06:04), не входом: бот торгует только continuation.
+  `initiative_exhaustion_enabled` false → **true**.
+- **C3 — форма профиля гейтит направление (§2.1).** Канон 34:32: *«Is not a P
+  shape. So it's still balance… indecision»*. `classify` получил `shape_gate`;
+  тяжёлый хвост без направленной дельты в самом хвосте больше не даёт тренд.
+- **C4 — одна сессия вместо склейки London+NY (§6.1).** Канон 28:54: одна
+  сессия, выбранная по доле объёма. Окно для крипты измерено
+  (`scripts/flowzone_session_volume.py`): NY 12:00-21:00 = 51.4% оборота за 9ч
+  против 46.8% у London за те же 9ч; склейка 07:00-21:00 = 67.2%, но за 14ч.
+  `session_windows_utc` `"07:00-16:00,12:00-21:00"` → **`"12:00-21:00"`**.
+- **C5 — добавлен сетап hook / failed auction (§4.2).** Канон 26:17 и 27:20,
+  *«one really profitable setup with high win rate»*; в боте отсутствовал.
+  Новый модуль `analysis/hook.py`, ветка `strategy._evaluate_hook`, поиск по
+  persisted-принтам. Порог «не приняли» выведен из VA 68%, новых
+  magic-number-ов нет.
+
+Телеметрия переведена в непрерывные скаляры (`init_prev` с долей дельты и
+флагом подтверждения, `vratio` = плотность ленты / EMA): бинарные защёлки дали
+2/16 покрытия за неделю, на таком темпе порог в 100 сделок (`sample-size.mdc`)
+недостижим.
+
+Тестовые фикстуры `_down_elongated_buckets` / `_short_reload_profile` держали
+нисходящий день с **покупательской** дельтой в нижнем хвосте (весь профиль был
+buy-only ради краткости). Под гейтом C3 канон справедливо считает такой день
+indecision, поэтому хвосты приведены к sell-доминанте — это исправление
+фикстуры под описанный ею же сценарий, а не подгонка под тест.
+
+Файлы: `config/settings.py`, `analysis/{context,volume_profile,orderflow,hook,
+strategy,session,telemetry}.py`, `app/main.py`, `trading/executor.py`,
+`state/db.py`, `scripts/flowzone_session_volume.py`, `tests/test_flowzone_bot.py`.
 
 

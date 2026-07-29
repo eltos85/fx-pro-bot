@@ -141,22 +141,60 @@ class FlowzoneSettings(BaseSettings):
     # = направленное принятие той же грейд-доли», 68%). Не тюнинг под P&L;
     # reversible через env (no-data-fitting.mdc).
     context_accept_frac: float = Field(default=0.68)
-    # D4: форма профиля (P-shape / double-distribution / balance / shift) —
-    # обогащение `ctx.shape`, НЕ гейтит вход (бинарный trend/balance `classify`
-    # гейтит как прежде). Канон-нюанс (Dalton + «The Only Orderflow Guide»),
-    # новая классификация не меняет торговое решение без OOS-валидации
-    # (no-data-fitting.mdc). Флаг зарезервирован под будущий gating-эксперимент.
+    # C3 (было D4): форма профиля ГЕЙТИТ направление аукциона. Канон 34:32 —
+    # *«from a down profile, you go in an up profile. Is not a P shape. So it's
+    # still balance. You can use this as indecision.»* Тренд принимается только
+    # при P-shape в сторону acceptance (тяжёлый хвост + направленная дельта
+    # В ХВОСТЕ) или при double distribution (канон 31:31). До 2026-07-29 форма
+    # была лишь обогащением `ctx.shape` — это и есть расхождение с каноном.
+    # False → старое поведение (только acceptance вне VA), для A/B через env.
     profile_shape_enabled: bool = Field(default=True)
-    # D3: composite / double-day profile merge (канон «merge them… double day
-    # profile»). Утилита `volume_profile.merge_profiles` готова; в live-путь НЕ
-    # подключена по умолчанию — включение composite-зон как торгового критерия
-    # требует OOS-валидации (no-data-fitting.mdc, strategy-guard.mdc).
-    profile_merge_enabled: bool = Field(default=False)
-    # D7: initiative auction / exhaustion — доп. order-flow паттерны (канон «The
-    # Only Orderflow Guide»). Детекторы `orderflow.detect_initiative` /
-    # `detect_exhaustion` готовы; в live-вход НЕ гейтят по умолчанию — основной
-    # канон-сетап absorption-reload (§4); новые триггеры требуют OOS-валидации.
-    initiative_exhaustion_enabled: bool = Field(default=False)
+    # C1 (было D3): composite / double-day profile merge. Канон 31:14 —
+    # *«these two profile can be merged. You can merge them… when they are
+    # overlapping on the same level»*, 31:59 — *«do a double day profile on a
+    # single level and you can have a really precise value area low point»*.
+    # Это базовая практика автора, а не наша утилита: до 2026-07-29 merge был
+    # помечен [НАШЕ] и выключен — расхождение с каноном. Сливаются профили
+    # предыдущих сессий, у которых value area ПЕРЕСЕКАЕТСЯ с текущей.
+    profile_merge_enabled: bool = Field(default=True)
+    # Сколько предыдущих сессий рассматривать как кандидатов на merge. Канон
+    # показывает склейку двух и трёх профилей («three profile on an horizontal
+    # level also we can merge them»), поэтому 3 — верх канон-диапазона.
+    profile_merge_lookback: int = Field(default=3)
+    # C2 (было D7): initiative auction + exhaustion. Канон 37:03 перечисляет три
+    # равноправных паттерна исполнения: *«we saw the absorption, we saw the
+    # exhaustion, we saw the initiative auction»*. До 2026-07-29 работал только
+    # absorption — расхождение с каноном.
+    #   • initiative — ВТОРОЙ триггер входа рядом с absorption («The Simplest
+    #     Orderflow Trading Model»: *«we can use this as a confirmation trigger
+    #     to go long, or maybe you can see an exhaustion… you can take a
+    #     momentum trade»*);
+    #   • exhaustion — НЕ вход (бот торгует только continuation), а ФИКСАЦИЯ
+    #     прибыли: «My Signature Orderflow Model» 06:04 — *«this selling
+    #     pressure is almost exhausted… I take out my position»*.
+    initiative_exhaustion_enabled: bool = Field(default=True)
+    # Порог «сильной» направленной дельты для initiative (доля |net| от объёма
+    # окна). 0.30 — нейтральный порог односторонности, не тюнинг под P&L.
+    initiative_min_delta_frac: float = Field(default=0.30)
+    # Окно оценки exhaustion при сопровождении позиции (сек).
+    exhaustion_window_sec: float = Field(default=300.0)
+    # Затухание: объём второй половины окна ≤ N × первой (канон «decreasing
+    # volume», 18:28). Встречная агрессия в последней трети окна ≥ N (канон
+    # «contrarian imbalance» на экстремуме).
+    exhaustion_min_decay: float = Field(default=0.80)
+    exhaustion_min_contrarian_frac: float = Field(default=0.60)
+
+    # ─── C5: сетап hook / failed auction (канон 26:17, 27:20) ────────────
+    # *«they do a failed auction, they try to break, they get rejected… when you
+    # go back inside, you have your continuation trade»*; *«This is one really
+    # profitable setup with high win rate»*. До 2026-07-29 сетапа не было
+    # вообще. Порог «не приняли» берётся из value_area_pct (см. analysis/hook),
+    # отдельного magic-number нет.
+    hook_enabled: bool = Field(default=True)
+    # Окно persisted-потока для поиска вылазки (сек). ОПЕРАЦИОННЫЙ лимит объёма
+    # чтения из SQLite и свежести сетапа, а не торговый порог: вылазка,
+    # начавшаяся час назад и до сих пор не разрешившаяся, уже не «hook».
+    hook_lookback_sec: float = Field(default=3600.0)
 
     # ─── Поток: big-trades + absorption-триггер (фаза 3, канон STRATEGY §3-4) ─
     # Big trade = крупный исполненный принт (STRATEGY §3.3 «volume got support by
@@ -295,12 +333,21 @@ class FlowzoneSettings(BaseSettings):
     reload_cooldown_sec: float = Field(default=10.0)
 
     # ─── Session gate (фаза 6, канон STRATEGY §6.1) ──────────────────────
-    # Торгуем только в активные сессии London/NY (ликвидность нужна для absorption/
-    # big-trades; вне сессий поток разрежен — §6.1, §8). Окна UTC (Bybit — UTC):
-    # London ≈07:00-16:00, NY ≈12:00-21:00 (каноничные FX-сессии, BIS/Investopedia).
+    # C4: ОДНА сессия, та, где торгуется основной объём — и торгуем в ней, и по
+    # ней же строим профиль. Канон («The Only Orderflow Guide» 28:54): *«I only
+    # trade in the New York session… because it's where the majority of the
+    # volume get traded and I find it from statistical validation the London
+    # session to be usually for US indices not so valuable to add to the
+    # profile. So I only use the cash session profile.»* Раньше склеивали
+    # London+NY в один 14-часовой блок 07:00-21:00 — это противоречит канону:
+    # профиль размывался сессией, которую автор осознанно исключает.
+    # Окно выбрано ИЗМЕРЕНИЕМ, не аналогией с US indices (крипта 24/7, «cash
+    # session» не определена): scripts/flowzone_session_volume.py, 1000 часовых
+    # баров ≈41 день, среднее по BTC/ETH/SOL — NY 12-21 = 51.4% оборота за 9ч
+    # против London 07-16 = 46.8%; пик 13:00 (8.9%), 14:00 (8.3%), 15:00 (7.6%).
     # Пустая строка/выкл → круглосуточно. Окна — операционные, не торговый порог.
     session_gate_enabled: bool = Field(default=True)
-    session_windows_utc: str = Field(default="07:00-16:00,12:00-21:00")
+    session_windows_utc: str = Field(default="12:00-21:00")
 
     # ─── Telegram (репорты в чат ai_trader, префикс [flowzone]) ──────────
     telegram_enabled: bool = Field(default=False)

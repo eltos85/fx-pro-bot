@@ -1,16 +1,23 @@
 """Session gate flowzone_bot (STRATEGY §6.1).
 
-Канон: входы привязаны к активным сессиям — **London** и **New York**. Высокая
-ликвидность сессий нужна, чтобы absorption и big trades были читаемы; ВНЕ
-активных сессий поток разрежен → методика НЕ применяется (§6.1, §8 анти-канон).
+Канон (C4, «The Only Orderflow Guide» 28:54): торгуем и строим профиль по
+**ОДНОЙ** сессии — той, где проходит основной объём. *«I only trade in the New
+York session for US indices because it's where the majority of the volume get
+traded and I find it from statistical validation the London session to be
+usually for US indices not so valuable to add to the profile. So I only use the
+cash session profile.»* Высокая ликвидность нужна, чтобы absorption и big
+trades были читаемы; ВНЕ сессии поток разрежен → методика НЕ применяется
+(§6.1, §8 анти-канон).
 
-Окна заданы в UTC (биржа Bybit — UTC). Каноничные определения сессий FX
-(BIS Triennial Survey; Investopedia «Forex Trading Sessions»):
-- **London** ≈ 07:00–16:00 UTC.
-- **New York** ≈ 12:00–21:00 UTC (перекрытие с London 12:00–16:00 — пик
-  ликвидности).
+Для крипты (24/7, «cash session» не определена) окно выбрано измерением
+оборота, а не аналогией с US indices: ``scripts/flowzone_session_volume.py`` —
+NY 12:00–21:00 UTC несёт 51.4% оборота за 9ч против 46.8% у London 07:00–16:00
+(1000 часовых баров ≈41 день, BTC/ETH/SOL). До 2026-07-29 окна London и NY
+склеивались в блок 07:00–21:00; это давало 14-часовой профиль вместо
+сессионного и противоречило канону.
 
-Окна — операционные (не торговый эдж-порог), настраиваются через env
+Модуль по-прежнему поддерживает несколько окон (``merged_segments``,
+переход через полночь) — это операционная механика, настраиваемая через env
 ``FLOWZONE_SESSION_WINDOWS_UTC``. Функции чистые, тестируются на фикстурах.
 """
 from __future__ import annotations

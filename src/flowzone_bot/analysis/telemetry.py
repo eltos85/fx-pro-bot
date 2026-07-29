@@ -7,12 +7,16 @@ sample-size.mdc). Модуль пишет в ``reasons`` сделки и в ло
 +$54.94) от «флапа» (ложный переворот, кейсы #531/#532 06.07.2026 12:25-12:34):
 
 1. **init_prev** — initiative-импульс ПРЕДЫДУЩЕЙ M5-ноги, до текущего
-   absorption-окна (направление + возраст + alignment со стороной сделки).
-   Канон: направление, рождённое инициативной волной (объём ×10-20,
+   absorption-окна (направление + сила дельты + возраст + alignment со стороной
+   сделки). Канон: направление, рождённое инициативной волной (объём ×10-20,
    односторонняя дельта), живёт долго. В v1 initiative ошибочно считался на том
    же окне, где стратегия ищет поглощаемую контр-агрессию: 64/81 сделок были
    ``counter``, включая все top-10 wins. Исправлено 24.07.2026: источник —
    persisted prints окна ``[now-2×M5, now-M5)``.
+   С 29.07.2026 пишется НЕПРЕРЫВНО (доля дельты + флаг подтверждения), а не
+   только при confirmed: бинарная защёлка давала 2/16 покрытия при базовой
+   частоте подтверждения 25-34% — на таком темпе выборка в 100 сделок
+   (sample-size.mdc) не набирается никогда.
 2. **dwell_struct** — сколько секунд цена НЕПРЕРЫВНО держится за ЗНАЧИМЫМ
    структурным экстремумом: max(swing highs) / min(swing lows) всего M5-lookback,
    а не за ближайшим фракталом. Канон «accepted after the breakout» = процесс
@@ -25,6 +29,10 @@ sample-size.mdc). Модуль пишет в ``reasons`` сделки и в ло
    направление. После шока профиль перестраивается 30-60 мин, мгновенный
    classify ненадёжен. В v1 shock не истекал: 50/81 сделок получили возраст
    >6ч (до 194 тыс. сек). Исправлено: TTL=60 мин + reset на новом session anchor.
+   Рядом с дискретным событием с 29.07.2026 пишется НЕПРЕРЫВНЫЙ ``vratio`` =
+   тиков в окне / базовая EMA. Причина та же: за 5 суток после TTL-фикса шок
+   (порог ×4) не сработал ни разу — реплей по тикам дал максимум ×2.1-3.0, то
+   есть дискретное поле не наберёт статистику, а сам ratio доступен всегда.
 
 Технические пороги ниже (EMA halflife, множитель шока, троттлинг) — параметры
 НАБЛЮДАЕМОСТИ (anti-noise), не торговые: они влияют только на содержимое
@@ -72,9 +80,11 @@ class DirectionTelemetry:
         self._rate_ema: dict[str, float] = {}
         self._rate_ts: dict[str, float] = {}      # ts последнего EMA-апдейта
         self._rate_started: dict[str, float] = {}  # ts первого апдейта (warmup)
+        self._rate_ratio: dict[str, float] = {}   # непрерывный n/EMA (vratio)
         self._shock: dict[str, tuple[float, str]] = {}   # (ts, 'up'|'down')
-        # Initiative только из ПРЕДЫДУЩЕЙ M5-ноги (refresh_preceding_initiative).
-        self._init: dict[str, tuple[float, str]] = {}    # (last print ts, up|down)
+        # Initiative только из ПРЕДЫДУЩЕЙ M5-ноги (refresh_preceding_initiative):
+        # (ts последнего принта, up|down, доля дельты, confirmed).
+        self._init: dict[str, tuple[float, str, float, bool]] = {}
         self._dwell_up: dict[str, float] = {}      # ts выше major swing high
         self._dwell_dn: dict[str, float] = {}      # ts ниже major swing low
         self._struct_hi: dict[str, float] = {}
@@ -103,6 +113,7 @@ class DirectionTelemetry:
         self._rate_ema.pop(symbol, None)
         self._rate_ts.pop(symbol, None)
         self._rate_started.pop(symbol, None)
+        self._rate_ratio.pop(symbol, None)
         self._shock.pop(symbol, None)
         self._init.pop(symbol, None)
         self._dwell_up.pop(symbol, None)
@@ -128,6 +139,11 @@ class DirectionTelemetry:
         ema = self._rate_ema.get(symbol)
         started = self._rate_started.setdefault(symbol, now)
         warmed = (now - started) >= _WARMUP_SEC and ema is not None and ema > 0
+        # непрерывный аналог шока: во сколько раз лента гуще базовой EMA.
+        # Пишется всегда (после прогрева) — дискретный шок ×4 слишком редок,
+        # чтобы набрать выборку.
+        if warmed:
+            self._rate_ratio[symbol] = n / ema
         # детекция ДО апдейта EMA — шок не должен мгновенно раздувать базу
         if warmed and n >= _SHOCK_MIN_TRADES and n >= _SHOCK_MULT * ema:
             trades = snap.trades
@@ -150,16 +166,24 @@ class DirectionTelemetry:
         Вызывающий передаёт persisted prints ``[now-2×window, now-window)``.
         Текущее absorption-окно намеренно исключено: его контр-агрессия — часть
         entry trigger, а не направление предшествующего импульса.
+
+        Пишем результат ВСЕГДА: направление и силу дельты ноги плюс флаг
+        ``confirmed``. Раньше состояние заполнялось только при подтверждении, и
+        поле пропадало из reasons в 88% сделок.
         """
         self._init.pop(symbol, None)
         if not trades:
             return
         thr = big_trade_threshold(trades, pct=self._big_pct)
-        for side, direction in (("long", "up"), ("short", "down")):
-            res = detect_initiative(trades, side, big_threshold=thr)
-            if res.confirmed:
-                self._init[symbol] = (trades[-1].ts, direction)
-                break
+        confirmed_side = next(
+            (d for s, d in (("long", "up"), ("short", "down"))
+             if detect_initiative(trades, s, big_threshold=thr).confirmed),
+            None)
+        # Направление ноги — по знаку дельты, независимо от подтверждения.
+        probe = detect_initiative(trades, "long", big_threshold=thr)
+        direction = confirmed_side or ("up" if probe.net_delta >= 0 else "down")
+        self._init[symbol] = (trades[-1].ts, direction, probe.delta_frac,
+                              confirmed_side is not None)
 
     def _update_dwell(self, symbol: str, now: float, px: float,
                       swings: list[Swing]) -> None:
@@ -191,6 +215,10 @@ class DirectionTelemetry:
         if init is not None:
             out["init_dir"] = init[1]
             out["init_age_sec"] = max(now - init[0], 0.0)
+            out["init_frac"] = init[2]
+            out["init_confirmed"] = init[3]
+        if symbol in self._rate_ratio:
+            out["vratio"] = self._rate_ratio[symbol]
         shock = self._shock.get(symbol)
         if shock is not None:
             age = now - shock[0]
@@ -218,8 +246,9 @@ class DirectionTelemetry:
         """Компактная строка для reasons/лога. Разделитель полей — запятая
         (reasons сделки склеиваются через '+', не смешиваем).
 
-        Пример: ``tele=init_prev:down:412s:same,dwell_struct_dn:35s,
-        dStructHi:123bp,dStructLo:-18bp,dHi:140bp,dLo:9bp,shock:down:1520s``"""
+        Пример: ``tele=init_prev:down:41%:conf:412s:same,vratio:1.4x,
+        dwell_struct_dn:35s,dStructHi:123bp,dStructLo:-18bp,dHi:140bp,
+        dLo:9bp,shock:down:1520s``"""
         f = self.features(symbol, now, last_price)
         parts: list[str] = []
         if "init_dir" in f:
@@ -227,7 +256,11 @@ class DirectionTelemetry:
             if side in ("long", "short"):
                 want = "up" if side == "long" else "down"
                 align = ":same" if f["init_dir"] == want else ":counter"
-            parts.append(f"init_prev:{f['init_dir']}:{f['init_age_sec']:.0f}s{align}")
+            conf = ":conf" if f.get("init_confirmed") else ""
+            parts.append(f"init_prev:{f['init_dir']}:{f['init_frac']:.0%}"
+                         f"{conf}:{f['init_age_sec']:.0f}s{align}")
+        if "vratio" in f:
+            parts.append(f"vratio:{f['vratio']:.2f}x")
         if "dwell_struct_up_sec" in f:
             parts.append(f"dwell_struct_up:{f['dwell_struct_up_sec']:.0f}s")
         if "dwell_struct_dn_sec" in f:

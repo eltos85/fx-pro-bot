@@ -52,9 +52,10 @@ TREND_DOWN = "trend_down"
 BALANCE = "balance"
 UNKNOWN = "unknown"
 
-# Форма профиля (D4, канон-нюансы — Dalton/Steidlmayer + «The Only Orderflow
-# Guide»). НЕ гейтит вход (обогащение `ctx.shape`); вход гейтит бинарный
-# trend/balance `state` как прежде (no-data-fitting.mdc / strategy-guard.mdc).
+# Форма профиля (D4 → C3, канон Dalton/Steidlmayer + «The Only Orderflow
+# Guide»). С 2026-07-29 форма ГЕЙТИТ направление (см. `classify`, параметр
+# `shape_gate`): канон 34:32 — *«from a down profile, you go in an up profile.
+# Is not a P shape. So it's still balance. You can use this as indecision.»*
 P_SHAPE_UP = "p_shape_up"            # тяжёлый верхний хвост + buy-delta → bullish next
 P_SHAPE_DOWN = "p_shape_down"        # тяжёлый нижний хвост + sell-delta → bearish next
 DOUBLE_DISTRIBUTION = "double_distribution"  # два HVN-кластера через LVN-перешеек
@@ -102,10 +103,10 @@ def classify_shape(profile: VolumeProfile | None, accept_above: float,
     - **Double distribution** — два HVN-кластера, разделённых LVN-перешейком →
       два dealing range, быстрый проход по LVN.
     - **Balance** — хвосты слабые (< accept_frac с обеих сторон), симметрия.
-    - **Normal** — колокол вокруг POC, хвостов вне VA нет.
+    - **Normal** — колокол вокруг POC либо тяжёлый хвост БЕЗ подтверждающей
+      дельты (объём вне VA есть, но агрессия в хвосте не направлена).
 
-    НЕ гейтит вход (обогащение); вход определяется бинарным `classify` (trend vs
-    balance по acceptance вне VA).
+    Результат гейтит направление в `classify` при ``shape_gate=True`` (C3).
     """
     if profile is None:
         return UNKNOWN
@@ -136,7 +137,8 @@ def classify_shape(profile: VolumeProfile | None, accept_above: float,
 
 def classify(profile: VolumeProfile | None, last_price: float | None, *,
              accept_frac: float = 0.68,
-             value_area_pct: float = 0.68) -> Context:
+             value_area_pct: float = 0.68,
+             shape_gate: bool = True) -> Context:
     """Определить контекст по ФОРМЕ профиля (Steidlmayer/Dalton, STRATEGY §2).
 
     Тренд = направленный acceptance ВНЕ value area: объём, принятый в ХВОСТАХ
@@ -152,6 +154,15 @@ def classify(profile: VolumeProfile | None, last_price: float | None, *,
     случайными принтами за VA давал бы «тренд» по шуму (VA-алгоритм к тому же
     overshoot-ит номинал → хвосты меньше 32%). Порог выведен из канон-константы
     68% VA + симметрии, без нового magic-number (no-data-fitting.mdc).
+
+    C3 (``shape_gate=True``, канон 34:32): одного acceptance вне VA НЕ хватает —
+    форма профиля обязана подтверждать направление. *«from a down profile, you
+    go in an up profile. Is not a P shape. So it's still balance. You can use
+    this as indecision.»* Тренд остаётся только при P-shape в ту же сторону
+    (тяжёлый хвост + направленная дельта В ХВОСТЕ — «aggressive buyers/sellers»)
+    либо при double distribution (канон 31:31: два dealing range через тонкий
+    LVN — направленный день). Тяжёлый хвост без подтверждающей дельты даёт
+    `NORMAL` → баланс, не торгуем.
 
     Это МГНОВЕННЫЙ режим (форма дневного профиля); он флапает при миграции VA на
     откате. Удержание направления (канон «второе движение») — в
@@ -184,8 +195,13 @@ def classify(profile: VolumeProfile | None, last_price: float | None, *,
         state = TREND_UP
     else:
         state = BALANCE
+    shape = classify_shape(profile, accept_above, accept_below,
+                           accept_frac=accept_frac)
+    if shape_gate:
+        allowed = {TREND_DOWN: (P_SHAPE_DOWN, DOUBLE_DISTRIBUTION),
+                   TREND_UP: (P_SHAPE_UP, DOUBLE_DISTRIBUTION)}.get(state)
+        if allowed is not None and shape not in allowed:
+            state = BALANCE
     return Context(state, vah=vah, val=val, poc=poc,
                    accept_above=accept_above, accept_below=accept_below,
-                   last_price=last_price,
-                   shape=classify_shape(profile, accept_above, accept_below,
-                                        accept_frac=accept_frac))
+                   last_price=last_price, shape=shape)

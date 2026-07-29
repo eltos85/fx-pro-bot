@@ -27,7 +27,9 @@ from flowzone_bot.analysis.session import (in_session, parse_windows,
 from flowzone_bot.analysis.strategy import evaluate
 from flowzone_bot.analysis.swings import Swing, find_swings
 from flowzone_bot.analysis.telemetry import DirectionTelemetry
-from flowzone_bot.analysis.volume_profile import build_profile
+from flowzone_bot.analysis.volume_profile import (VolumeProfile, build_profile,
+                                                  merge_profiles,
+                                                  value_areas_overlap)
 from flowzone_bot.config.settings import load_settings
 from flowzone_bot.data.aggregates import SymbolState, TradePrint
 from flowzone_bot.data.exec_stream import BybitExecStream
@@ -214,6 +216,7 @@ def run() -> None:
             # heartbeat раз в 60с (+ контекст аукциона по символам)
             if now - last_heartbeat >= 60:
                 _heartbeat(states, db, stream, cfg, in_active_session, auction)
+                _persist_session_profiles(states, db, cfg, now)
                 last_heartbeat = now
 
             elapsed = time.monotonic() - loop_start
@@ -255,7 +258,7 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         swings = _swings_for(client, cfg, sym, swing_cache, now)
         prev_dir = auction.peek(sym)
         _ctx_profile, ctx = _context_for(snap, cfg, auction=auction,
-                                         swings=swings, now=now)
+                                         swings=swings, now=now, db=db)
         # лог переворота/установки латча + телеметрия (mining флапов, D-audit
         # 06.07: кейсы #531/#532 — ложный переворот после volume-shock).
         cur_dir = auction.peek(sym)
@@ -271,13 +274,14 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
             continue
         # per-swing профиль зоны (канон §3: профиль ПРЕДЫДУЩЕЙ swing-точки из
         # исполненного потока, окно [ts prev swing, now]). None → нет зоны.
+        # None → зоны нет; сетап hook (C5) её не требует, поэтому не выходим.
         swing_profile = _swing_profile_for(db, cfg, sym, swings,
                                            ctx.trade_side, snap.vp_bucket_size,
                                            now)
-        if swing_profile is None:
-            continue
+        hook_prints = _hook_prints_for(db, cfg, sym, snap, now)
         try:
-            sig = evaluate(snap, ctx, swing_profile, cfg=cfg, swings=swings)
+            sig = evaluate(snap, ctx, swing_profile, cfg=cfg, swings=swings,
+                           hook_prints=hook_prints)
         except Exception:
             log.exception("evaluate %s failed", sym)
             continue
@@ -345,6 +349,29 @@ def _refresh_preceding_initiative(
         telemetry.refresh_preceding_initiative(symbol, [])
 
 
+def _hook_prints_for(db: FlowzoneDB, cfg, symbol: str, snap,
+                     now: float) -> list[TradePrint] | None:
+    """Persisted-поток для сетапа hook (C5): вылазка за границу VA и возврат.
+
+    5-минутного окна снапшота не хватает — failed auction разворачивается
+    дольше. Читаем принты с начала сессии, но не глубже ``hook_lookback_sec``
+    (операционный лимит объёма чтения и свежести сетапа).
+    """
+    if not getattr(cfg, "hook_enabled", False):
+        return None
+    anchor = snap.vp_session_start
+    if anchor is None:
+        return None
+    since = max(float(anchor), now - float(cfg.hook_lookback_sec))
+    try:
+        rows = db.prints_since(symbol, since, now)
+    except Exception:
+        log.exception("hook prints %s failed", symbol)
+        return None
+    return [TradePrint(float(ts), float(price), float(size), str(side))
+            for ts, price, size, side in rows]
+
+
 def _swings_for(client, cfg, symbol: str,
                 cache: dict[str, tuple[float, list[Swing]]],
                 now: float) -> list[Swing]:
@@ -404,11 +431,19 @@ def _swing_profile_for(db, cfg, symbol: str, swings: list[Swing],
 
 
 def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
-                 swings: list[Swing] | None = None, now: float | None = None):
+                 swings: list[Swing] | None = None, now: float | None = None,
+                 db: FlowzoneDB | None = None):
     """Контекст аукциона по символу: режим по ФОРМЕ per-SESSION footprint-профиля
     (направленный acceptance вне value area, STRATEGY §2). Якорь профиля — старт
-    текущего London/NY окна (snap.vp_session_start). None если вне сессии или
-    профиль ещё не накоплен (BALANCE → не торгуем).
+    текущей канон-сессии (snap.vp_session_start, C4: одна сессия с основным
+    объёмом). None если вне сессии или профиль ещё не накоплен (BALANCE → не
+    торгуем).
+
+    C1: если передан ``db`` и включён ``profile_merge_enabled`` — контекст
+    считается по composite-профилю (текущая сессия + перекрывающиеся по value
+    area предыдущие, канон 31:14). Возвращается ИМЕННО composite: канон
+    подчёркивает, что merge даёт «really precise value area low point», то есть
+    уточнённые границы и есть рабочие уровни.
 
     Если передан ``auction`` — мгновенный режим латчится (канон §2: держим
     направление, переворот только по встречному структурному пробою ``swings``).
@@ -420,12 +455,70 @@ def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
                             value_area_pct=cfg.value_area_pct)
     if profile is None:
         return None, None
+    if db is not None and cfg.profile_merge_enabled:
+        profile = _merged_session_profile(db, cfg, snap, profile)
     inst = classify(profile, snap.last_price, accept_frac=cfg.context_accept_frac,
-                    value_area_pct=cfg.value_area_pct)
+                    value_area_pct=cfg.value_area_pct,
+                    shape_gate=cfg.profile_shape_enabled)
     if auction is None:
         return profile, inst
     ctx = auction.update(snap.symbol, inst, snap.last_price, swings or [], now=now)
     return profile, ctx
+
+
+def _merged_session_profile(db: FlowzoneDB, cfg, snap,
+                            current: VolumeProfile) -> VolumeProfile:
+    """Composite текущей сессии с перекрывающимися предыдущими (C1, канон 31:14).
+
+    Сливаем только те прошлые сессии, чья value area пересекается с текущей —
+    канон merge-ит профили, «overlapping on the same level», а не подряд идущие.
+    Любая ошибка/несовместимость → возвращаем исходный профиль (merge не должен
+    ломать торговый путь).
+    """
+    try:
+        rows = db.recent_session_profiles(snap.symbol, snap.vp_session_start,
+                                          cfg.profile_merge_lookback)
+    except Exception:
+        log.exception("session profiles read %s failed", snap.symbol)
+        return current
+    group = [current]
+    for _start, bucket_size, buckets in rows:
+        if bucket_size != current.bucket_size:
+            continue
+        prev = build_profile(buckets, bucket_size,
+                             value_area_pct=cfg.value_area_pct)
+        if prev is None or not value_areas_overlap(current, prev):
+            continue
+        group.append(prev)
+    if len(group) == 1:
+        return current
+    return merge_profiles(group, value_area_pct=cfg.value_area_pct) or current
+
+
+def _persist_session_profiles(states: dict[str, SymbolState], db: FlowzoneDB,
+                              cfg, now: float) -> None:
+    """Сохранить профили текущих сессий (C1) + retention.
+
+    Профили прошлых сессий нельзя пересобрать из `prints` (retention 6ч),
+    поэтому текущий сессионный профиль периодически перезаписывается в БД и
+    после закрытия сессии остаётся итоговым снимком.
+    """
+    if not cfg.profile_merge_enabled:
+        return
+    for sym, st in states.items():
+        try:
+            snap = st.snapshot()
+            if snap.vp_session_start is None or not snap.vp_buckets:
+                continue
+            db.save_session_profile(sym, snap.vp_session_start,
+                                    snap.vp_bucket_size, snap.vp_buckets, ts=now)
+        except Exception:
+            log.exception("save session profile %s failed", sym)
+    keep_days = max(cfg.profile_merge_lookback, 1) + 4
+    try:
+        db.prune_session_profiles_before(now - keep_days * 86400.0)
+    except Exception:
+        log.exception("prune session profiles failed")
 
 
 def _heartbeat(states: dict[str, SymbolState], db: FlowzoneDB,

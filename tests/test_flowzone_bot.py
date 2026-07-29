@@ -18,7 +18,8 @@ from flowzone_bot.analysis.orderflow import (big_trade_threshold,
 from flowzone_bot.analysis.swings import (Swing, find_swings,
                                           nearest_swing_target, swing_targets)
 from flowzone_bot.analysis.volume_profile import (build_profile, find_hvn_lvn,
-                                                  find_ledges, merge_profiles)
+                                                  find_ledges, merge_profiles,
+                                                  value_areas_overlap)
 from flowzone_bot.analysis.zone import build_zones
 from flowzone_bot.data.aggregates import SymbolState, TradePrint
 
@@ -140,10 +141,20 @@ def test_find_ledges_sharp_drop():
 # Честная синтетика: ядро (≈80% объёма) даёт VA, дальний хвост = принятие вне VA.
 
 def _down_elongated_buckets() -> dict[int, tuple[float, float]]:
-    """Профиль, элонгированный ВНИЗ: тяжёлое ядро у idx20 + хвост ниже VAL."""
+    """Профиль, элонгированный ВНИЗ: тяжёлое ядро у idx20 + хвост ниже VAL.
+
+    Хвост SELL-доминантный: канон-день с acceptance ниже VAL — это P-shape down,
+    где направление принято агрессивными ПРОДАВЦАМИ (26:49 *«P-shapes where the
+    buyers are really aggressive»*, зеркально вниз). Раньше весь профиль был
+    buy-only ради краткости — такой «нисходящий» день с покупательской дельтой
+    в хвосте канон трактует как indecision (34:32), и гейт формы (C3) его
+    справедливо отвергает.
+    """
     core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}           # ≈80% → value area
     tail = {10: 15, 11: 15, 12: 15, 13: 15, 14: 15}            # принято НИЖЕ VAL
-    return {i: (float(v), 0.0) for i, v in {**core, **tail}.items()}
+    buckets = {i: (float(v), 0.0) for i, v in core.items()}
+    buckets.update({i: (0.0, float(v)) for i, v in tail.items()})
+    return buckets
 
 
 def _up_elongated_buckets() -> dict[int, tuple[float, float]]:
@@ -391,10 +402,16 @@ def _evictless_state_snapshot(buckets, bucket_size, trades, last_price, ts):
 
 def _short_reload_profile() -> dict[int, tuple[float, float]]:
     """Профиль элонгирован ВНИЗ (trend_down) + тяжёлое ядро idx118-122 как зона
-    reload-резистанса ВЫШЕ цены для шорта. Все корзины buy-only (delta=vol)."""
+    reload-резистанса ВЫШЕ цены для шорта.
+
+    Ядро buy-only (покупатели, которых будут поглощать в зоне), хвост ниже VAL
+    sell-доминантный — канон-P-shape вниз (см. `_down_elongated_buckets`).
+    """
     core = {120: 100, 121: 70, 119: 70, 122: 30, 118: 30}   # VA≈119-122, POC=120
     tail = {100: 15, 102: 15, 104: 15, 106: 15, 108: 15}    # принято НИЖЕ VAL
-    return {i: (float(v), 0.0) for i, v in {**core, **tail}.items()}
+    buckets = {i: (float(v), 0.0) for i, v in core.items()}
+    buckets.update({i: (0.0, float(v)) for i, v in tail.items()})
+    return buckets
 
 
 def _short_reload_trades(now: float) -> list[TradePrint]:
@@ -1769,9 +1786,46 @@ def test_telemetry_initiative_uses_explicit_preceding_window():
     assert abs(f["init_age_sec"] - 10.0) < 1e-6
     s_long = t.fmt("X", 1010.0, "long", 112.0)
     s_short = t.fmt("X", 1010.0, "short", 112.0)
-    assert "init_prev:up:10s:same" in s_long
-    assert "init_prev:up:10s:counter" in s_short
+    assert "init_prev:up:100%:conf:10s:same" in s_long
+    assert "init_prev:up:100%:conf:10s:counter" in s_short
     assert s_long.startswith("tele=")
+
+
+def test_telemetry_initiative_written_even_when_not_confirmed():
+    """Непрерывный скаляр: направление и сила дельты пишутся всегда.
+
+    Бинарная защёлка «только confirmed» давала 2/16 покрытия на живых сделках —
+    выборку в 100 сделок на таком темпе не набрать. Здесь дельта слабая
+    (buy/sell почти поровну), initiative НЕ подтверждён, но поле есть.
+    """
+    t = _make_telemetry()
+    previous = []
+    for i in range(24):
+        side = "Buy" if i % 2 == 0 else "Sell"
+        previous.append(TradePrint(976 + i, 100.0, 2.0, side))
+    t.refresh_preceding_initiative("X", previous)
+    f = t.features("X", 1010.0, 100.0)
+    assert f["init_confirmed"] is False
+    assert f["init_frac"] == 0.0
+    assert "init_prev:" in t.fmt("X", 1010.0, "long", 100.0)
+    assert ":conf:" not in t.fmt("X", 1010.0, "long", 100.0)
+
+
+def test_telemetry_vratio_is_continuous_after_warmup():
+    """vratio пишется всегда после прогрева, а дискретный shock — только ×4.
+
+    Реплей по тикам за 5.5ч дал максимум ×2.1-3.0 при пороге ×4: дискретное
+    поле не набирает статистику, непрерывное отношение доступно постоянно.
+    """
+    t = _make_telemetry()
+    base = [TradePrint(0.0, 100.0, 1.0, "Buy")] * 200
+    t.update("X", 0.0, _tele_snap(100.0, base), [])
+    t.update("X", 200.0, _tele_snap(100.0, base), [])
+    f = t.features("X", 200.0, 100.0)
+    assert "vratio" in f
+    assert 0.9 <= f["vratio"] <= 1.1     # лента ровная → отношение около 1
+    assert "shock_dir" not in f          # ×4 не достигнут
+    assert "vratio:" in t.fmt("X", 200.0, "long", 100.0)
 
 
 def test_telemetry_fmt_none_when_no_data():
@@ -1808,3 +1862,241 @@ def test_refresh_preceding_initiative_reads_previous_window_only():
     assert all(isinstance(t, TradePrint) for t in tele.trades)
     assert tele.trades[-1].ts == 700.0
 
+# ─── Строгий канон 2026-07-29 (C1-C5): merge, shape-гейт, initiative, hook ──
+
+
+class _CfgCanon(_Cfg):
+    """cfg с включённым полным каноном (C2/C5) — дефолты settings.py."""
+    value_area_pct = 0.68
+    initiative_exhaustion_enabled = True
+    initiative_min_delta_frac = 0.30
+    exhaustion_window_sec = 300.0
+    exhaustion_min_decay = 0.80
+    exhaustion_min_contrarian_frac = 0.60
+    hook_enabled = True
+    hook_lookback_sec = 3600.0
+
+
+# C3: форма профиля гейтит направление (канон 34:32 «Is not a P shape. So it's
+# still balance. You can use this as indecision.»)
+
+def _down_tail_without_sell_delta() -> dict[int, tuple[float, float]]:
+    """Acceptance ниже VAL есть, но хвост НАБРАН ПОКУПАТЕЛЯМИ — не P-shape."""
+    core = {20: 100, 21: 70, 19: 70, 22: 30, 18: 30}
+    tail = {10: 15, 11: 15, 12: 15, 13: 15, 14: 15}
+    return {i: (float(v), 0.0) for i, v in {**core, **tail}.items()}
+
+
+def test_shape_gate_rejects_heavy_tail_without_directional_delta():
+    prof = build_profile(_down_tail_without_sell_delta(), bucket_size=1.0)
+    gated = classify(prof, last_price=20.5, accept_frac=0.68)
+    assert gated.state == BALANCE          # канон: indecision, не тренд
+    assert gated.trade_side is None
+    # без гейта (старое поведение) тот же профиль давал trend_down
+    ungated = classify(prof, last_price=20.5, accept_frac=0.68, shape_gate=False)
+    assert ungated.state == TREND_DOWN
+
+
+def test_shape_gate_keeps_trend_when_tail_delta_confirms():
+    prof = build_profile(_down_elongated_buckets(), bucket_size=1.0)
+    ctx = classify(prof, last_price=20.5, accept_frac=0.68)
+    assert ctx.state == TREND_DOWN
+    assert ctx.shape in (P_SHAPE_DOWN, DOUBLE_DISTRIBUTION)
+
+
+# C1: merge перекрывающихся сессионных профилей (канон 31:14)
+
+def test_value_areas_overlap_detects_same_horizontal_level():
+    a = build_profile({20: (100.0, 0.0), 21: (70.0, 0.0), 19: (70.0, 0.0)}, 1.0)
+    same = build_profile({20: (90.0, 0.0), 21: (60.0, 0.0), 19: (60.0, 0.0)}, 1.0)
+    far = build_profile({80: (90.0, 0.0), 81: (60.0, 0.0), 79: (60.0, 0.0)}, 1.0)
+    assert value_areas_overlap(a, same)
+    assert not value_areas_overlap(a, far)
+
+
+def test_session_profile_survives_db_roundtrip(tmp_path):
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    buckets = {20: (100.0, 5.0), 21: (70.0, 1.0)}
+    db.save_session_profile("BTCUSDT", 1000.0, 0.5, buckets, ts=1100.0)
+    db.save_session_profile("BTCUSDT", 2000.0, 0.5, {30: (10.0, 0.0)}, ts=2100.0)
+    rows = db.recent_session_profiles("BTCUSDT", before_start=2000.0, limit=3)
+    assert len(rows) == 1                      # текущая сессия исключена
+    start, bucket_size, restored = rows[0]
+    assert start == 1000.0 and bucket_size == 0.5
+    assert restored == buckets                 # объёмы не потерялись
+    assert db.prune_session_profiles_before(1500.0) == 1
+    assert db.recent_session_profiles("BTCUSDT", before_start=9e9) != []
+    db.close()
+
+
+def test_merged_profile_sharpens_value_area_low():
+    """Канон 31:59: склейка перекрывающихся дней даёт «really precise VAL»."""
+    day1 = build_profile({20: (100.0, 0.0), 21: (60.0, 0.0), 19: (60.0, 0.0),
+                          18: (20.0, 0.0)}, 1.0)
+    day2 = build_profile({20: (90.0, 0.0), 21: (55.0, 0.0), 19: (80.0, 0.0),
+                          18: (25.0, 0.0)}, 1.0)
+    assert value_areas_overlap(day1, day2)
+    merged = merge_profiles([day1, day2])
+    assert merged is not None
+    assert merged.total_volume == day1.total_volume + day2.total_volume
+    assert merged.val <= day1.val or merged.val <= day2.val
+
+
+# C5: hook / failed auction (канон 26:17, 27:20)
+
+def _hook_prints_long(beyond_size: float) -> list[TradePrint]:
+    """Торговля внутри VA + вылазка ниже VAL заданного объёма."""
+    inside = [TradePrint(float(i), 105.0, 1.0, "Buy") for i in range(20)]
+    below = [TradePrint(20.0 + i, 98.0, beyond_size, "Sell") for i in range(3)]
+    return inside + below
+
+
+def test_detect_hook_confirms_rejected_excursion_below_val():
+    from flowzone_bot.analysis.hook import detect_hook
+    hook = detect_hook(_hook_prints_long(1.0), "long", vah=110.0, val=100.0,
+                       last_price=101.0)
+    assert hook.confirmed
+    assert hook.boundary == 100.0
+    assert hook.extreme == 98.0
+    assert hook.beyond_frac < 0.32          # не приняли снаружи
+
+
+def test_detect_hook_rejects_accepted_breakout():
+    """Если за границей наторговали много — это принятие, а не failed auction."""
+    from flowzone_bot.analysis.hook import detect_hook
+    hook = detect_hook(_hook_prints_long(20.0), "long", vah=110.0, val=100.0,
+                       last_price=101.0)
+    assert not hook.confirmed
+    assert "accepted_outside" in hook.reasons
+
+
+def test_detect_hook_requires_return_inside_value_area():
+    from flowzone_bot.analysis.hook import detect_hook
+    hook = detect_hook(_hook_prints_long(1.0), "long", vah=110.0, val=100.0,
+                       last_price=97.0)   # всё ещё снаружи
+    assert not hook.confirmed
+    assert "not_back_inside" in hook.reasons
+
+
+def test_evaluate_takes_hook_setup_when_no_confluence_zone():
+    from flowzone_bot.analysis.context import Context
+    from flowzone_bot.analysis.strategy import evaluate
+    ctx = Context(TREND_UP, vah=110.0, val=100.0, poc=105.0, last_price=101.0,
+                  shape=P_SHAPE_UP)
+    snap = _evictless_state_snapshot({}, 1.0, [], last_price=101.0, ts=1000.0)
+    swings = [type("S", (), {"kind": "high", "price": 115.0})()]
+    sig = evaluate(snap, ctx, None, cfg=_CfgCanon(), swings=swings,
+                   hook_prints=_hook_prints_long(1.0))
+    assert sig is not None
+    assert sig.side == "long"
+    assert "setup=hook" in sig.reasons
+    # стоп за экстремумом неудачной вылазки: принятие снаружи убивает тезис
+    assert sig.sl_level < 98.0
+    assert sig.tp_level == 115.0
+
+
+def test_evaluate_no_hook_when_disabled():
+    from flowzone_bot.analysis.context import Context
+    from flowzone_bot.analysis.strategy import evaluate
+    ctx = Context(TREND_UP, vah=110.0, val=100.0, poc=105.0, last_price=101.0,
+                  shape=P_SHAPE_UP)
+    snap = _evictless_state_snapshot({}, 1.0, [], last_price=101.0, ts=1000.0)
+    swings = [type("S", (), {"kind": "high", "price": 115.0})()]
+    assert evaluate(snap, ctx, None, cfg=_Cfg(), swings=swings,
+                    hook_prints=_hook_prints_long(1.0)) is None
+
+
+# C2: initiative — второй триггер входа, exhaustion — фиксация (канон 37:03)
+
+def _initiative_short_trades(now: float) -> list[TradePrint]:
+    """Momentum-вход: продавцы агрессируют И получают результат (цена падает).
+
+    Absorption здесь НЕ подтвердится — контр-сторона (Buy) не давила, её нечего
+    поглощать. Канон «The Simplest Orderflow Trading Model»: рынок не даёт
+    теста зоны с поглощением, берём momentum-триггер.
+    """
+    return [TradePrint(now - 100, 120.0, 8.0, "Sell"),
+            TradePrint(now - 60, 119.8, 8.0, "Sell"),
+            TradePrint(now - 10, 119.5, 2.0, "Buy")]
+
+
+def test_initiative_confirms_entry_when_absorption_absent():
+    from flowzone_bot.analysis.orderflow import detect_absorption
+    from flowzone_bot.analysis.strategy import evaluate
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
+    now = 1000.0
+    trades = _initiative_short_trades(now)
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, trades,
+                                     last_price=119.5, ts=now)
+    ctx = classify(prof, snap.last_price, accept_frac=0.68)
+    assert ctx.state == TREND_DOWN
+    thr = big_trade_threshold(trades, pct=0.90, min_samples=3)
+    assert not detect_absorption(trades, "short", big_threshold=thr).confirmed
+    swings = [type("S", (), {"kind": "low", "price": 95.0})()]
+    assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swings) is None
+    sig = evaluate(snap, ctx, prof, cfg=_CfgCanon(), swings=swings)
+    assert sig is not None
+    assert "trigger=initiative" in sig.reasons
+
+
+def test_absorption_still_preferred_over_initiative():
+    """Основной сетап §4 не должен подменяться momentum-вариантом."""
+    from flowzone_bot.analysis.strategy import evaluate
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
+    now = 1000.0
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
+                                     last_price=119.5, ts=now)
+    ctx = classify(prof, snap.last_price, accept_frac=0.68)
+    swings = [type("S", (), {"kind": "low", "price": 95.0})()]
+    sig = evaluate(snap, ctx, prof, cfg=_CfgCanon(), swings=swings)
+    assert sig is not None
+    assert "trigger=absorption" in sig.reasons
+
+
+class _ExhaustTrade:
+    def __init__(self, side="long", entry=100.0):
+        self.id = 1
+        self.side = side
+        self.entry = entry
+        self.qty = 1.0
+        self.mode = "paper"
+
+
+def _exhaustion_ready(cfg, trade, snap):
+    """Вызвать проверку стадии 3 без конструирования полного Executor."""
+    from flowzone_bot.trading.executor import Executor
+    ex = Executor.__new__(Executor)
+    ex._cfg = cfg
+    return Executor._exhaustion_exit_ready(ex, trade, snap)
+
+
+def _decaying_up_move(now: float) -> list[TradePrint]:
+    """Аптренд выдыхается: объём падает + продавцы забирают хвост окна."""
+    first = [TradePrint(now - 250 + i, 100.0 + i * 0.1, 4.0, "Buy")
+             for i in range(12)]
+    second = [TradePrint(now - 100 + i, 101.2, 1.0, "Buy") for i in range(6)]
+    tail = [TradePrint(now - 40 + i, 101.1, 3.0, "Sell") for i in range(9)]
+    return first + second + tail
+
+
+def test_exhaustion_exit_fires_on_fading_move_in_profit():
+    now = 1000.0
+    snap = type("S", (), {"last_price": 101.1, "ts": now,
+                          "trades": _decaying_up_move(now)})()
+    assert _exhaustion_ready(_CfgCanon(), _ExhaustTrade(entry=100.0), snap)
+
+
+def test_exhaustion_exit_skipped_when_position_in_loss():
+    """Канон фиксирует ПРИБЫЛЬ; убыток отдаём стопу, а не exhaustion-выходу."""
+    now = 1000.0
+    snap = type("S", (), {"last_price": 101.1, "ts": now,
+                          "trades": _decaying_up_move(now)})()
+    assert not _exhaustion_ready(_CfgCanon(), _ExhaustTrade(entry=105.0), snap)
+
+
+def test_exhaustion_exit_disabled_by_flag():
+    now = 1000.0
+    snap = type("S", (), {"last_price": 101.1, "ts": now,
+                          "trades": _decaying_up_move(now)})()
+    assert not _exhaustion_ready(_Cfg(), _ExhaustTrade(entry=100.0), snap)

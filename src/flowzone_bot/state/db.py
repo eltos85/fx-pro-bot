@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -50,6 +51,14 @@ CREATE TABLE IF NOT EXISTS prints (
     side TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_prints_symbol_ts ON prints(symbol, ts);
+CREATE TABLE IF NOT EXISTS session_profiles (
+    symbol TEXT NOT NULL,
+    session_start REAL NOT NULL,
+    bucket_size REAL NOT NULL,
+    buckets TEXT NOT NULL,
+    ts_updated REAL NOT NULL,
+    PRIMARY KEY (symbol, session_start)
+);
 """
 
 
@@ -249,6 +258,65 @@ class FlowzoneDB:
     def prints_count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS c FROM prints").fetchone()
         return int(row["c"] or 0)
+
+    # ─── session profiles (C1: composite / double-day merge) ─────────────
+    # Канон «The Only Orderflow Guide» 31:14 — *«these two profile can be
+    # merged… when they are overlapping on the same level they are just telling
+    # you that they stayed in this balance area for two days»*. Профили прошлых
+    # сессий нельзя пересобрать из `prints` (retention 6ч), поэтому итог сессии
+    # сохраняется отдельной строкой.
+
+    def save_session_profile(self, symbol: str, session_start: float,
+                             bucket_size: float,
+                             buckets: dict[int, tuple[float, float]],
+                             ts: float | None = None) -> None:
+        """Upsert профиля сессии (idx → (buy, sell)) как JSON."""
+        if bucket_size <= 0 or not buckets:
+            return
+        payload = json.dumps({str(i): [b[0], b[1]] for i, b in buckets.items()},
+                             separators=(",", ":"))
+        self._conn.execute(
+            "INSERT INTO session_profiles "
+            "(symbol,session_start,bucket_size,buckets,ts_updated) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(symbol,session_start) DO UPDATE SET "
+            "bucket_size=excluded.bucket_size, buckets=excluded.buckets, "
+            "ts_updated=excluded.ts_updated",
+            (symbol, session_start, bucket_size, payload,
+             ts if ts is not None else time.time()))
+        self._conn.commit()
+
+    def recent_session_profiles(self, symbol: str, before_start: float,
+                                limit: int = 3
+                                ) -> list[tuple[float, float, dict[int, tuple[float, float]]]]:
+        """Профили ПРЕДЫДУЩИХ сессий символа (свежие первыми).
+
+        Возвращает [(session_start, bucket_size, buckets), ...] для сессий,
+        начавшихся строго раньше ``before_start``.
+        """
+        rows = self._conn.execute(
+            "SELECT session_start,bucket_size,buckets FROM session_profiles "
+            "WHERE symbol=? AND session_start<? "
+            "ORDER BY session_start DESC LIMIT ?",
+            (symbol, before_start, max(int(limit), 0))).fetchall()
+        out: list[tuple[float, float, dict[int, tuple[float, float]]]] = []
+        for r in rows:
+            try:
+                raw = json.loads(r["buckets"])
+            except (ValueError, TypeError):
+                continue
+            buckets = {int(k): (float(v[0]), float(v[1])) for k, v in raw.items()}
+            if buckets:
+                out.append((float(r["session_start"]), float(r["bucket_size"]),
+                            buckets))
+        return out
+
+    def prune_session_profiles_before(self, before_start: float) -> int:
+        """Retention профилей сессий. Возвращает число удалённых строк."""
+        cur = self._conn.execute(
+            "DELETE FROM session_profiles WHERE session_start<?", (before_start,))
+        self._conn.commit()
+        return int(cur.rowcount or 0)
 
     # закрытия, не имеющие биржевого closedPnl (нечего сверять) — сразу verified
     _NON_TRADE_REASONS = ("restart_flat", "entry_Cancelled", "entry_Rejected",

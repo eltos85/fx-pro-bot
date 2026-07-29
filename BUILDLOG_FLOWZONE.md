@@ -51,6 +51,88 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-07-29
+
+### feat(flowzone): строгий канон C1-C5 по дословным транскриптам роликов
+`_коммит ниже_`
+
+Пользователь попросил пересмотреть первоисточник и привести стратегию к
+строгому канону. Впервые удалось достать **полные транскрипты** роликов
+Fabervaale ENG (sozai.app): прямой доступ к YouTube для `yt-dlp` и fetch закрыт
+(`LOGIN_REQUIRED`, бот-чек; куки браузера и подстановка UA не помогли). До этого
+вся сверка шла по выдержкам — отсюда и ошибки атрибуции ниже.
+
+**Симптом.** Аудит D1-D8 (30.06) пометил три канон-механики как «[НАШЕ]» и
+оставил их выключенными, ссылаясь на `no-data-fitting.mdc`. Дословный текст
+показывает, что в ролике это базовые практики автора, а не наши надстройки.
+Плюс один сетап, который автор называет самым надёжным, отсутствовал целиком.
+
+- **C1 — merge профилей** (`profile_merge_enabled` false → **true**). Канон
+  31:14 *«these two profile can be merged. You can merge them… when they are
+  overlapping on the same level»*, 31:59 *«do a double day profile on a single
+  level and you can have a really precise value area low point»*, далее ещё два
+  повтора (32:33, 32:50). Критерий слияния — перекрытие value area. Добавлены
+  `value_areas_overlap`, `_merged_session_profile`, таблица `session_profiles`
+  (профили прошлых сессий не пересобрать из `prints` — retention 6ч).
+- **C2 — initiative + exhaustion** (`initiative_exhaustion_enabled` false →
+  **true**). Канон 37:03 *«we saw the absorption, we saw the exhaustion, we saw
+  the initiative auction»*. Initiative стал вторым триггером входа рядом с
+  absorption (absorption приоритетнее). Exhaustion — НЕ вход (бот только
+  continuation), а стадия 3 сопровождения: фиксация прибыли по «My Signature
+  Orderflow Model» 06:04 *«this selling pressure is almost exhausted… I take out
+  my position»*. Новый `close_reason=exhaustion_exit`.
+- **C3 — форма профиля гейтит направление.** Канон 34:32 *«Is not a P shape. So
+  it's still balance. You can use this as indecision»*. `classify` получил
+  `shape_gate`: тренд остаётся только при P-shape в сторону acceptance (хвост
+  + направленная дельта **в хвосте**) или double distribution. Тяжёлый хвост
+  без подтверждающей дельты → баланс. Раньше `shape` был лишь обогащением.
+- **C4 — одна сессия вместо склейки London+NY.** Канон 28:54 *«I only trade in
+  the New York session… where the majority of the volume get traded… So I only
+  use the cash session profile»*. Окно для крипты **измерено**, а не взято по
+  аналогии: `scripts/flowzone_session_volume.py`, 1000 часовых баров ≈41 день,
+  среднее по BTC/ETH/SOL — пик 13:00 (8.91%), 14:00 (8.34%), 15:00 (7.61%) UTC;
+  **NY 12-21 = 51.4%** оборота за 9ч против **London 07-16 = 46.8%**; склейка
+  07-21 = 67.2%, но за 14ч. `session_windows_utc` → `"12:00-21:00"`. Это меняет
+  и торговое окно, и базу VP: было 14ч, стало 9ч.
+- **C5 — новый сетап hook / failed auction.** Канон 26:17 *«they do a failed
+  auction, they try to break, they get rejected… when you go back inside, you
+  have your continuation trade»* и 27:20 *«This is one really profitable setup
+  with high win rate»*. Модуль `analysis/hook.py` + ветка
+  `strategy._evaluate_hook`. Порог «не приняли» = доля объёма за границей
+  меньше `1 − value_area_pct` (32%) — выведен из канон-константы VA, нового
+  подобранного числа нет. Стоп за экстремумом неудачной вылазки, цель и
+  R:R-фильтр общие (§5.1/§5.3). Ищется по persisted-принтам: hook длиннее одной
+  M5-свечи.
+
+**Телеметрия → непрерывные скаляры.** За неделю после v2-фикса `init_prev`
+покрыл 2/16 сделок, а `shock` (порог ×4) не сработал ни разу — реплей по тикам
+дал максимум ×2.1-3.0. Бинарные защёлки на таком темпе не наберут 100 сделок
+(`sample-size.mdc`), поэтому пишем непрерывно: `init_prev` теперь всегда несёт
+направление ноги, долю дельты и флаг `conf`, добавлен `vratio` = плотность
+ленты / базовая EMA. Дискретный `shock` с TTL сохранён.
+
+**Правка тестовых фикстур.** `_down_elongated_buckets` и `_short_reload_profile`
+описывали нисходящий день, но весь профиль был buy-only, включая нижний хвост.
+Под гейтом C3 канон справедливо считает такой день indecision (34:32), поэтому
+хвосты приведены к sell-доминанте — исправление фикстуры под её собственный
+сценарий, не подгонка под тест (`no-data-fitting.mdc`).
+
+**Ожидаемое влияние на частоту сделок — вниз**, и это надо учитывать при сборе
+статистики: окно сузилось 14ч → 9ч, гейт C3 отсекает дни без подтверждающей
+дельты в хвосте. В противоход работают два новых входа (initiative, hook).
+Нетто-эффект неизвестен — это и есть предмет замера. Правило `sample-size.mdc`
+(≥100 сделок, ≥2 недели, p<0.05) до набора выборки не нарушаем: никаких
+дальнейших правок порогов до данных.
+
+**Файлы:** `config/settings.py`, `analysis/{context,volume_profile,orderflow,
+hook,strategy,session,telemetry}.py`, `app/main.py`, `trading/executor.py`,
+`state/db.py`, `scripts/flowzone_session_volume.py`, `tests/test_flowzone_bot.py`,
+`STRATEGY_FLOWZONE.md`, `docker-compose.yml` (только env сервиса `flowzone-bot`:
+окно сессии жёстко задавало старое `07:00-16:00,12:00-21:00` и перекрыло бы
+дефолт из кода, плюс добавлены флаги C1/C2/C3/C5). Тесты: 1316 passed.
+
+---
+
 ## 2026-07-24
 
 ### fix(flowzone): telemetry v2 — preceding initiative, structural dwell, shock TTL

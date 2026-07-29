@@ -23,7 +23,8 @@ import math
 import time
 
 from flowzone_bot.analysis.orderflow import (big_trade_threshold,
-                                             detect_big_trades)
+                                             detect_big_trades,
+                                             detect_exhaustion)
 from flowzone_bot.analysis.strategy import Signal
 
 log = logging.getLogger("flowzone_bot.exec")
@@ -701,6 +702,69 @@ class Executor:
             play.info("🔁 [%s] PAPER trail #%d %s: SL→%.4f", tr.symbol, tr.id,
                       tr.side.upper(), new_sl)
 
+    # ─── Стадия 3: фиксация по exhaustion (канон «My Signature Orderflow
+    # Model» 06:04) ─────────────────────────────────────────────────────────
+    # *«when you see an opposite area on the buy side, you can understand that
+    # now this selling pressure is almost exhausted… it's not worth to risk all
+    # this profit that I make just to make an additional small movement by
+    # risking all this profit. So I take out my position»*. Повторный вход, если
+    # движение продолжится, канон делает отдельной сделкой — у нас это
+    # reload_cooldown_sec в main._scan_signals.
+
+    def _exhaustion_exit_ready(self, tr, snap) -> bool:
+        """Выдохлось ли движение В НАШУ сторону при позиции в плюсе.
+
+        Канон фиксирует прибыль именно на затухании собственного движения, а не
+        на любом откате: exhaustion = падающий объём + встречная агрессия на
+        экстремуме. Позиция в минусе не фиксируется — там работает стоп.
+        """
+        if not getattr(self._cfg, "initiative_exhaustion_enabled", False):
+            return False
+        if snap is None or snap.last_price is None or tr.entry <= 0:
+            return False
+        price = snap.last_price
+        in_profit = (price > tr.entry) if tr.side == "long" else (price < tr.entry)
+        if not in_profit:
+            return False
+        cut = snap.ts - getattr(self._cfg, "exhaustion_window_sec",
+                                self._cfg.absorption_window_sec)
+        window = [t for t in snap.trades if t.ts >= cut]
+        move_dir = "up" if tr.side == "long" else "down"
+        return detect_exhaustion(
+            window, move_dir,
+            min_decay=self._cfg.exhaustion_min_decay,
+            min_contrarian_frac=self._cfg.exhaustion_min_contrarian_frac,
+        ).confirmed
+
+    def _maybe_exhaustion_exit(self, tr, snap) -> bool:
+        """Закрыть прибыльную позицию на exhaustion. True — позиция закрыта."""
+        if not self._exhaustion_exit_ready(tr, snap):
+            return False
+        price = snap.last_price
+        if tr.mode == "paper":
+            pnl, fees = paper_pnl(tr.side, tr.entry, price, tr.qty)
+            self._db.mark_closed(tr.id, exit_price=price, pnl_usd=pnl,
+                                 fees_usd=fees, close_reason="exhaustion_exit",
+                                 ts_close=self._now())
+            self._note_close(tr.symbol, pnl)
+            play.info("🟡 [%s] PAPER exhaustion-exit #%d %s @%.4f pnl=%.2f",
+                      tr.symbol, tr.id, tr.side.upper(), price, pnl)
+            self._notify(f"🟡 PAPER close #{tr.id} {tr.symbol} pnl=${pnl:.2f} "
+                         f"(exhaustion_exit)")
+            return True
+        side = "Buy" if tr.side == "long" else "Sell"
+        link = f"fz{tr.id}x{int(self._now())}"
+        res = self._client.close_market(tr.symbol, side, tr.qty, link)
+        if not res.get("ok"):
+            log.warning("exhaustion-exit #%d %s отклонён (%s)", tr.id,
+                        tr.symbol, res.get("error"))
+            return False
+        self._link2trade[link] = tr.id
+        play.info("🟡 [%s] exhaustion-exit #%d %s @%.4f — движение выдохлось, "
+                  "фиксирую прибыль (канон 06:04)", tr.symbol, tr.id,
+                  tr.side.upper(), price)
+        return True
+
     def _manage_paper(self, tr, snap, swings: list) -> None:
         price = snap.last_price if snap else None
         if price is None:
@@ -708,6 +772,8 @@ class Executor:
         trades = snap.trades if snap else []
         self._maybe_be_lock(tr, price, swings, trades)  # стадия 1: BE
         self._maybe_trail(tr, snap)                      # стадия 2: trail
+        if self._maybe_exhaustion_exit(tr, snap):        # стадия 3: exhaustion
+            return
         hit_tp = price >= tr.tp if tr.side == "long" else price <= tr.tp
         hit_sl = price <= tr.sl if tr.side == "long" else price >= tr.sl
         if not (hit_tp or hit_sl):
@@ -776,6 +842,8 @@ class Executor:
         # троттлим лог дистанций до TP/SL
         self._maybe_be_lock(tr, price, swings, snap.trades if snap else [])
         self._maybe_trail(tr, snap)
+        if self._maybe_exhaustion_exit(tr, snap):        # стадия 3: exhaustion
+            return
         iv = 15.0
         if price is not None and self._now() - self._hold_log.get(tr.id, 0.0) >= iv:
             self._hold_log[tr.id] = self._now()
