@@ -218,7 +218,13 @@ def run() -> None:
     db_pin_set = set(db_pins)
     # v0.18.48: shadow_only — символы ТОЛЬКО под наблюдение. Ни одна стратегия
     # не выставляет по ним ордера; сигнал конвертируется в counterfactual.
-    shadow_only = set(shadow_syms) - universe_syms - set(canon_syms) - db_pin_set
+    shadow_only = _shadow_only_set(symbols, universe_syms, canon_syms,
+                                   db_pin_set)
+    # Все символы, когда-либо отобранные тенью. Нужен для честной атрибуции
+    # наблюдений: символ, оставшийся в подписках по другой причине (например
+    # держал позицию и выпал из вселенной), торговать нельзя, но и записывать
+    # его в гипотезу про порог оборота нечестно — это другая популяция.
+    shadow_pool: set[str] = set(shadow_syms)
     # (стратегия, символ) → id активного теневого кандидата. Пока он не дошёл до
     # терминала, новых по этой связке не эмитим: живой бот в это время держал бы
     # позицию и не взводился заново (open_symbols-гейт), поэтому одна связка =
@@ -272,6 +278,7 @@ def run() -> None:
                         universe_syms | set(canon_syms) | set(db_pins))
                     if fresh_shadow:
                         shadow_syms = fresh_shadow
+                        shadow_pool |= set(fresh_shadow)
                     stream, states, symbols, picked = _rotate_universe(
                         client, cfg, db, stream, states, strategies, symbols,
                         notifier,
@@ -282,11 +289,15 @@ def run() -> None:
                         canon_only = set(canon_syms) - universe_syms
                         # db_pins не зависят от авто-вселенной (всегда force-include)
                         db_pin_set = set(db_pins)
-                    # Пересчёт shadow_only ПОСЛЕ ротации: если теневая монета
-                    # попала в боевую вселенную, вычитание уберёт её отсюда и
-                    # она начнёт торговаться — наблюдение больше не нужно.
-                    shadow_only = (set(shadow_syms) - universe_syms
-                                   - set(canon_syms) - db_pin_set)
+                    prev_shadow_only = shadow_only
+                    shadow_only = _shadow_only_set(
+                        symbols, universe_syms, canon_syms, db_pin_set)
+                    if shadow_only != prev_shadow_only:
+                        # Наблюдаемость: без этого лога утечку v0.18.49 было
+                        # видно только по факту сделки в БД.
+                        log.info("наблюдаемые (НЕ торгуются) %d: %s",
+                                 len(shadow_only),
+                                 ",".join(sorted(shadow_only)) or "—")
                     funding.refresh(client, symbols)  # новые символы → их график
                     # v0.18.2: прогрев HTF новых символов СРАЗУ (до того как они
                     # смогут торговаться) — закрываем fail-open окно ≤htf_refresh_sec.
@@ -429,8 +440,9 @@ def run() -> None:
                     # Единственная точка, где тень могла бы утечь в торговлю,
                     # поэтому отсекаем ДО candidates.append.
                     if sym in shadow_only:
-                        _add_shadow_universe_candidate(
-                            counterfactual, shadow_open, cfg, s, now)
+                        if sym in shadow_pool:
+                            _add_shadow_universe_candidate(
+                                counterfactual, shadow_open, cfg, s, now)
                         continue
                     candidates.append(s)
                 sig = resolve(candidates)
@@ -923,6 +935,28 @@ def _select_universe(client, cfg) -> list[str]:
                      ",".join(padded[len(ranked):]))
         ranked = padded
     return apply_pins(ranked, cfg.universe_pin_list, cfg.universe_top_n)
+
+
+def _shadow_only_set(symbols, universe_syms: set[str], canon_syms,
+                     db_pin_set: set[str]) -> set[str]:
+    """Символы, по которым торговать НЕЛЬЗЯ: подписаны, но не разрешены явно.
+
+    Fail-closed и намеренно считается от ФАКТИЧЕСКИХ подписок, а не от свежего
+    теневого списка. Раньше было ``set(shadow_syms) - …`` — и это дало утечку
+    (v0.18.49): когда монета выпадала из топ-``shadow_universe_max_symbols``
+    (сдвинулся композитный скор или просела амплитуда), она пропадала из
+    ``shadow_syms``, но оставалась в ``symbols`` — ``_rotate_universe`` при
+    пустой авто-вселенной выходит раньше и состав подписок не пересобирает.
+    Символ оказывался подписан и без защиты → стратегии его торговали
+    (ESPORTSUSDT, сделки #3894/#3897/#3898, окно 08:42–09:29 UTC 2026-07-29,
+    затем утечка «залечилась» сама, когда монета вернулась в топ).
+
+    Теперь право торговать нужно подтвердить принадлежностью к разрешённому
+    множеству, а не отсутствием в теневом. Любой «осадок» в подписках по
+    умолчанию неторгуемый.
+    """
+    tradeable = set(universe_syms) | set(canon_syms) | set(db_pin_set)
+    return set(symbols) - tradeable
 
 
 def _add_shadow_universe_candidate(tracker, shadow_open: dict, cfg, sig,

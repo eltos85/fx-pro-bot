@@ -3108,6 +3108,57 @@ def test_shadow_universe_fail_open_on_client_error():
     assert _select_shadow_universe(_Broken(), _shadow_cfg(), set()) == []
 
 
+def test_shadow_only_derives_from_subscriptions_not_fresh_list():
+    """v0.18.49 (регрессия утечки): право торговать подтверждается членством в
+    разрешённом множестве, а не отсутствием в теневом списке.
+
+    Утечка была так: монета выпала из топ-N теневого отбора → пропала из
+    shadow_syms, но осталась в подписках (при пустой авто-вселенной
+    _rotate_universe выходит раньше и состав не пересобирает) → торговалась.
+    """
+    from scalp_bot.app.main import _shadow_only_set
+
+    symbols = ["ZECUSDT", "BTCUSDT", "HYPEUSDT", "ESPORTSUSDT", "TAOUSDT"]
+    universe, canon, pins = {"ZECUSDT"}, ["BTCUSDT"], {"HYPEUSDT"}
+
+    # ESPORTSUSDT выпал из свежего теневого списка, но остался подписан —
+    # по СТАРОЙ логике (set(shadow_syms) - …) он стал бы торгуемым.
+    stale_shadow_list = {"TAOUSDT"}
+    assert "ESPORTSUSDT" not in stale_shadow_list - universe - set(canon) - pins
+    # по новой — остаётся неторгуемым, потому что не в разрешённых множествах
+    got = _shadow_only_set(symbols, universe, canon, pins)
+    assert got == {"ESPORTSUSDT", "TAOUSDT"}
+
+    # разрешённые множества торгуются
+    for sym in ("ZECUSDT", "BTCUSDT", "HYPEUSDT"):
+        assert sym not in got
+
+    # монета переросла порог и попала в боевую вселенную → торгуется
+    assert "TAOUSDT" not in _shadow_only_set(
+        symbols, universe | {"TAOUSDT"}, canon, pins)
+    # пустая авто-вселенная не делает торгуемым ничего лишнего
+    assert _shadow_only_set(symbols, set(), [], set()) == set(symbols)
+
+
+def test_shadow_observation_attributed_only_to_shadow_pool():
+    """Осадок в подписках торговать нельзя, но и записывать в гипотезу про
+    порог оборота нечестно — это другая популяция."""
+    shadow_only, shadow_pool = {"ESPORTSUSDT", "LEFTOVERUSDT"}, {"ESPORTSUSDT"}
+    observed, traded = [], []
+
+    def loop(sym):
+        if sym in shadow_only:
+            if sym in shadow_pool:
+                observed.append(sym)
+            return
+        traded.append(sym)
+
+    for sym in ("ESPORTSUSDT", "LEFTOVERUSDT", "ZECUSDT"):
+        loop(sym)
+    assert observed == ["ESPORTSUSDT"]
+    assert traded == ["ZECUSDT"], "ни один наблюдаемый символ не торгуется"
+
+
 def test_shadow_only_gate_keeps_signal_out_of_trading():
     """Ключевая гарантия: сигнал по наблюдаемому символу НЕ попадает в
     candidates → не доходит до resolve и executor. Воспроизводим гейт."""
