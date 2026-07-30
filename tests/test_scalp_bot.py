@@ -5732,11 +5732,12 @@ def test_sl_widen_report_expectancy_and_pairing():
     grossR − комиссия, а парное сравнение считает исходы на ОДНИХ сделках."""
     from scripts.scalp_sl_widen_report import _summarise, _paired
 
-    def row(variant, risk, outcome, tid):
+    def row(variant, risk, outcome, tid, state="final", last=None):
         # entry=100, TP=3.5R — боевая геометрия
         return {"variant": variant, "entry": 100.0, "risk": risk,
-                "tp": 100.0 + 3.5 * risk, "state": "final",
-                "outcome_tp": outcome, "source_trade_id": tid}
+                "tp": 100.0 + 3.5 * risk, "state": state, "side": "long",
+                "outcome_tp": outcome, "source_trade_id": tid,
+                "last_price": last}
 
     # x1: SL 0.3% цены; x2 вдвое шире. По 4 исхода в каждой ветке.
     rows = [
@@ -5761,11 +5762,71 @@ def test_sl_widen_report_expectancy_and_pairing():
     # gross = 0.5×3.5 − 0.5×1.0 = 1.25
     assert wide["gross_r"] == pytest.approx(1.25)
 
-    pairs = _paired(rows, control="x1")
-    both, wins, losses = pairs["x2"]
-    assert both == 4        # все четыре сделки решены в обеих ветках
-    assert wins == 1        # сделка #2: x2 взяла TP там, где x1 словила SL
-    assert losses == 0
+    fee = {k: v["fee_r"] for k, v in arms.items()}
+    pairs = _paired(rows, control="x1", fee=fee)
+    assert pairs["x2"]["pairs"] == 4   # все четыре досмотрены в обеих ветках
+    # Счёт теперь по netR, а не по категории TP/SL: даже когда обе ветки
+    # словили SL, широкая дешевле на разнице комиссии — это реальный, а не
+    # бухгалтерский выигрыш, и он обязан попадать в сравнение.
+    assert pairs["x2"]["wins"] == 4
+    assert pairs["x2"]["losses"] == 0
+    # ΔnetR = разница gross (1.25 − 0.125) + экономия комиссии (0.3387/2)
+    assert pairs["x2"]["mean"] == pytest.approx(1.125 + 0.1016 / 0.6)
+
+
+def test_sl_widen_report_counts_no_touch_as_observed_outcome():
+    """v0.18.51 (регрессия смещения): «не коснулся барьера за горизонт» —
+    наблюдаемый третий исход, а не пропуск.
+
+    Раньше знаменателем было tp+sl, и такие ветки выбрасывались. Доля выброса
+    росла с множителем (2% при x1 против 45% при x3), поэтому ветки
+    сравнивались на разных популяциях.
+    """
+    from scripts.scalp_sl_widen_report import _summarise, realised_r
+
+    def row(variant, risk, outcome, tid, state="final", last=None):
+        return {"variant": variant, "entry": 100.0, "risk": risk,
+                "tp": 100.0 + 3.5 * risk, "state": state, "side": "long",
+                "outcome_tp": outcome, "source_trade_id": tid,
+                "last_price": last}
+
+    # x1 коснулся барьеров всегда; x2 в половине случаев не дошёл никуда,
+    # закончив горизонт на +0.5R (цена 100.3 при risk 0.6).
+    rows = [
+        row("x1", 0.3, "tp", 1), row("x1", 0.3, "sl", 2),
+        row("x2", 0.6, "tp", 1), row("x2", 0.6, None, 2, last=100.3),
+    ]
+    arms = _summarise(rows, fee_pct=0.1016)
+
+    assert arms["x2"]["final"] == 2, "досмотрены обе, а не только коснувшаяся"
+    assert arms["x2"]["no_touch"] == 1
+    # знаменатель одинаков у веток: 1 TP из 2 досмотренных, а не 1 из 1
+    assert arms["x2"]["p_tp"] == pytest.approx(0.5)
+    assert arms["x1"]["p_tp"] == pytest.approx(0.5)
+    # gross = (3.5 + 0.5) / 2 = 2.0, а не 3.5 как при выбрасывании
+    assert arms["x2"]["gross_r"] == pytest.approx(2.0)
+    assert realised_r(rows[3]) == pytest.approx(0.5)
+
+    # short считается с обратным знаком
+    short = dict(rows[3], side="short", last_price=99.7)
+    assert realised_r(short) == pytest.approx(0.5)
+
+
+def test_sl_widen_report_excludes_unfinished_but_reports_them():
+    """Настоящее цензурирование (pending/abandoned) исключается из
+    знаменателя, но показывается — иначе его не заметить."""
+    from scripts.scalp_sl_widen_report import _summarise
+
+    def row(state, outcome, tid):
+        return {"variant": "x1", "entry": 100.0, "risk": 0.3, "tp": 101.05,
+                "state": state, "side": "long", "outcome_tp": outcome,
+                "source_trade_id": tid, "last_price": 100.0}
+
+    arms = _summarise([row("final", "tp", 1), row("pending", None, 2),
+                       row("abandoned", "sl", 3)], fee_pct=0.1016)
+    assert arms["x1"]["final"] == 1
+    assert arms["x1"]["censored"] == 2
+    assert arms["x1"]["gross_r"] == pytest.approx(3.5), "только досмотренный"
 
 
 def _shadow_universe_db(tmp_path, rows, trades=()):
