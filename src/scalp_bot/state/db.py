@@ -296,6 +296,15 @@ CREATE INDEX IF NOT EXISTS idx_counterfactual_pending
     ON counterfactual_setups(state, ts_entry);
 CREATE INDEX IF NOT EXISTS idx_counterfactual_setup
     ON counterfactual_setups(setup_type, variant, ts_candidate);
+CREATE TABLE IF NOT EXISTS symbol_fees (
+    symbol TEXT PRIMARY KEY,
+    maker_rate REAL,
+    taker_rate REAL,
+    maker_samples INTEGER NOT NULL DEFAULT 0,
+    taker_samples INTEGER NOT NULL DEFAULT 0,
+    first_seen REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -751,6 +760,55 @@ class ScalpDB:
             "SELECT * FROM meta_label_features WHERE ts>=? ORDER BY id",
             (since_ts,),
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    def record_symbol_fee(self, symbol: str, *, is_maker: bool,
+                          fee_rate: float, ts: float | None = None) -> bool:
+        """Запомнить ФАКТИЧЕСКУЮ ставку комиссии символа из исполнения.
+
+        Тариф — свойство контракта, а не наша оценка: ``feeRate`` приходит в
+        каждом филле (docs.v5/websocket/private/execution). Нужен он потому,
+        что тариф не универсален — BANKUSDT и ESPORTSUSDT берут вдвое больше
+        стандартных 0.055%/0.02%, а заранее на demo это не узнать:
+        ``/v5/account/fee-rate`` в demo-списке API отсутствует.
+
+        Maker и taker хранятся раздельно: у одного символа они отличаются
+        втрое, и усреднять их в одну «ставку символа» бессмысленно.
+
+        Храним ПОСЛЕДНЕЕ значение, а не среднее: ставка постоянна, а если
+        изменилась (VIP-уровень, пересмотр контракта), то истина — свежая.
+        ``samples`` нужен, чтобы отличить одно наблюдение от подтверждённого.
+
+        Возвращает True, когда значение для этой стороны книги появилось или
+        изменилось — вызывающему это нужно, чтобы залогировать аномалию один
+        раз, а не на каждом филле. Fail-open: телеметрия не влияет на торговлю.
+        """
+        if not symbol:
+            return False
+        t = ts if ts is not None else time.time()
+        col = "maker_rate" if is_maker else "taker_rate"
+        cnt = "maker_samples" if is_maker else "taker_samples"
+        try:
+            row = self._conn.execute(
+                f"SELECT {col} AS rate FROM symbol_fees WHERE symbol=?",
+                (symbol,)).fetchone()
+            prev = None if row is None else row["rate"]
+            self._conn.execute(
+                f"INSERT INTO symbol_fees "
+                f"(symbol,{col},{cnt},first_seen,updated_at) VALUES (?,?,1,?,?) "
+                f"ON CONFLICT(symbol) DO UPDATE SET {col}=excluded.{col}, "
+                f"{cnt}={cnt}+1, updated_at=excluded.updated_at",
+                (symbol, fee_rate, t, t))
+            self._conn.commit()
+            return prev is None or abs(float(prev) - fee_rate) > 1e-12
+        except sqlite3.Error:
+            self._conn.rollback()
+            return False
+
+    def symbol_fee_rows(self) -> list[dict]:
+        """Выученные ставки по символам (для отчётов/тестов)."""
+        rows = self._conn.execute(
+            "SELECT * FROM symbol_fees ORDER BY symbol").fetchall()
         return [dict(r) for r in rows]
 
     def insert_density_track(self, row: dict) -> None:

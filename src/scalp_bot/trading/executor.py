@@ -29,6 +29,7 @@ from scalp_bot.analysis.counterfactual import (
     advance_counterfactual,
 )
 from scalp_bot.analysis.signals import Signal
+from scalp_bot.data.exec_stream import FEE_RATE_UNKNOWN, fee_rate_known
 
 log = logging.getLogger("scalp_bot.exec")
 play = logging.getLogger("scalp_bot.play")  # пошаговый нарратив торговли
@@ -470,6 +471,46 @@ class Executor:
             except Exception:
                 log.exception("sl-widen shadow #%s x%g failed", tid, mult)
 
+    def _learn_fee_rate(self, row: dict) -> None:
+        """Запомнить фактическую ставку филла (только телеметрия, fail-open).
+
+        Зачем: гейты fee-guard в ``build_signal`` считают издержки от КОНСТАНТЫ
+        ``cfg.round_trip_fee_frac`` = 0.075% (maker-вход + taker-выход) и обещают
+        в комментарии инвариант «fee ≤ 0.25R». Константа верна лишь для
+        maker-входа на стандартном тарифе, а живут ещё два отклонения:
+        market-вход (taker обе ноги, 0.11%) и контракты с двойным тарифом
+        (BANKUSDT/ESPORTSUSDT). Замеры совпали с обоими предсказаниями —
+        0.247R при maker, 0.366R при market, 0.459R при market+двойной тариф.
+
+        Ставка сознательно НЕ подставляется в гейты: буквальная починка
+        расширила бы стоп market-стратегиям с 0.30% до 0.44% цены, а это почти
+        точно ветка ``x1.5`` эксперимента ``sl_widen`` (1.47×), у которой
+        предварительная оценка ΔnetR = −0.102 [−0.389; +0.185] — уже с учётом
+        экономии на комиссии. Решение про геометрию ждёт его завершения
+        (sample-size.mdc); пока фиксируем факт (v0.18.53).
+        """
+        if self._db is None:
+            return
+        rate = row.get("feeRate", FEE_RATE_UNKNOWN)
+        symbol = row.get("symbol") or ""
+        if not symbol or not fee_rate_known(rate):
+            return
+        is_maker = bool(row.get("isMaker"))
+        if not self._db.record_symbol_fee(symbol, is_maker=is_maker,
+                                         fee_rate=rate, ts=self._now()):
+            return  # значение не изменилось — не шумим на каждом филле
+        expected = MAKER_FEE if is_maker else TAKER_FEE
+        book_side = "maker" if is_maker else "taker"
+        if abs(rate - expected) < 1e-9:
+            log.info("тариф %s %s = %.4f%% (стандартный)",
+                     symbol, book_side, 100.0 * rate)
+        else:
+            log.warning(
+                "тариф %s %s = %.4f%% против стандартных %.4f%% (×%.2f) — "
+                "комиссия в R отличается от той, из которой считает fee-guard",
+                symbol, book_side, 100.0 * rate, 100.0 * expected,
+                rate / expected)
+
     def ingest_executions(self, rows: list[dict]) -> None:
         """Атрибуция филлов из приватного WS execution к сделкам (вызывается из
         главного треда). Матч по нашему orderLinkId (вход/выход тегаются), для
@@ -487,6 +528,9 @@ class Executor:
         реального VWAP, сохраняя дистанции (реальный $-риск = расчётному)."""
         entry_dirty: set[int] = set()
         for r in rows or []:
+            # Ставку учим ДО атрибуции: тариф — свойство контракта, он не зависит
+            # от того, к какой нашей сделке относится филл (и относится ли вообще).
+            self._learn_fee_rate(r)
             tid = self._link2trade.get(r.get("orderLinkId", ""))
             if tid is None:
                 tid = self._open_trade_for_symbol(r.get("symbol", ""))

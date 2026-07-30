@@ -469,12 +469,20 @@ def test_taker_pnl_estimate():
     assert taker_pnl("short", 100.0, 99.0, 5.0) == pytest.approx(5.0 - 5 * 199 * 0.00055)
 
 
-def _exec(symbol, link, *, fee, pnl=0.0, price, qty, closed=0.0):
-    """Нормализованная строка приватного WS execution (как из exec_stream)."""
+def _exec(symbol, link, *, fee, pnl=0.0, price, qty, closed=0.0,
+          fee_rate=None, is_maker=False):
+    """Нормализованная строка приватного WS execution (как из exec_stream).
+
+    ``fee_rate=None`` воспроизводит филл БЕЗ ставки (сентинел): так ведут себя
+    старые тесты и любой филл, где биржа поле не прислала.
+    """
+    from scalp_bot.data.exec_stream import FEE_RATE_UNKNOWN
     return {"symbol": symbol, "orderLinkId": link, "orderId": "", "side": "",
             "execFee": fee, "execPnl": pnl, "execPrice": price, "execQty": qty,
             "closedSize": closed, "leavesQty": 0.0, "stopOrderType": "",
-            "execTime": 0.0}
+            "execTime": 0.0,
+            "feeRate": FEE_RATE_UNKNOWN if fee_rate is None else fee_rate,
+            "isMaker": is_maker, "execValue": price * qty}
 
 
 def test_realized_from_fills_none_until_close_arrives():
@@ -643,6 +651,183 @@ def test_ingest_entry_fill_without_db_does_not_crash():
     ex.ingest_executions([_exec("ETHUSDT", "entry", fee=0.01,
                                 price=2000.0, qty=0.04)])
     assert ex._fills[1]["open_qty"] == pytest.approx(0.04)
+
+
+# ─── фактические ставки комиссии (v0.18.53, только телеметрия) ──────────────
+
+def test_exec_stream_normalises_fee_rate_and_maker_flag():
+    """``feeRate`` и ``isMaker`` приходят готовыми в каждом филле, выводить
+    ставку делением execFee/execValue не нужно.
+    https://bybit-exchange.github.io/docs/v5/websocket/private/execution"""
+    from scalp_bot.data.exec_stream import (
+        FEE_RATE_UNKNOWN, BybitExecStream, fee_rate_known)
+
+    st = BybitExecStream("k", "s")
+    st._on_exec({"data": [
+        {"symbol": "ZECUSDT", "execType": "Trade", "execFee": "0.05",
+         "feeRate": "0.0002", "isMaker": True, "execValue": "250",
+         "execPrice": "500", "execQty": "0.5"},
+        # биржа поле не прислала → сентинел, а не 0.0 (иначе «бесплатно»)
+        {"symbol": "ZECUSDT", "execType": "Trade", "execFee": "0.05",
+         "execPrice": "500", "execQty": "0.5"},
+    ]})
+    rows = st.drain()
+    assert rows[0]["feeRate"] == pytest.approx(0.0002)
+    assert rows[0]["isMaker"] is True
+    assert fee_rate_known(rows[0]["feeRate"])
+    assert rows[1]["feeRate"] == FEE_RATE_UNKNOWN
+    assert not fee_rate_known(rows[1]["feeRate"])
+    # рибейт (отрицательная ставка на высоком VIP) — легальное значение
+    assert fee_rate_known(-0.0001)
+
+
+def test_symbol_fee_stored_separately_for_maker_and_taker(tmp_path):
+    """Maker и taker у одного символа отличаются втрое — усреднять их в одну
+    «ставку символа» нельзя."""
+    db = ScalpDB(str(tmp_path))
+    assert db.record_symbol_fee("ZECUSDT", is_maker=True, fee_rate=0.0002)
+    assert db.record_symbol_fee("ZECUSDT", is_maker=False, fee_rate=0.00055)
+    row = {r["symbol"]: r for r in db.symbol_fee_rows()}["ZECUSDT"]
+    assert row["maker_rate"] == pytest.approx(0.0002)
+    assert row["taker_rate"] == pytest.approx(0.00055)
+    assert row["maker_samples"] == 1 and row["taker_samples"] == 1
+
+    # повтор той же ставки: sample считается, но «изменилось» = False —
+    # иначе лог шумел бы на каждом филле
+    assert not db.record_symbol_fee("ZECUSDT", is_maker=False, fee_rate=0.00055)
+    row = {r["symbol"]: r for r in db.symbol_fee_rows()}["ZECUSDT"]
+    assert row["taker_samples"] == 2
+
+    # смена тарифа (VIP/пересмотр контракта) → истина свежая, не среднее
+    assert db.record_symbol_fee("ZECUSDT", is_maker=False, fee_rate=0.0011)
+    row = {r["symbol"]: r for r in db.symbol_fee_rows()}["ZECUSDT"]
+    assert row["taker_rate"] == pytest.approx(0.0011)
+    db.close()
+
+
+def test_learn_fee_rate_flags_double_tariff_once(tmp_path, caplog):
+    """Двойной тариф (BANKUSDT/ESPORTSUSDT: 0.11% против 0.055%) должен быть
+    виден в логе, но один раз, а не на каждом филле."""
+    import logging
+
+    db = ScalpDB(str(tmp_path))
+    ex = Executor(db=db, settings=SimpleNamespace(), client=SimpleNamespace(),
+                  now=lambda: 1000.0)
+    fill = _exec("BANKUSDT", "нечей-линк", fee=0.22, price=1.0, qty=200.0,
+                 fee_rate=0.0011)
+    with caplog.at_level(logging.INFO, logger="scalp_bot.exec"):
+        # филл не привязан ни к одной сделке — ставку всё равно учим:
+        # тариф это свойство контракта, а не нашей сделки
+        ex.ingest_executions([fill, fill, fill])
+    row = {r["symbol"]: r for r in db.symbol_fee_rows()}["BANKUSDT"]
+    assert row["taker_rate"] == pytest.approx(0.0011)
+    assert row["taker_samples"] == 3
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "×2.00" in warnings[0].getMessage()
+    db.close()
+
+
+def test_learn_fee_rate_standard_tariff_is_not_a_warning(tmp_path, caplog):
+    import logging
+
+    db = ScalpDB(str(tmp_path))
+    ex = Executor(db=db, settings=SimpleNamespace(), client=SimpleNamespace(),
+                  now=lambda: 1000.0)
+    with caplog.at_level(logging.INFO, logger="scalp_bot.exec"):
+        ex.ingest_executions([_exec("ZECUSDT", "l", fee=0.05, price=500.0,
+                                    qty=0.5, fee_rate=0.00055)])
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert {r["symbol"] for r in db.symbol_fee_rows()} == {"ZECUSDT"}
+    db.close()
+
+
+def test_fee_report_shows_gap_between_actual_and_assumed(tmp_path):
+    """Отчёт должен показывать РАЗРЫВ между тем, во что комиссию оценивал
+    fee-guard, и тем, что списала биржа.
+
+    Числа здесь — не выдумка, а воспроизведение замера: при одинаковом стопе
+    0.30% цены maker-вход даёт ровно обещанные 0.25R, а market-вход (обе ноги
+    taker) — 0.367R, что и наблюдалось на BTC/HYPE/XRP.
+    """
+    from scripts.scalp_fee_report import _aggregate, trade_costs
+
+    db = ScalpDB(str(tmp_path))
+
+    def closed(strategy, symbol, fees):
+        tid = db.insert_open(symbol=symbol, side="long", qty=1.0, entry=100.0,
+                             sl=99.7, tp=101.05, score=3, reasons="x",
+                             mode="live", strategy=strategy, ts_open=1000.0)
+        db.mark_closed(tid, exit_price=100.0, pnl_usd=0.0, fees_usd=fees,
+                       close_reason="tp_hit", ts_close=1100.0)
+
+    closed("sweep_fade", "ZECUSDT", 0.02 + 0.055)      # maker-вход + taker-выход
+    closed("density_break", "BTCUSDT", 0.055 + 0.055)  # обе ноги taker
+    rows = trade_costs(db._conn, since=0.0)
+    db.close()
+
+    assert len(rows) == 2
+    by_strategy = dict(_aggregate(rows, "strategy", assumed_pct=0.075))
+
+    maker = by_strategy["sweep_fade"]
+    assert maker["sl_pct"] == pytest.approx(0.30)
+    assert maker["per_side_pct"] == pytest.approx(0.0375)   # round-turn 0.075%
+    assert maker["fee_r"] == pytest.approx(0.25)            # инвариант выполнен
+    assert maker["assumed_fee_r"] == pytest.approx(0.25)
+
+    taker = by_strategy["density_break"]
+    assert taker["per_side_pct"] == pytest.approx(0.055)    # round-turn 0.11%
+    assert taker["fee_r"] == pytest.approx(0.11 / 0.3)      # 0.367R
+    # гейт «думал» про ту же сделку 0.25R — вот и весь разрыв
+    assert taker["assumed_fee_r"] == pytest.approx(0.25)
+    assert taker["fee_r"] - taker["assumed_fee_r"] == pytest.approx(0.1167,
+                                                                    abs=1e-3)
+
+
+def test_fee_report_ignores_trades_without_known_fees(tmp_path):
+    """До v0.18.44 ``fees_usd`` был нулём — такие строки размыли бы средние."""
+    from scripts.scalp_fee_report import trade_costs
+
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ZECUSDT", side="long", qty=1.0, entry=100.0,
+                         sl=99.7, tp=101.0, score=3, reasons="x", mode="live",
+                         strategy="sweep_fade", ts_open=1000.0)
+    db.mark_closed(tid, exit_price=100.0, pnl_usd=0.0, fees_usd=0.0,
+                   close_reason="tp_hit", ts_close=1100.0)
+    rejected = db.insert_open(symbol="ZECUSDT", side="long", qty=1.0,
+                              entry=100.0, sl=99.7, tp=101.0, score=3,
+                              reasons="x", mode="live", strategy="sweep_fade",
+                              ts_open=1000.0)
+    db.mark_closed(rejected, exit_price=100.0, pnl_usd=0.0, fees_usd=0.05,
+                   close_reason="entry_Rejected", ts_close=1100.0)
+    assert trade_costs(db._conn, since=0.0) == []
+    db.close()
+
+
+def test_learned_fee_rate_does_not_change_signal_geometry(tmp_path):
+    """Замок на отложенное решение (v0.18.53).
+
+    Выученная ставка — ТОЛЬКО телеметрия. Буквальная подстановка её в гейты
+    расширила бы стоп market-стратегиям с 0.30% до 0.44% цены, а это почти
+    точно ветка ``x1.5`` эксперимента ``sl_widen`` (1.47×), у которой
+    предварительная оценка ΔnetR отрицательна. Пока эксперимент не закрыт,
+    геометрия обязана зависеть только от ``cfg.round_trip_fee_frac``.
+    """
+    from scalp_bot.analysis.signals import build_signal
+    from scalp_bot.config.settings import ScalpSettings
+
+    db = ScalpDB(str(tmp_path))
+    db.record_symbol_fee("BANKUSDT", is_maker=False, fee_rate=0.0011)
+    cfg = ScalpSettings().model_copy(update={"sl_buffer_bps": 0.0})
+    snap = SimpleNamespace(symbol="BANKUSDT", best_bid=100.0, best_ask=100.0,
+                           last_price=100.0)
+    # структурный риск заведомо меньше пола → пол и определяет стоп
+    sig = build_signal(snap, "long", 99.99, cfg, 3, ["r"], order_type="market")
+    assert sig is not None
+    expected_floor = cfg.min_risk_fee_mult * cfg.round_trip_fee_frac * 100.0
+    assert expected_floor == pytest.approx(0.30)  # 4 × 0.075% от цены 100
+    assert sig.sl_level == pytest.approx(100.0 - expected_floor)
+    db.close()
 
 
 def test_reconcile_finalizes_from_ws_ledger(tmp_path):

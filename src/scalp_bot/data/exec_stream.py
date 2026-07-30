@@ -9,7 +9,12 @@ https://bybit-exchange.github.io/docs/v5/websocket/private/execution
 - ``execPrice``/``execQty`` — реальная цена/объём филла (не mark price!);
 - ``orderLinkId`` — наш тег ордера (вход ``scalp_{sym}_{ts}``,
   выход ``scalp_{reason}_{id}``) → точный матч к сделке без гонок по времени;
-- ``closedSize`` — закрытый объём (>0 у закрывающего филла).
+- ``closedSize`` — закрытый объём (>0 у закрывающего филла);
+- ``feeRate``/``isMaker`` — фактическая ставка этого филла и его сторона в книге.
+  Нужны потому, что тариф НЕ универсален: BANKUSDT/ESPORTSUSDT берут двойной
+  (0.11% taker против 0.055%), а на demo узнать тариф заранее нельзя —
+  ``/v5/account/fee-rate`` в demo-списке API отсутствует. Исполнения — наш
+  единственный источник правды по ставке.
 
 net сделки = Σ execPnl − Σ execFee по всем филлам позиции (= Bybit closedPnl,
 проверено по офдоку close-pnl: closedPnl = Σ execPnl − openFee − closeFee).
@@ -30,6 +35,16 @@ log = logging.getLogger("scalp_bot.exec_ws")
 # отдельные кэшфлоу, в per-trade closedPnl Bybit их НЕ включает, поэтому
 # в атрибуцию сделки не берём (иначе исказим net и комиссии).
 _FILL_TYPES = {"Trade", "AdlTrade", "BustTrade"}
+
+# «Ставки в филле не было». Отрицательная ставка сама по себе легальна (maker-
+# рибейт на высоких VIP), поэтому 0.0 сентинелом быть не может, а −1.0 (−100%)
+# недостижимо ни при каком тарифе.
+FEE_RATE_UNKNOWN = -1.0
+
+
+def fee_rate_known(rate: float) -> bool:
+    """Была ли ставка в филле. Рибейт (<0) легален, −100% недостижим."""
+    return rate > FEE_RATE_UNKNOWN / 2.0
 
 
 def _f(v: object, default: float = 0.0) -> float:
@@ -93,6 +108,14 @@ class BybitExecStream:
                     "leavesQty": _f(row.get("leavesQty")),
                     "stopOrderType": row.get("stopOrderType", "") or "",
                     "execTime": _f(row.get("execTime")),
+                    # Ставка приходит от биржи готовой — выводить её делением
+                    # execFee/execValue не нужно (и нельзя: на закрывающем филле
+                    # знаменатель считается по цене выхода, а не входа).
+                    # ``isMaker`` разделяет тарифы: у одного символа maker и taker
+                    # отличаются втрое, поэтому смешивать их в одну ставку нельзя.
+                    "feeRate": _f(row.get("feeRate"), FEE_RATE_UNKNOWN),
+                    "isMaker": bool(row.get("isMaker")),
+                    "execValue": _f(row.get("execValue")),
                 })
         except Exception:
             log.exception("BybitExecStream._on_exec parse failed")
