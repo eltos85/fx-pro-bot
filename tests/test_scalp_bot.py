@@ -5514,8 +5514,8 @@ def test_forward_checkpoint_counts_canon_episodes_not_rows(tmp_path):
         "symbol TEXT,side TEXT,level_type TEXT,level_price REAL,"
         "ts_candidate REAL,outcome_target TEXT,outcome_tp TEXT,"
         "source_trade_id INTEGER)")
-    con.execute("CREATE TABLE trades (id INTEGER,ts_open REAL,strategy TEXT,"
-                "status TEXT,pnl_usd REAL,close_reason TEXT)")
+    con.execute("CREATE TABLE trades (id INTEGER,ts_open REAL,symbol TEXT,"
+                "strategy TEXT,status TEXT,pnl_usd REAL,close_reason TEXT)")
     con.execute("CREATE TABLE meta_label_features (trade_id INTEGER,"
                 "label_type TEXT,would_keep INTEGER)")
     con.executemany(
@@ -5537,15 +5537,91 @@ def test_counterfactual_defaults_and_bounce_grid_do_not_change_production_persis
     assert cfg.density_bounce_persist_sec == pytest.approx(300.0)
 
 
-def test_forward_checkpoint_requires_both_sample_and_time():
-    from scripts.scalp_forward_checkpoint import Readiness
+def test_forward_checkpoint_requires_sample_clusters_and_regimes():
+    """v0.18.50: календарь заменён на кластеры + покрытие режимов.
 
-    cutoff = 1_000_000.0
-    assert not Readiness("x", 99, cutoff, cutoff + 20 * 86_400).ready
-    assert not Readiness("x", 100, cutoff, cutoff + 13.99 * 86_400).ready
-    ready = Readiness("x", 100, cutoff, cutoff + 14 * 86_400)
-    assert ready.ready
-    assert ready.span_days == pytest.approx(14.0)
+    Календарь был прокси для «≥2 недели в разных режимах» (sample-size.mdc) и
+    мерил не то: maker_nonfill прошёл 14 дней на 3 символах, а 27% выборки
+    sl_widen — один символ за один день.
+    """
+    from scripts.scalp_forward_checkpoint import (
+        MIN_CLUSTERS, REQUIRED_CELLS, Readiness)
+
+    t0 = 1_000_000.0
+    full = frozenset(REQUIRED_CELLS)
+
+    def r(n=100, clusters=MIN_CLUSTERS, cells=full):
+        return Readiness("x", n, t0, t0 + 86_400, clusters, cells)
+
+    assert r().ready
+    assert not r(n=99).ready, "порог ≥100 из sample-size.mdc остаётся полом"
+    assert not r(clusters=MIN_CLUSTERS - 1).ready, "мало независимых кластеров"
+    assert not r(cells=full - {REQUIRED_CELLS[0]}).ready, "режим не покрыт"
+    assert not r(cells=frozenset()).ready, "нет режимных данных → гейт закрыт"
+
+    # Длинный календарь больше не открывает гейт сам по себе.
+    concentrated = Readiness("x", 500, t0, t0 + 30 * 86_400, 3, full)
+    assert concentrated.span_days == pytest.approx(30.0)
+    assert not concentrated.ready, "30 дней на 3 кластерах — не готовность"
+    assert r(cells=full - {REQUIRED_CELLS[1]}).missing_cells == (
+        REQUIRED_CELLS[1],)
+
+
+def test_forward_checkpoint_clusters_are_symbol_days_not_rows():
+    """Концентрация в одном символе не должна раздувать выборку."""
+    from scripts.scalp_forward_checkpoint import _readiness
+
+    day = 1_785_000_000.0
+    # 50 наблюдений, но всё это ZEC за один день → один кластер
+    same = [("ZECUSDT", day + i * 60) for i in range(50)]
+    assert _readiness("h", same, {}).outcomes == 50
+    assert _readiness("h", same, {}).clusters == 1
+
+    spread = [("ZECUSDT", day), ("ZECUSDT", day + 86_400),
+              ("ETHUSDT", day), ("ETHUSDT", day + 86_400)]
+    assert _readiness("h", spread, {}).clusters == 4
+
+
+def test_forward_checkpoint_regime_cells_split_by_adx_and_volatility(tmp_path):
+    """Ось тренда — канонический ADX 25 (Wilder 1978); ось волатильности —
+    медиана по наблюдаемым символо-дням, а не магическое число."""
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import _day, _readiness, regime_cells
+
+    ts = 1_785_000_000.0
+    day = _day(ts)
+    con = sqlite3.connect(tmp_path / "rc.sqlite")
+    con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
+                "adx REAL, htf_natr_pct REAL)")
+    # NATR по символо-дням: 0.2/0.4/0.6/0.8 → медиана 0.6
+    con.executemany(
+        "INSERT INTO shadow_signals VALUES (?,?,?,?)",
+        [(ts, "AUSDT", 40.0, 0.8),    # тренд/волатильно
+         (ts, "BUSDT", 40.0, 0.2),    # тренд/тихо
+         (ts, "CUSDT", 10.0, 0.6),    # флет/волатильно (ровно медиана)
+         (ts, "DUSDT", 10.0, 0.4)])   # флет/тихо
+    con.commit()
+    cells = regime_cells(con, 0.0)
+    con.close()
+    assert cells[("AUSDT", day)] == "тренд/волатильно"
+    assert cells[("BUSDT", day)] == "тренд/тихо"
+    assert cells[("CUSDT", day)] == "флет/волатильно"
+    assert cells[("DUSDT", day)] == "флет/тихо"
+
+    obs = [(s, ts) for s in ("AUSDT", "BUSDT", "CUSDT", "DUSDT")]
+    assert not _readiness("h", obs, cells).missing_cells
+    # символо-день без режимных данных ячейку не засчитывает (fail-closed)
+    assert _readiness("h", [("XUSDT", ts)], cells).cells == frozenset()
+
+
+def test_forward_checkpoint_survives_missing_regime_table(tmp_path):
+    """Нет таблицы shadow_signals — не падаем, но и гейт не открываем."""
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import regime_cells
+
+    con = sqlite3.connect(tmp_path / "empty.sqlite")
+    assert regime_cells(con, 0.0) == {}
+    con.close()
 
 
 # ─── v0.18.45: shadow-grid ширины стопа (observational) ────────────────────
@@ -5703,8 +5779,9 @@ def _shadow_universe_db(tmp_path, rows, trades=()):
         mfe_r REAL, mae_r REAL, state TEXT, level_type TEXT, level_price REAL,
         source_trade_id INTEGER)""")
     con.execute("""CREATE TABLE trades (
-        id INTEGER PRIMARY KEY, ts_open REAL, strategy TEXT, pnl_usd REAL,
-        entry REAL, sl REAL, qty REAL, close_reason TEXT, status TEXT)""")
+        id INTEGER PRIMARY KEY, ts_open REAL, symbol TEXT, strategy TEXT,
+        pnl_usd REAL, entry REAL, sl REAL, qty REAL, close_reason TEXT,
+        status TEXT)""")
     # нужна checkpoint-скрипту: он считает и meta-гейты
     con.execute("""CREATE TABLE meta_label_features (
         trade_id INTEGER, ts REAL, label_type TEXT, would_keep INTEGER)""")

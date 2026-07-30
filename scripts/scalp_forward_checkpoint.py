@@ -2,9 +2,14 @@
 """Fail-closed readiness checkpoint для activation этапа 5.
 
 Скрипт только читает SQLite и никогда не меняет конфиг/торговую логику.
-READY означает лишь достаточную длительность и число релевантных исходов;
-после READY всё равно обязательны effect size, p<0.05, BH-FDR/CI, PF и
-expectancy из специализированных отчётов.
+READY означает лишь, что выборка достаточна и не сконцентрирована; после READY
+всё равно обязательны effect size, p<0.05, BH-FDR/CI, PF и expectancy из
+специализированных отчётов.
+
+Готовность (v0.18.50) = ``исходов ≥ MIN_OUTCOMES`` И ``независимых символо-дней
+≥ MIN_CLUSTERS`` И все режимные ячейки заполнены. Календарный размах остался
+только справочной колонкой: он был прокси для разнообразия режимов и мерил не
+то (см. комментарий у MIN_CLUSTERS).
 
 Usage:
   python scripts/scalp_forward_checkpoint.py \
@@ -25,7 +30,28 @@ from scalp_episodes import DEDUPED_SETUP_TYPES, collapse_episodes  # noqa: E402
 
 DEFAULT_CUTOFF = "2026-07-22T14:08:00Z"
 MIN_OUTCOMES = 100
-MIN_DAYS = 14.0
+# Независимые кластеры вместо календарного размаха (v0.18.50). Календарь был
+# лишь ПРОКСИ для того, что требует sample-size.mdc: «≥2 недели данных (в разных
+# рыночных режимах: тренд, флет, новости)». Прокси мерил не то: maker_nonfill
+# прошёл 14 дней, имея всего 3 символа и 16 символо-дней, а sl_widen набрал
+# «154 исхода», из которых 41 (27%) — один ZECUSDT за одно 29.07. Теперь
+# проверяем напрямую обе вещи, которые прокси пытался покрыть: разнообразие
+# режимов и число независимых кластеров.
+#
+# Порог 40: при кластеризованных данных cluster-robust инференс ненадёжен на
+# малом числе кластеров; общепринятое эмпирическое правило — ~40+.
+# Cameron & Miller (2015) «A Practitioner's Guide to Cluster-Robust Inference»,
+# Journal of Human Resources 50(2):317–372, §VI «few clusters»;
+# Angrist & Pischke (2009) «Mostly Harmless Econometrics» ch.8 («42 clusters»).
+MIN_CLUSTERS = 40
+# Кластер = символ×день: внутри одного символа за один день наблюдения
+# сильно скоррелированы (тот же уровень, тот же режим, те же участники).
+CLUSTER_KEY = "symbol-day"
+# Ось тренда: ADX≥25 — канонический порог Wilder (1978) «New Concepts in
+# Technical Trading Systems»; ниже — безтрендовый рынок.
+ADX_TREND = 25.0
+REQUIRED_CELLS = ("тренд/волатильно", "тренд/тихо",
+                  "флет/волатильно", "флет/тихо")
 
 
 @dataclass(frozen=True)
@@ -34,6 +60,8 @@ class Readiness:
     outcomes: int
     first_ts: float | None
     last_ts: float | None
+    clusters: int = 0
+    cells: frozenset[str] = frozenset()
 
     @property
     def span_days(self) -> float:
@@ -42,8 +70,14 @@ class Readiness:
         return max(0.0, (self.last_ts - self.first_ts) / 86_400.0)
 
     @property
+    def missing_cells(self) -> tuple[str, ...]:
+        return tuple(c for c in REQUIRED_CELLS if c not in self.cells)
+
+    @property
     def ready(self) -> bool:
-        return self.outcomes >= MIN_OUTCOMES and self.span_days >= MIN_DAYS
+        return (self.outcomes >= MIN_OUTCOMES
+                and self.clusters >= MIN_CLUSTERS
+                and not self.missing_cells)
 
 
 def _ts(value: str) -> float:
@@ -51,20 +85,79 @@ def _ts(value: str) -> float:
         UTC).timestamp()
 
 
-def _aggregate(con: sqlite3.Connection, query: str,
-               params: tuple) -> tuple[int, float | None, float | None]:
-    row = con.execute(query, params).fetchone()
-    return int(row[0] or 0), row[1], row[2]
+def _day(ts: float) -> str:
+    return datetime.fromtimestamp(float(ts), UTC).strftime("%Y-%m-%d")
+
+
+def regime_cells(con: sqlite3.Connection,
+                 cutoff: float) -> dict[tuple[str, str], str]:
+    """Режимная ячейка для каждого символо-дня: тренд/флет × волатильно/тихо.
+
+    Источник — ``shadow_signals``: там режимные фичи пишутся по всем символам и
+    плотно (десятки строк в час), в отличие от ``regime_features``, где строка
+    появляется только на реальную сделку.
+
+    Порог волатильности берём как медиану по самим наблюдаемым символо-дням, а
+    не константой: «волатильно» — понятие относительное к текущему месяцу, и
+    жёсткое число здесь было бы подгонкой (no-data-fitting.mdc).
+    """
+    try:
+        rows = con.execute(
+            """SELECT symbol, date(ts,'unixepoch'), AVG(adx), AVG(htf_natr_pct)
+               FROM shadow_signals
+               WHERE ts>=? AND adx IS NOT NULL AND htf_natr_pct IS NOT NULL
+               GROUP BY 1,2""",
+            (cutoff,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # Нет таблицы/колонок — не падаем, но и гейт не открываем: пустая карта
+        # означает «режим неизвестен», а неизвестный режим ячейку не засчитывает.
+        return {}
+    natr = sorted(float(r[3]) for r in rows if r[3] is not None)
+    if not natr:
+        return {}
+    mid = natr[len(natr) // 2]
+    cells: dict[tuple[str, str], str] = {}
+    for symbol, day, adx, vol in rows:
+        if adx is None or vol is None:
+            continue
+        trend = "тренд" if float(adx) >= ADX_TREND else "флет"
+        loud = "волатильно" if float(vol) >= mid else "тихо"
+        cells[(str(symbol), str(day))] = f"{trend}/{loud}"
+    return cells
+
+
+def _readiness(hypothesis: str, observations: list[tuple[str, float]],
+               cells: dict[tuple[str, str], str]) -> Readiness:
+    """Свести наблюдения ``(символ, ts)`` в готовность.
+
+    Кластеры и режимные ячейки считаются по символо-дням. Символо-день без
+    режимных данных попадает в кластеры, но НЕ засчитывает ячейку: неизвестный
+    режим не должен открывать гейт (fail-closed).
+    """
+    times = [ts for _, ts in observations]
+    keys = {(symbol, _day(ts)) for symbol, ts in observations}
+    return Readiness(
+        hypothesis=hypothesis, outcomes=len(observations),
+        first_ts=min(times) if times else None,
+        last_ts=max(times) if times else None,
+        clusters=len(keys),
+        cells=frozenset(cells[k] for k in keys if k in cells))
 
 
 def collect_readiness(con: sqlite3.Connection,
                       cutoff: float) -> list[Readiness]:
+    cells = regime_cells(con, cutoff)
     result: list[Readiness] = []
 
+    def observations(query: str, params: tuple) -> list[tuple[str, float]]:
+        return [(str(sym), float(ts))
+                for sym, ts in con.execute(query, params).fetchall()
+                if sym is not None and ts is not None]
+
     # Meta-gate sweep: closed actual fills + terminal maker non-fill.
-    actual = _aggregate(
-        con,
-        """SELECT COUNT(*),MIN(t.ts_open),MAX(t.ts_open)
+    actual = observations(
+        """SELECT t.symbol,t.ts_open
            FROM trades t JOIN meta_label_features m ON m.trade_id=t.id
            WHERE t.ts_open>=? AND m.label_type='fade_exhaustion'
              AND m.would_keep IS NOT NULL AND t.status='closed'
@@ -72,9 +165,8 @@ def collect_readiness(con: sqlite3.Connection,
              AND (t.close_reason IS NULL OR t.close_reason NOT LIKE 'entry_%')""",
         (cutoff,),
     )
-    maker = _aggregate(
-        con,
-        """SELECT COUNT(*),MIN(c.ts_candidate),MAX(c.ts_candidate)
+    maker = observations(
+        """SELECT c.symbol,c.ts_candidate
            FROM counterfactual_setups c
            JOIN meta_label_features m ON m.trade_id=c.source_trade_id
            WHERE c.ts_candidate>=? AND c.setup_type='maker_nonfill'
@@ -82,24 +174,17 @@ def collect_readiness(con: sqlite3.Connection,
              AND c.outcome_target IN ('target','sl')""",
         (cutoff,),
     )
-    times = [x for x in (actual[1], actual[2], maker[1], maker[2])
-             if x is not None]
-    result.append(Readiness(
-        "sweep_fade_meta_gate", actual[0] + maker[0],
-        min(times) if times else None, max(times) if times else None))
+    result.append(_readiness("sweep_fade_meta_gate", actual + maker, cells))
 
     # Breakout meta-label на реально завершённых V1.
-    n, first, last = _aggregate(
-        con,
-        """SELECT COUNT(*),MIN(t.ts_open),MAX(t.ts_open)
+    result.append(_readiness("density_break_meta_gate", observations(
+        """SELECT t.symbol,t.ts_open
            FROM trades t JOIN meta_label_features m ON m.trade_id=t.id
            WHERE t.ts_open>=? AND t.strategy='density_break'
              AND m.label_type='breakout_fuel' AND m.would_keep IS NOT NULL
              AND t.status='closed' AND t.pnl_usd IS NOT NULL
              AND (t.close_reason IS NULL OR t.close_reason NOT LIKE 'entry_%')""",
-        (cutoff,),
-    )
-    result.append(Readiness("density_break_meta_gate", n, first, last))
+        (cutoff,)), cells))
 
     for setup_type, hypothesis in (
         ("density_break_v2_shadow", "density_break_v2_retest"),
@@ -118,71 +203,60 @@ def collect_readiness(con: sqlite3.Connection,
             episodes = collapse_episodes(
                 [dict(zip(("symbol", "side", "level_type", "level_price",
                            "ts_candidate"), r)) for r in rows])
-            times = [float(e["ts_candidate"]) for e in episodes]
-            result.append(Readiness(
-                hypothesis, len(episodes),
-                min(times) if times else None, max(times) if times else None))
+            result.append(_readiness(hypothesis, [
+                (str(e["symbol"]), float(e["ts_candidate"])) for e in episodes
+            ], cells))
             continue
-        n, first, last = _aggregate(
-            con,
-            """SELECT COUNT(*),MIN(ts_candidate),MAX(ts_candidate)
-               FROM counterfactual_setups
+        result.append(_readiness(hypothesis, observations(
+            """SELECT symbol,ts_candidate FROM counterfactual_setups
                WHERE ts_candidate>=? AND setup_type=?
                  AND outcome_target IN ('target','sl')""",
-            (cutoff, setup_type),
-        )
-        result.append(Readiness(hypothesis, n, first, last))
+            (cutoff, setup_type)), cells))
 
-    rows = con.execute(
-        """SELECT variant,COUNT(*),MIN(ts_candidate),MAX(ts_candidate)
-           FROM counterfactual_setups
-           WHERE ts_candidate>=?
-             AND setup_type='density_bounce_persist_shadow'
-             AND outcome_target IN ('target','sl')
-           GROUP BY variant ORDER BY variant""",
-        (cutoff,),
-    ).fetchall()
-    by_variant = {row[0]: row[1:] for row in rows}
+    def by_variant(setup_type: str,
+                   terminal: str) -> dict[str, list[tuple[str, float]]]:
+        """Наблюдения по ветке. ``terminal`` — какой столбец считаем исходом:
+        ``outcome_target`` (дошло до +target_r) или ``outcome_tp`` (брекет
+        целиком). Значения столбца зашиты рядом, чтобы не собирать SQL строкой.
+        """
+        column, values = {
+            "target": ("outcome_target", ("target", "sl")),
+            "bracket": ("outcome_tp", ("tp", "sl")),
+        }[terminal]
+        grouped: dict[str, list[tuple[str, float]]] = {}
+        for variant, sym, ts in con.execute(
+            f"""SELECT variant,symbol,ts_candidate FROM counterfactual_setups
+                WHERE ts_candidate>=? AND setup_type=?
+                  AND {column} IN (?,?)""",
+                (cutoff, setup_type, *values)):
+            if sym is None or ts is None:
+                continue
+            grouped.setdefault(str(variant), []).append((str(sym), float(ts)))
+        return grouped
+
+    grouped = by_variant("density_bounce_persist_shadow", "target")
     for seconds in (60, 90, 120, 180):
         variant = f"persist_{seconds}s"
-        row = by_variant.get(variant, (0, None, None))
-        result.append(Readiness(
-            f"density_bounce_{variant}", int(row[0]), row[1], row[2]))
+        result.append(_readiness(f"density_bounce_{variant}",
+                                 grouped.get(variant, []), cells))
 
     # v0.18.45: ширина стопа. Считаем по outcome_tp (TP vs SL), а не по
     # outcome_target: гипотеза именно про исход брекета целиком, ведь комиссия
     # в R зависит от ширины стопа, а не от промежуточного +1.5R.
     # Контрольная ×1.0 тоже проходит checkpoint — сравнивать не с чем, пока
     # у контроля нет собственной выборки.
-    rows = con.execute(
-        """SELECT variant,COUNT(*),MIN(ts_candidate),MAX(ts_candidate)
-           FROM counterfactual_setups
-           WHERE ts_candidate>=? AND setup_type='sl_widen'
-             AND outcome_tp IN ('tp','sl')
-           GROUP BY variant ORDER BY variant""",
-        (cutoff,),
-    ).fetchall()
-    by_variant = {row[0]: row[1:] for row in rows}
+    grouped = by_variant("sl_widen", "bracket")
     # Ветки перечисляем явно (как persist-grid): гипотеза должна быть видна в
     # отчёте с n=0, иначе про неё легко забыть до появления первых исходов.
     for variant in ("x1", "x1.5", "x2", "x3"):
-        row = by_variant.get(variant, (0, None, None))
-        result.append(Readiness(
-            f"sl_widen_{variant}", int(row[0]), row[1], row[2]))
+        result.append(_readiness(f"sl_widen_{variant}",
+                                 grouped.get(variant, []), cells))
 
     # v0.18.48: стоил ли чего-то порог оборота. Группируем по стратегии —
     # порог мог быть вреден для одной и полезен для другой, агрегат это скрыл бы.
-    rows = con.execute(
-        """SELECT variant,COUNT(*),MIN(ts_candidate),MAX(ts_candidate)
-           FROM counterfactual_setups
-           WHERE ts_candidate>=? AND setup_type='shadow_universe'
-             AND outcome_tp IN ('tp','sl')
-           GROUP BY variant ORDER BY variant""",
-        (cutoff,),
-    ).fetchall()
-    for variant, n, first, last in rows:
-        result.append(Readiness(
-            f"shadow_universe_{variant}", int(n or 0), first, last))
+    for variant, obs in sorted(
+            by_variant("shadow_universe", "bracket").items()):
+        result.append(_readiness(f"shadow_universe_{variant}", obs, cells))
     return result
 
 
@@ -195,13 +269,27 @@ def main() -> int:
     rows = collect_readiness(con, _ts(args.cutoff))
     con.close()
 
-    print(f"cutoff={args.cutoff} min_n={MIN_OUTCOMES} min_days={MIN_DAYS:g}")
+    print(f"cutoff={args.cutoff} min_n={MIN_OUTCOMES} "
+          f"min_clusters={MIN_CLUSTERS} ({CLUSTER_KEY}) "
+          f"нужны режимы: {', '.join(REQUIRED_CELLS)}")
     any_ready = False
     for row in rows:
         status = "READY_FOR_STATS" if row.ready else "COLLECTING"
         any_ready = any_ready or row.ready
+        # Явно показываем, ЧТО именно держит гипотезу: раньше был только
+        # span, и по нему нельзя было понять, мало данных или они
+        # сконцентрированы в одном символе.
+        blockers = []
+        if row.outcomes < MIN_OUTCOMES:
+            blockers.append(f"исходов {row.outcomes}/{MIN_OUTCOMES}")
+        if row.clusters < MIN_CLUSTERS:
+            blockers.append(f"кластеров {row.clusters}/{MIN_CLUSTERS}")
+        if row.missing_cells:
+            blockers.append("нет режимов: " + ",".join(row.missing_cells))
         print(f"{row.hypothesis}: {status} n={row.outcomes} "
-              f"span={row.span_days:.2f}d")
+              f"кластеров={row.clusters} режимов={len(row.cells)}/"
+              f"{len(REQUIRED_CELLS)} span={row.span_days:.2f}d"
+              + (f" | держит: {'; '.join(blockers)}" if blockers else ""))
     print("activation=FORBIDDEN "
           "(READY_FOR_STATS запускает статистическую проверку, не автогейт)")
     return 0 if any_ready else 2
