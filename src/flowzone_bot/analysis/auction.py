@@ -103,6 +103,11 @@ class AuctionTracker:
                 new_dir = BALANCE  # нет подтверждённого пробоя — не торгуем
 
         self._dir[symbol] = new_dir
+        # shape пробрасываем из мгновенного контекста: латчится только state,
+        # остальные поля описывают ТЕКУЩИЙ профиль. Без этого форма падала в
+        # UNKNOWN по дефолту dataclass и все сделки логировали shape=unknown —
+        # измерить связь формы с исходом было невозможно.
         return Context(state=new_dir, vah=inst.vah, val=inst.val, poc=inst.poc,
                        accept_above=inst.accept_above,
-                       accept_below=inst.accept_below, last_price=last_price)
+                       accept_below=inst.accept_below, last_price=last_price,
+                       shape=inst.shape)

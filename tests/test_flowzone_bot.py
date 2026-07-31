@@ -9,8 +9,8 @@ from __future__ import annotations
 from flowzone_bot.analysis.auction import AuctionTracker
 from flowzone_bot.analysis.context import (BALANCE, BALANCE_SHAPE,
                                           DOUBLE_DISTRIBUTION, NORMAL, P_SHAPE_DOWN,
-                                          P_SHAPE_UP, TREND_DOWN, TREND_UP, classify,
-                                          classify_shape)
+                                          P_SHAPE_UP, TREND_DOWN, TREND_UP, UNKNOWN,
+                                          classify, classify_shape)
 from flowzone_bot.analysis.orderflow import (big_trade_threshold,
                                              detect_absorption, detect_big_trades,
                                              detect_exhaustion, detect_initiative,
@@ -266,6 +266,24 @@ def test_auction_resets_on_new_utc_day():
     ctx = tr.update("X", _DOWN_INST, 96.0, _SW, now=86400.0)
     assert ctx.state == BALANCE
     assert tr.peek("X") is None
+
+
+def test_auction_keeps_shape_of_instant_context():
+    """Латчится только state; форма профиля описывает ТЕКУЩИЙ профиль.
+
+    Регрессия: update() пересобирал Context без shape → дефолт dataclass
+    UNKNOWN, и все живые сделки логировали `shape=unknown` (07-29..07-31),
+    что не давало измерить связь формы с исходом.
+    """
+    tr = AuctionTracker()
+    assert _DOWN_INST.shape != UNKNOWN  # мгновенный контекст форму знает
+    ctx = tr.update("X", _DOWN_INST, 94.0, _SW, now=0.0)
+    assert ctx.state == TREND_DOWN
+    assert ctx.shape == _DOWN_INST.shape
+    # sticky-путь (направление держим, форма — свежая) тоже сохраняет форму
+    held = tr.update("X", _BAL_INST, 100.0, _SW, now=0.0)
+    assert held.state == TREND_DOWN
+    assert held.shape == _BAL_INST.shape
 
 
 # ─── Фаза 3: order-flow (big trades + absorption) ────────────────────────
@@ -711,6 +729,65 @@ def test_db_prune_prints(tmp_path):
     n = db.prune_prints_before(1000.0)
     assert n == 1
     assert db.prints_count() == 1
+    db.close()
+
+
+def test_db_writes_are_serialized_across_threads(tmp_path):
+    """Один connection делится между main-циклом и потоком флаша принтов.
+
+    Регрессия прода 07-29..07-30: доступ не был сериализован, и потоки
+    чередовали (DML → commit) на общем соединении. Симптомы в логе:
+    «cannot start a transaction within a transaction» при save_session_profile,
+    «cannot commit - no transaction is active», и SystemError в insert_prints
+    (батч принтов терялся). Офдок sqlite3 требует сериализации записи при
+    check_same_thread=False.
+    """
+    import threading
+    from flowzone_bot.state.db import FlowzoneDB
+    db = FlowzoneDB(str(tmp_path))
+    errors: list[BaseException] = []
+    start = threading.Barrier(3)
+
+    def prints_writer():
+        start.wait()
+        for i in range(60):
+            db.insert_prints([(1000.0 + i, "BTCUSDT", 100.0 + i, 1.0, "Buy")])
+
+    def profiles_writer():
+        start.wait()
+        for i in range(60):
+            db.save_session_profile("BTCUSDT", 1000.0 + i, 1.0,
+                                    {i: (1.0, 2.0)})
+
+    def trades_writer():
+        start.wait()
+        for _ in range(60):
+            tid = db.insert_open(symbol="BTCUSDT", side="long", qty=1.0,
+                                 entry=100.0, sl=99.0, tp=102.0, score=1,
+                                 reasons="x", mode="paper")
+            db.mark_closed(tid, exit_price=101.0, pnl_usd=1.0, fees_usd=0.0,
+                           close_reason="tp_hit")
+
+    def guard(fn):
+        def run():
+            try:
+                fn()
+            except BaseException as exc:   # noqa: BLE001 — тест ловит любой сбой
+                errors.append(exc)
+        return run
+
+    threads = [threading.Thread(target=guard(f))
+               for f in (prints_writer, profiles_writer, trades_writer)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30.0)
+        assert not t.is_alive()
+    assert not errors, f"конкурентная запись упала: {errors!r}"
+    # ни одна запись не потерялась
+    assert db.prints_count() == 60
+    assert len(db.recent_session_profiles("BTCUSDT", 1_000_000.0, limit=100)) == 60
+    assert db.trades_since(0.0) == 60
     db.close()
 
 
