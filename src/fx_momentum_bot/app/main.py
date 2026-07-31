@@ -314,11 +314,11 @@ def _count_open_positions_for_symbols(
     symbols: tuple[str, ...],
     *,
     labels: frozenset[str],
-) -> int:
-    try:
-        open_positions = executor.get_open_positions()
-    except Exception:
-        return 0
+) -> int | None:
+    """Число своих открытых позиций; `None` — reconcile не ответил."""
+    open_positions = executor.try_get_open_positions()
+    if open_positions is None:
+        return None
 
     symbol_ids = set()
     for yf_symbol in symbols:
@@ -421,6 +421,19 @@ def _should_record_direction(*, live: bool, wants_open: bool, executed: bool) ->
     return (not live) or (not wants_open) or executed
 
 
+def _sl_at_least_as_good(
+    side: str, *, current_sl: float | None, target_sl: float
+) -> bool:
+    """Текущий SL не хуже целевого (для long — выше, для short — ниже).
+
+    Гард монотонности стопа: не даём перевести SL в сторону убытка.
+    `None`/0 (стопа нет) → False: ставить целевой можно.
+    """
+    if not current_sl:
+        return False
+    return current_sl >= target_sl if side == "long" else current_sl <= target_sl
+
+
 def _r_multiple(side: str, *, entry_price: float, current_price: float, risk_price: float) -> float:
     if risk_price <= 0:
         return 0.0
@@ -470,7 +483,8 @@ def _collect_managed_positions(
     symbols: tuple[str, ...],
     *,
     labels: frozenset[str],
-) -> dict[str, list[ManagedPosition]]:
+) -> dict[str, list[ManagedPosition]] | None:
+    """Свои позиции по символам; `None` — reconcile не ответил (не «пусто»)."""
     sid_to_symbol: dict[int, str] = {}
     symbol_meta: dict[str, tuple[int, int]] = {}  # symbol -> (digits, symbol_id)
     for symbol in symbols:
@@ -480,8 +494,12 @@ def _collect_managed_positions(
         sid_to_symbol[info.symbol_id] = symbol
         symbol_meta[symbol] = (info.digits, info.symbol_id)
 
+    open_positions = executor.try_get_open_positions()
+    if open_positions is None:
+        return None
+
     grouped: dict[str, list[ManagedPosition]] = {s: [] for s in symbols}
-    for pos in executor.get_open_positions():
+    for pos in open_positions:
         td = getattr(pos, "tradeData", None)
         if td is None:
             continue
@@ -581,15 +599,35 @@ def _manage_positions(
 
             if not break_even_done and r_now >= settings.break_even_r:
                 be_sl = round(pos.entry_price, pos.digits)
-                ok = executor.amend_sl_tp(
+                # Монотонность SL (как у трейлинга: max/min с prev_sl). Если
+                # стоп уже В ПРОФИТЕ, BE его НЕ откатывает: риск снят, цель
+                # BE достигнута — просто фиксируем флаг. Симптом без гарда
+                # (VPS 2026-07-31 00:25, GBPUSD #153062967): после потери
+                # state BE-ветка перевела SL с оттрейленного 1.34410 (+2.98R)
+                # назад на entry 1.33397 — заблокированная прибыль стёрлась.
+                sl_already_better = _sl_at_least_as_good(
+                    pos.side, current_sl=pos.stop_loss, target_sl=be_sl
+                )
+                if sl_already_better:
+                    store.set_break_even_done(pos.position_id)
+                    break_even_done = True
+                    log.info(
+                        "MANAGE %s #%d: BE skip — SL %.5f уже лучше entry "
+                        "%.5f (риск снят, прибыль не откатываем)",
+                        symbol,
+                        pos.position_id,
+                        pos.stop_loss,
+                        be_sl,
+                    )
+                elif executor.amend_sl_tp(
                     pos.position_id,
                     sl_price=be_sl,
                     tp_price=None,
                     yf_symbol=symbol,
                     current_price=current_price,
-                )
-                if ok:
+                ):
                     store.set_break_even_done(pos.position_id)
+                    break_even_done = True
                     pos.stop_loss = be_sl
                     log.info(
                         "MANAGE %s #%d: BE set @ %.5f (R=%.2f)",
@@ -694,26 +732,32 @@ def run() -> None:
         try:
             signal_by_symbol: dict[str, MomentumSignal] = {}
             ctx_by_symbol: dict[str, EntryContext | None] = {}
-            # Пустой reconcile при обрыве коннекта — «не знаем», а не
-            # «позиций нет»: get_open_positions() на exception отдаёт []
-            # (executor.py), и без гейта cleanup_position_state вытирал
-            # трекинг ЖИВЫХ позиций, а per-symbol гард не видел их
-            # (VPS 2026-07-24→29: 3470 реконнектов, "removed 2 stale
-            # positions" каждый час). Брокерские действия — только при
-            # живом коннекте.
-            broker_ready = executor is not None and executor.client.is_ready
-            positions_by_symbol: dict[str, list[ManagedPosition]] = {}
-            if broker_ready:
+            # Неудавшийся reconcile — «не знаем», а не «позиций нет»:
+            # get_open_positions() на ошибке отдавал [] (executor.py), и без
+            # гейта cleanup_position_state вытирал трекинг ЖИВЫХ позиций,
+            # а per-symbol гард не видел их (VPS 2026-07-24→29: 3470
+            # реконнектов, "removed N stale positions" каждый час).
+            # Гейт по `client.is_ready` недостаточен: 2026-07-31 00:19
+            # reconcile отвалился по таймауту (type=2125) ПРИ живом коннекте
+            # (uptime 119293s) → state снова вытерло. Поэтому источник
+            # истины — статус самого запроса (`try_get_open_positions`).
+            # Брокерские действия — только если позиции реально известны.
+            positions_by_symbol: dict[str, list[ManagedPosition]] | None = None
+            if executor is not None and executor.client.is_ready:
                 # Позиции нужны не только management'у: exit-on-flip у momentum
                 # читает их независимо от флага position_management_enabled.
                 positions_by_symbol = _collect_managed_positions(
                     executor, settings.symbols, labels=settings.managed_labels
                 )
-            elif executor is not None:
-                log.info(
-                    "cTrader: нет подключения — брокерские действия цикла "
-                    "пропущены (management/exits/entries)"
-                )
+            broker_ready = positions_by_symbol is not None
+            if not broker_ready:
+                positions_by_symbol = {}
+                if executor is not None:
+                    log.info(
+                        "cTrader: позиции неизвестны (нет подключения либо "
+                        "reconcile не ответил) — брокерские действия цикла "
+                        "пропущены (management/exits/entries)"
+                    )
             for symbol in settings.symbols:
                 candles = _drop_forming_bar(
                     _fetch_candles(
@@ -859,12 +903,18 @@ def run() -> None:
                             )
                     if sym in positions_by_symbol:
                         positions_by_symbol[sym] = remaining
+            open_count = 0
             if broker_ready:
-                open_count = _count_open_positions_for_symbols(
+                counted = _count_open_positions_for_symbols(
                     executor, settings.symbols, labels=settings.managed_labels
                 )
-            else:
-                open_count = 0
+                if counted is None:
+                    # Второй reconcile в цикле мог не ответить — тогда и слоты
+                    # неизвестны: входы не открываем (max_positions не с чем
+                    # сравнить), но выходы/сопровождение уже отработали выше.
+                    broker_ready = False
+                else:
+                    open_count = counted
 
             # Event-guard: HIGH-impact релиз в окне ±N минут → новые входы
             # блокируются; сопровождение и выходы работают.

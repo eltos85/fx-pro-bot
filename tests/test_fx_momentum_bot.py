@@ -767,3 +767,90 @@ def test_store_ctx_defaults_are_null(tmp_path) -> None:
     assert row["ctx_ema_dist_atr"] is None
     assert row["ctx_with_htf"] is None
 
+
+
+# ─── Гейт «позиции неизвестны» + монотонность SL (BUILDLOG 2026-07-31) ──
+
+
+class _StubSymbolInfo:
+    def __init__(self, symbol_id: int, digits: int = 5) -> None:
+        self.symbol_id = symbol_id
+        self.digits = digits
+
+
+class _StubSymbols:
+    def resolve_yfinance(self, yf_symbol: str):
+        return _StubSymbolInfo(symbol_id=1)
+
+
+class _StubExecutor:
+    """Executor-заглушка: reconcile либо отдаёт позиции, либо «не знаю»."""
+
+    def __init__(self, positions: list | None) -> None:
+        self._positions = positions
+        self.symbols = _StubSymbols()
+
+    def try_get_open_positions(self) -> list | None:
+        return self._positions
+
+
+def test_collect_managed_positions_none_on_failed_reconcile() -> None:
+    # reconcile не ответил → None, НЕ пустой dict: иначе cleanup сотрёт
+    # state живых позиций (VPS 2026-07-31 00:19, таймаут type=2125).
+    from fx_momentum_bot.app.main import _collect_managed_positions
+
+    result = _collect_managed_positions(
+        _StubExecutor(None), ("EURUSD=X",), labels=frozenset({"momentum-bot"})
+    )
+    assert result is None
+
+
+def test_collect_managed_positions_empty_dict_when_no_positions() -> None:
+    from fx_momentum_bot.app.main import _collect_managed_positions
+
+    result = _collect_managed_positions(
+        _StubExecutor([]), ("EURUSD=X",), labels=frozenset({"momentum-bot"})
+    )
+    assert result == {"EURUSD=X": []}
+
+
+def test_count_open_positions_none_on_failed_reconcile() -> None:
+    from fx_momentum_bot.app.main import _count_open_positions_for_symbols
+
+    counted = _count_open_positions_for_symbols(
+        _StubExecutor(None), ("EURUSD=X",), labels=frozenset({"momentum-bot"})
+    )
+    assert counted is None
+
+
+def test_count_open_positions_zero_when_no_positions() -> None:
+    from fx_momentum_bot.app.main import _count_open_positions_for_symbols
+
+    counted = _count_open_positions_for_symbols(
+        _StubExecutor([]), ("EURUSD=X",), labels=frozenset({"momentum-bot"})
+    )
+    assert counted == 0
+
+
+@pytest.mark.parametrize(
+    "side,current_sl,target_sl,expected",
+    [
+        # long: трейленный SL в профите выше entry → BE не откатывает
+        ("long", 1.34410, 1.33397, True),
+        ("long", 1.32000, 1.33397, False),
+        ("long", 1.33397, 1.33397, True),
+        # short: SL в профите НИЖЕ entry
+        ("short", 160.10, 163.52, True),
+        ("short", 164.00, 163.52, False),
+        # стопа нет → ставить можно
+        ("long", None, 1.33397, False),
+        ("short", 0.0, 163.52, False),
+    ],
+)
+def test_sl_at_least_as_good(side, current_sl, target_sl, expected) -> None:
+    from fx_momentum_bot.app.main import _sl_at_least_as_good
+
+    assert (
+        _sl_at_least_as_good(side, current_sl=current_sl, target_sl=target_sl)
+        is expected
+    )

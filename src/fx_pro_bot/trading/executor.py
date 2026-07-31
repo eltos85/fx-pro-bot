@@ -562,13 +562,33 @@ class TradeExecutor:
             return AccountInfo()
 
     def get_open_positions(self) -> list:
-        """Получить список открытых позиций из cTrader."""
+        """Получить список открытых позиций из cTrader.
+
+        ВНИМАНИЕ: на ошибке отдаёт `[]` — «нет данных» неотличимо от
+        «нет позиций». Для логики, где эта разница критична (cleanup
+        state, per-symbol гарды), использовать `try_get_open_positions`.
+        """
         try:
             resp = self._client.reconcile()
             return list(resp.position) if hasattr(resp, "position") else []
         except Exception as exc:
             log.error("Ошибка reconcile: %s", exc)
             return []
+
+    def try_get_open_positions(self) -> list | None:
+        """Как `get_open_positions`, но `None` вместо `[]` при сбое.
+
+        Нужно там, где пустой ответ нельзя трактовать как «позиций нет»:
+        reconcile может отвалиться по таймауту ПРИ ЖИВОМ коннекте
+        (`type=2125`, VPS 2026-07-31 00:19), поэтому проверки
+        `client.is_ready` недостаточно — нужен статус самого запроса.
+        """
+        try:
+            resp = self._client.reconcile()
+        except Exception as exc:
+            log.error("Ошибка reconcile: %s", exc)
+            return None
+        return list(resp.position) if hasattr(resp, "position") else []
 
     def close_all_positions(self) -> int:
         """Аварийное закрытие всех позиций. Возвращает количество закрытых."""

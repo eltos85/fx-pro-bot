@@ -4,6 +4,55 @@
 
 ---
 
+## 2026-07-31
+
+### fix(momentum): reconcile-таймаут при живом коннекте + BE не откатывает трейленный SL
+`<pending commit>`
+
+Проверка бота через 45ч после фикса `7dc7315`. **Хорошее**: коннект
+стабилизировался (2 отключения / 45ч против 3470 / 5 дней), 6 входов
+исполнено, FOMC event-guard отработал (~26 циклов блокировки), и главное —
+**runner-механизм ожил**: EURUSD/GBPUSD/AUDUSD дошли до BE@~1.1R →
+partial@~1.55R → трейлинг до **+2.98R** (до правки 24.07 средний
+победитель был +0.48R). Sign-decay с гистерезисом сработал один раз
+(AUDUSD 30.07 02:02, momentum развернулся против позиции).
+
+**Симптом**: 31.07 00:19 снова `Momentum state cleanup: removed 2 stale
+positions`, а в 00:25 — `BE set @ 1.33397` для GBPUSD #153062967, у
+которой SL уже был оттрейлен на 1.34410 (+2.98R).
+
+**Причина (две)**:
+
+1. Гейт `broker_ready` из `7dc7315` проверял `client.is_ready`, но
+   reconcile отвалился **по таймауту при живом коннекте** (`type=2125`,
+   uptime 119293s) → `get_open_positions()` вернул `[]` → cleanup стёр
+   state. `is_ready` — про сессию, а нужен статус самого запроса.
+2. BE-ветка не имела гарда монотонности SL (в отличие от трейлинга, где
+   `max/min` с `prev_sl`). После потери state (`break_even_done=0`) BE
+   перевёл SL с 1.34410 назад на entry 1.33397 — заблокированные ~3R
+   стёрлись. Побочно: `risk_price` пересчитался как |entry − трейленный
+   SL| = 0.01017 вместо 0.004552 (2.2×), исказив R-метрики, а
+   `partial_done` сбросился в 0 (риск повторного partial).
+
+**Решение**:
+- `executor.try_get_open_positions()` — новый метод, отдаёт `None`
+  вместо `[]` при сбое (`get_open_positions()` не тронут: им пользуются
+  advisor и fx_ai_trader). `_collect_managed_positions` и
+  `_count_open_positions_for_symbols` протягивают `None` = «не знаю»;
+  `broker_ready` теперь = «позиции реально известны».
+- `_sl_at_least_as_good()` — гард монотонности: если SL уже не хуже
+  целевого, BE только фиксирует флаг (риск снят), стоп не откатывает.
+  Симметрично клампу трейлинга, класс bug-fix (`no-data-fitting.mdc`:
+  «inverted sign / off-by-one»), параметры стратегии не менялись.
+
+**Тесты:** 7 новых (гейт `None` vs пустой список, монотонность SL для
+long/short/без стопа) — 1343 passed.
+
+**Файлы:** `src/fx_momentum_bot/app/main.py`,
+`src/fx_pro_bot/trading/executor.py`, `tests/test_fx_momentum_bot.py`
+
+---
+
 ## 2026-07-29
 
 ### fix(momentum): не доверять пустому reconcile при обрыве коннекта (гейт broker_ready)
