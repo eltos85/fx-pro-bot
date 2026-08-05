@@ -93,38 +93,57 @@ def regime_cells(con: sqlite3.Connection,
                  cutoff: float) -> dict[tuple[str, str], str]:
     """Режимная ячейка для каждого символо-дня: тренд/флет × волатильно/тихо.
 
-    Источник — ``shadow_signals``: там режимные фичи пишутся по всем символам и
-    плотно (десятки строк в час), в отличие от ``regime_features``, где строка
-    появляется только на реальную сделку.
+    Источников два, и они объединяются (v0.18.55). ``shadow_signals`` покрывает
+    только символы, чей сигнал дошёл до боевых гейтов, — теневая вселенная туда
+    не пишет по устройству, а density-тени попадают редко. Пока карта строилась
+    на одном этом источнике, у трёх семейств гипотез было размечено 4–29%
+    кластеров, и требование «все четыре режима» не могло выполниться в принципе.
+    Второй источник — режим, записанный самим counterfactual-кандидатом при
+    рождении; он покрывает свою гипотезу по определению.
 
     Порог волатильности берём как медиану по самим наблюдаемым символо-дням, а
     не константой: «волатильно» — понятие относительное к текущему месяцу, и
-    жёсткое число здесь было бы подгонкой (no-data-fitting.mdc).
+    жёсткое число здесь было бы подгонкой (no-data-fitting.mdc). Медиана
+    считается по объединённой популяции, чтобы деление было одним и тем же для
+    всех гипотез.
     """
-    try:
-        rows = con.execute(
-            """SELECT symbol, date(ts,'unixepoch'), AVG(adx), AVG(htf_natr_pct)
-               FROM shadow_signals
-               WHERE ts>=? AND adx IS NOT NULL AND htf_natr_pct IS NOT NULL
-               GROUP BY 1,2""",
-            (cutoff,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # Нет таблицы/колонок — не падаем, но и гейт не открываем: пустая карта
-        # означает «режим неизвестен», а неизвестный режим ячейку не засчитывает.
-        return {}
-    natr = sorted(float(r[3]) for r in rows if r[3] is not None)
-    if not natr:
-        return {}
-    mid = natr[len(natr) // 2]
-    cells: dict[tuple[str, str], str] = {}
+    sources = (
+        """SELECT symbol, date(ts,'unixepoch'), AVG(adx), AVG(htf_natr_pct)
+           FROM shadow_signals
+           WHERE ts>=? AND adx IS NOT NULL AND htf_natr_pct IS NOT NULL
+           GROUP BY 1,2""",
+        """SELECT symbol, date(ts_candidate,'unixepoch'),
+                  AVG(regime_adx), AVG(regime_natr_pct)
+           FROM counterfactual_setups
+           WHERE ts_candidate>=? AND regime_adx IS NOT NULL
+                 AND regime_natr_pct IS NOT NULL
+           GROUP BY 1,2""",
+    )
+    rows: list[tuple] = []
+    for sql in sources:
+        try:
+            rows.extend(con.execute(sql, (cutoff,)).fetchall())
+        except sqlite3.OperationalError:
+            # Нет таблицы/колонок — не падаем, но и гейт не открываем: пустая
+            # карта означает «режим неизвестен», а неизвестный ячейку не даёт.
+            continue
+    # Символо-день, попавший в оба источника, обязан весить столько же, сколько
+    # любой другой: иначе он дважды сдвигал бы медиану волатильности.
+    merged: dict[tuple[str, str], list[tuple[float, float]]] = {}
     for symbol, day, adx, vol in rows:
         if adx is None or vol is None:
             continue
-        trend = "тренд" if float(adx) >= ADX_TREND else "флет"
-        loud = "волатильно" if float(vol) >= mid else "тихо"
-        cells[(str(symbol), str(day))] = f"{trend}/{loud}"
-    return cells
+        merged.setdefault((str(symbol), str(day)), []).append(
+            (float(adx), float(vol)))
+    if not merged:
+        return {}
+    means = {k: (sum(a for a, _ in v) / len(v), sum(n for _, n in v) / len(v))
+             for k, v in merged.items()}
+    natr = sorted(n for _, n in means.values())
+    mid = natr[len(natr) // 2]
+    return {k: ("тренд" if adx >= ADX_TREND else "флет")
+               + ("/волатильно" if vol >= mid else "/тихо")
+            for k, (adx, vol) in means.items()}
 
 
 def _readiness(hypothesis: str, observations: list[tuple[str, float]],

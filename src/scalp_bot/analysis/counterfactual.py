@@ -57,6 +57,11 @@ class CounterfactualCandidate:
     wall_persist_sec: float | None = None
     v1_signal_created: bool | None = None
     actual_gate: str | None = None
+    # Режим рынка на момент рождения кандидата (v0.18.55). Нужен, чтобы
+    # readiness-чекпоинт мог разметить символо-день гипотезы её собственными
+    # наблюдениями, а не выводить режим из чужой популяции shadow_signals.
+    regime_adx: float | None = None
+    regime_natr_pct: float | None = None
 
     def as_row(self) -> dict[str, Any]:
         row = dict(self.__dict__)
@@ -238,10 +243,12 @@ def advance_retest_entry(row: dict, snap, now: float) -> bool:
 class CounterfactualTracker:
     """SQLite-backed, idempotent и bounded live tracker."""
 
-    def __init__(self, db, settings, *, now=time.time) -> None:
+    def __init__(self, db, settings, *, now=time.time,
+                 regime_provider=None) -> None:
         self._db = db
         self._cfg = settings
         self._now = now
+        self._regime_provider = regime_provider
         self._rows: dict[int, dict] = {}
         self._last_flush: dict[int, float] = {}
         if not getattr(settings, "counterfactual_enabled", True) or db is None:
@@ -260,6 +267,32 @@ class CounterfactualTracker:
     def active_count(self) -> int:
         return len(self._rows)
 
+    def set_regime_provider(self, provider) -> None:
+        """Источник (adx, natr_pct) по символу; ставится после прогрева HTF."""
+        self._regime_provider = provider
+
+    def _stamp_regime(self, row: dict) -> None:
+        """Проставить режим на момент рождения кандидата.
+
+        Значения только описательные: они не участвуют в advance/outcome и не
+        могут изменить исход. Уже заполненные поля не перетираем — стратегия
+        вправе знать режим точнее, чем общий провайдер.
+        """
+        if self._regime_provider is None:
+            return
+        if (row.get("regime_adx") is not None
+                and row.get("regime_natr_pct") is not None):
+            return
+        try:
+            adx, natr = self._regime_provider(row["symbol"])
+        except Exception:
+            log.exception("regime stamp %s failed", row.get("symbol"))
+            return
+        if row.get("regime_adx") is None and adx is not None:
+            row["regime_adx"] = float(adx)
+        if row.get("regime_natr_pct") is None and natr is not None:
+            row["regime_natr_pct"] = float(natr)
+
     def is_active(self, candidate_id: int | None) -> bool:
         """Наблюдаем ли ещё за кандидатом. Терминальные строки из ``_rows``
         удаляются, поэтому отсутствие ключа = исход уже зафиксирован."""
@@ -273,6 +306,7 @@ class CounterfactualTracker:
         row.setdefault("risk", abs(float(row["entry"]) - float(row["sl"])))
         if row["risk"] <= 0 or float(row.get("target_r") or 0.0) <= 0:
             return None
+        self._stamp_regime(row)
         try:
             cid, stored = self._db.insert_counterfactual_setup(row)
             if cid is None or stored is None:

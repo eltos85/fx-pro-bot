@@ -235,6 +235,13 @@ def run() -> None:
     # старте, далее refresh раз в htf_refresh_sec (метрика медленная).
     htf = HtfTrend(cfg.htf_ema_len, cfg.htf_interval, cfg.htf_adx_len)
     last_htf = 0.0
+    # v0.18.55: каждый counterfactual-кандидат несёт свой режим. До этого
+    # readiness-чекпоинт брал режим символо-дня из shadow_signals, куда
+    # теневая вселенная не пишет вовсе, а density-тени попадают редко: у них
+    # было размечено 4% и 28% кластеров, и требование «все четыре режима»
+    # не могло выполниться никогда, сколько бы данных ни накопилось.
+    counterfactual.set_regime_provider(
+        lambda sym: (htf.trend_strength(sym), htf.natr_pct(sym)))
     if client is not None and cfg.require_htf_trend:
         try:
             htf.refresh(client, symbols)

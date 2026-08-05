@@ -5809,6 +5809,130 @@ def test_forward_checkpoint_survives_missing_regime_table(tmp_path):
     con.close()
 
 
+def test_forward_checkpoint_regime_from_candidate_own_rows(tmp_path):
+    """v0.18.55: символо-день размечается собственным режимом кандидата.
+
+    Теневая вселенная в shadow_signals не пишет вовсе, поэтому раньше её
+    кластеры оставались без режима и требование «все четыре ячейки» было
+    невыполнимо в принципе.
+    """
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import _day, regime_cells
+
+    ts = 1_785_000_000.0
+    day = _day(ts)
+    con = sqlite3.connect(tmp_path / "own.sqlite")
+    con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
+                "adx REAL, htf_natr_pct REAL)")
+    con.execute("CREATE TABLE counterfactual_setups (ts_candidate REAL, "
+                "symbol TEXT, regime_adx REAL, regime_natr_pct REAL)")
+    # NATR по символо-дням: 0.2/0.3/0.8/0.9 → медиана 0.8. Тихие ячейки
+    # приходят ровно оттуда, где раньше режим был неизвестен.
+    con.executemany(
+        "INSERT INTO shadow_signals VALUES (?,?,?,?)",
+        [(ts, "AUSDT", 40.0, 0.9), (ts, "BUSDT", 10.0, 0.8)])
+    con.executemany(
+        "INSERT INTO counterfactual_setups VALUES (?,?,?,?)",
+        [(ts, "SHADOW1USDT", 40.0, 0.2),
+         (ts, "SHADOW2USDT", 10.0, 0.3)])
+    con.commit()
+    cells = regime_cells(con, 0.0)
+    con.close()
+    assert cells[("AUSDT", day)] == "тренд/волатильно"
+    assert cells[("BUSDT", day)] == "флет/волатильно"
+    assert cells[("SHADOW1USDT", day)] == "тренд/тихо"
+    assert cells[("SHADOW2USDT", day)] == "флет/тихо"
+
+
+def test_forward_checkpoint_shared_symbol_day_counted_once(tmp_path):
+    """Символо-день из обоих источников не должен дважды двигать медиану."""
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import _day, regime_cells
+
+    ts = 1_785_000_000.0
+    day = _day(ts)
+    con = sqlite3.connect(tmp_path / "dup.sqlite")
+    con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
+                "adx REAL, htf_natr_pct REAL)")
+    con.execute("CREATE TABLE counterfactual_setups (ts_candidate REAL, "
+                "symbol TEXT, regime_adx REAL, regime_natr_pct REAL)")
+    # Уникальные NATR 0.2/0.4/0.9/1.0 → медиана 0.9, BUSDT тихий. Если бы
+    # AUSDT из обоих источников считался дважды, медиана съехала бы на 0.4 и
+    # BUSDT ошибочно стал бы «волатильно».
+    con.executemany(
+        "INSERT INTO shadow_signals VALUES (?,?,?,?)",
+        [(ts, "AUSDT", 40.0, 0.2), (ts, "BUSDT", 40.0, 0.4),
+         (ts, "CUSDT", 40.0, 0.9), (ts, "DUSDT", 40.0, 1.0)])
+    con.execute("INSERT INTO counterfactual_setups VALUES (?,?,?,?)",
+                (ts, "AUSDT", 40.0, 0.2))
+    con.commit()
+    cells = regime_cells(con, 0.0)
+    con.close()
+    assert len(cells) == 4
+    assert cells[("BUSDT", day)] == "тренд/тихо"
+    assert cells[("CUSDT", day)] == "тренд/волатильно"
+
+
+def _counter_cfg():
+    return SimpleNamespace(counterfactual_enabled=True,
+                           counterfactual_max_active=10,
+                           counterfactual_flush_sec=60.0)
+
+
+def test_counterfactual_stamps_regime_at_birth(tmp_path):
+    """Кандидат несёт режим своего символа — это и делает его размечаемым."""
+    calls: list[str] = []
+
+    def provider(symbol: str):
+        calls.append(symbol)
+        return (31.5, 0.42)
+
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(db, _counter_cfg(),
+                                    regime_provider=provider)
+    tracker.add(_counter_candidate(symbol="ZECUSDT"))
+    assert calls == ["ZECUSDT"]
+    row = db.counterfactual_rows()[0]
+    assert row["regime_adx"] == pytest.approx(31.5)
+    assert row["regime_natr_pct"] == pytest.approx(0.42)
+    db.close()
+
+
+def test_counterfactual_regime_stamp_never_blocks_candidate(tmp_path):
+    """Сломанный или непрогретый провайдер не должен терять наблюдение."""
+    def broken(symbol: str):
+        raise RuntimeError("htf not warm")
+
+    db = ScalpDB(str(tmp_path))
+    tracker = CounterfactualTracker(db, _counter_cfg(), regime_provider=broken)
+    assert tracker.add(_counter_candidate()) is not None
+    row = db.counterfactual_rows()[0]
+    assert row["regime_adx"] is None and row["regime_natr_pct"] is None
+
+    tracker2 = CounterfactualTracker(db, _counter_cfg(),
+                                     regime_provider=lambda s: (None, None))
+    assert tracker2.add(_counter_candidate(candidate_key="test:2")) is not None
+    assert db.counterfactual_rows()[1]["regime_adx"] is None
+    db.close()
+
+
+def test_counterfactual_regime_stamp_does_not_change_outcome(tmp_path):
+    """Режим — только описание: путь кандидата от него не зависит."""
+    def run(provider):
+        db = ScalpDB(str(tmp_path / ("with" if provider else "without")))
+        tracker = CounterfactualTracker(db, _counter_cfg(), now=lambda: 110.0,
+                                        regime_provider=provider)
+        tracker.add(_counter_candidate())
+        tracker.update_snapshot(SimpleNamespace(
+            symbol="SOLUSDT", stale=False, last_price=101.6, ts=110.0),
+            now=110.0)
+        row = db.counterfactual_rows()[0]
+        db.close()
+        return row["outcome_target"], row["mfe_r"], row["sample_count"]
+
+    assert run(lambda s: (31.5, 0.42)) == run(None)
+
+
 # ─── v0.18.45: shadow-grid ширины стопа (observational) ────────────────────
 # Аудит 2026-07-26: комиссия в R = fee_rate / SL%, при SL 0.300% это 0.34R и
 # она съедает gross edge +0.114R. Ветки меряют, что даёт более широкий стоп

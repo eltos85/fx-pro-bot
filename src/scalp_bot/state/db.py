@@ -273,6 +273,8 @@ CREATE TABLE IF NOT EXISTS counterfactual_setups (
     wall_persist_sec REAL,
     v1_signal_created INTEGER,
     actual_gate TEXT,
+    regime_adx REAL,
+    regime_natr_pct REAL,
     outcome_target TEXT,
     ts_outcome_target REAL,
     outcome_tp TEXT,
@@ -406,6 +408,15 @@ class ScalpDB:
             if col not in mcols:
                 self._conn.execute(
                     f"ALTER TABLE meta_label_features ADD COLUMN {col} {col_type}")
+        # v0.18.55: режим на момент рождения counterfactual-кандидата. Старым
+        # строкам оставляем NULL — восстановить режим задним числом нечем, а
+        # догадка исказила бы разметку режимных ячеек.
+        ccols = {r["name"] for r in
+                 self._conn.execute("PRAGMA table_info(counterfactual_setups)")}
+        for col in ("regime_adx", "regime_natr_pct"):
+            if col not in ccols:
+                self._conn.execute(
+                    f"ALTER TABLE counterfactual_setups ADD COLUMN {col} REAL")
         self._migrate_maker_shadows()
         self._void_clock_bug_setups()
 
@@ -920,6 +931,7 @@ class ScalpDB:
         "retest_delay_sec", "retest_distance_bps", "retest_hold_sec",
         "retest_tolerance_bps",
         "wall_persist_sec", "v1_signal_created", "actual_gate",
+        "regime_adx", "regime_natr_pct",
         "outcome_target", "ts_outcome_target", "outcome_tp", "ts_outcome_tp",
         "mfe_r", "mae_r", "mfe_r_60", "mae_r_60", "mfe_r_90", "mae_r_90",
         "mfe_r_120", "mae_r_120", "mfe_r_180", "mae_r_180", "sample_count",

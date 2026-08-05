@@ -27,7 +27,10 @@ EMA200, DMI long-gate, no_long_symbols, rate-limit, max_open_positions. Знач
 заложена, поэтому netR боевых сделок строже теневого MFE/MAE.
 
 Решения принимать нельзя, пока не пройден ``scalp_forward_checkpoint.py``
-(≥100 исходов И ≥14 дней) — см. sample-size.mdc.
+(≥100 исходов И ≥40 независимых символо-дней И все четыре режимные ячейки) —
+см. sample-size.mdc. Календарный порог «≥14 дней» из v0.18.48 заменён на
+кластеры и покрытие режимов в v0.18.50: он был лишь прокси для разнообразия
+режимов и мерил не то.
 
 Usage:
   python scripts/scalp_shadow_universe_report.py --db /data/scalp_bot.sqlite
