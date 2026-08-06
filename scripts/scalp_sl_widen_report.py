@@ -72,8 +72,8 @@ def _fmt(value: float | None, digits: int = 3) -> str:
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
-def _load(conn: sqlite3.Connection, since: float,
-          filled_only: bool) -> list[sqlite3.Row]:
+def _load(conn: sqlite3.Connection, since: float, filled_only: bool,
+          strategy: str | None = None) -> list[sqlite3.Row]:
     sql = (
         "SELECT c.id, c.variant, c.strategy, c.symbol, c.side, c.entry, "
         "       c.risk, c.tp, c.state, c.outcome_tp, c.source_trade_id, "
@@ -82,12 +82,19 @@ def _load(conn: sqlite3.Connection, since: float,
         "LEFT JOIN trades t ON t.id = c.source_trade_id "
         "WHERE c.setup_type='sl_widen' AND c.ts_candidate >= ?"
     )
+    params: list = [since]
+    if strategy:
+        # Агрегат по всем стратегиям тянут те, у кого теней больше. Вывод
+        # «стоп расширять не надо» может не переноситься на стратегию с иной
+        # геометрией и иной ставкой комиссии, поэтому её надо уметь выделить.
+        sql += " AND c.strategy = ?"
+        params.append(strategy)
     if filled_only:
         # Сделки, которые так и не вошли в рынок, не несут информации о том,
         # как повёл бы себя стоп: там нет ни fill-а, ни исполненной геометрии.
         sql += (" AND t.close_reason IS NOT NULL AND t.close_reason NOT IN "
                 "('entry_Cancelled','entry_timeout','entry_Rejected')")
-    return conn.execute(sql, (since,)).fetchall()
+    return conn.execute(sql, tuple(params)).fetchall()
 
 
 def realised_r(row) -> float | None:
@@ -228,13 +235,17 @@ def main() -> int:
     parser.add_argument("--filled-only", action="store_true",
                         help="только сделки, реально вошедшие в рынок")
     parser.add_argument("--control", default="x1")
+    parser.add_argument("--strategy", default=None,
+                        help="разбор по одной стратегии (агрегат тянет та, "
+                             "у кого теней больше)")
     args = parser.parse_args()
 
     conn = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    rows = _load(conn, _timestamp(args.since), args.filled_only)
+    rows = _load(conn, _timestamp(args.since), args.filled_only, args.strategy)
     print(f"source={args.db} since={args.since} fee={args.fee_pct}% "
-          f"round-turn filled_only={args.filled_only} observational-only")
+          f"round-turn filled_only={args.filled_only} "
+          f"strategy={args.strategy or 'все'} observational-only")
     if not rows:
         print("NO DATA")
         return 0

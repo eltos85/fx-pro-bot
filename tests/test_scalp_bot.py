@@ -6207,6 +6207,36 @@ def test_sl_widen_report_excludes_unfinished_but_reports_them():
     assert arms["x1"]["gross_r"] == pytest.approx(3.5), "только досмотренный"
 
 
+def test_sl_widen_report_filters_by_strategy(tmp_path):
+    """Агрегат тянет стратегия с бо́льшим числом теней, поэтому её надо уметь
+    отделить: у density_break своя геометрия и своя ставка комиссии."""
+    import sqlite3
+    from scripts.scalp_sl_widen_report import _load
+
+    con = sqlite3.connect(tmp_path / "widen.sqlite")
+    con.execute("""CREATE TABLE counterfactual_setups (
+        id INTEGER PRIMARY KEY, setup_type TEXT, variant TEXT, strategy TEXT,
+        symbol TEXT, side TEXT, entry REAL, risk REAL, tp REAL, state TEXT,
+        outcome_tp TEXT, source_trade_id INTEGER, last_price REAL,
+        ts_candidate REAL)""")
+    con.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, "
+                "close_reason TEXT)")
+    con.executemany(
+        "INSERT INTO counterfactual_setups (setup_type,variant,strategy,"
+        "symbol,side,entry,risk,tp,state,outcome_tp,ts_candidate) "
+        "VALUES ('sl_widen',?,?,?,'long',100.0,0.3,101.05,'final','tp',10.0)",
+        [("x1", "density_break", "HYPEUSDT"),
+         ("x3", "density_break", "HYPEUSDT"),
+         ("x1", "sweep_fade", "ZECUSDT")])
+    con.commit()
+    con.row_factory = sqlite3.Row
+    assert len(_load(con, 0.0, False)) == 3
+    only = _load(con, 0.0, False, "density_break")
+    con.close()
+    assert len(only) == 2
+    assert {r["strategy"] for r in only} == {"density_break"}
+
+
 def _shadow_universe_db(tmp_path, rows, trades=()):
     """Мини-БД со схемой, достаточной для read-only отчётов."""
     import sqlite3
