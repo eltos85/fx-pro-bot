@@ -63,7 +63,7 @@ cutoff брать только через `_ts()`, а не подставлят�
 **Файлы:** `scripts/scalp_forward_checkpoint.py`, `tests/test_scalp_bot.py`
 
 ### result(scalp): density_break V2 (вход лимиткой на ретесте) — отрицательно
-`hash-pending`
+`0145781`
 
 Гипотеза: боевой `density_break` входит по рынку сразу после close-confirm
 пробоя и стабильно убыточен; V2 предлагал дождаться возврата к пробитой стене и
