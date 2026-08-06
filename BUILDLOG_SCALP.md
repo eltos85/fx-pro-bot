@@ -63,7 +63,7 @@ cutoff брать только через `_ts()`, а не подставлят�
 **Файлы:** `scripts/scalp_forward_checkpoint.py`, `tests/test_scalp_bot.py`
 
 ### finding(scalp): вывод по ширине стопа НЕ переносится на density_break
-`hash-pending`
+`7ec76fc`
 
 Уточнение к `d84cac2`, где `sl_widen` был закрыт отрицательно. Агрегат тянули
 `sweep_fade` (168 теней на ветку) и `sweep_fade_canon` (89); на `density_break`
