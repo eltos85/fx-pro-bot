@@ -5769,22 +5769,24 @@ def test_forward_checkpoint_clusters_are_symbol_days_not_rows():
 
 def test_forward_checkpoint_regime_cells_split_by_adx_and_volatility(tmp_path):
     """Ось тренда — канонический ADX 25 (Wilder 1978); ось волатильности —
-    медиана по наблюдаемым символо-дням, а не магическое число."""
+    замороженный NATR_SPLIT. Значения задаём относительно порога, чтобы тест
+    проверял логику разметки, а не совпадение с конкретным числом."""
     import sqlite3
-    from scripts.scalp_forward_checkpoint import _day, _readiness, regime_cells
+    from scripts.scalp_forward_checkpoint import (NATR_SPLIT, _day,
+                                                  _readiness, regime_cells)
 
     ts = 1_785_000_000.0
     day = _day(ts)
+    loud, quiet = NATR_SPLIT * 2, NATR_SPLIT / 2
     con = sqlite3.connect(tmp_path / "rc.sqlite")
     con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
                 "adx REAL, htf_natr_pct REAL)")
-    # NATR по символо-дням: 0.2/0.4/0.6/0.8 → медиана 0.6
     con.executemany(
         "INSERT INTO shadow_signals VALUES (?,?,?,?)",
-        [(ts, "AUSDT", 40.0, 0.8),    # тренд/волатильно
-         (ts, "BUSDT", 40.0, 0.2),    # тренд/тихо
-         (ts, "CUSDT", 10.0, 0.6),    # флет/волатильно (ровно медиана)
-         (ts, "DUSDT", 10.0, 0.4)])   # флет/тихо
+        [(ts, "AUSDT", 40.0, loud),        # тренд/волатильно
+         (ts, "BUSDT", 40.0, quiet),       # тренд/тихо
+         (ts, "CUSDT", 10.0, NATR_SPLIT),  # флет/волатильно (ровно порог)
+         (ts, "DUSDT", 10.0, quiet)])      # флет/тихо
     con.commit()
     cells = regime_cells(con, 0.0)
     con.close()
@@ -5914,10 +5916,11 @@ def test_forward_checkpoint_readiness_is_monotonic(tmp_path):
 def test_forward_checkpoint_shared_symbol_day_counted_once(tmp_path):
     """Символо-день из обоих источников — один кластер с усреднённым режимом."""
     import sqlite3
-    from scripts.scalp_forward_checkpoint import _day, regime_cells
+    from scripts.scalp_forward_checkpoint import NATR_SPLIT, _day, regime_cells
 
     ts = 1_785_000_000.0
     day = _day(ts)
+    quiet, loud = NATR_SPLIT / 2, NATR_SPLIT * 2
     con = sqlite3.connect(tmp_path / "dup.sqlite")
     con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
                 "adx REAL, htf_natr_pct REAL)")
@@ -5927,10 +5930,10 @@ def test_forward_checkpoint_shared_symbol_day_counted_once(tmp_path):
     # иначе один и тот же день дважды весил бы в требовании MIN_CLUSTERS.
     con.executemany(
         "INSERT INTO shadow_signals VALUES (?,?,?,?)",
-        [(ts, "AUSDT", 40.0, 0.2), (ts, "BUSDT", 40.0, 0.4),
-         (ts, "CUSDT", 40.0, 0.9), (ts, "DUSDT", 40.0, 1.0)])
+        [(ts, "AUSDT", 40.0, quiet), (ts, "BUSDT", 40.0, quiet),
+         (ts, "CUSDT", 40.0, loud), (ts, "DUSDT", 40.0, loud)])
     con.execute("INSERT INTO counterfactual_setups VALUES (?,?,?,?)",
-                (ts, "AUSDT", 40.0, 0.2))
+                (ts, "AUSDT", 40.0, quiet))
     con.commit()
     cells = regime_cells(con, 0.0)
     con.close()
