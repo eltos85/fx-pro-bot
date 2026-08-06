@@ -5844,8 +5844,75 @@ def test_forward_checkpoint_regime_from_candidate_own_rows(tmp_path):
     assert cells[("SHADOW2USDT", day)] == "флет/тихо"
 
 
+def test_forward_checkpoint_split_is_frozen_not_recomputed(tmp_path):
+    """v0.18.56: разметка зависит только от замороженного порога.
+
+    Регрессия 2026-08-06: медиана пересчитывалась на каждом запуске, уехала
+    0.367→0.432, четыре символо-дня сменили ярлык, и canon_rejection откатился
+    с 4/4 режимов на 3/4, имея строго больше данных.
+    """
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import (NATR_SPLIT, _day,
+                                                  regime_cells)
+
+    ts = 1_785_000_000.0
+    day = _day(ts)
+    quiet, loud = NATR_SPLIT * 0.5, NATR_SPLIT * 2.0
+    con = sqlite3.connect(tmp_path / "frozen.sqlite")
+    con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
+                "adx REAL, htf_natr_pct REAL)")
+    con.execute("INSERT INTO shadow_signals VALUES (?,?,?,?)",
+                (ts, "AUSDT", 40.0, quiet))
+    con.commit()
+    # Единственный символо-день тихий — при пересчёте медианы он был бы
+    # «волатильно» по построению (сам себе медиана).
+    assert regime_cells(con, 0.0)[("AUSDT", day)] == "тренд/тихо"
+
+    # Приход громких дней не должен переклеивать ярлык уже размеченного дня.
+    con.executemany(
+        "INSERT INTO shadow_signals VALUES (?,?,?,?)",
+        [(ts, "BUSDT", 40.0, loud), (ts, "CUSDT", 40.0, loud),
+         (ts, "DUSDT", 40.0, loud)])
+    con.commit()
+    cells = regime_cells(con, 0.0)
+    con.close()
+    assert cells[("AUSDT", day)] == "тренд/тихо"
+    assert cells[("BUSDT", day)] == "тренд/волатильно"
+
+
+def test_forward_checkpoint_readiness_is_monotonic(tmp_path):
+    """Новые наблюдения не могут отобрать уже набранную ячейку."""
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import (NATR_SPLIT, REQUIRED_CELLS,
+                                                  _readiness, regime_cells)
+
+    ts = 1_785_000_000.0
+    con = sqlite3.connect(tmp_path / "mono.sqlite")
+    con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
+                "adx REAL, htf_natr_pct REAL)")
+    four = [("AUSDT", 40.0, NATR_SPLIT * 2), ("BUSDT", 40.0, NATR_SPLIT / 2),
+            ("CUSDT", 10.0, NATR_SPLIT * 2), ("DUSDT", 10.0, NATR_SPLIT / 2)]
+    con.executemany("INSERT INTO shadow_signals VALUES (?,?,?,?)",
+                    [(ts, s, a, v) for s, a, v in four])
+    con.commit()
+    obs = [(s, ts) for s, _, _ in four]
+    assert _readiness("h", obs, regime_cells(con, 0.0)).cells == frozenset(
+        REQUIRED_CELLS)
+
+    # Дозаливаем много громких дней — раньше это сдвигало медиану вверх и
+    # отбирало ячейку «волатильно» у пограничных наблюдений.
+    con.executemany(
+        "INSERT INTO shadow_signals VALUES (?,?,?,?)",
+        [(ts, f"X{i}USDT", 40.0, NATR_SPLIT * 10) for i in range(20)])
+    con.commit()
+    cells = regime_cells(con, 0.0)
+    con.close()
+    assert _readiness("h", obs, cells).cells == frozenset(
+        REQUIRED_CELLS)
+
+
 def test_forward_checkpoint_shared_symbol_day_counted_once(tmp_path):
-    """Символо-день из обоих источников не должен дважды двигать медиану."""
+    """Символо-день из обоих источников — один кластер с усреднённым режимом."""
     import sqlite3
     from scripts.scalp_forward_checkpoint import _day, regime_cells
 
@@ -5856,9 +5923,8 @@ def test_forward_checkpoint_shared_symbol_day_counted_once(tmp_path):
                 "adx REAL, htf_natr_pct REAL)")
     con.execute("CREATE TABLE counterfactual_setups (ts_candidate REAL, "
                 "symbol TEXT, regime_adx REAL, regime_natr_pct REAL)")
-    # Уникальные NATR 0.2/0.4/0.9/1.0 → медиана 0.9, BUSDT тихий. Если бы
-    # AUSDT из обоих источников считался дважды, медиана съехала бы на 0.4 и
-    # BUSDT ошибочно стал бы «волатильно».
+    # AUSDT виден обоими источниками: он обязан остаться одним кластером,
+    # иначе один и тот же день дважды весил бы в требовании MIN_CLUSTERS.
     con.executemany(
         "INSERT INTO shadow_signals VALUES (?,?,?,?)",
         [(ts, "AUSDT", 40.0, 0.2), (ts, "BUSDT", 40.0, 0.4),

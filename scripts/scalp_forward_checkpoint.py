@@ -11,6 +11,11 @@ READY означает лишь, что выборка достаточна и �
 только справочной колонкой: он был прокси для разнообразия режимов и мерил не
 то (см. комментарий у MIN_CLUSTERS).
 
+Готовность монотонна (v0.18.56): порог волатильности заморожен, поэтому новые
+данные могут только приблизить гипотезу к READY, но не отозвать разрешение
+задним числом. Порог печатается в шапке отчёта вместе с актуальной медианой
+популяции — расхождение видно сразу и служит поводом пересмотреть заморозку.
+
 Usage:
   python scripts/scalp_forward_checkpoint.py \
     --db /data/scalp_bot.sqlite --cutoff 2026-07-22T14:08:00Z
@@ -50,6 +55,20 @@ CLUSTER_KEY = "symbol-day"
 # Ось тренда: ADX≥25 — канонический порог Wilder (1978) «New Concepts in
 # Technical Trading Systems»; ниже — безтрендовый рынок.
 ADX_TREND = 25.0
+# Ось волатильности: порог ЗАМОРОЖЕН (v0.18.56). Раньше медиана пересчитывалась
+# на каждом запуске, и готовность перестала быть монотонной: 2026-08-06
+# медиана уехала 0.367→0.432 (в популяцию вошли 22 counterfactual-дня), четыре
+# символо-дня сменили ярлык волатильно→тихо, и canon_rejection откатился с 4/4
+# режимов на 3/4, имея СТРОГО больше данных. Гейт, санкционирующий анализ, не
+# может отзывать разрешение задним числом.
+#
+# Значение выведено из данных, а не выбрано: медиана NATR по 73 символо-дням
+# объединённой популяции с cutoff 2026-07-22T14:08:00Z, посчитана 2026-08-06.
+# Порог привязан к поколению эксперимента: меняется cutoff → пересчитать
+# (`--recompute-split` печатает актуальную медиану, но НЕ правит константу —
+# правка руками и в коммите, иначе воспроизводимость снова теряется).
+NATR_SPLIT = 0.432055
+NATR_SPLIT_BASIS = "медиана 73 символо-дней с cutoff 2026-07-22, зафикс. 2026-08-06"
 REQUIRED_CELLS = ("тренд/волатильно", "тренд/тихо",
                   "флет/волатильно", "флет/тихо")
 
@@ -101,11 +120,13 @@ def regime_cells(con: sqlite3.Connection,
     Второй источник — режим, записанный самим counterfactual-кандидатом при
     рождении; он покрывает свою гипотезу по определению.
 
-    Порог волатильности берём как медиану по самим наблюдаемым символо-дням, а
-    не константой: «волатильно» — понятие относительное к текущему месяцу, и
-    жёсткое число здесь было бы подгонкой (no-data-fitting.mdc). Медиана
-    считается по объединённой популяции, чтобы деление было одним и тем же для
-    всех гипотез.
+    Порог волатильности — замороженный ``NATR_SPLIT`` (v0.18.56). Он выведен из
+    данных (медиана объединённой популяции), но зафиксирован в коде, потому что
+    пересчёт на каждом запуске делал готовность немонотонной. Деление одно и то
+    же для всех гипотез намеренно: «волатильно» должно означать «относительно
+    всего, что бот наблюдает», а не относительно узкой популяции самой гипотезы.
+    Per-hypothesis медиана давала бы 50/50 по построению и превратила бы
+    требование разнообразия режимов в тавтологию.
     """
     sources = (
         """SELECT symbol, date(ts,'unixepoch'), AVG(adx), AVG(htf_natr_pct)
@@ -139,11 +160,41 @@ def regime_cells(con: sqlite3.Connection,
         return {}
     means = {k: (sum(a for a, _ in v) / len(v), sum(n for _, n in v) / len(v))
              for k, v in merged.items()}
-    natr = sorted(n for _, n in means.values())
-    mid = natr[len(natr) // 2]
     return {k: ("тренд" if adx >= ADX_TREND else "флет")
-               + ("/волатильно" if vol >= mid else "/тихо")
+               + ("/волатильно" if vol >= NATR_SPLIT else "/тихо")
             for k, (adx, vol) in means.items()}
+
+
+def current_natr_median(con: sqlite3.Connection, cutoff: float) -> float | None:
+    """Актуальная медиана популяции — справочно, для решения о переzаморозке.
+
+    Никогда не используется при разметке: ярлык обязан зависеть только от
+    зафиксированного ``NATR_SPLIT``.
+    """
+    cells = regime_cells(con, cutoff)
+    if not cells:
+        return None
+    sources = (
+        """SELECT symbol, date(ts,'unixepoch'), AVG(htf_natr_pct)
+           FROM shadow_signals WHERE ts>=? AND htf_natr_pct IS NOT NULL
+           GROUP BY 1,2""",
+        """SELECT symbol, date(ts_candidate,'unixepoch'), AVG(regime_natr_pct)
+           FROM counterfactual_setups
+           WHERE ts_candidate>=? AND regime_natr_pct IS NOT NULL GROUP BY 1,2""",
+    )
+    merged: dict[tuple[str, str], list[float]] = {}
+    for sql in sources:
+        try:
+            for symbol, day, vol in con.execute(sql, (cutoff,)):
+                if vol is not None:
+                    merged.setdefault((str(symbol), str(day)), []).append(
+                        float(vol))
+        except sqlite3.OperationalError:
+            continue
+    if not merged:
+        return None
+    natr = sorted(sum(v) / len(v) for v in merged.values())
+    return natr[len(natr) // 2]
 
 
 def _readiness(hypothesis: str, observations: list[tuple[str, float]],
@@ -285,12 +336,20 @@ def main() -> int:
     parser.add_argument("--cutoff", default=DEFAULT_CUTOFF)
     args = parser.parse_args()
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
-    rows = collect_readiness(con, _ts(args.cutoff))
+    cutoff = _ts(args.cutoff)
+    rows = collect_readiness(con, cutoff)
+    live_median = current_natr_median(con, cutoff)
     con.close()
 
     print(f"cutoff={args.cutoff} min_n={MIN_OUTCOMES} "
           f"min_clusters={MIN_CLUSTERS} ({CLUSTER_KEY}) "
           f"нужны режимы: {', '.join(REQUIRED_CELLS)}")
+    # Порог печатаем всегда: разметка режимов должна быть воспроизводима по
+    # одному только выводу отчёта, без чтения исходников.
+    drift = ("" if live_median is None
+             else f"; текущая медиана популяции {live_median:.3f}")
+    print(f"порог волатильности NATR={NATR_SPLIT:.3f} заморожен "
+          f"({NATR_SPLIT_BASIS}){drift}")
     any_ready = False
     for row in rows:
         status = "READY_FOR_STATS" if row.ready else "COLLECTING"
