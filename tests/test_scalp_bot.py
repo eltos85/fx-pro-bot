@@ -5906,6 +5906,55 @@ def test_forward_checkpoint_ignores_incomplete_day(tmp_path):
     assert ("BUSDT", _day(now)) not in cells
 
 
+def _scope_row(cells_seen, labeled, name="h"):
+    from scripts.scalp_forward_checkpoint import Readiness
+    return Readiness(hypothesis=name, outcomes=200, first_ts=0.0, last_ts=1.0,
+                     clusters=labeled, cells=frozenset(cells_seen),
+                     labeled_clusters=labeled)
+
+
+def _population(n_per_cell):
+    from scripts.scalp_forward_checkpoint import REQUIRED_CELLS
+    out, i = {}, 0
+    for cell, n in zip(REQUIRED_CELLS, n_per_cell):
+        for _ in range(n):
+            out[(f"S{i}USDT", "2026-07-30")] = cell
+            i += 1
+    return out
+
+
+def test_forward_checkpoint_scope_excludes_structurally_absent_cell():
+    """v0.18.57: одно-режимная гипотеза не обязана покрывать режим, в котором
+    она не возникает. 40 размеченных дней подряд без «тихих» при 50% тихих в
+    популяции — это устройство стратегии, а не недобор."""
+    from scripts.scalp_forward_checkpoint import apply_scope
+    row = _scope_row(["тренд/волатильно", "флет/волатильно"], labeled=40)
+    out = apply_scope([row], _population([30, 30, 30, 30]))[0]
+    assert out.unreachable == frozenset({"тренд/тихо", "флет/тихо"})
+    assert out.ready and out.scope_limited
+
+
+def test_forward_checkpoint_scope_needs_evidence_not_just_absence():
+    """Мало размеченных дней — отсутствие ячейки ничего не доказывает, и гейт
+    остаётся закрытым. Иначе правило выродилось бы в «чего не видели, того и
+    не требуем»."""
+    from scripts.scalp_forward_checkpoint import apply_scope
+    row = _scope_row(["тренд/волатильно"], labeled=4)
+    out = apply_scope([row], _population([30, 30, 30, 30]))[0]
+    assert out.unreachable == frozenset()
+    assert not out.ready
+
+
+def test_forward_checkpoint_scope_ignores_cells_absent_in_population():
+    """Ячейка, которой нет во всей популяции, не объявляется «недостижимой для
+    гипотезы»: про неё вообще ничего не известно (fail-closed)."""
+    from scripts.scalp_forward_checkpoint import apply_scope
+    row = _scope_row(["тренд/волатильно"], labeled=60)
+    out = apply_scope([row], _population([60, 60, 60, 0]))[0]
+    assert "флет/тихо" not in out.unreachable
+    assert not out.ready
+
+
 def test_forward_checkpoint_readiness_is_monotonic(tmp_path):
     """Новые наблюдения не могут отобрать уже набранную ячейку."""
     import sqlite3

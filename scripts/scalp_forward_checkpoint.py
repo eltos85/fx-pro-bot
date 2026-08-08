@@ -26,7 +26,7 @@ import argparse
 import sqlite3
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -72,6 +72,27 @@ NATR_SPLIT = 0.385209
 NATR_SPLIT_BASIS = "медиана 93 символо-дней с cutoff 2026-07-22, зафикс. 2026-08-06"
 REQUIRED_CELLS = ("тренд/волатильно", "тренд/тихо",
                   "флет/волатильно", "флет/тихо")
+# Требуемый набор ячеек — свойство РАЗВЁРТЫВАНИЯ, а не универсальная константа
+# (v0.18.57). Формулировка дисциплины: «backtest sample contains enough trading
+# days in each of the regimes the strategy will face in deployment»; и отдельно
+# разобран случай «impossible regime coverage», когда режим слишком редок, —
+# предписание там не «ждать вечно» и не «ослабить определение», а «document the
+# uncovered regime, size the strategy assuming it will occur, and have a written
+# disable rule for when the live data enters the uncovered regime».
+# Aligrithm (2026) «Regime Coverage: Why Your Backtest Needs Different Market
+# States», разделы «Cases of impossible regime coverage» и «Decision matrix»
+# (строка «Aggregate driven by one cell → strategy is single-regime; reframe»).
+#
+# Мы зашили C_required = все четыре ячейки для КАЖДОЙ гипотезы. Для плотностных
+# теней это требование невыполнимо: стены рождаются только там, где есть
+# движение, и 33/33, 40/40, 28/28 их размеченных дней волатильные при 57% в
+# популяции. Такие гипотезы не «недособраны», они одно-режимные по устройству.
+#
+# Ячейка исключается из требуемых, только если её отсутствие СТАТИСТИЧЕСКИ
+# установлено, а не просто пока не наблюдалось: биномиальный тест на ноль
+# попаданий при частоте ячейки в популяции. Без теста правило выродилось бы в
+# «чего не видели, того и не требуем» — и открывало бы гейт при малой выборке.
+SCOPE_ALPHA = 0.01
 
 
 @dataclass(frozen=True)
@@ -82,6 +103,9 @@ class Readiness:
     last_ts: float | None
     clusters: int = 0
     cells: frozenset[str] = frozenset()
+    labeled_clusters: int = 0
+    # Ячейки, недостижимые для этой гипотезы по устройству (тест ниже).
+    unreachable: frozenset[str] = frozenset()
 
     @property
     def span_days(self) -> float:
@@ -91,13 +115,51 @@ class Readiness:
 
     @property
     def missing_cells(self) -> tuple[str, ...]:
-        return tuple(c for c in REQUIRED_CELLS if c not in self.cells)
+        return tuple(c for c in REQUIRED_CELLS
+                     if c not in self.cells and c not in self.unreachable)
 
     @property
     def ready(self) -> bool:
         return (self.outcomes >= MIN_OUTCOMES
                 and self.clusters >= MIN_CLUSTERS
                 and not self.missing_cells)
+
+    @property
+    def scope_limited(self) -> bool:
+        """READY получен на суженной области — вывод переносим только на неё."""
+        return self.ready and bool(self.unreachable)
+
+
+def apply_scope(rows: list[Readiness],
+                cells: dict[tuple[str, str], str]) -> list[Readiness]:
+    """Отметить ячейки, недостижимые для гипотезы по устройству.
+
+    Тест: если у гипотезы ``k`` размеченных символо-дней и НИ ОДНОГО в ячейке
+    ``c``, чья доля в популяции ``p``, то вероятность такого исхода при
+    «гипотеза видит рынок как все» равна ``(1-p)**k``. Малое значение говорит,
+    что ячейка недостижима структурно, а не по недобору.
+
+    Поправка Бонферрони по числу проверок (гипотезы × ячейки): проверок
+    несколько десятков, без поправки одна-две «значимости» набежали бы случайно.
+
+    Исключение ячейки — не поблажка, а сужение области вывода: гипотеза с
+    непокрытой ячейкой может быть активирована только вместе с живым запретом
+    входить в этот режим (см. ссылку у SCOPE_ALPHA).
+    """
+    if not rows or not cells:
+        return rows
+    total = len(cells)
+    freq = {c: sum(1 for v in cells.values() if v == c) / total
+            for c in REQUIRED_CELLS}
+    alpha = SCOPE_ALPHA / max(1, len(rows) * len(REQUIRED_CELLS))
+    out: list[Readiness] = []
+    for row in rows:
+        unreachable = {
+            c for c in REQUIRED_CELLS
+            if c not in row.cells and freq[c] > 0.0
+            and (1.0 - freq[c]) ** row.labeled_clusters < alpha}
+        out.append(replace(row, unreachable=frozenset(unreachable)))
+    return out
 
 
 def _ts(value: str) -> float:
@@ -217,12 +279,14 @@ def _readiness(hypothesis: str, observations: list[tuple[str, float]],
     """
     times = [ts for _, ts in observations]
     keys = {(symbol, _day(ts)) for symbol, ts in observations}
+    labeled = [cells[k] for k in keys if k in cells]
     return Readiness(
         hypothesis=hypothesis, outcomes=len(observations),
         first_ts=min(times) if times else None,
         last_ts=max(times) if times else None,
         clusters=len(keys),
-        cells=frozenset(cells[k] for k in keys if k in cells))
+        cells=frozenset(labeled),
+        labeled_clusters=len(labeled))
 
 
 def collect_readiness(con: sqlite3.Connection,
@@ -337,7 +401,7 @@ def collect_readiness(con: sqlite3.Connection,
     for variant, obs in sorted(
             by_variant("shadow_universe", "bracket").items()):
         result.append(_readiness(f"shadow_universe_{variant}", obs, cells))
-    return result
+    return apply_scope(result, cells)
 
 
 def main() -> int:
@@ -361,9 +425,13 @@ def main() -> int:
     print(f"порог волатильности NATR={NATR_SPLIT:.3f} заморожен "
           f"({NATR_SPLIT_BASIS}){drift}")
     any_ready = False
+    scoped: list[Readiness] = []
     for row in rows:
-        status = "READY_FOR_STATS" if row.ready else "COLLECTING"
+        status = ("READY_SCOPED" if row.scope_limited
+                  else "READY_FOR_STATS" if row.ready else "COLLECTING")
         any_ready = any_ready or row.ready
+        if row.scope_limited:
+            scoped.append(row)
         # Явно показываем, ЧТО именно держит гипотезу: раньше был только
         # span, и по нему нельзя было понять, мало данных или они
         # сконцентрированы в одном символе.
@@ -374,10 +442,23 @@ def main() -> int:
             blockers.append(f"кластеров {row.clusters}/{MIN_CLUSTERS}")
         if row.missing_cells:
             blockers.append("нет режимов: " + ",".join(row.missing_cells))
+        scope = (" вне области: " + ",".join(sorted(row.unreachable))
+                 if row.unreachable else "")
         print(f"{row.hypothesis}: {status} n={row.outcomes} "
               f"кластеров={row.clusters} режимов={len(row.cells)}/"
               f"{len(REQUIRED_CELLS)} span={row.span_days:.2f}d"
-              + (f" | держит: {'; '.join(blockers)}" if blockers else ""))
+              + (f" | держит: {'; '.join(blockers)}" if blockers else "")
+              + scope)
+    # Число проверенных гипотез печатаем всегда: при выводе по любой из них
+    # порог значимости обязан быть дефлирован на число испытаний, иначе лучшая
+    # из N шумовых гипотез покажет «край» просто по максимуму из N.
+    # Bailey & Lopez de Prado (2014) «The Deflated Sharpe Ratio», JPM 40(5).
+    print(f"испытаний в семье: {len(rows)} "
+          "(при выводе дефлировать порог на это число)")
+    if scoped:
+        print("READY_SCOPED = вывод действителен ТОЛЬКО в покрытых режимах. "
+              "Активация такой гипотезы обязана нести живой запрет на вход "
+              "в непокрытый режим — иначе она торгует там, где не проверена.")
     print("activation=FORBIDDEN "
           "(READY_FOR_STATS запускает статистическую проверку, не автогейт)")
     return 0 if any_ready else 2
