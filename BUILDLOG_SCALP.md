@@ -7,7 +7,7 @@
 ## 2026-08-08
 
 ### fix(scalp): теневая сетка density_bounce глушила боевые сигналы (v0.18.60)
-`hash-pending`
+`20bd68d`
 
 Симптом: в логе контейнера `ERROR strategy density_bounce HOMEUSDT failed` с
 трейсом в `strategies.py:_emit_persist_grid`. Найдено при проверке деплоя
