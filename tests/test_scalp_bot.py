@@ -4268,7 +4268,11 @@ def test_canon_strategy_in_registry_and_cooldown_family():
     # SL-cooldown семейства fade (60м) распространяется и на канон
     s = ScalpSettings()
     assert s.sl_cooldown_for("sweep_fade_canon") == s.sweep_fade_sl_cooldown_sec
-    assert "sweep_fade_canon" in s.strategy_list  # включён по умолчанию (A/B)
+    # v0.18.59: канон ОТКЛЮЧЁН в дефолтном списке (114 сделок, чистый R −0.413
+    # CI95 [−0.665; −0.182], убыточен во всех сессиях). Класс из реестра НЕ
+    # удалён: гипотеза закрыта по результату, а не по механике, и включается
+    # обратно одним env-override, если появится причина.
+    assert "sweep_fade_canon" not in s.strategy_list
 
 
 # ─── v0.18.27: sweep_fade_run — УДАЛЕНА v0.18.37 (2026-07-15) ─
