@@ -20,6 +20,7 @@ import time
 from scalp_bot.analysis.meta_labels import meta_label_for
 from scalp_bot.analysis.counterfactual import (CounterfactualCandidate,
                                                CounterfactualTracker)
+from scalp_bot.analysis.fees import nonstandard_tariff
 from scalp_bot.analysis.regime import compute_regime_features, is_dead_market
 from scalp_bot.analysis.signals import diagnose
 from scalp_bot.analysis.strategies import build_strategies, resolve
@@ -44,6 +45,11 @@ log = logging.getLogger("scalp_bot")
 play = logging.getLogger("scalp_bot.play")  # пошаговый нарратив торговли
 
 _shutdown = False
+
+# Как часто перечитывать выученные тарифы символов. Тариф — константа контракта,
+# новая запись появляется только при первом исполнении по символу, поэтому
+# минуты достаточно: гейт опоздает максимум на одну сделку по новому символу.
+_FEE_RATES_REFRESH_SEC = 60.0
 
 
 def _handle_signal(signum: int, frame: object) -> None:  # noqa: ARG001
@@ -235,6 +241,17 @@ def run() -> None:
     # старте, далее refresh раз в htf_refresh_sec (метрика медленная).
     htf = HtfTrend(cfg.htf_ema_len, cfg.htf_interval, cfg.htf_adx_len)
     last_htf = 0.0
+    # symbol → (maker_rate, taker_rate) из филлов. Заполняем сразу на старте:
+    # тарифы, выученные в прошлых запусках, должны действовать с первого тика,
+    # иначе после каждого рестарта дорогой контракт снова был бы разрешён.
+    fee_rates: dict[str, tuple[float | None, float | None]] = {}
+    last_fee_rates = 0.0
+    if db is not None:
+        try:
+            fee_rates = db.symbol_fee_rates()
+            last_fee_rates = time.time()
+        except Exception:
+            log.exception("symbol fee rates initial load failed")
     # v0.18.55: каждый counterfactual-кандидат несёт свой режим. До этого
     # readiness-чекпоинт брал режим символо-дня из shadow_signals, куда
     # теневая вселенная не пишет вовсе, а density-тени попадают редко: у них
@@ -320,6 +337,16 @@ def run() -> None:
                         _refresh_key_levels(client, key_levels, new_syms)
                 except Exception:
                     log.exception("rotate_universe failed")
+
+            # 0a1) выученные тарифы символов для гейта. Таблица крошечная, но и
+            # меняется редко — только когда символ впервые исполнился. Обновляем
+            # по таймеру, а не на каждом тике: тариф постоянен, спешки нет.
+            if db is not None and now - last_fee_rates >= _FEE_RATES_REFRESH_SEC:
+                last_fee_rates = now
+                try:
+                    fee_rates = db.symbol_fee_rates()
+                except Exception:
+                    log.exception("symbol fee rates refresh failed")
 
             # 0a2) HTF-bias refresh (EMA200 1H, метрика медленная — раз в ~5мин)
             if (client is not None and cfg.require_htf_trend
@@ -596,6 +623,25 @@ def run() -> None:
                               funding.sec_to_next(sig.symbol, now),
                               funding.interval(sig.symbol))
                     _log_shadow(db, cfg, sig, "funding_window", snap, htf,
+                                key_levels, now, btc_snap)
+                    continue
+                # v0.18.61: гейт тарифа — рядом с funding, потому что оба про
+                # издержки, а не про сетап. Контракты с тарифом выше стандартной
+                # сетки Bybit стоят вдвое дороже той цены, из которой считают
+                # наши fee-гейты: при стопе 0.30% комиссия выходит ~0.5R против
+                # заявленных 0.25R, а валового края такого размера нет ни у одной
+                # стратегии (лучший замер — density_break +0.236R на HYPE).
+                # Тариф выучен из филлов; неизвестный тариф НЕ блокирует.
+                if cfg.fee_tariff_guard_enabled and nonstandard_tariff(
+                        *fee_rates.get(sig.symbol, (None, None))):
+                    maker_r, taker_r = fee_rates[sig.symbol]
+                    play.info("🏷️ [%s] %s — тариф символа выше стандарта "
+                              "(maker %s / taker %s против 0.0200%%/0.0550%%): "
+                              "комиссия в R вдвое выше той, из которой считают "
+                              "гейты — пропускаю", sig.symbol, sig.side,
+                              "?" if maker_r is None else f"{maker_r * 100:.4f}%",
+                              "?" if taker_r is None else f"{taker_r * 100:.4f}%")
+                    _log_shadow(db, cfg, sig, "fee_tariff", snap, htf,
                                 key_levels, now, btc_snap)
                     continue
                 funnel["fired"] += 1

@@ -4792,6 +4792,71 @@ def test_dead_market_settings_defaults():
     assert s.dead_market_rv_max == 1.1
 
 
+def test_fee_tariff_guard_blocks_only_above_standard():
+    """v0.18.61: блокируем только тариф ВЫШЕ стандартной сетки Bybit.
+
+    Стандарт (taker 0.055% / maker 0.02%) — та сетка, из которой выведены
+    round_trip_fee_frac и инвариант «комиссия ≤ 0.25R». Двойной тариф
+    (BANKUSDT/ESPORTSUSDT, замер `cae61f4`) удваивает комиссию в R.
+    """
+    from scalp_bot.analysis.fees import (STANDARD_MAKER_FEE,
+                                         STANDARD_TAKER_FEE,
+                                         nonstandard_tariff)
+    # стандартный контракт торгуем
+    assert nonstandard_tariff(STANDARD_MAKER_FEE, STANDARD_TAKER_FEE) is False
+    # двойной тариф — по любой из ног
+    assert nonstandard_tariff(STANDARD_MAKER_FEE, 2 * STANDARD_TAKER_FEE) is True
+    assert nonstandard_tariff(2 * STANDARD_MAKER_FEE, STANDARD_TAKER_FEE) is True
+    # скидка (VIP/промо) — не повод блокировать: издержки НИЖЕ модельных
+    assert nonstandard_tariff(0.0, 0.0003) is False
+    # рибейт мейкера (отрицательная ставка) тоже допустим
+    assert nonstandard_tariff(-0.0001, STANDARD_TAKER_FEE) is False
+
+
+def test_fee_tariff_guard_fail_open_on_unknown_rate():
+    """Неизвестный тариф НЕ блокирует: на demo ставку до первого филла не
+    узнать (в demo-списке API нет /v5/account/fee-rate), и fail-closed
+    остановил бы торговлю на любом новом символе."""
+    from scalp_bot.analysis.fees import nonstandard_tariff
+    assert nonstandard_tariff(None, None) is False
+    assert nonstandard_tariff(None, 0.0011) is True, "известная нога всё решает"
+    assert nonstandard_tariff(0.0002, None) is False
+
+
+def test_fee_tariff_guard_enabled_by_default_and_reversible():
+    from scalp_bot.config.settings import ScalpSettings
+    assert ScalpSettings().fee_tariff_guard_enabled is True
+    off = ScalpSettings().model_copy(update={"fee_tariff_guard_enabled": False})
+    assert off.fee_tariff_guard_enabled is False
+
+
+def test_symbol_fee_rates_feeds_guard_and_survives_restart(tmp_path):
+    """Гейт читает ставки из БД, поэтому выученный тариф действует и после
+    рестарта — иначе дорогой контракт снова становился бы разрешённым."""
+    from scalp_bot.analysis.fees import nonstandard_tariff
+    db = ScalpDB(str(tmp_path))
+    db.record_symbol_fee("BANKUSDT", is_maker=False, fee_rate=0.0011)
+    db.record_symbol_fee("HYPEUSDT", is_maker=False, fee_rate=0.00055)
+    db.close()
+
+    reopened = ScalpDB(str(tmp_path))
+    rates = reopened.symbol_fee_rates()
+    assert nonstandard_tariff(*rates["BANKUSDT"]) is True
+    assert nonstandard_tariff(*rates["HYPEUSDT"]) is False
+    # символа без филлов в словаре нет → гейт видит (None, None) → пропускает
+    assert nonstandard_tariff(*rates.get("NEWCOINUSDT", (None, None))) is False
+    reopened.close()
+
+
+def test_executor_fee_constants_come_from_shared_schedule():
+    """Гейт и учёт комиссии обязаны судить по ОДНОЙ сетке: две копии констант
+    рано или поздно разошлись бы, и гейт блокировал бы не то, что дорого."""
+    from scalp_bot.analysis import fees
+    from scalp_bot.trading import executor
+    assert executor.MAKER_FEE is fees.STANDARD_MAKER_FEE
+    assert executor.TAKER_FEE is fees.STANDARD_TAKER_FEE
+
+
 def test_main_log_shadow_accepts_precomputed_feats(tmp_path):
     """dead_market-гейт передаёт уже посчитанные фичи — _log_shadow пишет их
     как есть (без пересчёта)."""

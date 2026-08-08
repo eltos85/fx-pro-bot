@@ -34,8 +34,12 @@ from scalp_bot.data.exec_stream import FEE_RATE_UNKNOWN, fee_rate_known
 log = logging.getLogger("scalp_bot.exec")
 play = logging.getLogger("scalp_bot.play")  # пошаговый нарратив торговли
 
-MAKER_FEE = 0.0002
-TAKER_FEE = 0.00055
+from scalp_bot.analysis.fees import STANDARD_MAKER_FEE, STANDARD_TAKER_FEE
+
+# Сетка живёт в analysis/fees.py: её же читает гейт тарифа в основном цикле,
+# и расхождение двух копий означало бы, что гейт и учёт судят по разным ставкам.
+MAKER_FEE = STANDARD_MAKER_FEE
+TAKER_FEE = STANDARD_TAKER_FEE
 
 # Закрытие → человеческая причина для плейбук-логов
 _CLOSE_RU = {

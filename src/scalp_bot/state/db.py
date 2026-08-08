@@ -822,6 +822,23 @@ class ScalpDB:
             "SELECT * FROM symbol_fees ORDER BY symbol").fetchall()
         return [dict(r) for r in rows]
 
+    def symbol_fee_rates(self) -> dict[str, tuple[float | None, float | None]]:
+        """symbol → (maker_rate, taker_rate) для гейта тарифа.
+
+        Отдаёт ровно то, что выучено из филлов; символ без записи в словарь не
+        попадает, и гейт трактует его как «тариф неизвестен» (fail-open).
+        """
+        out: dict[str, tuple[float | None, float | None]] = {}
+        try:
+            rows = self._conn.execute(
+                "SELECT symbol, maker_rate, taker_rate FROM symbol_fees"
+            ).fetchall()
+        except sqlite3.Error:
+            return out
+        for r in rows:
+            out[r["symbol"]] = (r["maker_rate"], r["taker_rate"])
+        return out
+
     def insert_density_track(self, row: dict) -> None:
         """Жизненный цикл трека стены density_bounce (v0.18.32, телеметрия):
         для офлайн-анализа выживаемости стен и post-wall цены — обоснование

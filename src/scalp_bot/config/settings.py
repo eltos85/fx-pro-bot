@@ -333,6 +333,16 @@ class ScalpSettings(BaseSettings):
     # остальные, поэтому сравнение рук не смещено методикой измерения.
     # Горизонт 6ч > 3ч у прочих shadow: широкий стоп разрешается дольше
     # (исторический max hold до TP — 529 мин).
+    # v0.18.61: гейт тарифа. Не торгуем символы, чей ФАКТИЧЕСКИЙ тариф выше
+    # стандартной сетки Bybit (taker 0.055% / maker 0.02%), из которой выведена
+    # константа round_trip_fee_frac и инвариант «комиссия ≤ 0.25R». Замер
+    # 2026-08-06 (`cae61f4`): BANKUSDT и ESPORTSUSDT берут ровно вдвое больше.
+    # Это НЕ отключение по P&L на малой выборке (sample-size.mdc), а арифметика
+    # издержек: при том же стопе 0.30% двойной тариф даёт комиссию ~0.5R против
+    # 0.25R, а валового края такого размера у нас нет ни у одной стратегии.
+    # Ставка узнаётся только из филлов (на demo нет /v5/account/fee-rate),
+    # поэтому первая сделка по новому символу проходит — гейт fail-open.
+    fee_tariff_guard_enabled: bool = Field(default=True)
     sl_widen_shadow_enabled: bool = Field(default=True)
     sl_widen_shadow_grid: str = Field(default="1.0,1.5,2.0,3.0")
     sl_widen_shadow_horizon_sec: float = Field(default=21600.0)
