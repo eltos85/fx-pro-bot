@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,8 +109,8 @@ def _day(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), UTC).strftime("%Y-%m-%d")
 
 
-def regime_cells(con: sqlite3.Connection,
-                 cutoff: float) -> dict[tuple[str, str], str]:
+def regime_cells(con: sqlite3.Connection, cutoff: float,
+                 now: float | None = None) -> dict[tuple[str, str], str]:
     """Режимная ячейка для каждого символо-дня: тренд/флет × волатильно/тихо.
 
     Источников два, и они объединяются (v0.18.55). ``shadow_signals`` покрывает
@@ -127,7 +128,16 @@ def regime_cells(con: sqlite3.Connection,
     всего, что бот наблюдает», а не относительно узкой популяции самой гипотезы.
     Per-hypothesis медиана давала бы 50/50 по построению и превратила бы
     требование разнообразия режимов в тавтологию.
+
+    Текущие (незавершённые) сутки исключаются (v0.18.57). Ярлык символо-дня
+    считается по СРЕДНИМ за день, поэтому пока день идёт, среднее ползёт и
+    пограничный день может перещёлкнуться. Так 2026-08-06 у density_break_v2
+    была ячейка «флет/тихо», а к концу тех же суток день добрал волатильности
+    и ячейка пропала — готовность снова откатилась. Завершённые сутки уже
+    неизменны, поэтому достаточно не считать сегодняшний день.
     """
+    today = datetime.fromtimestamp(
+        time.time() if now is None else now, UTC).strftime("%Y-%m-%d")
     sources = (
         """SELECT symbol, date(ts,'unixepoch'), AVG(adx), AVG(htf_natr_pct)
            FROM shadow_signals
@@ -152,7 +162,7 @@ def regime_cells(con: sqlite3.Connection,
     # любой другой: иначе он дважды сдвигал бы медиану волатильности.
     merged: dict[tuple[str, str], list[tuple[float, float]]] = {}
     for symbol, day, adx, vol in rows:
-        if adx is None or vol is None:
+        if adx is None or vol is None or str(day) == today:
             continue
         merged.setdefault((str(symbol), str(day)), []).append(
             (float(adx), float(vol)))

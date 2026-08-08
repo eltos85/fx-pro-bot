@@ -5882,6 +5882,30 @@ def test_forward_checkpoint_split_is_frozen_not_recomputed(tmp_path):
     assert cells[("BUSDT", day)] == "тренд/волатильно"
 
 
+def test_forward_checkpoint_ignores_incomplete_day(tmp_path):
+    """v0.18.57: ярлык считается по среднему за сутки, поэтому пока день идёт,
+    пограничный символо-день может перещёлкнуться и отобрать уже набранную
+    ячейку. Завершённые сутки неизменны — незавершённые не размечаем."""
+    import sqlite3
+    from scripts.scalp_forward_checkpoint import (NATR_SPLIT, _day,
+                                                  regime_cells)
+
+    now = 1_785_000_000.0
+    yesterday = now - 86_400
+    con = sqlite3.connect(tmp_path / "today.sqlite")
+    con.execute("CREATE TABLE shadow_signals (ts REAL, symbol TEXT, "
+                "adx REAL, htf_natr_pct REAL)")
+    con.executemany(
+        "INSERT INTO shadow_signals VALUES (?,?,?,?)",
+        [(yesterday, "AUSDT", 40.0, NATR_SPLIT / 2),
+         (now, "BUSDT", 40.0, NATR_SPLIT / 2)])
+    con.commit()
+    cells = regime_cells(con, 0.0, now=now)
+    con.close()
+    assert cells[("AUSDT", _day(yesterday))] == "тренд/тихо"
+    assert ("BUSDT", _day(now)) not in cells
+
+
 def test_forward_checkpoint_readiness_is_monotonic(tmp_path):
     """Новые наблюдения не могут отобрать уже набранную ячейку."""
     import sqlite3
