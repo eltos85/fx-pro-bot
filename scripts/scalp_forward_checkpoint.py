@@ -357,8 +357,8 @@ def collect_readiness(con: sqlite3.Connection,
                  AND outcome_target IN ('target','sl')""",
             (cutoff, setup_type)), cells))
 
-    def by_variant(setup_type: str,
-                   terminal: str) -> dict[str, list[tuple[str, float]]]:
+    def by_variant(setup_type: str, terminal: str, *,
+                   extra: str = "") -> dict[str, list[tuple[str, float]]]:
         """Наблюдения по ветке. ``terminal`` — какой столбец считаем исходом:
         ``outcome_target`` (дошло до +target_r) или ``outcome_tp`` (брекет
         целиком). Значения столбца зашиты рядом, чтобы не собирать SQL строкой.
@@ -371,18 +371,32 @@ def collect_readiness(con: sqlite3.Connection,
         for variant, sym, ts in con.execute(
             f"""SELECT variant,symbol,ts_candidate FROM counterfactual_setups
                 WHERE ts_candidate>=? AND setup_type=?
-                  AND {column} IN (?,?)""",
+                  AND {column} IN (?,?) {extra}""",
                 (cutoff, setup_type, *values)):
             if sym is None or ts is None:
                 continue
             grouped.setdefault(str(variant), []).append((str(sym), float(ts)))
         return grouped
 
-    grouped = by_variant("density_bounce_persist_shadow", "target")
+    # v0.18.58: считаем только каузальное поколение теней. До этой правки
+    # кандидат рождался залитым, и уход цены ОТ стены записывался победой по
+    # несуществующей сделке: 4–6% строк, 100% побед среди них. Старые строки
+    # остаются в БД для истории, но в готовность не входят — смешивать
+    # поколения нельзя. Дискриминатор: у каузальных проставлен таймаут залива.
+    CAUSAL = "AND retest_timeout_sec IS NOT NULL"
+    grouped = by_variant("density_bounce_persist_shadow", "target",
+                         extra=CAUSAL)
     for seconds in (60, 90, 120, 180):
         variant = f"persist_{seconds}s"
         result.append(_readiness(f"density_bounce_{variant}",
                                  grouped.get(variant, []), cells))
+
+    # Ширина стопа для density_bounce отдельно от боевого sl_widen: та выборка
+    # (v0.18.54, отрицательная) собрана на sweep_fade, density_bounce туда не
+    # попала вовсе, а у density_break знак эффекта был противоположный.
+    for variant, obs in sorted(
+            by_variant("density_bounce_sl_shadow", "target").items()):
+        result.append(_readiness(f"density_bounce_{variant}", obs, cells))
 
     # v0.18.45: ширина стопа. Считаем по outcome_tp (TP vs SL), а не по
     # outcome_target: гипотеза именно про исход брекета целиком, ведь комиссия

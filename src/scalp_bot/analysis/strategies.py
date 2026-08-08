@@ -509,13 +509,20 @@ def _wall_setup(cur: dict, now: float, *, setup_type: str,
 
 
 def _shadow_wall_bracket(side: str, level: float, cfg,
-                         *, tp_r: float | None = None) -> tuple[float, float, float]:
-    """Hypothetical LIMIT@wall bracket без вызова торгового build_signal."""
+                         *, tp_r: float | None = None,
+                         sl_mult: float = 1.0) -> tuple[float, float, float]:
+    """Hypothetical LIMIT@wall bracket без вызова торгового build_signal.
+
+    ``sl_mult`` растягивает стоп при неизменном R:R (TP считается от risk, а
+    значит масштабируется вместе с ним). Долларовый риск на сделку тоже не
+    меняется — меняется размер позиции. Смысл ветки: комиссия в R равна
+    отношению ставок к ширине стопа, поэтому у́же стоп → дороже сделка в R.
+    """
     risk = max(
         level * float(getattr(cfg, "sl_buffer_bps", 0.0)) / 1e4,
         level * float(getattr(cfg, "min_risk_fee_mult", 0.0))
         * float(getattr(cfg, "round_trip_fee_frac", 0.0)),
-    )
+    ) * max(0.0, float(sl_mult))
     if risk <= 0:
         risk = level * 1e-8
     target = float(tp_r if tp_r is not None
@@ -896,11 +903,29 @@ class DensityBounceStrategy:
 
     def _emit_persist_grid(self, sym: str, last: float, now: float,
                            near: float) -> None:
-        """60/90/120/180s shadows из того же lifecycle, что боевой 300s."""
+        """60/90/120/180s shadows из того же lifecycle, что боевой 300s.
+
+        Залив каузален (v0.18.58). Раньше кандидат рождался сразу в ``pending``
+        с ``ts_entry=now``, то есть лимитке на стене приписывался мгновенный
+        fill. Для лонга это значит покупку по цене bid-стены в момент, когда
+        цена ещё ВЫШЕ неё: если дальше цена уходила вверх, тень записывала
+        победу по сделке, которой не было бы. Замер 2026-08-08: 4–6% кандидатов
+        ни разу не касались стены, и 100% из них помечены победой; удаление
+        этих фантомов срезало валовой край примерно на треть (60s +0.171→
+        +0.111R). Теперь кандидат ждёт наблюдаемого касания уровня, а не
+        получает его задним числом.
+
+        Окно ожидания — ``entry_fill_timeout_sec``, ровно столько живёт боевая
+        лимитка. Любое другое число мерило бы стратегию, которой у нас нет.
+        """
         if not getattr(self.cfg, "density_bounce_shadow_enabled", True):
             return
         grid = tuple(getattr(
             self.cfg, "density_bounce_shadow_persist_grid", (60, 90, 120, 180)))
+        sl_at = float(getattr(
+            self.cfg, "density_bounce_sl_shadow_at_persist_sec", 0.0))
+        sl_grid = (tuple(getattr(self.cfg, "sl_widen_shadow_grid", ()))
+                   if sl_at > 0 else ())
         for book_side, side in (("bid", "long"), ("ask", "short")):
             wall = self._track[sym][book_side]
             if wall is None or wall.get("miss_since") is not None:
@@ -913,30 +938,53 @@ class DensityBounceStrategy:
                 persist_f = float(persist)
                 if persist in emitted or life < persist_f:
                     continue
-                entry, sl, tp = _shadow_wall_bracket(
-                    side, wall["price"], self.cfg)
                 emitted.add(persist)
                 wall["did_price_approach"] = 1
-                self._shadow_candidates.append(CounterfactualCandidate(
-                    candidate_key=(
-                        f"density_bounce:{wall['track_key']}:{persist:g}"),
+                self._emit_wall_shadow(
+                    sym, side, wall, now, last, life, persist_f,
                     setup_type="density_bounce_persist_shadow",
-                    variant=f"persist_{persist:g}s", strategy=self.name,
-                    symbol=sym, side=side, ts_candidate=now, ts_entry=now,
-                    entry=entry, sl=sl, tp=tp, target_r=1.5,
-                    horizon_sec=float(getattr(
-                        self.cfg, "counterfactual_horizon_sec", 10_800.0)),
-                    checkpoint_sec=float(getattr(
-                        self.cfg, "counterfactual_checkpoint_sec", 3_600.0)),
-                    source_track_key=wall["track_key"],
-                    level_type=wall.get("round") or "orderbook_wall",
-                    level_price=wall["price"], level_age_sec=life,
-                    approach_ts=now,
-                    approach_distance_bps=(
-                        abs(last - wall["price"]) / wall["price"] * 1e4),
-                    wall_persist_sec=persist_f,
-                    actual_gate="shadow_only",
-                ))
+                    variant=f"persist_{persist:g}s")
+            # Ветки ширины стопа снимаются с ОДНОГО persist-рубежа: полное
+            # произведение сеток дало бы вчетверо больше строк на ту же стену
+            # без нового знания — сравнение веток идёт внутри рубежа.
+            key = ("sl", sl_at)
+            if sl_grid and key not in emitted and life >= sl_at:
+                emitted.add(key)
+                for mult in sl_grid:
+                    self._emit_wall_shadow(
+                        sym, side, wall, now, last, life, sl_at,
+                        setup_type="density_bounce_sl_shadow",
+                        variant=f"sl_x{mult:g}", sl_mult=float(mult))
+
+    def _emit_wall_shadow(self, sym: str, side: str, wall: dict, now: float,
+                          last: float, life: float, persist: float, *,
+                          setup_type: str, variant: str,
+                          sl_mult: float = 1.0) -> None:
+        entry, sl, tp = _shadow_wall_bracket(
+            side, wall["price"], self.cfg, sl_mult=sl_mult)
+        self._shadow_candidates.append(CounterfactualCandidate(
+            candidate_key=(
+                f"density_bounce:{wall['track_key']}:{variant}:{persist:g}"),
+            setup_type=setup_type, variant=variant, strategy=self.name,
+            symbol=sym, side=side,
+            # Лимитка только выставлена; ts_entry перепишется на касании.
+            state="waiting_entry_fill", ts_candidate=now, ts_entry=now,
+            entry=entry, sl=sl, tp=tp, target_r=1.5,
+            horizon_sec=float(getattr(
+                self.cfg, "counterfactual_horizon_sec", 10_800.0)),
+            checkpoint_sec=float(getattr(
+                self.cfg, "counterfactual_checkpoint_sec", 3_600.0)),
+            retest_timeout_sec=float(getattr(
+                self.cfg, "entry_fill_timeout_sec", 8.0)),
+            source_track_key=wall["track_key"],
+            level_type=wall.get("round") or "orderbook_wall",
+            level_price=wall["price"], level_age_sec=life,
+            approach_ts=now,
+            approach_distance_bps=(
+                abs(last - wall["price"]) / wall["price"] * 1e4),
+            wall_persist_sec=persist,
+            actual_gate="shadow_only",
+        ))
 
     def drain_shadow_candidates(self) -> list[CounterfactualCandidate]:
         out = self._shadow_candidates

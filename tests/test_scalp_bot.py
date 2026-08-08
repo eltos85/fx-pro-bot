@@ -5477,6 +5477,120 @@ def test_density_bounce_shadow_grid_uses_one_track_without_real_signal():
     assert st.drain_shadow_candidates() == []
 
 
+def test_density_bounce_shadow_waits_real_touch_of_wall():
+    """v0.18.58: лимитке на стене нельзя приписывать мгновенный fill.
+
+    Для лонга вход = цена bid-стены, а в момент рубежа цена ВЫШЕ неё. Пока
+    кандидат рождался сразу в pending, уход цены вверх записывался победой по
+    сделке, которой не было бы: замер показал 4–6% таких строк и 100% побед
+    среди них. Кандидат обязан ждать наблюдаемого касания уровня.
+    """
+    cfg = _density_cfg(
+        density_bounce_persist_sec=300.0, density_bounce_shadow_enabled=True,
+        density_bounce_shadow_persist_grid=(60,),
+        density_bounce_sl_shadow_at_persist_sec=0.0,
+        entry_fill_timeout_sec=8.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    st.update(snap, now=61.0)
+    cand = st.drain_shadow_candidates()
+    assert len(cand) == 1
+    assert cand[0].state == "waiting_entry_fill", "fill не выдаётся авансом"
+    # Окно ожидания равно жизни боевой лимитки, а не выдуманному числу.
+    assert cand[0].retest_timeout_sec == pytest.approx(8.0)
+
+
+def test_density_bounce_shadow_sl_arms_keep_rr_and_scale_only_risk():
+    """Ветки ширины стопа меняют ТОЛЬКО расстояние до стопа: R:R и цена входа
+    те же, иначе сравнивать ветки было бы нельзя."""
+    cfg = _density_cfg(
+        density_bounce_persist_sec=300.0, density_bounce_shadow_enabled=True,
+        density_bounce_shadow_persist_grid=(),
+        density_bounce_sl_shadow_at_persist_sec=90.0,
+        sl_widen_shadow_grid=(1.0, 2.0))
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    st.update(snap, now=91.0)
+    arms = {c.variant: c for c in st.drain_shadow_candidates()}
+    assert set(arms) == {"sl_x1", "sl_x2"}
+    base, wide = arms["sl_x1"], arms["sl_x2"]
+    assert base.entry == wide.entry
+    risk_base = abs(base.entry - base.sl)
+    assert abs(wide.entry - wide.sl) == pytest.approx(2 * risk_base)
+    rr = lambda c: abs(c.tp - c.entry) / abs(c.entry - c.sl)  # noqa: E731
+    assert rr(base) == pytest.approx(rr(wide)), "R:R обязан остаться прежним"
+    # Повторный рубеж не плодит дубликаты веток.
+    st.update(snap, now=92.0)
+    assert st.drain_shadow_candidates() == []
+
+
+def _bounce_shadow_candidate():
+    cfg = _density_cfg(
+        density_bounce_persist_sec=300.0, density_bounce_shadow_enabled=True,
+        density_bounce_shadow_persist_grid=(60,),
+        density_bounce_sl_shadow_at_persist_sec=0.0,
+        entry_fill_timeout_sec=8.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    st.update(snap, now=61.0)
+    return st.drain_shadow_candidates()[0]
+
+
+def _bounce_tracker(db):
+    return CounterfactualTracker(
+        db, SimpleNamespace(counterfactual_enabled=True,
+                            counterfactual_max_active=10,
+                            counterfactual_flush_sec=60.0))
+
+
+def test_density_bounce_shadow_fills_only_on_observed_touch(tmp_path):
+    """Цена ушла ВВЕРХ от bid-стены и не вернулась — лимитка не залилась, и
+    исход не записывается. Ровно этот случай раньше давал фантомные победы."""
+    cand = _bounce_shadow_candidate()
+    db = ScalpDB(str(tmp_path))
+    tracker = _bounce_tracker(db)
+    tracker.add(cand)
+    away = _snap([], ts=63.0, last_price=cand.entry * 1.004)
+    tracker.update_snapshot(away, now=63.0)
+    assert db.counterfactual_rows()[0]["state"] == "waiting_entry_fill"
+    # Окно жизни боевой лимитки истекло → сделки не было.
+    tracker.update_snapshot(away, now=61.0 + 9.0)
+    row = db.counterfactual_rows()[0]
+    assert row["state"] == "expired"
+    assert row["outcome_target"] is None, "нет входа — нет исхода"
+    db.close()
+
+
+def test_density_bounce_shadow_measures_outcome_from_fill_not_emission(tmp_path):
+    """После касания отсчёт идёт от момента залива: движение ДО касания не
+    может создать победу, которой лимитка не застала."""
+    cand = _bounce_shadow_candidate()
+    db = ScalpDB(str(tmp_path))
+    tracker = _bounce_tracker(db)
+    tracker.add(cand)
+    risk = abs(cand.entry - cand.sl)
+    tracker.update_snapshot(
+        _snap([], ts=62.0, last_price=cand.entry * 1.001), now=62.0)
+    tracker.update_snapshot(
+        _snap([], ts=64.0, last_price=cand.entry), now=64.0)
+    row = db.counterfactual_rows()[0]
+    assert row["state"] == "pending"
+    assert row["ts_entry"] == pytest.approx(64.0), "вход в момент касания"
+    tracker.update_snapshot(
+        _snap([], ts=70.0, last_price=cand.entry + 1.6 * risk), now=70.0)
+    assert db.counterfactual_rows()[0]["outcome_target"] == "target"
+    db.close()
+
+
 def test_density_break_v2_waits_future_retest_even_when_v1_gate_blocks(tmp_path):
     cfg = _density_cfg(
         density_break_confirm_bar_sec=60.0,
@@ -5698,7 +5812,7 @@ def test_forward_checkpoint_counts_canon_episodes_not_rows(tmp_path):
         "CREATE TABLE counterfactual_setups (setup_type TEXT,variant TEXT,"
         "symbol TEXT,side TEXT,level_type TEXT,level_price REAL,"
         "ts_candidate REAL,outcome_target TEXT,outcome_tp TEXT,"
-        "source_trade_id INTEGER)")
+        "source_trade_id INTEGER,retest_timeout_sec REAL)")
     con.execute("CREATE TABLE trades (id INTEGER,ts_open REAL,symbol TEXT,"
                 "strategy TEXT,status TEXT,pnl_usd REAL,close_reason TEXT)")
     con.execute("CREATE TABLE meta_label_features (trade_id INTEGER,"
@@ -5706,7 +5820,7 @@ def test_forward_checkpoint_counts_canon_episodes_not_rows(tmp_path):
     con.executemany(
         "INSERT INTO counterfactual_setups VALUES "
         "('canon_rejection_shadow','pdh','ETHUSDT','short','pdh',100.0,?,"
-        "'target',NULL,NULL)",
+        "'target',NULL,NULL,NULL)",
         [(2_000.0 + 2 * i,) for i in range(40)])
     con.commit()
     readiness = {r.hypothesis: r for r in collect_readiness(con, 0.0)}
@@ -6319,7 +6433,7 @@ def _shadow_universe_db(tmp_path, rows, trades=()):
         id INTEGER PRIMARY KEY, setup_type TEXT, variant TEXT, symbol TEXT,
         side TEXT, ts_candidate REAL, outcome_tp TEXT, outcome_target TEXT,
         mfe_r REAL, mae_r REAL, state TEXT, level_type TEXT, level_price REAL,
-        source_trade_id INTEGER)""")
+        source_trade_id INTEGER, retest_timeout_sec REAL)""")
     con.execute("""CREATE TABLE trades (
         id INTEGER PRIMARY KEY, ts_open REAL, symbol TEXT, strategy TEXT,
         pnl_usd REAL, entry REAL, sl REAL, qty REAL, close_reason TEXT,
