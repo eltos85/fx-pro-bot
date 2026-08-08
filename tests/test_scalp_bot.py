@@ -5514,7 +5514,7 @@ def test_density_bounce_shadow_sl_arms_keep_rr_and_scale_only_risk():
         density_bounce_persist_sec=300.0, density_bounce_shadow_enabled=True,
         density_bounce_shadow_persist_grid=(),
         density_bounce_sl_shadow_at_persist_sec=90.0,
-        sl_widen_shadow_grid=(1.0, 2.0))
+        sl_widen_shadow_multipliers=(1.0, 2.0))
     st = DensityBounceStrategy(cfg, ["SOLUSDT"])
     bids, asks = _book_with_bid_wall()
     snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
@@ -5532,6 +5532,59 @@ def test_density_bounce_shadow_sl_arms_keep_rr_and_scale_only_risk():
     # Повторный рубеж не плодит дубликаты веток.
     st.update(snap, now=92.0)
     assert st.drain_shadow_candidates() == []
+
+
+def test_sl_widen_grid_is_csv_string_and_must_be_read_parsed():
+    """Регресс инцидента 2026-08-08: сетка множителей бралась из СЫРОГО поля.
+
+    `sl_widen_shadow_grid` — CSV-строка, разбирает её свойство
+    `sl_widen_shadow_multipliers`. `tuple()` от строки даёт кортеж символов,
+    на котором падают и `float()`, и формат `:g`, — и падение уносило весь
+    `update()`, отменяя боевые сигналы density_bounce. Тест не поймал баг,
+    потому что подменённый конфиг отдавал в сыром поле уже кортеж чисел.
+    Здесь оба атрибута выставлены как в проде: строка и разобранный кортеж.
+    """
+    from scalp_bot.config.settings import ScalpSettings
+    prod = ScalpSettings()
+    assert isinstance(prod.sl_widen_shadow_grid, str)
+    assert all(isinstance(x, float) for x in prod.sl_widen_shadow_multipliers)
+
+    cfg = _density_cfg(
+        density_bounce_persist_sec=300.0, density_bounce_shadow_enabled=True,
+        density_bounce_shadow_persist_grid=(),
+        density_bounce_sl_shadow_at_persist_sec=90.0,
+        sl_widen_shadow_grid="1.0,3.0",
+        sl_widen_shadow_multipliers=(1.0, 3.0))
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+    st.update(snap, now=91.0)
+    assert {c.variant for c in st.drain_shadow_candidates()} == {"sl_x1", "sl_x3"}
+
+
+def test_density_bounce_shadow_failure_cannot_suppress_live_signal():
+    """Телеметрия fail-open: упавшая теневая сетка не отменяет боевой сигнал.
+
+    Вызов `_emit_persist_grid` стоит ДО боевой логики в `update()`, поэтому
+    любое исключение внутри него ранее уносило сигнал стратегии целиком
+    (инцидент 2026-08-08). Проверяем, что теперь сигнал доходит.
+    """
+    cfg = _density_cfg(density_bounce_persist_sec=10.0)
+    st = DensityBounceStrategy(cfg, ["SOLUSDT"])
+    bids, asks = _book_with_bid_wall()
+    snap = _snap([], last_price=100.05, best_bid=100.0, best_ask=100.10,
+                 bids=bids, asks=asks)
+    st.update(snap, now=0.0)
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("теневая сетка сломана")
+
+    st._emit_persist_grid = boom
+    sig = st.update(snap, now=11.0)
+    assert sig is not None, "боевой сигнал обязан выжить при падении телеметрии"
+    assert sig.strategy == "density_bounce"
 
 
 def _bounce_shadow_candidate():

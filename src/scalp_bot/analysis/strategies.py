@@ -39,6 +39,7 @@ from scalp_bot.analysis.signals import (
 from scalp_bot.data.aggregates import SymbolSnapshot
 
 play = logging.getLogger("scalp_bot.play")
+log = logging.getLogger(__name__)
 
 _SIDE_RU = {"long": "LONG↑", "short": "SHORT↓"}
 
@@ -850,7 +851,15 @@ class DensityBounceStrategy:
         self._update_track(sym, "bid", snap.bids, now, last)
         self._update_track(sym, "ask", snap.asks, now, last)
         near = cfg.density_near_bps / 1e4
-        self._emit_persist_grid(sym, last, now, near)
+        # Теневая телеметрия НЕ имеет права глушить торговлю. Вызов стоит до
+        # боевой логики, поэтому любое исключение внутри него ранее уносило весь
+        # update() и отменяло сигнал стратегии на этом символе (инцидент
+        # 2026-08-08: кортеж символов вместо множителей ширины стопа).
+        try:
+            self._emit_persist_grid(sym, last, now, near)
+        except Exception:
+            log.exception("density_bounce %s: теневая сетка упала, торговлю "
+                          "продолжаю", sym)
         # v0.18.15: пер-стратегийный persist (канон density-фейда 20–30+ мин).
         persist = self._persist()
         # bid-стена → отскок ВВЕРХ (long); ask-стена → отскок ВНИЗ (short)
@@ -924,7 +933,11 @@ class DensityBounceStrategy:
             self.cfg, "density_bounce_shadow_persist_grid", (60, 90, 120, 180)))
         sl_at = float(getattr(
             self.cfg, "density_bounce_sl_shadow_at_persist_sec", 0.0))
-        sl_grid = (tuple(getattr(self.cfg, "sl_widen_shadow_grid", ()))
+        # ВАЖНО: сетку берём из разобранного свойства, а не из сырого поля.
+        # `sl_widen_shadow_grid` — строка "1.0,1.5,2.0,3.0", и `tuple()` от неё
+        # даёт кортеж СИМВОЛОВ ('1', '.', '0', ',', …), на которых падает и
+        # `float()`, и формат `:g`. Executor всегда читал разобранное свойство.
+        sl_grid = (tuple(getattr(self.cfg, "sl_widen_shadow_multipliers", ()))
                    if sl_at > 0 else ())
         for book_side, side in (("bid", "long"), ("ask", "short")):
             wall = self._track[sym][book_side]
