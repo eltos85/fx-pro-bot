@@ -229,9 +229,10 @@ services:
       # опровергнута; возврат к канону (A/B base vs canon). Числа — BUILDLOG.
       # sweep_fade_trend УДАЛЕНА v0.18.33 (2026-07-06): n=35 WR 37% net −$121.62.
       # Реальное значение — из .env (env_file); тут дефолт для свежего деплоя.
-      # sweep_fade_canon отключена v0.18.59: 114 сделок, чистый R −0.413
-      # CI95 [−0.665; −0.182], убыточна во всех сессиях, итог −$468.91.
-      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break}
+      # sweep_fade_canon отключалась v0.18.59, возвращена v0.18.65: довод про
+      # валовой минус оказался артефактом перекошенного покрытия fees_usd
+      # (1a90ad2), а без неё вселенная схлопнулась до двух монет.
+      SCALP_ENABLED_STRATEGIES: ${SCALP_ENABLED_STRATEGIES:-sweep_fade,density_bounce,density_break,sweep_fade_canon}
       # v0.18.20: вселенная канон-страты — ликвидные мейджоры (глубокие книги,
       # рейнджи: канон fade; live ETH WR 55% vs ZEC 28%). Торгуются ТОЛЬКО
       # sweep_fade_canon (symbol_scope), авто-вселенная других страт не задета.
