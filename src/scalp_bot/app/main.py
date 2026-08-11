@@ -83,6 +83,10 @@ def run() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
 
     symbols = cfg.symbol_list
+    # Авто-отбор отработал и не нашёл ни одной пригодной монеты (≠ сбой REST,
+    # который прокидывает исключение). Разделено, потому что при сбое торгуем
+    # прежним составом, а при пустом отборе — не торгуем вовсе.
+    auto_universe_empty = False
     mode = "LIVE(demo)" if cfg.trading_enabled else "PAPER"
 
     db = ScalpDB(cfg.data_dir)
@@ -104,7 +108,16 @@ def run() -> None:
                          cfg.universe_method, cfg.universe_top_n,
                          ",".join(symbols))
             else:
-                log.warning("авто-вселенная пуста — fallback на SCALP_SYMBOLS=%s",
+                # v0.18.66: пустой отбор = рынок непригоден, а не «возьми
+                # затравку». SCALP_SYMBOLS остаются в WS-подписках (детекторы и
+                # counterfactual продолжают наблюдать), но торговать по ним
+                # нельзя — universe_syms ниже пустеет, и они уходят в
+                # shadow_only. Канон отбора (_select_universe): «Лучше
+                # вселенная < floor (или пустая), чем торговля непригодными
+                # монетами» — до этой правки код до пустоты не доходил.
+                auto_universe_empty = True
+                log.warning("авто-вселенная пуста — торговля по SCALP_SYMBOLS=%s "
+                            "запрещена, остаются только под наблюдение",
                             ",".join(symbols))
         if cfg.flatten_on_start:
             # закрыть позиции по выбранным символам И по символам открытых сделок
@@ -128,7 +141,10 @@ def run() -> None:
     # (в отличие от глобальных universe_pin_symbols). Цель: дать density_break
     # волатильные альты на мёртвом рынке, где rvol-селектор их не пропускает.
     db_pins: list[str] = list(dict.fromkeys(cfg.density_break_pin_list))
-    universe_syms = set(symbols)
+    # Пустой авто-отбор → торговой вселенной нет. Пины и канон-мейджоры это НЕ
+    # затрагивает: они force-include по явному решению в конфиге и всегда шли в
+    # обход авто-фильтра (db_pin- и canon_only-гейты ниже).
+    universe_syms = set() if auto_universe_empty else set(symbols)
     if canon_syms:
         symbols = list(dict.fromkeys(symbols + canon_syms))
     if db_pins:
@@ -308,11 +324,14 @@ def run() -> None:
                         notifier,
                         extra_syms=list(dict.fromkeys(
                             canon_syms + db_pins + shadow_syms)))
-                    if picked:
-                        universe_syms = set(picked)
-                        canon_only = set(canon_syms) - universe_syms
-                        # db_pins не зависят от авто-вселенной (всегда force-include)
-                        db_pin_set = set(db_pins)
+                    # v0.18.66: присваиваем безусловно — пустой отбор обнуляет
+                    # торговую вселенную (fail-closed). Сбой отбора сюда не
+                    # доходит: исключение ловит except ниже, и состав переживает
+                    # цикл нетронутым.
+                    universe_syms = set(picked)
+                    canon_only = set(canon_syms) - universe_syms
+                    # db_pins не зависят от авто-вселенной (всегда force-include)
+                    db_pin_set = set(db_pins)
                     prev_shadow_only = shadow_only
                     shadow_only = _shadow_only_set(
                         symbols, universe_syms, canon_syms, db_pin_set)
@@ -477,6 +496,16 @@ def run() -> None:
                         if sym in shadow_pool:
                             _add_shadow_universe_candidate(
                                 counterfactual, shadow_open, cfg, s, now)
+                        elif not universe_syms:
+                            # v0.18.66: торговая вселенная пуста, символ остался
+                            # только в подписках. Записываем отдельной
+                            # популяцией — так видно, чего стоит fail-closed:
+                            # без этих наблюдений цена запрета неизмерима.
+                            _add_shadow_universe_candidate(
+                                counterfactual, shadow_open, cfg, s, now,
+                                setup_type="dead_universe",
+                                actual_gate="empty_universe",
+                                reason="вселенная пуста, рынок непригоден")
                         continue
                     candidates.append(s)
                 sig = resolve(candidates)
@@ -1012,14 +1041,22 @@ def _shadow_only_set(symbols, universe_syms: set[str], canon_syms,
     return set(symbols) - tradeable
 
 
-def _add_shadow_universe_candidate(tracker, shadow_open: dict, cfg, sig,
-                                   now: float) -> None:
+def _add_shadow_universe_candidate(
+    tracker, shadow_open: dict, cfg, sig, now: float,
+    setup_type: str = "shadow_universe",
+    actual_gate: str = "below_turnover_floor",
+    reason: str = "оборот ниже порога",
+) -> None:
     """Сигнал по наблюдаемому символу → counterfactual. Ордеров не создаёт.
 
     Дедуп по связке (стратегия, символ): пока предыдущий кандидат жив, новые не
     эмитим — живой бот в это время держал бы позицию и не взводился бы заново.
     Без этого детектор писал бы кандидата на каждом тике (баг v0.18.47 у
     canon-теней: 25 строк на одно событие).
+
+    ``setup_type`` разделяет популяции наблюдений: у символа, отсечённого
+    порогом оборота, и у символа, запрещённого пустой вселенной, разные
+    гипотезы, и смешивать их в одну выборку нельзя.
     """
     if tracker is None:
         return
@@ -1029,9 +1066,9 @@ def _add_shadow_universe_candidate(tracker, shadow_open: dict, cfg, sig,
         return
     try:
         cid = tracker.add(CounterfactualCandidate(
-            candidate_key=f"shadow_universe:{sig.strategy}:{sig.symbol}:"
+            candidate_key=f"{setup_type}:{sig.strategy}:{sig.symbol}:"
                           f"{sig.side}:{now:.0f}",
-            setup_type="shadow_universe", variant=sig.strategy,
+            setup_type=setup_type, variant=sig.strategy,
             strategy=sig.strategy, symbol=sig.symbol, side=sig.side,
             ts_candidate=now, ts_entry=now, entry=sig.entry_ref,
             sl=sig.sl_level, tp=sig.tp_level,
@@ -1040,16 +1077,17 @@ def _add_shadow_universe_candidate(tracker, shadow_open: dict, cfg, sig,
                 cfg, "counterfactual_horizon_sec", 10_800.0)),
             checkpoint_sec=float(getattr(
                 cfg, "counterfactual_checkpoint_sec", 3_600.0)),
-            actual_gate="below_turnover_floor",
+            actual_gate=actual_gate,
         ))
     except Exception:
-        log.exception("shadow universe candidate %s %s failed",
-                      sig.strategy, sig.symbol)
+        log.exception("%s candidate %s %s failed",
+                      setup_type, sig.strategy, sig.symbol)
         return
     if cid is not None:
         shadow_open[key] = cid
-        play.info("👁 [%s] %s %s — только наблюдение (оборот ниже порога), "
-                  "ордер НЕ выставляется", sig.symbol, sig.strategy, sig.side)
+        play.info("👁 [%s] %s %s — только наблюдение (%s), "
+                  "ордер НЕ выставляется", sig.symbol, sig.strategy, sig.side,
+                  reason)
 
 
 def _select_shadow_universe(client, cfg, live: set[str]) -> list[str]:
@@ -1098,8 +1136,10 @@ def _select_shadow_universe(client, cfg, live: set[str]) -> list[str]:
 def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
                      notifier, extra_syms: list[str] | None = None):
     """Часовой пересмотр вселенной. Возвращает (stream, states, symbols, picked)
-    — picked = свежая авто-вселенная (None при сбое; нужна вызывающему для
-    учёта canon-only символов).
+    — picked = свежая авто-вселенная (нужна вызывающему для учёта canon-only
+    символов). Пустой список = рынок непригоден: вызывающий обнуляет торговую
+    вселенную. Сбой REST наружу уходит исключением, а не пустым списком, —
+    иначе «биржа не ответила» было бы не отличить от «торговать нечем».
 
     ``extra_syms`` (v0.18.20) — символы канон-страты: всегда остаются в
     WS-подписках независимо от авто-фильтра (торгуются только своей стратой).
@@ -1112,8 +1152,13 @@ def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
     объекты для дискреционного выхода."""
     picked = _select_universe(client, cfg)
     if not picked:
-        log.warning("ротация: авто-вселенная пуста — оставляю текущие символы")
-        return stream, states, symbols, None
+        # v0.18.66: возвращаем [] (не None) — вызывающий отличает «отбор пуст»
+        # от «отбор сорвался» (исключение выше). Подписки не пересобираем:
+        # символы остаются под наблюдением, но вызывающий обнулит universe_syms
+        # и торговать по ним будет нельзя.
+        log.warning("ротация: авто-вселенная пуста — торговая вселенная "
+                    "обнуляется, текущие символы остаются под наблюдением")
+        return stream, states, symbols, []
     open_syms = {tr.symbol for tr in db.open_trades()}
     # топ-N плюс канон-символы плюс символы с открытыми позициями
     target = list(dict.fromkeys(

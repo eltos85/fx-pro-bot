@@ -3325,6 +3325,85 @@ def test_shadow_only_derives_from_subscriptions_not_fresh_list():
     assert _shadow_only_set(symbols, set(), [], set()) == set(symbols)
 
 
+def test_empty_universe_returns_empty_list_not_none(monkeypatch):
+    """v0.18.66: пустой отбор возвращает [], а не None. Канон _select_universe —
+    «Лучше вселенная < floor (или пустая), чем торговля непригодными монетами», —
+    но до этой правки при пустом отборе ротация выходила раньше с None, вызывающий
+    оставлял universe_syms прежним, и бот продолжал торговать затравку из
+    SCALP_SYMBOLS. Живой случай 2026-08-11: оборот >=$100M проходили 5 из 627
+    перпов, амплитуда >=6% — ни один, вселенная была пуста сутки, а HYPE (range
+    3.92%) и ZEC (оборот $80M) торговались вопреки собственным фильтрам.
+
+    [] против None нужен вызывающему, чтобы отличить «торговать нечем» от «REST
+    не ответил»: во втором случае состав переживает цикл нетронутым.
+    """
+    from scalp_bot.app import main as m
+    from scalp_bot.config.settings import ScalpSettings
+
+    monkeypatch.setattr(m, "_select_universe", lambda client, cfg: [])
+    stream, states = object(), {"ZECUSDT": object()}
+    symbols = ["ZECUSDT", "HYPEUSDT"]
+    got_stream, got_states, got_syms, picked = m._rotate_universe(
+        None, ScalpSettings(), None, stream, states, [], symbols, None)
+
+    assert picked == [], "пустой отбор = пустой список, не None"
+    assert picked is not None
+    # подписки не пересобираем: символы остаются под наблюдением
+    assert got_stream is stream and got_states is states
+    assert got_syms == symbols
+    # вызывающий обнуляет вселенную → все символы уходят в наблюдаемые
+    from scalp_bot.app.main import _shadow_only_set
+    assert _shadow_only_set(symbols, set(picked), [], set()) == set(symbols)
+
+
+def test_empty_universe_still_trades_explicit_pins_and_canon():
+    """Обнуление вселенной не затрагивает канон-мейджоры и per-strategy пины:
+    они force-include по явному решению в конфиге и всегда шли в обход
+    авто-фильтра. Запрет касается только тех, кто попал в состав через
+    авто-отбор или затравку SCALP_SYMBOLS."""
+    from scalp_bot.app.main import _shadow_only_set
+
+    symbols = ["ZECUSDT", "NEARUSDT", "BTCUSDT", "HYPEUSDT"]
+    got = _shadow_only_set(symbols, set(), ["BTCUSDT"], {"HYPEUSDT"})
+    assert got == {"ZECUSDT", "NEARUSDT"}, "затравка запрещена"
+    for sym in ("BTCUSDT", "HYPEUSDT"):
+        assert sym not in got, f"{sym} разрешён явно, вселенная его не касается"
+
+
+def test_dead_universe_observations_are_separate_population():
+    """Цена fail-closed должна быть измерима, поэтому сигнал по запрещённому
+    символу пишется в counterfactual. Но популяция отдельная: гипотеза «сколько
+    стоил порог оборота» и гипотеза «сколько стоил запрет на мёртвом рынке» —
+    разные выборки, смешивать нельзя (та же логика, что у shadow_pool)."""
+    from scalp_bot.app.main import _add_shadow_universe_candidate
+
+    class _Tracker:
+        def __init__(self):
+            self.added = []
+
+        def add(self, candidate):
+            self.added.append(candidate)
+            return len(self.added)
+
+        def is_active(self, cid):
+            return False
+
+    sig = SimpleNamespace(strategy="sweep_fade", symbol="ZECUSDT", side="short",
+                          entry_ref=100.0, sl_level=101.0, tp_level=98.0)
+    tracker = _Tracker()
+    _add_shadow_universe_candidate(
+        tracker, {}, _shadow_cfg(), sig, 1000.0,
+        setup_type="dead_universe", actual_gate="empty_universe",
+        reason="вселенная пуста")
+    row = tracker.added[0].as_row()
+    assert row["setup_type"] == "dead_universe"
+    assert row["actual_gate"] == "empty_universe"
+    assert row["candidate_key"].startswith("dead_universe:")
+    # дефолт не поехал: гипотеза про порог оборота осталась своей популяцией
+    _add_shadow_universe_candidate(tracker, {}, _shadow_cfg(), sig, 2000.0)
+    assert tracker.added[1].as_row()["setup_type"] == "shadow_universe"
+
+
 def test_shadow_observation_attributed_only_to_shadow_pool():
     """Осадок в подписках торговать нельзя, но и записывать в гипотезу про
     порог оборота нечестно — это другая популяция."""
