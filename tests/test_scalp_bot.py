@@ -3404,6 +3404,37 @@ def test_dead_universe_observations_are_separate_population():
     assert tracker.added[1].as_row()["setup_type"] == "shadow_universe"
 
 
+def test_dead_universe_wins_over_shadow_pool_only_for_seed():
+    """Затравка может попасть и в теневой отбор: 12.08 у ZEC оборот $80M — ниже
+    боевого порога $100M, поэтому после обнуления вселенной теневой селектор
+    забрал его себе, и цена запрета три дня считалась бы под вывеской гипотезы
+    о пороге оборота (по ней вердикт уже вынесен отрицательный).
+
+    Разделитель — происхождение, а не текущий оборот: торговлю fail-closed
+    забрал именно у затравки. У монет, найденных теневым селектором, торговли
+    не было никогда, и приоритет по «вселенная пуста» их бы съел — гипотеза о
+    пороге оборота перестала бы набираться на каждом мёртвом рынке.
+    """
+    seed_syms, shadow_pool = {"ZECUSDT"}, {"ZECUSDT", "KAITOUSDT"}
+    recorded = []
+
+    def gate(sym, universe_syms):
+        # порядок ветвлений как в main-цикле
+        if not universe_syms and sym in seed_syms:
+            recorded.append((sym, "dead_universe"))
+        elif sym in shadow_pool:
+            recorded.append((sym, "shadow_universe"))
+
+    gate("ZECUSDT", set())          # вселенная пуста → цена запрета
+    gate("KAITOUSDT", set())        # теневая монета → своя гипотеза, не съедена
+    gate("ZECUSDT", {"NEARUSDT"})   # вселенная ожила → затравка снова обычная тень
+    assert recorded == [
+        ("ZECUSDT", "dead_universe"),
+        ("KAITOUSDT", "shadow_universe"),
+        ("ZECUSDT", "shadow_universe"),
+    ]
+
+
 def test_shadow_observation_attributed_only_to_shadow_pool():
     """Осадок в подписках торговать нельзя, но и записывать в гипотезу про
     порог оборота нечестно — это другая популяция."""

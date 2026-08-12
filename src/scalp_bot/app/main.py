@@ -83,6 +83,13 @@ def run() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
 
     symbols = cfg.symbol_list
+    # Затравка из SCALP_SYMBOLS до того, как её перезапишет авто-отбор. Именно
+    # эти символы торговались, пока пустая вселенная откатывалась на них, и
+    # именно у них fail-closed забрал торговлю — их исходы отвечают за цену
+    # запрета (setup_type="dead_universe"). Монеты, найденные теневым
+    # селектором, не торговались никогда: они отвечают за другую гипотезу
+    # (порог оборота, "shadow_universe"), и смешивать выборки нельзя.
+    seed_syms = set(symbols)
     # Авто-отбор отработал и не нашёл ни одной пригодной монеты (≠ сбой REST,
     # который прокидывает исключение). Разделено, потому что при сбое торгуем
     # прежним составом, а при пустом отборе — не торгуем вовсе.
@@ -493,19 +500,22 @@ def run() -> None:
                     # Единственная точка, где тень могла бы утечь в торговлю,
                     # поэтому отсекаем ДО candidates.append.
                     if sym in shadow_only:
-                        if sym in shadow_pool:
-                            _add_shadow_universe_candidate(
-                                counterfactual, shadow_open, cfg, s, now)
-                        elif not universe_syms:
-                            # v0.18.66: торговая вселенная пуста, символ остался
-                            # только в подписках. Записываем отдельной
-                            # популяцией — так видно, чего стоит fail-closed:
-                            # без этих наблюдений цена запрета неизмерима.
+                        if not universe_syms and sym in seed_syms:
+                            # v0.18.66: торговлю у затравки забрал именно
+                            # fail-closed, и её исходы измеряют цену запрета.
+                            # Проверяется ПЕРЕД shadow_pool: затравка может
+                            # попасть и в теневой отбор (ZEC 12.08: оборот $80M
+                            # ниже боевого порога), и тогда цена запрета
+                            # считалась бы под вывеской гипотезы о пороге
+                            # оборота — по которой вердикт уже вынесен.
                             _add_shadow_universe_candidate(
                                 counterfactual, shadow_open, cfg, s, now,
                                 setup_type="dead_universe",
                                 actual_gate="empty_universe",
                                 reason="вселенная пуста, рынок непригоден")
+                        elif sym in shadow_pool:
+                            _add_shadow_universe_candidate(
+                                counterfactual, shadow_open, cfg, s, now)
                         continue
                     candidates.append(s)
                 sig = resolve(candidates)
