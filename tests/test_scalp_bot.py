@@ -3341,19 +3341,104 @@ def test_empty_universe_returns_empty_list_not_none(monkeypatch):
     from scalp_bot.config.settings import ScalpSettings
 
     monkeypatch.setattr(m, "_select_universe", lambda client, cfg: [])
-    stream, states = object(), {"ZECUSDT": object()}
+    stream = SimpleNamespace(stop=lambda: None)
+    db = SimpleNamespace(open_trades=lambda: [])
     symbols = ["ZECUSDT", "HYPEUSDT"]
     got_stream, got_states, got_syms, picked = m._rotate_universe(
-        None, ScalpSettings(), None, stream, states, [], symbols, None)
+        None, ScalpSettings(), db, stream, {}, [], symbols, None,
+        extra_syms=[], observe_syms=symbols)
 
     assert picked == [], "пустой отбор = пустой список, не None"
     assert picked is not None
-    # подписки не пересобираем: символы остаются под наблюдением
-    assert got_stream is stream and got_states is states
-    assert got_syms == symbols
+    # состав тот же → пересборка не нужна, поток не трогаем
+    assert got_stream is stream and got_syms == symbols
     # вызывающий обнуляет вселенную → все символы уходят в наблюдаемые
     from scalp_bot.app.main import _shadow_only_set
     assert _shadow_only_set(symbols, set(picked), [], set()) == set(symbols)
+
+
+def test_empty_universe_still_resubscribes_for_observation(monkeypatch):
+    """v0.18.67: при пустой вселенной подписки пересобираются. Раньше ротация
+    выходила досрочно, и теневой отбор пересчитывался каждые 5 минут впустую —
+    новые монеты до вебсокета не доходили. 12.08 это стоило дорого: ZEC выпал
+    при короткой живой ротации и увёл 572 наблюдения (больше всех символов
+    вместе), а вернуться не мог, пока вселенная пуста.
+
+    Торговлю это не открывает: без авто-вселенной всё, кроме канона и пинов,
+    попадает в shadow_only у вызывающего.
+    """
+    from scalp_bot.app import main as m
+    from scalp_bot.config.settings import ScalpSettings
+
+    started: list[list[str]] = []
+
+    class _Stream:
+        def __init__(self, syms, states, **kw):
+            self.syms = syms
+
+        def start(self):
+            started.append(list(self.syms))
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(m, "_select_universe", lambda client, cfg: [])
+    monkeypatch.setattr(m, "BybitMarketStream", _Stream)
+    db = SimpleNamespace(open_trades=lambda: [])
+    # свежая тень (KAITO) пришла в extra_syms, устаревший DOGE должен уйти
+    _, _, got_syms, picked = m._rotate_universe(
+        None, ScalpSettings(), db, _Stream([], {}), {}, [],
+        ["DOGEUSDT", "BTCUSDT"], None,
+        extra_syms=["BTCUSDT", "KAITOUSDT"], observe_syms=["ZECUSDT"])
+
+    assert picked == []
+    assert started, "подписки должны пересобираться и при пустой вселенной"
+    assert "KAITOUSDT" in got_syms, "свежая тень доходит до вебсокета"
+    assert "ZECUSDT" in got_syms, "затравка остаётся под наблюдением"
+    assert "DOGEUSDT" not in got_syms, "устаревший символ уходит из подписок"
+
+
+def test_empty_universe_keeps_open_position_symbol_subscribed(monkeypatch):
+    """Символ с открытой позицией нельзя отписывать даже при пустой вселенной —
+    иначе за сопровождением сделки некому наблюдать."""
+    from scalp_bot.app import main as m
+    from scalp_bot.config.settings import ScalpSettings
+
+    class _Stream:
+        def __init__(self, syms, states, **kw):
+            self.syms = syms
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(m, "_select_universe", lambda client, cfg: [])
+    monkeypatch.setattr(m, "BybitMarketStream", _Stream)
+    db = SimpleNamespace(
+        open_trades=lambda: [SimpleNamespace(symbol="SOLUSDT")])
+    _, _, got_syms, _ = m._rotate_universe(
+        None, ScalpSettings(), db, _Stream([], {}), {}, [],
+        ["SOLUSDT", "DOGEUSDT"], None,
+        extra_syms=["BTCUSDT"], observe_syms=[])
+    assert "SOLUSDT" in got_syms
+
+
+def test_empty_universe_no_targets_keeps_current_subscriptions(monkeypatch):
+    """Ни канона, ни пинов, ни теней, ни открытых — подписываться не на что.
+    Пустой поток бессмыслен, состав оставляем прежним."""
+    from scalp_bot.app import main as m
+    from scalp_bot.config.settings import ScalpSettings
+
+    monkeypatch.setattr(m, "_select_universe", lambda client, cfg: [])
+    stream = SimpleNamespace(stop=lambda: None)
+    db = SimpleNamespace(open_trades=lambda: [])
+    symbols = ["ZECUSDT"]
+    got_stream, _, got_syms, picked = m._rotate_universe(
+        None, ScalpSettings(), db, stream, {}, [], symbols, None,
+        extra_syms=[], observe_syms=[])
+    assert got_stream is stream and got_syms == symbols and picked == []
 
 
 def test_empty_universe_still_trades_explicit_pins_and_canon():

@@ -330,7 +330,8 @@ def run() -> None:
                         client, cfg, db, stream, states, strategies, symbols,
                         notifier,
                         extra_syms=list(dict.fromkeys(
-                            canon_syms + db_pins + shadow_syms)))
+                            canon_syms + db_pins + shadow_syms)),
+                        observe_syms=sorted(seed_syms))
                     # v0.18.66: присваиваем безусловно — пустой отбор обнуляет
                     # торговую вселенную (fail-closed). Сбой отбора сюда не
                     # доходит: исключение ловит except ниже, и состав переживает
@@ -1144,7 +1145,8 @@ def _select_shadow_universe(client, cfg, live: set[str]) -> list[str]:
 
 
 def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
-                     notifier, extra_syms: list[str] | None = None):
+                     notifier, extra_syms: list[str] | None = None,
+                     observe_syms: list[str] | None = None):
     """Часовой пересмотр вселенной. Возвращает (stream, states, symbols, picked)
     — picked = свежая авто-вселенная (нужна вызывающему для учёта canon-only
     символов). Пустой список = рынок непригоден: вызывающий обнуляет торговую
@@ -1154,6 +1156,11 @@ def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
     ``extra_syms`` (v0.18.20) — символы канон-страты: всегда остаются в
     WS-подписках независимо от авто-фильтра (торгуются только своей стратой).
 
+    ``observe_syms`` (v0.18.67) — затравка SCALP_SYMBOLS: держим в подписках,
+    пока вселенная пуста, чтобы обещание «остаются только под наблюдение»
+    выполнялось и после первой же ротации, а `dead_universe` продолжал мерить
+    цену запрета. При живой вселенной затравка не нужна — авторитетен отбор.
+
     Безопасно для открытых: символ с открытой позицией НЕ выкидываем, пока она
     не закроется (даже если выпал из топа). Существующие SymbolState
     переиспользуем (CVD/агрегаты переживают рестарт WS — теряется лишь ~1с
@@ -1161,18 +1168,30 @@ def _rotate_universe(client, cfg, db, stream, states, strategies, symbols,
     символы (ensure_symbols), чтобы executor продолжал ссылаться на те же
     объекты для дискреционного выхода."""
     picked = _select_universe(client, cfg)
-    if not picked:
-        # v0.18.66: возвращаем [] (не None) — вызывающий отличает «отбор пуст»
-        # от «отбор сорвался» (исключение выше). Подписки не пересобираем:
-        # символы остаются под наблюдением, но вызывающий обнулит universe_syms
-        # и торговать по ним будет нельзя.
-        log.warning("ротация: авто-вселенная пуста — торговая вселенная "
-                    "обнуляется, текущие символы остаются под наблюдением")
-        return stream, states, symbols, []
     open_syms = {tr.symbol for tr in db.open_trades()}
-    # топ-N плюс канон-символы плюс символы с открытыми позициями
-    target = list(dict.fromkeys(
-        list(picked) + list(extra_syms or []) + [s for s in open_syms]))
+    if not picked:
+        # v0.18.66: [] (не None) — вызывающий отличает «отбор пуст» от «отбор
+        # сорвался» (исключение выше) и обнуляет торговую вселенную.
+        # v0.18.67: подписки пересобираем и здесь. Раньше выходили досрочно, и
+        # теневой отбор пересчитывался каждые 5 минут впустую: новые монеты до
+        # вебсокета не доходили, а сбор наблюдений замерзал на том составе, что
+        # случайно оказался подписан в момент последней живой ротации (12.08:
+        # ZEC выпал и увёл с собой 572 наблюдения, больше всех символов вместе).
+        # Торговлю это не открывает: без авто-вселенной всё, кроме канона и
+        # пинов, попадает в shadow_only у вызывающего.
+        log.warning("ротация: авто-вселенная пуста — торговая вселенная "
+                    "обнуляется, состав пересобираем только под наблюдение")
+        target = list(dict.fromkeys(
+            list(extra_syms or []) + list(observe_syms or [])
+            + [s for s in open_syms]))
+        if not target:
+            # Ни канона, ни пинов, ни теней, ни открытых — подписываться не на
+            # что. Пустой BybitMarketStream бессмыслен, оставляем как есть.
+            return stream, states, symbols, picked
+    else:
+        # топ-N плюс канон-символы плюс символы с открытыми позициями
+        target = list(dict.fromkeys(
+            list(picked) + list(extra_syms or []) + [s for s in open_syms]))
     if set(target) == set(symbols):
         return stream, states, symbols, picked
     log.info("ротация вселенной: %s → %s", ",".join(symbols), ",".join(target))
