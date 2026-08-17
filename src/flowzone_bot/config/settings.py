@@ -172,7 +172,11 @@ class FlowzoneSettings(BaseSettings):
     #   • exhaustion — НЕ вход (бот торгует только continuation), а ФИКСАЦИЯ
     #     прибыли: «My Signature Orderflow Model» 06:04 — *«this selling
     #     pressure is almost exhausted… I take out my position»*.
-    initiative_exhaustion_enabled: bool = Field(default=True)
+    # 2026-08-17 изоляция ядра: live C1-C5, n=134, WR hook 17.4% / initiative
+    # 15.6% / absorption 17.9% — новые входы неотличимы от ядра, но смешивают
+    # замер. Дефолт false на форвард: торгуем только absorption. Включение
+    # обратно — FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED=true.
+    initiative_exhaustion_enabled: bool = Field(default=False)
     # Порог «сильной» направленной дельты для initiative (доля |net| от объёма
     # окна). 0.30 — нейтральный порог односторонности, не тюнинг под P&L.
     initiative_min_delta_frac: float = Field(default=0.30)
@@ -190,7 +194,10 @@ class FlowzoneSettings(BaseSettings):
     # profitable setup with high win rate»*. До 2026-07-29 сетапа не было
     # вообще. Порог «не приняли» берётся из value_area_pct (см. analysis/hook),
     # отдельного magic-number нет.
-    hook_enabled: bool = Field(default=True)
+    # 2026-08-17 изоляция ядра: hook 46 сделок WR 17.4% (−$357), неотличим от
+    # reload/absorption. Дефолт false на форвард; код сетапа остаётся.
+    # Включение — FLOWZONE_HOOK_ENABLED=true.
+    hook_enabled: bool = Field(default=False)
     # Окно persisted-потока для поиска вылазки (сек). ОПЕРАЦИОННЫЙ лимит объёма
     # чтения из SQLite и свежести сетапа, а не торговый порог: вылазка,
     # начавшаяся час назад и до сих пор не разрешившаяся, уже не «hook».
@@ -346,8 +353,14 @@ class FlowzoneSettings(BaseSettings):
     # баров ≈41 день, среднее по BTC/ETH/SOL — NY 12-21 = 51.4% оборота за 9ч
     # против London 07-16 = 46.8%; пик 13:00 (8.9%), 14:00 (8.3%), 15:00 (7.6%).
     # Пустая строка/выкл → круглосуточно. Окна — операционные, не торговый порог.
+    # 2026-08-17 изоляция: окно возвращено к London+NY 07:00-21:00 (как до C4),
+    # чтобы отделить эффект C4 (9ч NY-only) от C1 merge и от hook/initiative.
+    # C4-окно 12:00-21:00 остаётся доступным через FLOWZONE_SESSION_WINDOWS_UTC.
+    # Канон 28:54 (одна cash-сессия) не отменяется — это форвард-A/B на крипте,
+    # где NY vs склейка не были разведены: absorption на тройке тоже упал
+    # 25%→18% вместе с C1-C5, не только новые сетапы.
     session_gate_enabled: bool = Field(default=True)
-    session_windows_utc: str = Field(default="12:00-21:00")
+    session_windows_utc: str = Field(default="07:00-16:00,12:00-21:00")
 
     # ─── Telegram (репорты в чат ai_trader, префикс [flowzone]) ──────────
     telegram_enabled: bool = Field(default=False)

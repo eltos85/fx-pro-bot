@@ -46,6 +46,10 @@ from flowzone_bot.analysis.volume_profile import (
     find_hvn_lvn,
 )
 
+# Перешеек double distribution = тот же «резкий обрыв» HVN→LVN, что volume
+# ledge (STRATEGY §3.1, ``find_ledges(..., drop_frac=0.5)``). Не новый порог.
+_DD_NECK_DROP = 0.5
+
 # Состояния контекста аукциона.
 TREND_UP = "trend_up"
 TREND_DOWN = "trend_down"
@@ -91,6 +95,27 @@ class Context:
         return None
 
 
+def _is_double_distribution(profile: VolumeProfile) -> bool:
+    """Два dealing range через тонкий LVN (канон 31:31), не пила соседних тиков.
+
+    Соседние существенные HVN (``find_hvn_lvn`` уже отсёк зубчики ниже среднего)
+    и LVN между ними с обрывом ≤ ``_DD_NECK_DROP`` от меньшего пика.
+    """
+    hvn, lvn = find_hvn_lvn(profile)
+    if len(hvn) < 2:
+        return False
+    hvn_s = sorted(hvn)
+    for a, b in zip(hvn_s, hvn_s[1:]):
+        neck = [lv for lv in lvn if a < lv < b]
+        if not neck:
+            continue
+        neck_vol = min(profile.bucket_volume(i) for i in neck)
+        peak = min(profile.bucket_volume(a), profile.bucket_volume(b))
+        if peak > 0 and neck_vol <= peak * _DD_NECK_DROP:
+            return True
+    return False
+
+
 def classify_shape(profile: VolumeProfile | None, accept_above: float,
                    accept_below: float, *, accept_frac: float = 0.68) -> str:
     """Форма профиля (D4, Dalton «Mind Over Markets» + канон-автор).
@@ -100,8 +125,11 @@ def classify_shape(profile: VolumeProfile | None, accept_above: float,
       directional next period (канон *«P-shape… aggressive buyers… directional
       next day»*). `P_SHAPE_UP` = тяжёлый верхний хвост с buy-доминантой;
       `P_SHAPE_DOWN` = тяжёлый нижний хвост с sell-доминантой.
-    - **Double distribution** — два HVN-кластера, разделённых LVN-перешейком →
-      два dealing range, быстрый проход по LVN.
+    - **Double distribution** — два *существенных* HVN-кластера (выше средней
+      плотности профиля), разделённых тонким LVN-перешейком (объём перешейка
+      ≤ половины меньшего пика — та же конвенция, что volume ledge §3.1) →
+      два dealing range, быстрый проход по LVN. Не любой зубчик соседних
+      корзин: иначе гейт C3 вырождается в always-DD (live 29.07–14.08).
     - **Balance** — хвосты слабые (< accept_frac с обеих сторон), симметрия.
     - **Normal** — колокол вокруг POC либо тяжёлый хвост БЕЗ подтверждающей
       дельты (объём вне VA есть, но агрессия в хвосте не направлена).
@@ -110,12 +138,8 @@ def classify_shape(profile: VolumeProfile | None, accept_above: float,
     """
     if profile is None:
         return UNKNOWN
-    hvn, lvn = find_hvn_lvn(profile)
-    # Double distribution: ≥2 HVN с LVN-перешейком между ними.
-    if len(hvn) >= 2:
-        lo_h, hi_h = min(hvn), max(hvn)
-        if any(lo_h < lv < hi_h for lv in lvn):
-            return DOUBLE_DISTRIBUTION
+    if _is_double_distribution(profile):
+        return DOUBLE_DISTRIBUTION
     # P-shape: доминирующий хвост + направленная дельта в хвосте.
     if accept_below >= accept_frac:
         tail_delta = sum(profile.bucket_delta(i) for i in profile.buckets

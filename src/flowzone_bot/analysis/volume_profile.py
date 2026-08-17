@@ -208,20 +208,30 @@ def merge_profiles(profiles: list[VolumeProfile],
 
 
 def find_hvn_lvn(profile: VolumeProfile) -> tuple[list[int], list[int]]:
-    """HVN/LVN — локальные максимумы/минимумы объёма по цене среди НЕпустых
-    корзин (Dalton). Возвращает (hvn_idxs, lvn_idxs). Края не классифицируем
-    (нет двух соседей)."""
+    """HVN/LVN — локальные экстремумы объёма среди непустых корзин (Dalton).
+
+    HVN = локальный максимум **и** объём ≥ среднего по непустым корзинам
+    (high-volume node = концентрация выше средней плотности профиля).
+    LVN = локальный минимум **и** объём ≤ среднего. Края не классифицируем.
+
+    Без отсечения по средней любой зубчик гистограммы соседних тиков становился
+    HVN: live 29.07–14.08 все 126 сделок после фикса shape были
+    ``double_distribution``, гейт C3 не резал ничего.
+    """
     idxs = sorted(profile.buckets)
     hvn: list[int] = []
     lvn: list[int] = []
+    if len(idxs) < 3:
+        return hvn, lvn
+    mean_v = sum(profile.bucket_volume(i) for i in idxs) / len(idxs)
     for k in range(1, len(idxs) - 1):
         i = idxs[k]
         v = profile.bucket_volume(i)
         vp = profile.bucket_volume(idxs[k - 1])
         vn = profile.bucket_volume(idxs[k + 1])
-        if v > vp and v > vn:
+        if v > vp and v > vn and v >= mean_v:
             hvn.append(i)
-        elif v < vp and v < vn:
+        elif v < vp and v < vn and v <= mean_v:
             lvn.append(i)
     return hvn, lvn
 

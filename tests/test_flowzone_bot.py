@@ -1221,6 +1221,12 @@ def test_flowzone_canon_defaults():
     assert cfg.trail_enabled is True
     assert cfg.trail_window_sec == 300.0
     assert not hasattr(cfg, "be_lock_zone_mult")  # удалён — не канон
+    # 2026-08-17 изоляция ядра: hook/initiative выкл, окно London+NY.
+    assert cfg.hook_enabled is False
+    assert cfg.initiative_exhaustion_enabled is False
+    assert cfg.session_windows_utc == "07:00-16:00,12:00-21:00"
+    assert cfg.profile_shape_enabled is True
+    assert cfg.profile_merge_enabled is True
 
 
 # ─── R:R-флор 1:2 (канон «1 to 2», 2026-06-29) ───────────────────────────
@@ -1669,6 +1675,17 @@ def test_classify_shape_double_distribution_two_clusters_with_lvn_neck():
     shape = classify_shape(prof, accept_above=0.0, accept_below=0.0,
                            accept_frac=0.68)
     assert shape == DOUBLE_DISTRIBUTION
+
+
+def test_classify_shape_sawtooth_is_not_double_distribution():
+    """Регрессия C1-C5 live: пила соседних корзин не double distribution.
+
+    29.07–14.08 все 126 сделок после фикса shape были DD, гейт C3 не резал.
+    Зубчики 10/11 около среднего — не два dealing range через тонкий LVN.
+    """
+    buckets = {i: (10.0 if i % 2 == 0 else 11.0, 0.0) for i in range(30)}
+    prof = build_profile(buckets, bucket_size=1.0)
+    assert classify_shape(prof, 0.0, 0.0, accept_frac=0.68) != DOUBLE_DISTRIBUTION
 
 
 def test_classify_shape_unknown_when_profile_none():

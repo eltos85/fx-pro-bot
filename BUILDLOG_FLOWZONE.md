@@ -11,6 +11,40 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-08-17
 
+### feat(flowzone): изоляция ядра — DD-детектор, hook/initiative выкл, окно London+NY
+`_коммит ниже_`
+
+Пользователь подтвердил пакет из разбора 17.08: починить то, что врёт
+относительно задумки, и развести C4/C1 vs новые сетапы на форварде.
+
+**1. Детектор double distribution (баг C3).** Симптом: 126/126 сделок после
+фикса `shape` были `double_distribution` — гейт формы не резал. Причина:
+`find_hvn_lvn` считал HVN любой локальный пик соседних корзин; `classify_shape`
+брал min/max HVN и любой LVN между ними. Dalton HVN = концентрация **выше
+средней** плотности профиля; перешеек двух dealing range — тонкий LVN, та же
+конвенция обрыва что volume ledge §3.1 (`drop_frac=0.5`). Не новый P&L-порог.
+Регрессия: пила 10/11 по 30 корзинам больше не DD; два кластера 100 через
+перешеек 5 — по-прежнему DD.
+
+**2. Hook и initiative выключены.** C1-C5 n=134: hook WR 17.4% (n=46),
+initiative 15.6% (n=32), absorption 17.9% (n=56). Разница <1 п.п. — по
+sample-size отключать «худший сетап» нельзя, но смешивать их с ядром на
+следующем форварде бессмысленно. Дефолт `hook_enabled=false`,
+`initiative_exhaustion_enabled=false` (тот же флаг глушит exhaustion-exit,
+который за две недели не сработал ни разу). Код на месте, env включает.
+
+**3. Окно сессии** `07:00-16:00,12:00-21:00` (London+NY, как до C4). Absorption
+на тройке тоже упал 25%→18% вместе с C1-C5, не только новые входы — C4 не был
+разведён. Канон-окно 12:00-21:00 остаётся через env. C1 merge не трогаем.
+
+Halt/cooldown 33004 — коммит `36673d4`, уже в проде. Ключ на VPS не менялся
+(нет secret).
+
+**Файлы:** `analysis/{context,volume_profile,session}.py`, `config/settings.py`,
+`docker-compose.yml`, `STRATEGY_FLOWZONE.md` §6.1/§11.9, `tests/test_flowzone_bot.py`.
+
+---
+
 ### fix(flowzone): cooldown на отказ входа + halt при Bybit 33004
 `36673d4`
 

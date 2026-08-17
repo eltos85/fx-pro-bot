@@ -617,20 +617,17 @@ services:
       # Killswitch выключен на demo (≤0). Для live вернуть лимиты.
       FLOWZONE_MAX_DAILY_LOSS_USD: ${FLOWZONE_MAX_DAILY_LOSS_USD:-0}
       FLOWZONE_MAX_TOTAL_LOSS_USD: ${FLOWZONE_MAX_TOTAL_LOSS_USD:-0}
-      # Session gate (§6.1) — окна UTC, тюнятся без правки кода.
-      # C4 (2026-07-29): ОДНА сессия по канону 28:54 «I only use the cash
-      # session profile». Окно измерено — scripts/flowzone_session_volume.py:
-      # NY 12-21 = 51.4% оборота за 9ч против 46.8% у London 07-16. Раньше
-      # склеивали оба окна в блок 07:00-21:00 (14ч профиля).
+      # Session gate (§6.1). 2026-08-17 изоляция ядра: London+NY 07-21, как до C4.
+      # C4 NY-only 12:00-21:00 — через FLOWZONE_SESSION_WINDOWS_UTC.
       FLOWZONE_SESSION_GATE_ENABLED: ${FLOWZONE_SESSION_GATE_ENABLED:-true}
-      FLOWZONE_SESSION_WINDOWS_UTC: ${FLOWZONE_SESSION_WINDOWS_UTC:-12:00-21:00}
-      # Полный канон C1/C2/C3/C5 (STRATEGY_FLOWZONE §11.8). Все три механики
-      # раньше были выключены как «[НАШЕ]», hook отсутствовал.
+      FLOWZONE_SESSION_WINDOWS_UTC: ${FLOWZONE_SESSION_WINDOWS_UTC:-07:00-16:00,12:00-21:00}
+      # C1 merge остаётся. C2/C5 выключены на форвард (не смешивать с ядром:
+      # hook/initiative WR ≈ absorption 17%, n=134 после C1-C5).
       FLOWZONE_PROFILE_MERGE_ENABLED: ${FLOWZONE_PROFILE_MERGE_ENABLED:-true}
       FLOWZONE_PROFILE_MERGE_LOOKBACK: ${FLOWZONE_PROFILE_MERGE_LOOKBACK:-3}
       FLOWZONE_PROFILE_SHAPE_ENABLED: ${FLOWZONE_PROFILE_SHAPE_ENABLED:-true}
-      FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED: ${FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED:-true}
-      FLOWZONE_HOOK_ENABLED: ${FLOWZONE_HOOK_ENABLED:-true}
+      FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED: ${FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED:-false}
+      FLOWZONE_HOOK_ENABLED: ${FLOWZONE_HOOK_ENABLED:-false}
       FLOWZONE_HOOK_LOOKBACK_SEC: ${FLOWZONE_HOOK_LOOKBACK_SEC:-3600}
       # Управление сделкой (фаза 5): частичная фиксация и reload (§5.3, §8).
       FLOWZONE_PARTIAL_FRACTION: ${FLOWZONE_PARTIAL_FRACTION:-0.5}
