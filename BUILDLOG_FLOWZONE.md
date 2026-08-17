@@ -12,7 +12,7 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 ## 2026-08-17
 
 ### feat(flowzone): воронка skip + inst/merge/sess на сделке
-`pending`
+`22c3107`
 
 Наблюдаемость, вход не гейтит. Heartbeat раз в минуту: `sess=` и
 `skip=no_trend:N,shape:N,no_zone:N,away:N,no_abs:N,rr:N,no_swing:N`
