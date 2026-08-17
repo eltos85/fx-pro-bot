@@ -9,6 +9,37 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ---
 
+## 2026-08-17
+
+### fix(flowzone): cooldown на отказ входа + halt при Bybit 33004
+`_коммит ниже_`
+
+Проверка 17.08: demo-ключ истёк, бот 16.08 за 8 минут записал 55
+`entry_Rejected` по одному шорту ETH (код 33004). Торговые пороги не трогаем.
+
+**Симптом.** `on_signal` при отказе биржи возвращает `None`, а cooldown
+ставился только если вернулся id. Eval-цикл ~1с → тот же сигнал долбил REST
+каждую секунду. Write-ahead insert плодил мусорные строки в `trades`.
+
+**Причина.** Анти-даблклик был привязан к успешному place, не к попытке.
+Истёкший ключ (офдок Bybit V5: *«33004 (Derivatives) Your api key has expired»*
+https://bybit-exchange.github.io/docs/v5/error) не останавливал сканер.
+
+**Решение.**
+1. `apply_signal_cooldown` — cooldown на попытку входа, до `on_signal`.
+2. `is_expired_api_key` в клиенте (33004 / «api key has expired»); флаг
+   `auth_expired` с `set_leverage` и `place_order`.
+3. Executor: после 33004 на leverage — ордер не пишется; после 33004 на
+   place — одна строка `entry_Rejected`, дальше skip до рестарта. Главный
+   цикл не сканирует входы, пока флаг поднят.
+
+Ключ в этом коммите не меняется (нужна пара key+secret на VPS `.env`, не в git).
+
+**Файлы:** `trading/client.py`, `trading/executor.py`, `app/main.py`,
+`tests/test_flowzone_bot.py`. Тесты: 1377 passed.
+
+---
+
 ## Бэклог (аудит 2026-07-02, «мелкие наблюдения — не блокеры»)
 
 Из аудита v0.2.0 (запись `473df5c` ниже). Пять наблюдений оценены по влиянию

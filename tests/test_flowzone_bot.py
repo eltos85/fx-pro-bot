@@ -2177,3 +2177,100 @@ def test_exhaustion_exit_disabled_by_flag():
     snap = type("S", (), {"last_price": 101.1, "ts": now,
                           "trades": _decaying_up_move(now)})()
     assert not _exhaustion_ready(_Cfg(), _ExhaustTrade(entry=100.0), snap)
+
+
+# ─── reject-storm / expired API key (live 16.08.2026, 55× ETH 33004) ─────
+
+def test_is_expired_api_key_matches_bybit_33004():
+    from flowzone_bot.trading.client import is_expired_api_key
+    assert is_expired_api_key(
+        "InvalidRequestError: Your api key has expired. (ErrCode: 33004)")
+    assert is_expired_api_key("retCode=33004 Your api key has expired")
+    assert not is_expired_api_key("retCode=10001 Qty invalid")
+    assert not is_expired_api_key("")
+
+
+def test_apply_signal_cooldown_on_attempt_not_only_fill():
+    from flowzone_bot.app.main import apply_signal_cooldown
+    cd: dict[str, float] = {}
+    apply_signal_cooldown(cd, "ETHUSDT", 1000.0)
+    assert cd["ETHUSDT"] == 1000.0
+    # повторная попытка через 1с (eval-цикл) должна быть внутри окна 60с
+    assert 1001.0 - cd["ETHUSDT"] < 60.0
+
+
+class _LiveCfg(_Cfg):
+    trading_enabled = True
+    risk_per_trade_usd = 10.0
+    min_position_usd = 10.0
+    max_leverage = 5
+
+
+def _reject_sig():
+    from flowzone_bot.analysis.strategy import Signal
+    return Signal(symbol="ETHUSDT", side="short", entry_ref=1888.75,
+                  sl_level=1890.66, tp_level=1882.4, score=3,
+                  reasons=["test"], zone_low=1888.0, zone_high=1890.0)
+
+
+def test_expired_key_on_leverage_skips_insert_and_halts(tmp_path):
+    """33004 на set_leverage — строка в trades НЕ пишется, повторный сигнал
+    тоже no-op. Регрессия: 55 entry_Rejected за 8 минут 16.08.2026."""
+    from flowzone_bot.state.db import FlowzoneDB
+    from flowzone_bot.trading.client import InstrumentInfo
+    from flowzone_bot.trading.executor import Executor
+
+    class _DeadKey:
+        auth_expired = False
+        def instrument(self, symbol):
+            return InstrumentInfo(symbol, 0.01, 0.01, 0.01)
+        def set_leverage(self, *a, **k):
+            self.auth_expired = True
+            return False
+        def round_price(self, symbol, price):
+            return price
+        def place_entry(self, **k):
+            raise AssertionError("place_entry не должен вызываться после 33004")
+
+    db = FlowzoneDB(str(tmp_path))
+    ex = Executor(db=db, settings=_LiveCfg(), client=_DeadKey(), now=lambda: 1.0)
+    sig = _reject_sig()
+    assert ex.on_signal(sig) is None
+    assert ex.auth_expired()
+    assert db.trades_since(0.0) == 0
+    assert ex.on_signal(sig) is None
+    assert db.trades_since(0.0) == 0
+    db.close()
+
+
+def test_expired_key_on_place_rejects_once_then_halts(tmp_path):
+    from flowzone_bot.state.db import FlowzoneDB
+    from flowzone_bot.trading.client import InstrumentInfo
+    from flowzone_bot.trading.executor import Executor
+
+    class _DeadOnPlace:
+        auth_expired = False
+        n_place = 0
+        def instrument(self, symbol):
+            return InstrumentInfo(symbol, 0.01, 0.01, 0.01)
+        def set_leverage(self, *a, **k):
+            return True
+        def round_price(self, symbol, price):
+            return price
+        def place_entry(self, **k):
+            self.n_place += 1
+            self.auth_expired = True
+            return {"ok": False,
+                    "error": "exception: Your api key has expired. (ErrCode: 33004)"}
+
+    db = FlowzoneDB(str(tmp_path))
+    cl = _DeadOnPlace()
+    ex = Executor(db=db, settings=_LiveCfg(), client=cl, now=lambda: 1.0)
+    sig = _reject_sig()
+    assert ex.on_signal(sig) is None
+    assert db.trades_since(0.0) == 1  # write-ahead + entry_Rejected
+    assert ex.auth_expired()
+    assert ex.on_signal(sig) is None
+    assert cl.n_place == 1            # второй вызов не ходит в биржу
+    assert db.trades_since(0.0) == 1
+    db.close()

@@ -26,6 +26,7 @@ from flowzone_bot.analysis.orderflow import (big_trade_threshold,
                                              detect_big_trades,
                                              detect_exhaustion)
 from flowzone_bot.analysis.strategy import Signal
+from flowzone_bot.trading.client import is_expired_api_key
 
 log = logging.getLogger("flowzone_bot.exec")
 play = logging.getLogger("flowzone_bot.play")
@@ -172,6 +173,22 @@ class Executor:
         self._rest_recon_attempts: dict[int, float] = {}
         self._verify_fail: dict[int, int] = {}  # tid → счётчик неудачных REST-сверок
         self._last_win: dict[str, float] = {}  # символ → ts последнего профита (re-entry)
+        self._auth_expired: bool = False
+
+    def auth_expired(self) -> bool:
+        """True после Bybit 33004 — новые входы остановлены до рестарта."""
+        if self._auth_expired:
+            return True
+        cl = self._client
+        return bool(getattr(cl, "auth_expired", False))
+
+    def _halt_if_expired(self, err: object) -> None:
+        if is_expired_api_key(err) or getattr(self._client, "auth_expired", False):
+            if not self._auth_expired:
+                log.error("Bybit API key expired (33004) — новые входы "
+                          "остановлены до смены ключа и рестарта. "
+                          "https://bybit-exchange.github.io/docs/v5/error")
+            self._auth_expired = True
 
     def last_win_ts(self, symbol: str) -> float | None:
         """ts последнего ВЫИГРЫШНОГО закрытия по символу (для re-entry §5.3)."""
@@ -189,6 +206,9 @@ class Executor:
 
     def on_signal(self, sig: Signal) -> int | None:
         cfg = self._cfg
+        if self.auth_expired():
+            log.info("skip %s %s: api key expired (33004)", sig.symbol, sig.side)
+            return None
         qty_step = min_qty = 0.0
         if self._client is not None:
             info = self._client.instrument(sig.symbol)
@@ -221,6 +241,11 @@ class Executor:
         cl = self._client
         side = "Buy" if sig.side == "long" else "Sell"
         cl.set_leverage(sig.symbol, cfg.max_leverage)
+        if self.auth_expired():
+            self._halt_if_expired("33004")
+            log.warning("LIVE entry skipped %s %s: api key expired",
+                        sig.symbol, side)
+            return None
         link = f"flowzone_{sig.symbol}_{int(self._now() * 1000)}"
         limit_price = cl.round_price(sig.symbol, sig.entry_ref)
         # канон §5.3: полный выход на swing point → биржевой TP = sig.tp_level
@@ -244,6 +269,7 @@ class Executor:
             sl_price=cl.round_price(sig.symbol, sig.sl_level),
             tp_price=cl.round_price(sig.symbol, exch_tp))
         if not res.get("ok"):
+            self._halt_if_expired(res.get("error"))
             self._db.mark_closed(tid, exit_price=limit_price, pnl_usd=0.0,
                                  fees_usd=0.0, close_reason="entry_Rejected",
                                  ts_close=self._now())

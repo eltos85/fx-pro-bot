@@ -17,6 +17,21 @@ from pybit.unified_trading import HTTP
 
 log = logging.getLogger("flowzone_bot.client")
 
+# Bybit V5: 33004 = «Your api key has expired» (derivatives).
+# https://bybit-exchange.github.io/docs/v5/error
+_EXPIRED_KEY_CODE = "33004"
+_EXPIRED_KEY_MSG = "api key has expired"
+
+
+def is_expired_api_key(err: object) -> bool:
+    """True, если ошибка Bybit — истёкший API-ключ (33004).
+
+    Офдок error-таблицы V5: *«33004 (Derivatives) Your api key has expired»*
+    https://bybit-exchange.github.io/docs/v5/error
+    """
+    text = str(err or "").lower()
+    return _EXPIRED_KEY_CODE in text or _EXPIRED_KEY_MSG in text
+
 
 def _as_float(v: object) -> float | None:
     try:
@@ -58,6 +73,12 @@ class FlowzoneBybitClient:
                              demo=demo, recv_window=10000)
         self._category = category
         self._instr: dict[str, InstrumentInfo] = {}
+        # 33004: новые ордера бессмысленны до ротации ключа / рестарта.
+        self.auth_expired: bool = False
+
+    def _note_auth_error(self, err: object) -> None:
+        if is_expired_api_key(err):
+            self.auth_expired = True
 
     # ─── instruments ─────────────────────────────────────────────────────
 
@@ -191,6 +212,7 @@ class FlowzoneBybitClient:
             if "not modified" in msg or "110043" in msg:
                 return True
             log.warning("set_leverage %s %dx failed: %s", symbol, leverage, e)
+            self._note_auth_error(e)
             return False
 
     # ─── orders ──────────────────────────────────────────────────────────
@@ -465,11 +487,13 @@ class FlowzoneBybitClient:
             resp = self._session.place_order(**params)
         except Exception as e:
             log.exception("place_order exception: %s", params)
+            self._note_auth_error(e)
             return {"ok": False, "error": f"exception: {e}", "params": params}
         ret_code = resp.get("retCode")
         if ret_code not in (0, None):
             log.warning("place_order retCode=%s msg=%s params=%s",
                         ret_code, resp.get("retMsg"), params)
+            self._note_auth_error(f"{ret_code} {resp.get('retMsg')}")
             return {"ok": False,
                     "error": f"retCode={ret_code} {resp.get('retMsg')}",
                     "params": params, "raw": resp}

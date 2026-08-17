@@ -207,7 +207,11 @@ def run() -> None:
 
             # killswitch: блокирует новые входы
             killed = killswitch.is_killed(db, cfg, now)
-            if killed.allowed and in_active_session:
+            auth_dead = executor.auth_expired()
+            if auth_dead and now - last_heartbeat >= 60:
+                log.warning("API key expired (33004) — входы заблокированы "
+                            "до смены ключа и рестарта")
+            if killed.allowed and in_active_session and not auth_dead:
                 _scan_signals(states, db, cfg, executor, cooldown, now,
                               client, swing_cache, auction, telemetry)
             elif not killed.allowed and now - last_heartbeat >= 60:
@@ -228,6 +232,17 @@ def run() -> None:
         print_store.stop()
         db.close()
         log.info("flowzone_bot остановлен")
+
+
+def apply_signal_cooldown(cooldown: dict[str, float], symbol: str,
+                          now: float) -> None:
+    """Анти-даблклик на попытку входа, не на принятый ордер.
+
+    ``on_signal`` возвращает None при entry_Rejected / qty=0 / истёкшем ключе.
+    Если cooldown ставить только на id — тот же сигнал бьёт биржу каждый
+    eval-цикл (~1с). Live 16.08.2026: 55 отказов ETHUSDT за 8 мин, Bybit 33004.
+    """
+    cooldown[symbol] = now
 
 
 def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
@@ -303,8 +318,11 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         if not gate.allowed:
             log.info("gate block: %s", gate.reason)
             break
+        # Анти-даблклик на ПОПЫТКУ, не на принятый ордер: entry_Rejected
+        # возвращает None, и без cooldown тот же сигнал стучит каждый цикл
+        # (~1с). Live 16.08.2026: 55 отказов ETHUSDT за 8 мин при 33004.
+        apply_signal_cooldown(cooldown, sym, now)
         if executor.on_signal(sig) is not None:
-            cooldown[sym] = now
             open_symbols.add(sym)
 
 
