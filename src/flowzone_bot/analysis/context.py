@@ -79,6 +79,12 @@ class Context:
     last_price: float | None = None
     # Форма профиля (D4) — обогащение, НЕ гейтит вход. UNKNOWN если профиля нет.
     shape: str = UNKNOWN
+    # Наблюдаемость (не гейт): мгновенный classify до латча; сколько прошлых
+    # сессий влито в профиль (C1); C3 снял тренд с формы; кусок окна сессии.
+    instant_state: str = UNKNOWN
+    merge_n: int = 0
+    shape_gated: bool = False
+    session_tag: str = ""
 
     @property
     def is_trend(self) -> bool:
@@ -194,7 +200,7 @@ def classify(profile: VolumeProfile | None, last_price: float | None, *,
     канон-автор Fabervaale (Value Area = 68% объёма).
     """
     if profile is None or last_price is None:
-        return Context(UNKNOWN, last_price=last_price)
+        return Context(UNKNOWN, last_price=last_price, instant_state=UNKNOWN)
     vah, val, poc = profile.vah, profile.val, profile.poc_price
     # Хвосты профиля = объём, принятый ВНЕ value area (корзины за её границами).
     # va_lo_idx/va_hi_idx — границы Value Area в индексах корзин (включительно).
@@ -205,7 +211,8 @@ def classify(profile: VolumeProfile | None, last_price: float | None, *,
     outside = vol_below + vol_above
     if outside <= 0:
         return Context(BALANCE, vah=vah, val=val, poc=poc, last_price=last_price,
-                       shape=classify_shape(profile, 0.0, 0.0, accept_frac=accept_frac))
+                       shape=classify_shape(profile, 0.0, 0.0, accept_frac=accept_frac),
+                       instant_state=BALANCE)
     accept_above = vol_above / outside
     accept_below = vol_below / outside
     # Минимальная материальность acceptance: доминирующий хвост ≥ нейтральной
@@ -221,11 +228,14 @@ def classify(profile: VolumeProfile | None, last_price: float | None, *,
         state = BALANCE
     shape = classify_shape(profile, accept_above, accept_below,
                            accept_frac=accept_frac)
+    shape_gated = False
     if shape_gate:
         allowed = {TREND_DOWN: (P_SHAPE_DOWN, DOUBLE_DISTRIBUTION),
                    TREND_UP: (P_SHAPE_UP, DOUBLE_DISTRIBUTION)}.get(state)
         if allowed is not None and shape not in allowed:
             state = BALANCE
+            shape_gated = True
     return Context(state, vah=vah, val=val, poc=poc,
                    accept_above=accept_above, accept_below=accept_below,
-                   last_price=last_price, shape=shape)
+                   last_price=last_price, shape=shape,
+                   instant_state=state, shape_gated=shape_gated)

@@ -61,10 +61,17 @@ class Signal:
     entry_order_type: str | None = None
 
 
+def _note_skip(skip: list[str] | None, code: str) -> None:
+    """Первый код промаха для воронки heartbeat. Не гейтит вход."""
+    if skip is not None:
+        skip.append(code)
+
+
 def _finalize(snap: SymbolSnapshot, context: Context, side: str, *, cfg,
               swings: list[Swing] | None, sl: float, score: int,
               zone_low: float, zone_high: float,
-              setup: str, extra_reasons: list[str]) -> Signal | None:
+              setup: str, extra_reasons: list[str],
+              skip: list[str] | None = None) -> Signal | None:
     """Общий хвост обоих канон-сетапов: swing-цель, геометрия, R:R-фильтр.
 
     Канон §5.3 — цель всегда ближайшая swing-точка по тренду; §5.1 — R:R не
@@ -73,19 +80,25 @@ def _finalize(snap: SymbolSnapshot, context: Context, side: str, *, cfg,
     """
     last = snap.last_price
     if last is None:
+        _note_skip(skip, "no_swing")
         return None
     tp = nearest_swing_target(swings or [], side, last)
     if tp is None:
+        _note_skip(skip, "no_swing")
         return None
     if (side == "short" and not (sl > last > tp)) or \
        (side == "long" and not (sl < last < tp)):
+        _note_skip(skip, "geom")
         return None  # геометрия сделки невалидна (защита)
     reward = abs(tp - last)
     risk = abs(sl - last)
     if risk <= 0 or reward / risk < cfg.min_rr:
+        _note_skip(skip, "rr")
         return None
     reasons = [f"ctx={context.state}", f"shape={context.shape}",
-               f"setup={setup}", "tp=swing", f"rr={reward / risk:.1f}"]
+               f"setup={setup}", "tp=swing", f"rr={reward / risk:.1f}",
+               f"inst={context.instant_state}", f"merge={context.merge_n}",
+               f"sess={context.session_tag or '-'}"]
     reasons += extra_reasons
     return Signal(symbol=snap.symbol, side=side, entry_ref=last, sl_level=sl,
                   tp_level=tp, score=score, reasons=reasons,
@@ -95,7 +108,8 @@ def _finalize(snap: SymbolSnapshot, context: Context, side: str, *, cfg,
 def evaluate(snap: SymbolSnapshot, context: Context,
              zone_profile: VolumeProfile | None, *, cfg,
              swings: list[Swing] | None = None,
-             hook_prints: list | None = None) -> Signal | None:
+             hook_prints: list | None = None,
+             skip: list[str] | None = None) -> Signal | None:
     """Прогнать чеклист входа. Возвращает Signal или None.
 
     ``context`` — залатченный контекст аукциона (per-SESSION профиль, §2).
@@ -106,25 +120,29 @@ def evaluate(snap: SymbolSnapshot, context: Context,
     всегда swing point, никаких структурных фолбэков).
     ``hook_prints`` — persisted-поток для сетапа hook (C5, §4.2): failed auction
     у границы value area разворачивается дольше 5-минутного окна снапшота.
+    ``skip`` — опциональный список кодов промаха (воронка heartbeat). Не гейтит.
 
     Порядок канон-сетапов: сперва основной reload (зона конфлюэнса +
     подтверждение потоком, §3-§4), затем hook / failed auction (§4.2).
     """
     side = context.trade_side
     if side is None or snap.last_price is None:
+        _note_skip(skip, "no_trend")
         return None  # шаг 1: нет трендового контекста
-    sig = _evaluate_reload(snap, context, zone_profile, cfg=cfg, swings=swings)
+    sig = _evaluate_reload(snap, context, zone_profile, cfg=cfg, swings=swings,
+                           skip=skip)
     if sig is not None:
         return sig
     if getattr(cfg, "hook_enabled", False):
         return _evaluate_hook(snap, context, cfg=cfg, swings=swings,
-                              hook_prints=hook_prints)
+                              hook_prints=hook_prints, skip=skip)
     return None
 
 
 def _evaluate_hook(snap: SymbolSnapshot, context: Context, *, cfg,
                    swings: list[Swing] | None,
-                   hook_prints: list | None) -> Signal | None:
+                   hook_prints: list | None,
+                   skip: list[str] | None = None) -> Signal | None:
     """Сетап hook / failed auction (C5, канон 26:17 и 27:20).
 
     Цена отвергнута за границей value area и вернулась внутрь → вход в сторону
@@ -135,10 +153,12 @@ def _evaluate_hook(snap: SymbolSnapshot, context: Context, *, cfg,
     side = context.trade_side
     last = snap.last_price
     if side is None or last is None or not hook_prints:
+        _note_skip(skip, "no_abs")
         return None
     hook = detect_hook(hook_prints, side, vah=context.vah, val=context.val,
                        last_price=last, value_area_pct=cfg.value_area_pct)
     if not hook.confirmed:
+        _note_skip(skip, "no_abs")
         return None
     buf = cfg.sl_buffer_bps / 10000.0 * last
     if side == "long":
@@ -150,15 +170,17 @@ def _evaluate_hook(snap: SymbolSnapshot, context: Context, *, cfg,
     return _finalize(snap, context, side, cfg=cfg, swings=swings, sl=sl,
                      score=cfg.zone_min_confluence, zone_low=zone_low,
                      zone_high=zone_high, setup="hook",
-                     extra_reasons=hook.reasons)
+                     extra_reasons=hook.reasons, skip=skip)
 
 
 def _evaluate_reload(snap: SymbolSnapshot, context: Context,
                      zone_profile: VolumeProfile | None, *, cfg,
-                     swings: list[Swing] | None) -> Signal | None:
+                     swings: list[Swing] | None,
+                     skip: list[str] | None = None) -> Signal | None:
     """Основной канон-сетап: зона конфлюэнса + подтверждение потоком (§3-§4)."""
     side = context.trade_side
     if side is None or zone_profile is None or snap.last_price is None:
+        _note_skip(skip, "no_zone")
         return None  # нет трендового контекста / нет per-swing профиля
     last = snap.last_price
     profile = zone_profile
@@ -173,12 +195,14 @@ def _evaluate_reload(snap: SymbolSnapshot, context: Context,
         cluster_ticks=cfg.zone_cluster_ticks,
         delta_min_frac=cfg.zone_delta_min_frac)
     if not zones:
+        _note_skip(skip, "no_zone")
         return None
 
     # шаг 3-4: цена ДОШЛА до зоны (внутри полосы) → проверяем absorption
     pad = profile.bucket_size * cfg.zone_cluster_ticks
     reached = [z for z in zones if z.contains(last, pad)]
     if not reached:
+        _note_skip(skip, "away")
         return None  # цена ещё не в зоне — только алерт/ожидание
     zone: Zone = max(reached, key=lambda z: z.score)
 
@@ -204,6 +228,7 @@ def _evaluate_reload(snap: SymbolSnapshot, context: Context,
             if initiative.confirmed:
                 trigger, trigger_reasons = "initiative", initiative.reasons
     if trigger is None:
+        _note_skip(skip, "no_abs")
         return None  # зона без подтверждения потоком — не сигнал (§4, §8)
 
     # шаг 5: стоп ЗА зоной — канон «1-2-3 / 1-2-4 / 1-2-5» = far_edge зоны +
@@ -221,4 +246,5 @@ def _evaluate_reload(snap: SymbolSnapshot, context: Context,
                      score=zone.score, zone_low=zone.low, zone_high=zone.high,
                      setup="reload",
                      extra_reasons=[f"zone={'+'.join(zone.factors)}",
-                                    f"trigger={trigger}", *trigger_reasons])
+                                    f"trigger={trigger}", *trigger_reasons],
+                     skip=skip)

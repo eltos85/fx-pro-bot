@@ -284,6 +284,27 @@ def test_auction_keeps_shape_of_instant_context():
     held = tr.update("X", _BAL_INST, 100.0, _SW, now=0.0)
     assert held.state == TREND_DOWN
     assert held.shape == _BAL_INST.shape
+    assert held.instant_state == _BAL_INST.instant_state
+
+
+def test_auction_forwards_observability_fields():
+    """merge/sess/shape_gated/instant_state — наблюдаемость, латч их не трёт."""
+    from dataclasses import replace
+    inst = replace(_DOWN_INST, merge_n=2, session_tag="overlap",
+                   shape_gated=True)
+    tr = AuctionTracker()
+    ctx = tr.update("X", inst, 94.0, _SW, now=0.0)
+    assert ctx.state == TREND_DOWN
+    assert ctx.instant_state == inst.instant_state
+    assert ctx.merge_n == 2
+    assert ctx.session_tag == "overlap"
+    assert ctx.shape_gated is True
+    # sticky: свежие теги с мгновенного контекста, направление держим
+    later = replace(_BAL_INST, merge_n=3, session_tag="ny")
+    held = tr.update("X", later, 100.0, _SW, now=0.0)
+    assert held.state == TREND_DOWN
+    assert held.merge_n == 3
+    assert held.session_tag == "ny"
 
 
 # ─── Фаза 3: order-flow (big trades + absorption) ────────────────────────
@@ -553,6 +574,52 @@ def test_evaluate_uses_swing_target_only():
     assert sig.tp_level == 95.0     # ближайший swing
     assert not hasattr(sig, "tp2_level")  # частичная фиксация удалена
     assert "tp=swing" in sig.reasons
+    assert any(r.startswith("inst=") for r in sig.reasons)
+    assert "merge=0" in sig.reasons
+    assert "sess=-" in sig.reasons
+
+
+def test_evaluate_reasons_carry_inst_merge_sess():
+    from dataclasses import replace
+    from flowzone_bot.analysis.strategy import evaluate
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
+    now = 1000.0
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
+                                     last_price=119.5, ts=now)
+    ctx = replace(classify(prof, snap.last_price, accept_frac=0.68),
+                  merge_n=2, session_tag="overlap")
+    swings = [type("S", (), {"kind": "low", "price": 95.0})()]
+    sig = evaluate(snap, ctx, prof, cfg=_Cfg(), swings=swings)
+    assert sig is not None
+    assert f"inst={ctx.instant_state}" in sig.reasons
+    assert "merge=2" in sig.reasons
+    assert "sess=overlap" in sig.reasons
+
+
+def test_evaluate_skip_codes_no_zone_away_rr():
+    from flowzone_bot.analysis.strategy import evaluate
+    prof = build_profile(_short_reload_profile(), bucket_size=1.0)
+    now = 1000.0
+    ctx = classify(prof, 119.5, accept_frac=0.68)
+    swings = [type("S", (), {"kind": "low", "price": 95.0})()]
+    miss: list[str] = []
+    snap_noz = _evictless_state_snapshot(prof.buckets, 1.0, [], 119.5, now)
+    assert evaluate(snap_noz, ctx, None, cfg=_Cfg(), swings=swings,
+                    skip=miss) is None
+    assert miss[0] == "no_zone"
+    miss.clear()
+    # зона есть (ядро ~118-122), цена далеко ниже — не дошла
+    snap_away = _evictless_state_snapshot(
+        prof.buckets, 1.0, _short_reload_trades(now), last_price=90.0, ts=now)
+    assert evaluate(snap_away, ctx, prof, cfg=_Cfg(), swings=swings,
+                    skip=miss) is None
+    assert miss[0] == "away"
+    miss.clear()
+    snap = _evictless_state_snapshot(prof.buckets, 1.0, _short_reload_trades(now),
+                                     last_price=119.5, ts=now)
+    near = [type("S", (), {"kind": "low", "price": 117.0})()]
+    assert evaluate(snap, ctx, prof, cfg=_Cfg(), swings=near, skip=miss) is None
+    assert miss[0] == "rr"
 
 
 # ─── Фаза 6: session gate (London/NY, UTC-окна) ──────────────────────────
@@ -563,6 +630,23 @@ def test_parse_windows():
     assert parse_windows("07:30-08:00") == [(7.5, 8.0)]
     assert parse_windows("") == []
     assert parse_windows("garbage,9-10") == [(9.0, 10.0)]
+
+
+def test_session_tag_london_overlap_ny():
+    import calendar
+
+    from flowzone_bot.analysis.session import parse_windows, session_tag
+
+    wins = parse_windows("07:00-16:00,12:00-21:00")
+
+    def ts_at(hour: int, minute: int = 0) -> float:
+        return calendar.timegm((2026, 8, 17, hour, minute, 0, 0, 0, 0))
+
+    assert session_tag(ts_at(8), wins) == "london"
+    assert session_tag(ts_at(13), wins) == "overlap"
+    assert session_tag(ts_at(18), wins) == "ny"
+    assert session_tag(ts_at(3), wins) == "none"
+    assert session_tag(ts_at(12), []) == "none"
 
 
 def test_in_session_london_ny_windows():
@@ -1986,9 +2070,11 @@ def test_shape_gate_rejects_heavy_tail_without_directional_delta():
     gated = classify(prof, last_price=20.5, accept_frac=0.68)
     assert gated.state == BALANCE          # канон: indecision, не тренд
     assert gated.trade_side is None
+    assert gated.shape_gated is True
     # без гейта (старое поведение) тот же профиль давал trend_down
     ungated = classify(prof, last_price=20.5, accept_frac=0.68, shape_gate=False)
     assert ungated.state == TREND_DOWN
+    assert ungated.shape_gated is False
 
 
 def test_shape_gate_keeps_trend_when_tail_delta_confirms():
@@ -2214,6 +2300,13 @@ def test_apply_signal_cooldown_on_attempt_not_only_fill():
     assert cd["ETHUSDT"] == 1000.0
     # повторная попытка через 1с (eval-цикл) должна быть внутри окна 60с
     assert 1001.0 - cd["ETHUSDT"] < 60.0
+
+
+def test_fmt_skip_funnel_stable_order():
+    from flowzone_bot.app.main import fmt_skip_funnel
+    assert fmt_skip_funnel({}) == "-"
+    assert fmt_skip_funnel({"rr": 2, "no_trend": 5, "away": 1}) == (
+        "no_trend:5,away:1,rr:2")
 
 
 class _LiveCfg(_Cfg):

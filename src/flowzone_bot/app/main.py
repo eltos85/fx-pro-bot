@@ -23,7 +23,7 @@ import time
 from flowzone_bot.analysis.auction import AuctionTracker
 from flowzone_bot.analysis.context import classify
 from flowzone_bot.analysis.session import (in_session, parse_windows,
-                                           session_start_ts)
+                                           session_start_ts, session_tag)
 from flowzone_bot.analysis.strategy import evaluate
 from flowzone_bot.analysis.swings import Swing, find_swings
 from flowzone_bot.analysis.telemetry import DirectionTelemetry
@@ -156,6 +156,7 @@ def run() -> None:
         log.info("session gate: окна UTC %s", cfg.session_windows_utc)
     last_heartbeat = 0.0
     last_universe = time.time()
+    skip_counts: dict[str, int] = {}
 
     try:
         while not _shutdown:
@@ -211,15 +212,20 @@ def run() -> None:
             if auth_dead and now - last_heartbeat >= 60:
                 log.warning("API key expired (33004) — входы заблокированы "
                             "до смены ключа и рестарта")
+            sess = (session_tag(now, session_windows)
+                    if cfg.session_gate_enabled else "none")
             if killed.allowed and in_active_session and not auth_dead:
                 _scan_signals(states, db, cfg, executor, cooldown, now,
-                              client, swing_cache, auction, telemetry)
+                              client, swing_cache, auction, telemetry,
+                              skip_counts=skip_counts, session_tag=sess)
             elif not killed.allowed and now - last_heartbeat >= 60:
                 log.warning("KILLSWITCH: %s — входы заблокированы", killed.reason)
 
             # heartbeat раз в 60с (+ контекст аукциона по символам)
             if now - last_heartbeat >= 60:
-                _heartbeat(states, db, stream, cfg, in_active_session, auction)
+                _heartbeat(states, db, stream, cfg, in_active_session, auction,
+                           skip_counts=skip_counts, session_tag=sess)
+                skip_counts.clear()
                 _persist_session_profiles(states, db, cfg, now)
                 last_heartbeat = now
 
@@ -245,12 +251,34 @@ def apply_signal_cooldown(cooldown: dict[str, float], symbol: str,
     cooldown[symbol] = now
 
 
+_SKIP_ORDER = ("open", "cd", "warming", "no_trend", "shape", "no_zone", "away",
+               "no_abs", "no_swing", "geom", "rr")
+
+
+def _bump_skip(counts: dict[str, int] | None, code: str) -> None:
+    if counts is None:
+        return
+    counts[code] = counts.get(code, 0) + 1
+
+
+def fmt_skip_funnel(counts: dict[str, int] | None) -> str:
+    """Воронка промахов за минуту: ``no_trend:N,shape:N,...``. Пусто → ``-``."""
+    if not counts:
+        return "-"
+    parts = [f"{k}:{counts[k]}" for k in _SKIP_ORDER if counts.get(k)]
+    extra = [f"{k}:{v}" for k, v in counts.items()
+             if k not in _SKIP_ORDER and v]
+    return ",".join(parts + extra) or "-"
+
+
 def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
                   executor: Executor, cooldown: dict[str, float],
                   now: float, client,
                   swing_cache: dict[str, tuple[float, list[Swing]]],
                   auction: AuctionTracker,
-                  telemetry: DirectionTelemetry | None = None) -> None:
+                  telemetry: DirectionTelemetry | None = None,
+                  skip_counts: dict[str, int] | None = None,
+                  session_tag: str = "") -> None:
     """Прогон чеклиста входа по символам: контекст → зона → absorption → Signal
     (цель = ближайший swing, §5.3). Один открытый сетап на символ; rate/позиции —
     killswitch.can_open. ``telemetry`` — наблюдаемость устойчивости направления
@@ -258,6 +286,7 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
     open_symbols = {tr.symbol for tr in db.open_trades()}
     for sym, st in states.items():
         if sym in open_symbols:
+            _bump_skip(skip_counts, "open")
             continue
         # reload (§5.3): после недавнего ВЫИГРЫША — короткий cooldown, чтобы быстро
         # перезарядиться на следующей зоне по тренду; иначе обычный анти-даблклик.
@@ -266,6 +295,7 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
               if win_ts is not None and now - win_ts < cfg.signal_cooldown_sec
               else cfg.signal_cooldown_sec)
         if now - cooldown.get(sym, 0.0) < cd:
+            _bump_skip(skip_counts, "cd")
             continue
         snap = st.snapshot()
         # swings нужны и для латча направления (структурный пробой), и для цели,
@@ -273,7 +303,8 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
         swings = _swings_for(client, cfg, sym, swing_cache, now)
         prev_dir = auction.peek(sym)
         _ctx_profile, ctx = _context_for(snap, cfg, auction=auction,
-                                         swings=swings, now=now, db=db)
+                                         swings=swings, now=now, db=db,
+                                         session_tag=session_tag)
         # лог переворота/установки латча + телеметрия (mining флапов, D-audit
         # 06.07: кейсы #531/#532 — ложный переворот после volume-shock).
         cur_dir = auction.peek(sym)
@@ -286,6 +317,12 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
                                    "long" if cur_dir == "trend_up" else "short",
                                    snap.last_price))
         if ctx is None or not ctx.is_trend:
+            if ctx is None:
+                _bump_skip(skip_counts, "warming")
+            elif ctx.shape_gated:
+                _bump_skip(skip_counts, "shape")
+            else:
+                _bump_skip(skip_counts, "no_trend")
             continue
         # per-swing профиль зоны (канон §3: профиль ПРЕДЫДУЩЕЙ swing-точки из
         # исполненного потока, окно [ts prev swing, now]). None → нет зоны.
@@ -294,13 +331,16 @@ def _scan_signals(states: dict[str, SymbolState], db: FlowzoneDB, cfg,
                                            ctx.trade_side, snap.vp_bucket_size,
                                            now)
         hook_prints = _hook_prints_for(db, cfg, sym, snap, now)
+        miss: list[str] = []
         try:
             sig = evaluate(snap, ctx, swing_profile, cfg=cfg, swings=swings,
-                           hook_prints=hook_prints)
+                           hook_prints=hook_prints, skip=miss)
         except Exception:
             log.exception("evaluate %s failed", sym)
             continue
         if sig is None:
+            if miss:
+                _bump_skip(skip_counts, miss[0])
             continue
         # телеметрия устойчивости направления → в reasons (persist в БД для
         # mining на ≥100 сделках; вход НЕ гейтит).
@@ -450,7 +490,7 @@ def _swing_profile_for(db, cfg, symbol: str, swings: list[Swing],
 
 def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
                  swings: list[Swing] | None = None, now: float | None = None,
-                 db: FlowzoneDB | None = None):
+                 db: FlowzoneDB | None = None, session_tag: str = ""):
     """Контекст аукциона по символу: режим по ФОРМЕ per-SESSION footprint-профиля
     (направленный acceptance вне value area, STRATEGY §2). Якорь профиля — старт
     текущей канон-сессии (snap.vp_session_start, C4: одна сессия с основным
@@ -473,11 +513,14 @@ def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
                             value_area_pct=cfg.value_area_pct)
     if profile is None:
         return None, None
+    merge_n = 0
     if db is not None and cfg.profile_merge_enabled:
-        profile = _merged_session_profile(db, cfg, snap, profile)
+        profile, merge_n = _merged_session_profile(db, cfg, snap, profile)
     inst = classify(profile, snap.last_price, accept_frac=cfg.context_accept_frac,
                     value_area_pct=cfg.value_area_pct,
                     shape_gate=cfg.profile_shape_enabled)
+    inst.merge_n = merge_n
+    inst.session_tag = session_tag
     if auction is None:
         return profile, inst
     ctx = auction.update(snap.symbol, inst, snap.last_price, swings or [], now=now)
@@ -485,20 +528,21 @@ def _context_for(snap, cfg, *, auction: AuctionTracker | None = None,
 
 
 def _merged_session_profile(db: FlowzoneDB, cfg, snap,
-                            current: VolumeProfile) -> VolumeProfile:
+                            current: VolumeProfile) -> tuple[VolumeProfile, int]:
     """Composite текущей сессии с перекрывающимися предыдущими (C1, канон 31:14).
 
     Сливаем только те прошлые сессии, чья value area пересекается с текущей —
     канон merge-ит профили, «overlapping on the same level», а не подряд идущие.
     Любая ошибка/несовместимость → возвращаем исходный профиль (merge не должен
-    ломать торговый путь).
+    ломать торговый путь). Второе значение — сколько прошлых сессий влилось
+    (наблюдаемость ``merge=N`` на сделке, не гейт).
     """
     try:
         rows = db.recent_session_profiles(snap.symbol, snap.vp_session_start,
                                           cfg.profile_merge_lookback)
     except Exception:
         log.exception("session profiles read %s failed", snap.symbol)
-        return current
+        return current, 0
     group = [current]
     for _start, bucket_size, buckets in rows:
         if bucket_size != current.bucket_size:
@@ -508,9 +552,10 @@ def _merged_session_profile(db: FlowzoneDB, cfg, snap,
         if prev is None or not value_areas_overlap(current, prev):
             continue
         group.append(prev)
-    if len(group) == 1:
-        return current
-    return merge_profiles(group, value_area_pct=cfg.value_area_pct) or current
+    n_extra = len(group) - 1
+    if n_extra == 0:
+        return current, 0
+    return merge_profiles(group, value_area_pct=cfg.value_area_pct) or current, n_extra
 
 
 def _persist_session_profiles(states: dict[str, SymbolState], db: FlowzoneDB,
@@ -541,7 +586,9 @@ def _persist_session_profiles(states: dict[str, SymbolState], db: FlowzoneDB,
 
 def _heartbeat(states: dict[str, SymbolState], db: FlowzoneDB,
                stream: BybitMarketStream, cfg, session_active: bool = True,
-               auction: AuctionTracker | None = None) -> None:
+               auction: AuctionTracker | None = None,
+               skip_counts: dict[str, int] | None = None,
+               session_tag: str = "") -> None:
     parts = []
     for sym, st in states.items():
         s = st.snapshot()
@@ -560,8 +607,9 @@ def _heartbeat(states: dict[str, SymbolState], db: FlowzoneDB,
         parts.append(f"{sym}:{flag} px={s.last_price} ticks={len(s.trades)} "
                      f"imb={imb}{ctxs}")
     day_pnl = db.realized_pnl_since(_now_utc_day())
-    log.info("HB ws=%s session=%s open=%d dayPnL=%.2f | %s",
+    log.info("HB ws=%s session=%s sess=%s skip=%s open=%d dayPnL=%.2f | %s",
              stream.is_connected(), "active" if session_active else "closed",
+             session_tag or "-", fmt_skip_funnel(skip_counts),
              db.open_count(), day_pnl, " | ".join(parts))
 
 

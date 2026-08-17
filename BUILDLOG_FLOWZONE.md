@@ -11,6 +11,20 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 
 ## 2026-08-17
 
+### feat(flowzone): воронка skip + inst/merge/sess на сделке
+`pending`
+
+Наблюдаемость, вход не гейтит. Heartbeat раз в минуту: `sess=` и
+`skip=no_trend:N,shape:N,no_zone:N,away:N,no_abs:N,rr:N,no_swing:N`
+(плюс open/cd/warming/geom). На сделке в `reasons`: `inst=` (classify до
+латча), `merge=N` (C1, сколько прошлых сессий влилось), `sess=london|overlap|ny`.
+`shape` в воронке = C3 снял тренд (`shape_gated`). MAE/MFE в цикл не кладём.
+
+**Файлы:** `analysis/{context,auction,strategy,session}.py`, `app/main.py`,
+`tests/test_flowzone_bot.py`, `STRATEGY_FLOWZONE.md` §11.9.
+
+---
+
 ### feat(flowzone): изоляция ядра — DD-детектор, hook/initiative выкл, окно London+NY
 `1f559dd`
 

@@ -57,6 +57,38 @@ def _to_hours(hhmm: str) -> float:
     return h + m / 60.0
 
 
+def session_tag(ts: float, windows: list[tuple[float, float]]) -> str:
+    """Кусок активного окна для mining: london / ny / overlap / none.
+
+    Не гейтит вход. Два совпавших окна → ``overlap``. Старт 07:00 → ``london``,
+    12:00 → ``ny``; иное одиночное окно → ``w{hour}``. Вне окон / пустой
+    список → ``none``.
+    """
+    if not windows:
+        return "none"
+    tm = time.gmtime(ts)
+    hour = tm.tm_hour + tm.tm_min / 60.0 + tm.tm_sec / 3600.0
+    hits: list[float] = []
+    for start, end in windows:
+        if start <= end:
+            inside = start <= hour < end
+        else:
+            inside = hour >= start or hour < end
+        if inside:
+            hits.append(start)
+    if not hits:
+        return "none"
+    if len(hits) >= 2:
+        return "overlap"
+    start = hits[0]
+    h = int(start)
+    if h == 7:
+        return "london"
+    if h == 12:
+        return "ny"
+    return f"w{h}"
+
+
 def in_session(ts: float, windows: list[tuple[float, float]]) -> bool:
     """В активной сессии ли момент ``ts`` (unix UTC). Окно с end ≤ start
     трактуется как переход через полночь. Пустой список окон → всегда True

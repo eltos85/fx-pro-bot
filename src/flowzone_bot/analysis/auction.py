@@ -110,4 +110,6 @@ class AuctionTracker:
         return Context(state=new_dir, vah=inst.vah, val=inst.val, poc=inst.poc,
                        accept_above=inst.accept_above,
                        accept_below=inst.accept_below, last_price=last_price,
-                       shape=inst.shape)
+                       shape=inst.shape, instant_state=inst.instant_state,
+                       merge_n=inst.merge_n, shape_gated=inst.shape_gated,
+                       session_tag=inst.session_tag)
