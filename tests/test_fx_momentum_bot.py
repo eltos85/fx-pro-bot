@@ -854,3 +854,134 @@ def test_sl_at_least_as_good(side, current_sl, target_sl, expected) -> None:
         _sl_at_least_as_good(side, current_sl=current_sl, target_sl=target_sl)
         is expected
     )
+
+
+# ─── Broker P&L sync в SQLite (BUILDLOG 2026-08-17) ──
+
+
+def _close_deal(
+    *,
+    deal_id: int,
+    pid: int,
+    sid: int,
+    ts_ms: int,
+    gross: int,
+    swap_usd_cents: int = 0,
+    comm: int = -50,
+    side: int = 1,
+):
+    from types import SimpleNamespace
+
+    cpd = SimpleNamespace(
+        grossProfit=gross,
+        swap=swap_usd_cents,
+        commission=comm,
+        moneyDigits=2,
+        entryPrice=1.16,
+    )
+
+    class _Deal:
+        dealId = deal_id
+        positionId = pid
+        symbolId = sid
+        tradeSide = side
+        executionTimestamp = ts_ms
+        filledVolume = 500000
+        executionPrice = 1.161
+        closePositionDetail = cpd
+
+        def HasField(self, name: str) -> bool:
+            return name == "closePositionDetail"
+
+    return _Deal()
+
+
+def test_store_closed_deals_and_snapshot(tmp_path) -> None:
+    from fx_momentum_bot.state.store import MomentumStore
+
+    store = MomentumStore(tmp_path / "m.sqlite")
+    assert store.insert_closed_deal(
+        deal_id=1, broker_position_id=10, symbol="EURUSD=X", side="long",
+        closed_at="2026-08-01 10:00:00", closed_ts_ms=1,
+        net_usd=5.0, gross_usd=5.5, swap_usd=0.0, commission_usd=-0.5,
+        volume=500000, execution_price=1.16, entry_price=1.15,
+    )
+    assert not store.insert_closed_deal(
+        deal_id=1, broker_position_id=10, symbol="EURUSD=X", side="long",
+        closed_at="2026-08-01 10:00:00", closed_ts_ms=1,
+        net_usd=5.0, gross_usd=5.5, swap_usd=0.0, commission_usd=-0.5,
+        volume=500000, execution_price=1.16, entry_price=1.15,
+    )
+    store.insert_closed_deal(
+        deal_id=2, broker_position_id=11, symbol="USDJPY=X", side="short",
+        closed_at="2026-08-02 10:00:00", closed_ts_ms=2,
+        net_usd=-3.0, gross_usd=-2.5, swap_usd=0.0, commission_usd=-0.5,
+        volume=500000, execution_price=159.0, entry_price=158.0,
+    )
+    snap = store.pnl_snapshot(since="2026-08-01 00:00:00", open_position_ids=set())
+    assert snap["n_deals"] == 2
+    assert snap["n_closed_positions"] == 2
+    assert snap["wins"] == 1
+    assert snap["wr"] == pytest.approx(0.5)
+    assert snap["net_usd"] == pytest.approx(2.0)
+    # частичное закрытие открытой позиции — в net, не в WR
+    store.insert_closed_deal(
+        deal_id=3, broker_position_id=12, symbol="GBPUSD=X", side="long",
+        closed_at="2026-08-03 10:00:00", closed_ts_ms=3,
+        net_usd=1.5, gross_usd=1.5, swap_usd=0.0, commission_usd=0.0,
+        volume=200000, execution_price=1.35, entry_price=1.34,
+    )
+    snap2 = store.pnl_snapshot(
+        since="2026-08-01 00:00:00", open_position_ids={12}
+    )
+    assert snap2["n_closed_positions"] == 2
+    assert snap2["n_open_with_partials"] == 1
+    assert snap2["net_usd"] == pytest.approx(3.5)
+
+
+def test_sync_broker_pnl_filters_foreign_symbols_and_is_idempotent(tmp_path) -> None:
+    from fx_momentum_bot.state.pnl_sync import sync_broker_pnl
+    from fx_momentum_bot.state.store import MomentumStore
+
+    class _Resp:
+        def __init__(self, deals):
+            self.deal = deals
+
+    class _Client:
+        def get_deal_list(self, from_ts, to_ts, max_rows=2000):  # noqa: ARG002
+            return _Resp([
+                _close_deal(deal_id=11, pid=100, sid=1, ts_ms=1_720_000_000_000,
+                            gross=1000, comm=-50, side=1),
+                _close_deal(deal_id=12, pid=101, sid=41, ts_ms=1_720_000_000_100,
+                            gross=-5000, comm=-50, side=1),  # XAUUSD — чужой
+            ])
+
+    class _Executor:
+        client = _Client()
+
+    store = MomentumStore(tmp_path / "m.sqlite")
+    n = sync_broker_pnl(
+        _Executor(), store,
+        sid_to_symbol={1: "EURUSD=X"},
+        baseline_ms=1_720_000_000_000,
+        open_position_ids=set(),
+    )
+    assert n == 1
+    n2 = sync_broker_pnl(
+        _Executor(), store,
+        sid_to_symbol={1: "EURUSD=X"},
+        baseline_ms=1_720_000_000_000,
+        open_position_ids=set(),
+    )
+    assert n2 == 0
+    snap = store.pnl_snapshot(since="2020-01-01 00:00:00")
+    assert snap["n_deals"] == 1
+    assert snap["net_usd"] == pytest.approx(9.50)  # 10.00 - 0.50
+
+
+def test_pnl_baseline_ms_parses() -> None:
+    from fx_momentum_bot.config.settings import MomentumBotSettings
+
+    s = MomentumBotSettings(pnl_baseline_raw="2026-07-24 08:27")
+    assert s.pnl_baseline_ms == 1784881620000
+

@@ -285,6 +285,19 @@ class MomentumBotSettings(BaseSettings):
         default=True, validation_alias="MOMENTUM_BOT_REQUIRE_TOKEN_SERVICE"
     )
 
+    # Ground-truth P&L: deal-list на ТОМ ЖЕ live-коннекте (не второй Open API
+    # слот). ProtoOADealListReq — https://help.ctrader.com/open-api/messages/
+    # Historical ≤5 req/s (help.ctrader.com/open-api). Один запрос / цикл
+    # (poll 300s) в лимит не упирается. baseline = дата последней правки
+    # логики (совпадает с TRADECARD_MOMENTUM_BASELINE_DATE).
+    pnl_sync_enabled: bool = Field(
+        default=True, validation_alias="MOMENTUM_BOT_PNL_SYNC_ENABLED"
+    )
+    pnl_baseline_raw: str = Field(
+        default="2026-07-24 08:27",
+        validation_alias="MOMENTUM_BOT_PNL_BASELINE",
+    )
+
     data_dir: str = Field(default="/data", validation_alias="MOMENTUM_BOT_DATA_DIR")
     db_filename: str = Field(
         default="momentum_bot.sqlite", validation_alias="MOMENTUM_BOT_DB_FILENAME"
@@ -312,6 +325,22 @@ class MomentumBotSettings(BaseSettings):
                 except ValueError:
                     continue
         return tuple(hours)
+
+    @property
+    def pnl_baseline_ms(self) -> int:
+        """Unix-ms начала учёта P&L (UTC). Битый формат → 2026-07-24 08:27."""
+        from datetime import datetime, timezone
+
+        raw = (self.pnl_baseline_raw or "").strip()
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+                return int(dt.timestamp() * 1000)
+            except ValueError:
+                continue
+        return int(
+            datetime(2026, 7, 24, 8, 27, tzinfo=timezone.utc).timestamp() * 1000
+        )
 
     @property
     def db_path(self) -> Path:

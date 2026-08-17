@@ -1143,6 +1143,11 @@ runtime, свои `MOMENTUM_BOT_*` env, своя SQLite. Не входит в ad
   Research: Andersen 2003 (news overreaction + gap); FX Foundations.
 - **ATR-scaled sizing**, риск $15/сделку (1% от $1500) — Van K. Tharp ch.11.
 
+**Observability P&L:** закрытые deal'ы (cTrader `ProtoOADealListReq`, net =
+gross+swap+commission) пишутся в `momentum_closed_deals` на том же live-коннекте,
+без второго Open API-слота. Baseline учёта = `MOMENTUM_BOT_PNL_BASELINE`
+(2026-07-24 08:27 UTC, совпадает с tradecard). Не влияет на торговлю.
+
 ### Каноничные исследования
 
 - Moskowitz, Ooi, Pedersen (2012) «Time Series Momentum», JFE — sign-rule, горизонты.

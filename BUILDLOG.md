@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-08-17
+
+### feat(momentum): ground-truth P&L в SQLite на живом коннекте (без второго слота)
+`<pending>`
+
+**Симптом:** после правок логики 24.07 «долларового P&L по новой логике нет».
+`tradecard-momentum` в профиле `tools` / `restart: no` и требует второй
+cTrader-коннект (тот же app, что momentum) — держать его постоянно = тот же
+throttle, что с fx_ai_trader. Разовые прогоны не копят историю в боте.
+
+**Решение:** каждый цикл при `broker_ready` бот читает `ProtoOADealListReq`
+на СВОЁМ коннекте и пишет close-deal'ы (gross+swap+commission) в
+`momentum_closed_deals`. Чужие символы (XAUUSD и т.п.) отбрасываются.
+Идемпотентно по `deal_id`. Baseline `MOMENTUM_BOT_PNL_BASELINE=2026-07-24 08:27`
+(как у tradecard). Источник:
+https://help.ctrader.com/open-api/messages/ (`ProtoOADealListReq`);
+historical ≤5 req/s — один запрос / 300s. Торговая логика не меняется
+(observability, `no-data-fitting.mdc`).
+
+tradecard остаётся разовым ревьюером (5 Why) в свободный слот; текущие
+доллары больше не зависят от него.
+
+**Файлы:** `state/pnl_sync.py`, `state/store.py`, `config/settings.py`,
+`app/main.py`, `tests/test_fx_momentum_bot.py`, `STRATEGIES.md` §8
+
+---
+
 ## 2026-07-31
 
 ### fix(momentum): reconcile-таймаут при живом коннекте + BE не откатывает трейленный SL

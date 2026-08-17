@@ -72,6 +72,32 @@ class MomentumStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS momentum_closed_deals (
+                    deal_id INTEGER PRIMARY KEY,
+                    broker_position_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    closed_at TEXT NOT NULL,
+                    closed_ts_ms INTEGER NOT NULL,
+                    net_usd REAL NOT NULL,
+                    gross_usd REAL NOT NULL,
+                    swap_usd REAL NOT NULL,
+                    commission_usd REAL NOT NULL,
+                    volume INTEGER NOT NULL DEFAULT 0,
+                    execution_price REAL,
+                    entry_price REAL,
+                    synced_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_closed_deals_closed_at
+                ON momentum_closed_deals(closed_at)
+                """
+            )
             conn.commit()
 
     def get_last_direction(self, symbol: str) -> str | None:
@@ -280,4 +306,103 @@ class MomentumStore:
                 cur = conn.execute("DELETE FROM momentum_position_state")
             conn.commit()
             return int(cur.rowcount or 0)
+
+    def last_closed_deal_ts_ms(self) -> int | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(closed_ts_ms) FROM momentum_closed_deals"
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    def insert_closed_deal(
+        self,
+        *,
+        deal_id: int,
+        broker_position_id: int,
+        symbol: str,
+        side: str,
+        closed_at: str,
+        closed_ts_ms: int,
+        net_usd: float,
+        gross_usd: float,
+        swap_usd: float,
+        commission_usd: float,
+        volume: int,
+        execution_price: float | None,
+        entry_price: float | None,
+    ) -> bool:
+        """True, если строка новая (deal_id ещё не было)."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO momentum_closed_deals(
+                    deal_id, broker_position_id, symbol, side, closed_at,
+                    closed_ts_ms, net_usd, gross_usd, swap_usd, commission_usd,
+                    volume, execution_price, entry_price
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    deal_id,
+                    broker_position_id,
+                    symbol,
+                    side,
+                    closed_at,
+                    closed_ts_ms,
+                    net_usd,
+                    gross_usd,
+                    swap_usd,
+                    commission_usd,
+                    volume,
+                    execution_price,
+                    entry_price,
+                ),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0) > 0
+
+    def pnl_snapshot(
+        self,
+        *,
+        since: str,
+        open_position_ids: set[int] | None = None,
+    ) -> dict[str, Any]:
+        """Агрегат broker-net с ``since`` (inclusive, UTC ISO).
+
+        WR считается по полностью закрытым позициям (position_id нет в
+        ``open_position_ids``). Частичные закрытия открытых позиций входят
+        в ``net_usd``, но не в WR.
+        """
+        open_ids = open_position_ids or set()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT broker_position_id, symbol, net_usd
+                FROM momentum_closed_deals
+                WHERE closed_at >= ?
+                """,
+                (since,),
+            ).fetchall()
+        net = 0.0
+        by_pos: dict[int, list[tuple[str, float]]] = {}
+        for pid, symbol, pnl in rows:
+            net += float(pnl)
+            by_pos.setdefault(int(pid), []).append((str(symbol), float(pnl)))
+        closed = {
+            pid: legs
+            for pid, legs in by_pos.items()
+            if pid not in open_ids
+        }
+        wins = sum(1 for legs in closed.values() if sum(p for _, p in legs) > 0)
+        n_closed = len(closed)
+        wr = (wins / n_closed) if n_closed else 0.0
+        return {
+            "n_deals": len(rows),
+            "n_closed_positions": n_closed,
+            "n_open_with_partials": len(by_pos) - n_closed,
+            "net_usd": round(net, 2),
+            "wins": wins,
+            "wr": wr,
+        }
 

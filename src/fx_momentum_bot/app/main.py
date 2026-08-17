@@ -11,6 +11,7 @@ import yfinance as yf
 
 from fx_momentum_bot.config.settings import MomentumBotSettings
 from fx_pro_bot.config.settings import calc_lot_size
+from fx_momentum_bot.state.pnl_sync import sync_broker_pnl
 from fx_momentum_bot.state.store import MomentumStore
 from fx_momentum_bot.strategy.context_metrics import (
     EntryContext,
@@ -758,6 +759,28 @@ def run() -> None:
                         "reconcile не ответил) — брокерские действия цикла "
                         "пропущены (management/exits/entries)"
                     )
+            if (
+                broker_ready
+                and executor is not None
+                and settings.pnl_sync_enabled
+            ):
+                sid_to_yf: dict[int, str] = {}
+                for yf_sym in settings.symbols:
+                    info = executor.symbols.resolve_yfinance(yf_sym)
+                    if info is not None:
+                        sid_to_yf[info.symbol_id] = yf_sym
+                open_ids = {
+                    pos.position_id
+                    for plist in positions_by_symbol.values()
+                    for pos in plist
+                }
+                sync_broker_pnl(
+                    executor,
+                    store,
+                    sid_to_symbol=sid_to_yf,
+                    baseline_ms=settings.pnl_baseline_ms,
+                    open_position_ids=open_ids,
+                )
             for symbol in settings.symbols:
                 candles = _drop_forming_bar(
                     _fetch_candles(
