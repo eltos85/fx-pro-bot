@@ -34,6 +34,8 @@ fx-pro-stats = "fx_pro_bot.app.stats_cli:main"
 fx-pro-auth = "fx_pro_bot.app.auth_cli:main"
 fx-ai-trader = "fx_ai_trader.app.main:run"
 scalp-bot = "scalp_bot.app.main:run"
+daytrend-bot = "horizon_bot.app.main:run"
+swing-bot = "horizon_bot.app.main:run"
 flowzone-bot = "flowzone_bot.app.main:run"
 tradecard-bybit = "tradecard_bybit.app.main:run"
 tradecard-momentum = "tradecard_momentum.app.main:run"
@@ -48,6 +50,7 @@ packages = [
   "src/fx_pro_bot",
   "src/fx_ai_trader",
   "src/scalp_bot",
+  "src/horizon_bot",
   "src/flowzone_bot",
   "src/tradecard_bybit",
   "src/tradecard_momentum",

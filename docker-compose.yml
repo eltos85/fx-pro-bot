@@ -552,6 +552,71 @@ services:
     volumes:
       - scalp_bot_data:/data
 
+  # ─── daytrend-bot: дневной SMA200 long/flat (Murphy 1999) ───────────────
+  # Изолирован от scalp. Демо, те же ключи Bybit по умолчанию. Чужие позиции
+  # (скальп на том же символе) не трогает. ORB на часах не используется:
+  # scripts/scalp_daytrend_research.py закрыл его (−67% за 2 года на BTC).
+  daytrend-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.horizon-bot
+    image: horizon-bot:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      HORIZON_NAME: daytrend
+      DAYTREND_STRATEGY: sma200_daily
+      DAYTREND_INTERVAL: D
+      DAYTREND_DATA_DIR: /data
+      DAYTREND_SYMBOLS: ${DAYTREND_SYMBOLS:-BTCUSDT,ETHUSDT}
+      DAYTREND_POLL_SEC: ${DAYTREND_POLL_SEC:-600}
+      DAYTREND_POSITION_FRAC: ${DAYTREND_POSITION_FRAC:-0.15}
+      DAYTREND_LEVERAGE: ${DAYTREND_LEVERAGE:-1}
+      DAYTREND_BYBIT_API_KEY: ${DAYTREND_BYBIT_API_KEY:-${SCALP_BYBIT_API_KEY:-}}
+      DAYTREND_BYBIT_API_SECRET: ${DAYTREND_BYBIT_API_SECRET:-${SCALP_BYBIT_API_SECRET:-}}
+      DAYTREND_BYBIT_DEMO: ${DAYTREND_BYBIT_DEMO:-${SCALP_BYBIT_DEMO:-true}}
+      DAYTREND_TRADING_ENABLED: ${DAYTREND_TRADING_ENABLED:-true}
+    volumes:
+      - daytrend_bot_data:/data
+
+  # ─── swing-bot: 4h SMA 20/50 long/flat (Murphy 1999, свинг ~2–7 дней) ──
+  # Форвард на демо: IS/OOS гейт на 2 годах не пройден
+  # (scripts/scalp_swing_research.py). Канон не тюнится.
+  swing-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.horizon-bot
+    image: horizon-bot:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      HORIZON_NAME: swing
+      SWING_STRATEGY: sma20_50_4h
+      SWING_INTERVAL: "240"
+      SWING_DATA_DIR: /data
+      SWING_SYMBOLS: ${SWING_SYMBOLS:-BTCUSDT,ETHUSDT}
+      SWING_POLL_SEC: ${SWING_POLL_SEC:-180}
+      SWING_POSITION_FRAC: ${SWING_POSITION_FRAC:-0.15}
+      SWING_LEVERAGE: ${SWING_LEVERAGE:-1}
+      SWING_BYBIT_API_KEY: ${SWING_BYBIT_API_KEY:-${SCALP_BYBIT_API_KEY:-}}
+      SWING_BYBIT_API_SECRET: ${SWING_BYBIT_API_SECRET:-${SCALP_BYBIT_API_SECRET:-}}
+      SWING_BYBIT_DEMO: ${SWING_BYBIT_DEMO:-${SCALP_BYBIT_DEMO:-true}}
+      SWING_TRADING_ENABLED: ${SWING_TRADING_ENABLED:-true}
+    volumes:
+      - swing_bot_data:/data
+
   # ─── flowzone-bot: order-flow бот Bybit (Auction Market Theory, без LLM) ──
   # Полностью изолирован. Стратегия — STRATEGY_FLOWZONE.md (Volume Profile +
   # Order Flow, continuation-вход из зон высокой вероятности; канон-ролик
@@ -860,6 +925,8 @@ services:
 
 volumes:
   scalp_bot_data:
+  daytrend_bot_data:
+  swing_bot_data:
   flowzone_data:
   momentum_bot_data:
   tradecard_bybit_data:
