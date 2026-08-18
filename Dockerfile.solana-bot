@@ -1,0 +1,20 @@
+FROM python:3.12-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN pip install --upgrade pip
+
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+
+# solders/solana только в этом образе, не в общих deps.
+RUN pip install --no-cache-dir ".[solana]"
+
+ENV SOLANA_DATA_DIR=/data
+VOLUME ["/data"]
+
+CMD ["python", "-m", "solana_bot.app.main"]

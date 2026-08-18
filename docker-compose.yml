@@ -617,6 +617,57 @@ services:
     volumes:
       - swing_bot_data:/data
 
+  # ─── impulse-bot: удар на perp-альтах (CScalp лента+кластер) ───────────
+  # Изолирован от scalp/horizon. Демо, ключи по умолчанию = SCALP_*.
+  # Чужие позиции на общем счёте не трогает. STRATEGY_RATIONALE_IMPULSE.md
+  impulse-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.impulse-bot
+    image: impulse-bot:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      IMPULSE_DATA_DIR: /data
+      IMPULSE_LOG_LEVEL: ${IMPULSE_LOG_LEVEL:-INFO}
+      IMPULSE_BYBIT_API_KEY: ${IMPULSE_BYBIT_API_KEY:-${SCALP_BYBIT_API_KEY:-}}
+      IMPULSE_BYBIT_API_SECRET: ${IMPULSE_BYBIT_API_SECRET:-${SCALP_BYBIT_API_SECRET:-}}
+      IMPULSE_BYBIT_DEMO: ${IMPULSE_BYBIT_DEMO:-${SCALP_BYBIT_DEMO:-true}}
+      IMPULSE_TRADING_ENABLED: ${IMPULSE_TRADING_ENABLED:-true}
+    volumes:
+      - impulse_bot_data:/data
+
+  # ─── solana-bot: щитки Solana (скан; свап выкл. без ключа) ─────────────
+  # Отдельный пакет. solders только в этом образе. STRATEGY_RATIONALE_SOLANA.md
+  solana-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.solana-bot
+    image: solana-bot:local
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    env_file:
+      - .env
+    environment:
+      SOLANA_DATA_DIR: /data
+      SOLANA_LOG_LEVEL: ${SOLANA_LOG_LEVEL:-INFO}
+      SOLANA_TRADING_ENABLED: ${SOLANA_TRADING_ENABLED:-false}
+      SOLANA_PRIVATE_KEY: ${SOLANA_PRIVATE_KEY:-}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      SOLANA_JUPITER_API_KEY: ${SOLANA_JUPITER_API_KEY:-}
+    volumes:
+      - solana_bot_data:/data
+
   # ─── flowzone-bot: order-flow бот Bybit (Auction Market Theory, без LLM) ──
   # Полностью изолирован. Стратегия — STRATEGY_FLOWZONE.md (Volume Profile +
   # Order Flow, continuation-вход из зон высокой вероятности; канон-ролик
@@ -927,6 +978,8 @@ volumes:
   scalp_bot_data:
   daytrend_bot_data:
   swing_bot_data:
+  impulse_bot_data:
+  solana_bot_data:
   flowzone_data:
   momentum_bot_data:
   tradecard_bybit_data:

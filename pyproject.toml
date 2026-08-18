@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
 token-service = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
+solana = ["solders>=0.21", "solana>=0.34"]
 
 [project.scripts]
 fx-pro-bot = "fx_pro_bot.app.main:main"
@@ -36,6 +37,8 @@ fx-ai-trader = "fx_ai_trader.app.main:run"
 scalp-bot = "scalp_bot.app.main:run"
 daytrend-bot = "horizon_bot.app.main:run"
 swing-bot = "horizon_bot.app.main:run"
+impulse-bot = "impulse_bot.app.main:run"
+solana-bot = "solana_bot.app.main:run"
 flowzone-bot = "flowzone_bot.app.main:run"
 tradecard-bybit = "tradecard_bybit.app.main:run"
 tradecard-momentum = "tradecard_momentum.app.main:run"
@@ -51,6 +54,8 @@ packages = [
   "src/fx_ai_trader",
   "src/scalp_bot",
   "src/horizon_bot",
+  "src/impulse_bot",
+  "src/solana_bot",
   "src/flowzone_bot",
   "src/tradecard_bybit",
   "src/tradecard_momentum",
