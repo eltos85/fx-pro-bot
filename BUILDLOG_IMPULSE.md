@@ -4,6 +4,16 @@
 
 ## 2026-08-18
 
+### feat(impulse): Telegram вход/выход на SCALP_TELEGRAM_*
+`pending`
+
+Исходящий sendMessage без поллинга (тот же токен, что у scalp). Старт,
+вход, выход (SL/TP/scratch/broker_flat). Торговая логика не менялась.
+https://core.telegram.org/bots/api#sendmessage
+
+**Файлы:** `src/impulse_bot/telegram.py`, `app/main.py`, `settings.py`,
+`docker-compose.yml`, `tests/test_impulse_bot.py`
+
 ### chore(impulse): heartbeat цикла в лог
 `c43ec76`
 

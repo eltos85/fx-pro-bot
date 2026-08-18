@@ -53,6 +53,10 @@ class ImpulseSettings(BaseSettings):
     leverage: int = Field(default=10)
     min_notional_usd: float = Field(default=10.0)
 
+    telegram_enabled: bool = Field(default=True)
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+
     @property
     def skip_set(self) -> set[str]:
         return {s.strip().upper() for s in self.skip_symbols.split(",") if s.strip()}
@@ -68,6 +72,10 @@ def load_settings() -> ImpulseSettings:
         s.bybit_api_key = os.environ.get("SCALP_BYBIT_API_KEY", "")
     if not s.bybit_api_secret:
         s.bybit_api_secret = os.environ.get("SCALP_BYBIT_API_SECRET", "")
+    if not s.telegram_bot_token:
+        s.telegram_bot_token = os.environ.get("SCALP_TELEGRAM_BOT_TOKEN", "")
+    if not s.telegram_chat_id:
+        s.telegram_chat_id = os.environ.get("SCALP_TELEGRAM_CHAT_ID", "")
     demo = os.environ.get("IMPULSE_BYBIT_DEMO")
     if demo is None:
         scalp_demo = os.environ.get("SCALP_BYBIT_DEMO")

@@ -4,6 +4,15 @@
 
 ## 2026-08-18
 
+### feat(solana): Telegram кандидат/вход/выход на SCALP_TELEGRAM_*
+`pending`
+
+Исходящий sendMessage без поллинга. Пока свап выкл — кандидат (антиспам
+30 мин на минт). https://core.telegram.org/bots/api#sendmessage
+
+**Файлы:** `src/solana_bot/telegram.py`, `app/main.py`, `settings.py`,
+`docker-compose.yml`, `tests/test_solana_bot.py`
+
 ### chore(solana): heartbeat цикла в лог
 `c43ec76`
 

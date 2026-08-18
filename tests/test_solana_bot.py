@@ -43,6 +43,24 @@ def test_enter_needs_move():
     assert not should_enter(_sh(move_m5_pct=1.0), move_min_pct=5.0)
 
 
+def test_telegram_candidate_and_cooldown():
+    from solana_bot.telegram import (
+        TelegramNotifier,
+        fmt_candidate,
+        should_alert,
+    )
+
+    text = fmt_candidate(symbol="FOO", mint="Token1111111111111111111111111111111111111",
+                         volume_m5=120_000, move_m5_pct=8.0,
+                         liquidity_usd=40_000, price_usd=0.001)
+    assert "[solana]" in text and "кандидат" in text and "FOO" in text
+    last: dict[str, float] = {}
+    assert should_alert(last, "m", 100.0, 1800)
+    assert not should_alert(last, "m", 200.0, 1800)
+    assert should_alert(last, "m", 2000.0, 1800)
+    assert not TelegramNotifier("", "", enabled=True).active
+
+
 def test_exits_tp_cap_sl():
     assert exit_reason(1.0, 1.07, tp_pct=7, cap_pct=30, sl_pct=12) == "tp"
     assert exit_reason(1.0, 1.35, tp_pct=7, cap_pct=30, sl_pct=12) == "cap"

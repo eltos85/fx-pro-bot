@@ -56,6 +56,19 @@ def test_cluster_pocket_follows_side():
     assert tape_from_prints([("Buy", 10), ("Sell", 3)]).buy_usd == 10
 
 
+def test_telegram_texts():
+    from impulse_bot.telegram import TelegramNotifier, esc, fmt_enter, fmt_exit
+
+    assert "&lt;" in esc("<FOO>")
+    text = fmt_enter(symbol="AAAUSDT", side="Buy", qty=1.5, px=1.0,
+                     sl=0.9975, tp=1.0045)
+    assert "[impulse]" in text and "вход" in text and "AAAUSDT" in text
+    out = fmt_exit(symbol="AAAUSDT", side="Buy", qty=1.5, entry=1.0,
+                   exit_px=1.0045, pnl_usd=0.00675, reason="tp")
+    assert "выход" in out and "tp" in out
+    assert not TelegramNotifier("", "", enabled=True).active
+
+
 def test_london_session():
     assert in_session(10, 7, 16)
     assert not in_session(6, 7, 16)

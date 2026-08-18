@@ -14,13 +14,21 @@ from solana_bot.db import SolanaDB
 from solana_bot.screener import token_price_usd, trending_shields
 from solana_bot.settings import load_settings
 from solana_bot.signals import WSOL, exit_reason, should_enter, universe_ok
+from solana_bot.telegram import (
+    TelegramNotifier,
+    fmt_candidate,
+    fmt_enter,
+    fmt_exit,
+    fmt_start,
+    should_alert,
+)
 
 log = logging.getLogger("solana_bot")
 
 _LAMPORTS = 1_000_000_000
 
 
-def _manage(cfg, db: SolanaDB) -> None:
+def _manage(cfg, db: SolanaDB, tg: TelegramNotifier) -> None:
     for pos in db.all_owned():
         px = token_price_usd(pos["mint"])
         if px <= 0:
@@ -61,9 +69,12 @@ def _manage(cfg, db: SolanaDB) -> None:
                                 continue
         db.close_pos(pos["mint"], px, why)
         log.info("%s выход %s px=%.8f", pos["symbol"], why, px)
+        tg.send(fmt_exit(symbol=pos["symbol"], entry=pos["entry"],
+                         exit_px=px, reason=why))
 
 
-def _enter(cfg, db: SolanaDB, mint: str, symbol: str, px: float) -> None:
+def _enter(cfg, db: SolanaDB, mint: str, symbol: str, px: float,
+           tg: TelegramNotifier) -> None:
     pk = wallet.pubkey(cfg.private_key) if cfg.private_key else None
     if not pk:
         log.error("нет pubkey — свап невозможен")
@@ -88,10 +99,12 @@ def _enter(cfg, db: SolanaDB, mint: str, symbol: str, px: float) -> None:
                   or od.get("outAmount") or 0)
     db.open_pos(mint, symbol, float(out_raw), px)
     log.info("%s вход raw=%s px=%.8f sol=%.4f", symbol, out_raw, px, cfg.size_sol)
+    tg.send(fmt_enter(symbol=symbol, px=px, size_sol=cfg.size_sol))
 
 
-def _cycle(cfg, db: SolanaDB) -> None:
-    _manage(cfg, db)
+def _cycle(cfg, db: SolanaDB, tg: TelegramNotifier,
+           alerted: dict[str, float]) -> None:
+    _manage(cfg, db, tg)
     shields = trending_shields()
     log.info("цикл open=%d seen=%d trading=%s",
              db.open_count(), len(shields), cfg.trading_enabled)
@@ -108,11 +121,17 @@ def _cycle(cfg, db: SolanaDB) -> None:
         log.info("кандидат %s vol5=%.0f move=%.1f%% liq=%.0f px=%.8f",
                  s.symbol, s.volume_m5, s.move_m5_pct, s.liquidity_usd, s.price_usd)
         if not cfg.trading_enabled:
+            if should_alert(alerted, s.mint, time.time(),
+                            cfg.telegram_cooldown_sec):
+                tg.send(fmt_candidate(
+                    symbol=s.symbol, mint=s.mint, volume_m5=s.volume_m5,
+                    move_m5_pct=s.move_m5_pct, liquidity_usd=s.liquidity_usd,
+                    price_usd=s.price_usd))
             continue
         if not cfg.private_key or not wallet.available():
             log.info("trading выкл или нет solders/ключа — только скан")
             continue
-        _enter(cfg, db, s.mint, s.symbol, s.price_usd)
+        _enter(cfg, db, s.mint, s.symbol, s.price_usd, tg)
         return
 
 
@@ -132,9 +151,14 @@ def run() -> None:
     if cfg.trading_enabled and not wallet.available():
         log.warning("нет solders — скан")
         cfg.trading_enabled = False
+    tg = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id,
+                          enabled=cfg.telegram_enabled)
+    log.info("telegram %s", "on" if tg.active else "off")
+    tg.send(fmt_start(trading=cfg.trading_enabled))
+    alerted: dict[str, float] = {}
     while True:
         try:
-            _cycle(cfg, db)
+            _cycle(cfg, db, tg, alerted)
         except Exception:
             log.exception("цикл")
         time.sleep(max(15, cfg.poll_sec))

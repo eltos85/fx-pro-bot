@@ -15,6 +15,7 @@ from impulse_bot.client import ImpulseClient, Ticker
 from impulse_bot.db import ImpulseDB
 from impulse_bot.settings import load_settings
 from impulse_bot.signals import detect_burst, in_session, in_universe, should_enter
+from impulse_bot.telegram import TelegramNotifier, fmt_enter, fmt_exit, fmt_start
 
 log = logging.getLogger("impulse_bot")
 
@@ -28,7 +29,19 @@ def _day() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _manage(cfg, client: ImpulseClient, db: ImpulseDB) -> None:
+def _pnl(pos: dict, exit_px: float) -> float:
+    sign = 1 if pos["side"] == "Buy" else -1
+    return sign * (exit_px - pos["entry"]) * pos["qty"]
+
+
+def _notify_exit(tg: TelegramNotifier, pos: dict, px: float, reason: str) -> None:
+    tg.send(fmt_exit(symbol=pos["symbol"], side=pos["side"], qty=pos["qty"],
+                     entry=pos["entry"], exit_px=px, pnl_usd=_pnl(pos, px),
+                     reason=reason))
+
+
+def _manage(cfg, client: ImpulseClient, db: ImpulseDB,
+            tg: TelegramNotifier) -> None:
     now = time.time()
     for pos in db.all_owned():
         broker = client.get_position(pos["symbol"])
@@ -37,6 +50,7 @@ def _manage(cfg, client: ImpulseClient, db: ImpulseDB) -> None:
         if broker.size == 0:
             px = client.last_price(pos["symbol"]) or pos["entry"]
             db.close_pos(pos["symbol"], px, "broker_flat")
+            _notify_exit(tg, pos, px, "broker_flat")
             continue
         if now - pos["ts_open"] >= cfg.scratch_sec:
             lid = _link()
@@ -48,10 +62,11 @@ def _manage(cfg, client: ImpulseClient, db: ImpulseDB) -> None:
                 px = client.last_price(pos["symbol"]) or pos["entry"]
                 db.close_pos(pos["symbol"], px, "time_scratch")
                 log.info("%s scratch %ds", pos["symbol"], cfg.scratch_sec)
+                _notify_exit(tg, pos, px, "time_scratch")
 
 
 def _enter(cfg, client: ImpulseClient, db: ImpulseDB, symbol: str,
-           side: str, px: float, equity: float) -> None:
+           side: str, px: float, equity: float, tg: TelegramNotifier) -> None:
     sl_frac = cfg.sl_pct / 100.0
     tp_frac = cfg.tp_pct / 100.0
     if side == "Buy":
@@ -82,12 +97,13 @@ def _enter(cfg, client: ImpulseClient, db: ImpulseDB, symbol: str,
     db.bump_session(_day())
     log.info("%s %s qty=%.6f px=%.6f sl=%.6f tp=%.6f",
              symbol, side, qty, px, sl, tp)
+    tg.send(fmt_enter(symbol=symbol, side=side, qty=qty, px=px, sl=sl, tp=tp))
 
 
 def _cycle(cfg, client: ImpulseClient, db: ImpulseDB,
-           cache: dict[str, tuple[float, float]]) -> None:
+           cache: dict[str, tuple[float, float]], tg: TelegramNotifier) -> None:
     hour = datetime.now(timezone.utc).hour
-    _manage(cfg, client, db)
+    _manage(cfg, client, db, tg)
     if db.open_count() >= cfg.max_open:
         return
     if not in_session(hour, cfg.session_start_utc, cfg.session_end_utc):
@@ -133,7 +149,7 @@ def _cycle(cfg, client: ImpulseClient, db: ImpulseDB,
             log.info("%s удар есть, лента/кластер нет buy=%.0f sell=%.0f cl=%.2f",
                      t.symbol, tape.buy_usd, tape.sell_usd, cluster.dir_frac)
             continue
-        _enter(cfg, client, db, t.symbol, burst.side, t.last, equity)
+        _enter(cfg, client, db, t.symbol, burst.side, t.last, equity, tg)
         return
 
 
@@ -152,10 +168,15 @@ def run() -> None:
     db = ImpulseDB(cfg.db_path)
     client = ImpulseClient(cfg.bybit_api_key, cfg.bybit_api_secret,
                            demo=cfg.bybit_demo, category=cfg.bybit_category)
+    tg = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id,
+                          enabled=cfg.telegram_enabled)
+    log.info("telegram %s", "on" if tg.active else "off")
+    tg.send(fmt_start(demo=cfg.bybit_demo,
+                      session=f"{cfg.session_start_utc:02d}-{cfg.session_end_utc:02d}"))
     cache: dict[str, tuple[float, float]] = {}
     while True:
         try:
-            _cycle(cfg, client, db, cache)
+            _cycle(cfg, client, db, cache, tg)
         except Exception:
             log.exception("цикл")
         time.sleep(max(5, cfg.poll_sec))

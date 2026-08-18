@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -39,6 +41,11 @@ class SolanaSettings(BaseSettings):
 
     skip_mints: str = Field(default="")
 
+    telegram_enabled: bool = Field(default=True)
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+    telegram_cooldown_sec: int = Field(default=1800)
+
     @property
     def skip_set(self) -> set[str]:
         return {s.strip() for s in self.skip_mints.split(",") if s.strip()}
@@ -49,4 +56,9 @@ class SolanaSettings(BaseSettings):
 
 
 def load_settings() -> SolanaSettings:
-    return SolanaSettings()
+    s = SolanaSettings()
+    if not s.telegram_bot_token:
+        s.telegram_bot_token = os.environ.get("SCALP_TELEGRAM_BOT_TOKEN", "")
+    if not s.telegram_chat_id:
+        s.telegram_chat_id = os.environ.get("SCALP_TELEGRAM_CHAT_ID", "")
+    return s
