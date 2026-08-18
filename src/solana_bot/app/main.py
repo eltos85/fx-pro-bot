@@ -92,9 +92,12 @@ def _enter(cfg, db: SolanaDB, mint: str, symbol: str, px: float) -> None:
 
 def _cycle(cfg, db: SolanaDB) -> None:
     _manage(cfg, db)
+    shields = trending_shields()
+    log.info("цикл open=%d seen=%d trading=%s",
+             db.open_count(), len(shields), cfg.trading_enabled)
     if db.open_count() >= cfg.max_open:
         return
-    for s in trending_shields():
+    for s in shields:
         if not universe_ok(s, vol_lo=cfg.volume_m5_usd, liq_lo=cfg.min_liquidity_usd,
                            age_lo=cfg.min_age_sec, skip=cfg.skip_set):
             continue

@@ -107,6 +107,8 @@ def _cycle(cfg, client: ImpulseClient, db: ImpulseDB,
         scored.append(t)
     scored.sort(key=lambda x: -x.turnover24h)
     scored = scored[:cfg.universe_cap]
+    log.info("цикл open=%d sess=%d uni=%d eq=%.0f",
+             db.open_count(), db.session_trades(_day()), len(scored), equity)
     for t in scored:
         prev = cache.get(t.symbol)
         cache[t.symbol] = (t.last, t.turnover24h)
