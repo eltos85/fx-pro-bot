@@ -5,7 +5,7 @@
 ## 2026-08-18
 
 ### feat(impulse): Telegram вход/выход на SCALP_TELEGRAM_*
-`pending`
+`16024ca`
 
 Исходящий sendMessage без поллинга (тот же токен, что у scalp). Старт,
 вход, выход (SL/TP/scratch/broker_flat). Торговая логика не менялась.

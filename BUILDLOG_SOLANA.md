@@ -5,7 +5,7 @@
 ## 2026-08-18
 
 ### feat(solana): Telegram кандидат/вход/выход на SCALP_TELEGRAM_*
-`pending`
+`16024ca`
 
 Исходящий sendMessage без поллинга. Пока свап выкл — кандидат (антиспам
 30 мин на минт). https://core.telegram.org/bots/api#sendmessage
