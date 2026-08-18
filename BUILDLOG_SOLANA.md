@@ -4,6 +4,13 @@
 
 ## 2026-08-18
 
+### chore(solana): heartbeat цикла в лог
+`c43ec76`
+
+Строка `цикл open/seen` чтобы скан было видно без кандидата.
+
+**Файлы:** `src/solana_bot/app/main.py`
+
 ### feat(solana): отдельный бот щитков (скан, Jupiter опционально)
 `398dcd0`
 
