@@ -4,6 +4,7 @@ from impulse_bot.signals import (
     Burst,
     Cluster,
     Tape,
+    clamp_mkt_qty,
     cluster_from_prints,
     detect_burst,
     in_session,
@@ -67,6 +68,14 @@ def test_telegram_texts():
                    exit_px=1.0045, pnl_usd=0.00675, reason="tp")
     assert "выход" in out and "tp" in out
     assert not TelegramNotifier("", "", enabled=True).active
+
+
+def test_clamp_mkt_qty_caps_and_keeps_under():
+    ok, capped = clamp_mkt_qty(100.0, max_mkt=80.0, min_qty=1.0, step=1.0)
+    assert capped and ok == 80.0
+    ok2, capped2 = clamp_mkt_qty(50.0, max_mkt=80.0, min_qty=1.0, step=1.0)
+    assert not capped2 and ok2 == 50.0
+    assert clamp_mkt_qty(0.4, max_mkt=80.0, min_qty=1.0, step=1.0) is None
 
 
 def test_london_session():

@@ -2,6 +2,21 @@
 
 Изолирован от `scalp_bot` / `horizon_bot` / `flowzone`. Bybit linear, демо.
 
+## 2026-08-19
+
+### fix(impulse): обрезать Market qty до maxMktOrderQty
+`pending`
+
+Вчера 22 входа (лента+кластер ок) отклонены Bybit 10001: расчётный лот
+(1.5% equity / 0.25% SL ≈ $274k нотионал) больше лимита контракта.
+Сигнал не меняем. Обрезаем до `lotSizeFilter.maxMktOrderQty`
+(офдок https://bybit-exchange.github.io/docs/v5/market/instrument),
+не `maxOrderQty` — тот для лимиток. Риск в $ на дешёвых альтах станет
+меньше потолка 1.5%.
+
+**Файлы:** `src/impulse_bot/signals.py`, `client.py`, `app/main.py`,
+`tests/test_impulse_bot.py`, `STRATEGY_RATIONALE_IMPULSE.md`
+
 ## 2026-08-18
 
 ### feat(impulse): Telegram вход/выход на SCALP_TELEGRAM_*

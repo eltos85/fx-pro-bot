@@ -12,7 +12,7 @@
 | Тейк / стоп | 0.45% / 0.25% | FF: не микро-тейк размером с комиссию; VIP 0 RT 0.110% → тейк ~4× |
 | Scratch | 90с если импульс не пошёл | операционный, в постах «быстрый скальп» |
 | Плечо / риск | 10×, 1.5% equity | в журналах 20× руками; автомат ниже |
-| Исполнение | Market + биржевой SL/TP | CScalp «заброс в край» ≈ тейкер на живом ударе |
+| Исполнение | Market + биржевой SL/TP; лот ≤ `maxMktOrderQty` | CScalp «заброс в край» ≈ тейкер; лимит Market — Bybit instruments-info |
 
 Лента: `GET /v5/market/recent-trade`
 (https://bybit-exchange.github.io/docs/v5/market/recent-trade).

@@ -14,7 +14,13 @@ from datetime import datetime, timezone
 from impulse_bot.client import ImpulseClient, Ticker
 from impulse_bot.db import ImpulseDB
 from impulse_bot.settings import load_settings
-from impulse_bot.signals import detect_burst, in_session, in_universe, should_enter
+from impulse_bot.signals import (
+    clamp_mkt_qty,
+    detect_burst,
+    in_session,
+    in_universe,
+    should_enter,
+)
 from impulse_bot.telegram import TelegramNotifier, fmt_enter, fmt_exit, fmt_start
 
 log = logging.getLogger("impulse_bot")
@@ -77,14 +83,25 @@ def _enter(cfg, client: ImpulseClient, db: ImpulseDB, symbol: str,
     dist = abs(px - sl)
     if dist <= 0:
         return
-    qty = float(client.fmt_qty(symbol, risk / dist))
+    raw = risk / dist
     info = client.instrument(symbol)
-    notional = qty * px
-    if qty <= 0 or notional < cfg.min_notional_usd:
-        log.info("%s qty/notional мало — skip", symbol)
+    max_mkt = info.max_mkt_order_qty if info else 0.0
+    min_qty = info.min_order_qty if info else 0.0
+    step = info.qty_step if info else 0.0
+    clamped = clamp_mkt_qty(raw, max_mkt=max_mkt, min_qty=min_qty, step=step)
+    if clamped is None:
+        log.info("%s qty после maxMktOrderQty меньше min — skip", symbol)
         return
-    if info and qty < info.min_order_qty:
-        log.info("%s qty < min", symbol)
+    qty, capped = clamped
+    qty = float(client.fmt_qty(symbol, qty))
+    if capped:
+        log.info("%s лот обрезан до maxMktOrderQty %.6f (хотели %.6f)",
+                 symbol, qty, raw)
+    min_notional = max(cfg.min_notional_usd,
+                       info.min_notional if info else 0.0)
+    notional = qty * px
+    if qty <= 0 or notional < min_notional:
+        log.info("%s qty/notional мало — skip", symbol)
         return
     client.set_leverage(symbol, cfg.leverage)
     lid = _link()

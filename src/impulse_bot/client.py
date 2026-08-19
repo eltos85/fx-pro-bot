@@ -32,6 +32,10 @@ class InstrumentInfo:
     qty_step: float
     min_order_qty: float
     tick_size: float
+    # Market: maxMktOrderQty, не maxOrderQty.
+    # https://bybit-exchange.github.io/docs/v5/market/instrument
+    max_mkt_order_qty: float
+    min_notional: float
 
 
 @dataclass
@@ -119,6 +123,8 @@ class ImpulseClient:
             qty_step=float(lf.get("qtyStep", "0.001")),
             min_order_qty=float(lf.get("minOrderQty", "0")),
             tick_size=float(pf.get("tickSize", "0.01")),
+            max_mkt_order_qty=float(lf.get("maxMktOrderQty") or 0),
+            min_notional=float(lf.get("minNotionalValue") or 0),
         )
         self._instr[symbol] = info
         return info

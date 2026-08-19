@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -112,6 +113,27 @@ def should_enter(burst: Burst | None, tape: Tape | None,
         return False
     return (tape_ok(tape, burst.side, ratio=tape_ratio)
             and cluster_ok(cluster))
+
+
+def clamp_mkt_qty(qty: float, *, max_mkt: float, min_qty: float,
+                  step: float) -> tuple[float, bool] | None:
+    """Обрезать рыночный лот до maxMktOrderQty.
+
+    Bybit lotSizeFilter.maxMktOrderQty — лимит Market, не maxOrderQty.
+    https://bybit-exchange.github.io/docs/v5/market/instrument
+    None — после обрезки лот меньше минимума.
+    """
+    if qty <= 0:
+        return None
+    capped = False
+    if max_mkt > 0 and qty > max_mkt:
+        qty = max_mkt
+        capped = True
+    if step > 0:
+        qty = math.floor(qty / step) * step
+    if qty <= 0 or (min_qty > 0 and qty < min_qty):
+        return None
+    return qty, capped
 
 
 def in_session(hour_utc: int, start: int, end: int) -> bool:
