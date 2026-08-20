@@ -76,9 +76,31 @@ def bet_size(*, position_usd: float, virtual_capital: float,
     return max(0.0, min(position_usd, left))
 
 
-def _money(pos: dict, exit_px: float) -> float:
+def _money(pos: dict, exit_px: float, exit_fee: float = 0.0) -> float:
+    """Чистые деньги сделки: ход цены минус комиссии обеих ног."""
     sign = 1.0 if pos["side"] == "Buy" else -1.0
-    return sign * (exit_px - pos["avg_entry"]) * pos["qty"]
+    fees = float(pos.get("entry_fee") or 0.0) + exit_fee
+    return sign * (exit_px - pos["avg_entry"]) * pos["qty"] - fees
+
+
+def _executed(cfg: HybridSettings, client: HybridClient, link_id: str,
+              symbol: str, qty: float, price: float) -> tuple[float, float,
+                                                              float]:
+    """Чем сделка обошлась на самом деле: (объём, цена, комиссия).
+
+    В торговле — из истории исполнений: цена тикера и нулевая комиссия завышают
+    результат, а канон требует сходимости учёта с биржей 1:1 (§8.4). В режиме
+    наблюдения фактических данных нет, поэтому комиссия оценивается по ставке
+    taker — иначе бумажные цифры были бы лучше живых.
+    """
+    if not cfg.trading_enabled:
+        return qty, price, qty * price * cfg.taker_fee
+    fill = client.fill_of(link_id)
+    if fill is None:
+        log.warning("%s исполнение по %s не прочитано — считаем по цене %.4f "
+                    "без комиссии", symbol, link_id, price)
+        return qty, price, 0.0
+    return fill.qty, fill.price, fill.fee
 
 
 def _open(cfg: HybridSettings, client: HybridClient, db: HybridDB,
@@ -97,39 +119,44 @@ def _open(cfg: HybridSettings, client: HybridClient, db: HybridDB,
     if qty <= 0 or (info and qty < info.min_order_qty):
         log.info("%s объём %.6f меньше минимального — пропуск", symbol, qty)
         return False
+    lid = _link(cfg.link_prefix)
     if cfg.trading_enabled:
         client.set_leverage(symbol, cfg.leverage)
-        lid = _link(cfg.link_prefix)
         res = client.market(symbol=symbol, side="Buy", qty=qty,
                             order_link_id=lid)
         if not res.get("ok"):
             log.warning("%s вход отклонён: %s", symbol, res.get("error"))
             return False
-    else:
-        lid = _link(cfg.link_prefix)
-    db.open_pos(symbol, "Buy", qty, price, lid, fixations=fixations)
-    log.info("%s вход %.6f по %.4f на $%.0f%s", symbol, qty, price, notional,
-             f" ({note})" if note else "")
+    qty, fill_px, fee = _executed(cfg, client, lid, symbol, qty, price)
+    db.open_pos(symbol, "Buy", qty, fill_px, lid, fixations=fixations,
+                entry_fee=fee)
+    log.info("%s вход %.6f по %.4f на $%.0f, комиссия $%.4f%s", symbol, qty,
+             fill_px, qty * fill_px, fee, f" ({note})" if note else "")
     if not note:
-        tg.send(f"🟢 {symbol}: купили {qty:.4f} по {price:.2f} "
-                f"на ${notional:,.0f}, тренд 4h вверх{_paper(cfg)}")
+        tg.send(f"🟢 {symbol}: купили {qty:.4f} по {fill_px:.2f} "
+                f"на ${qty * fill_px:,.0f}, тренд 4h вверх{_paper(cfg)}")
     return True
 
 
 def _close(cfg: HybridSettings, client: HybridClient, db: HybridDB,
-           symbol: str, pos: dict, price: float, reason: str) -> bool:
-    """Закрытие своего объёма reduce-only. Чужой лот не затрагивается."""
+           symbol: str, pos: dict, price: float,
+           reason: str) -> tuple[float, float] | None:
+    """Закрытие своего объёма reduce-only. Чужой лот не затрагивается.
+
+    Возвращает (цена исполнения, чистые деньги) или None, если биржа отказала.
+    """
+    lid = _link(cfg.link_prefix)
     if cfg.trading_enabled:
         res = client.market(symbol=symbol, side="Sell", qty=pos["qty"],
-                            order_link_id=_link(cfg.link_prefix),
-                            reduce_only=True)
+                            order_link_id=lid, reduce_only=True)
         if not res.get("ok"):
             log.warning("%s выход отклонён: %s", symbol, res.get("error"))
-            return False
-    db.record_closed(pos, exit_px=price, reason=reason,
-                     mode=cfg.trade_mode, strategy=STRATEGY)
+            return None
+    _, fill_px, fee = _executed(cfg, client, lid, symbol, pos["qty"], price)
+    db.record_closed(pos, exit_px=fill_px, reason=reason,
+                     mode=cfg.trade_mode, strategy=STRATEGY, exit_fee=fee)
     db.drop_pos(symbol)
-    return True
+    return fill_px, _money(pos, fill_px, fee)
 
 
 def _paper(cfg: HybridSettings) -> str:
@@ -179,36 +206,38 @@ def _cycle(cfg: HybridSettings, client: HybridClient, db: HybridDB,
         elif name == "open":
             _open(cfg, client, db, tg, symbol, price)
         elif name == "exit":
-            money = _money(owned, price)
-            if _close(cfg, client, db, symbol, owned, price, "trend_flat"):
+            done = _close(cfg, client, db, symbol, owned, price, "trend_flat")
+            if done:
+                exit_px, money = done
                 log.info("%s выход по тренду %.4f, деньги %+.2f", symbol,
-                         price, money)
+                         exit_px, money)
                 tg.send(f"🔴 {symbol}: тренд развернулся, закрыли "
-                        f"{owned['qty']:.4f} по {price:.2f}, "
+                        f"{owned['qty']:.4f} по {exit_px:.2f}, "
                         f"{money:+,.2f} ${_paper(cfg)}")
         elif name == "fix":
-            # Закрываем по факту рынком, поэтому считаем по цене исполнения,
-            # а не по уровню порога.
-            money = _money(owned, price)
-            dist = distance_pct(price, owned["avg_entry"])
             avg_was = owned["avg_entry"]
             fixations = int(owned["fixations"]) + 1
-            if not _close(cfg, client, db, symbol, owned, price,
-                          "fix_threshold"):
+            done = _close(cfg, client, db, symbol, owned, price,
+                          "fix_threshold")
+            if not done:
                 continue
+            # Считаем по цене исполнения, а не по уровню порога: рыночный ордер
+            # исполняется хуже уровня, и эта разница — измеряемая величина.
+            exit_px, money = done
+            dist = distance_pct(exit_px, avg_was)
             log.info("%s фиксация №%d: %.4f по %.4f (+%.2f%% от %.4f), "
-                     "деньги %+.2f", symbol, fixations, owned["qty"], price,
+                     "деньги %+.2f", symbol, fixations, owned["qty"], exit_px,
                      dist, avg_was, money)
             back = ""
-            if want == 1 and _open(cfg, client, db, tg, symbol, price,
+            if want == 1 and _open(cfg, client, db, tg, symbol, exit_px,
                                    fixations=fixations, note="обратный вход"):
                 new = db.owned(symbol)
                 if new:
                     back = (f", сразу зашли обратно {new['qty']:.4f} "
-                            f"по {price:.2f}")
+                            f"по {new['avg_entry']:.2f}")
             tg.send(f"💰 {symbol}: закрыли весь свой объём {owned['qty']:.4f} "
-                    f"по {price:.2f} — это {dist:+.2f}% от средней {avg_was:.2f}, "
-                    f"деньги {money:+,.2f} ${back}{_paper(cfg)}")
+                    f"по {exit_px:.2f} — это {dist:+.2f}% от средней "
+                    f"{avg_was:.2f}, деньги {money:+,.2f} ${back}{_paper(cfg)}")
         else:
             log.info("%s держим, до порога %.2f%% из %.2f%%", symbol,
                      act.get("distance_pct", 0.0), cfg.fix_threshold_pct)

@@ -25,8 +25,11 @@ class HybridDB:
                  avg_entry REAL NOT NULL,
                  ts_open INTEGER NOT NULL,
                  link_id TEXT NOT NULL,
-                 fixations INTEGER NOT NULL DEFAULT 0
+                 fixations INTEGER NOT NULL DEFAULT 0,
+                 entry_fee REAL NOT NULL DEFAULT 0
                )""")
+        self._ensure_column("positions", "entry_fee",
+                            "REAL NOT NULL DEFAULT 0")
         self._db.execute(
             """CREATE TABLE IF NOT EXISTS trades (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,25 +53,34 @@ class HybridDB:
                )""")
         self._db.commit()
 
+    def _ensure_column(self, table: str, column: str, decl: str) -> None:
+        """Добавляет колонку в уже существующую таблицу (боевая БД живёт на VPS)."""
+        cols = {r[1] for r in self._db.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            self._db.commit()
+
     # ─── своя позиция ────────────────────────────────────────────────────
 
     def owned(self, symbol: str) -> dict | None:
         row = self._db.execute(
-            "SELECT symbol, side, qty, avg_entry, ts_open, link_id, fixations "
-            "FROM positions WHERE symbol=?", (symbol,)).fetchone()
+            "SELECT symbol, side, qty, avg_entry, ts_open, link_id, fixations, "
+            "entry_fee FROM positions WHERE symbol=?", (symbol,)).fetchone()
         if not row:
             return None
         keys = ("symbol", "side", "qty", "avg_entry", "ts_open", "link_id",
-                "fixations")
+                "fixations", "entry_fee")
         return dict(zip(keys, row))
 
     def open_pos(self, symbol: str, side: str, qty: float, entry: float,
-                 link_id: str, *, fixations: int = 0) -> None:
+                 link_id: str, *, fixations: int = 0,
+                 entry_fee: float = 0.0) -> None:
         self._db.execute(
             "INSERT OR REPLACE INTO positions "
-            "(symbol, side, qty, avg_entry, ts_open, link_id, fixations) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (symbol, side, qty, entry, int(time.time()), link_id, fixations))
+            "(symbol, side, qty, avg_entry, ts_open, link_id, fixations, "
+            "entry_fee) VALUES (?,?,?,?,?,?,?,?)",
+            (symbol, side, qty, entry, int(time.time()), link_id, fixations,
+             entry_fee))
         self._db.commit()
 
     def drop_pos(self, symbol: str) -> None:
@@ -92,10 +104,17 @@ class HybridDB:
     # ─── сделки ──────────────────────────────────────────────────────────
 
     def record_closed(self, pos: dict, *, exit_px: float, reason: str,
-                      mode: str, strategy: str, fees_usd: float = 0.0) -> int:
-        """Пишет закрытую сделку. Деньги считаются от средней цены входа."""
+                      mode: str, strategy: str, exit_fee: float = 0.0) -> int:
+        """Пишет закрытую сделку. `pnl_usd` — **чистые** деньги.
+
+        Комиссия входа берётся из позиции, комиссия выхода — из фактического
+        исполнения. Валовой результат без комиссий завышает итог примерно на
+        0.11% нотионала за круг, а гейт §8.4 канона требует сходимости с
+        биржей 1:1 (`stats-collection.mdc`).
+        """
         sign = 1.0 if pos["side"] == "Buy" else -1.0
-        pnl = sign * (exit_px - pos["avg_entry"]) * pos["qty"]
+        fees_usd = float(pos.get("entry_fee") or 0.0) + exit_fee
+        pnl = sign * (exit_px - pos["avg_entry"]) * pos["qty"] - fees_usd
         cur = self._db.execute(
             "INSERT INTO trades (ts_open, ts_close, symbol, side, qty, entry, "
             "exit, sl, tp, score, reasons, mode, strategy, status, pnl_usd, "

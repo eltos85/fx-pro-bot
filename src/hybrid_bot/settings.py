@@ -42,6 +42,11 @@ class HybridSettings(BaseSettings):
     position_usd: float = Field(default=200.0)
     min_notional_usd: float = Field(default=10.0)
     leverage: int = Field(default=1)
+    # Ставка taker для linear без VIP. Используется только в режиме наблюдения,
+    # где фактических комиссий нет: иначе бумажные цифры выглядели бы лучше
+    # живых. В торговле комиссия берётся из исполнения.
+    # https://bybit-exchange.github.io/docs/v5/enum#tradingfeerate
+    taker_fee: float = Field(default=0.00055)
 
     telegram_enabled: bool = Field(default=False)
     telegram_bot_token: str = Field(default="")

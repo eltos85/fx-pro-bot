@@ -13,11 +13,17 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 
 from pybit.unified_trading import HTTP
 
 log = logging.getLogger("hybrid_bot.client")
+
+# execType: Funding-записи приходят в ту же историю исполнений, но их execQty
+# равен размеру позиции, а execFee — сам платёж. В расчёт цены сделки они идти
+# не должны. https://bybit-exchange.github.io/docs/v5/enum#exectype
+TRADE_EXEC_TYPES = {"Trade", "AdlTrade", "BustTrade", "Delivery"}
 
 
 def _qty_decimals(step: float) -> int:
@@ -40,6 +46,15 @@ class Position:
     side: str
     size: float
     entry_price: float
+
+
+@dataclass
+class Fill:
+    """Фактическое исполнение ордера: сколько, по какой цене, за какую комиссию."""
+
+    qty: float
+    price: float
+    fee: float
 
 
 class HybridClient:
@@ -119,6 +134,42 @@ class HybridClient:
                 entry_price=float(p.get("avgPrice") or 0),
             )
         return Position(symbol=symbol, side="", size=0.0, entry_price=0.0)
+
+    def fill_of(self, order_link_id: str, *, attempts: int = 3,
+                delay_sec: float = 1.0) -> Fill | None:
+        """Чем на самом деле исполнился наш ордер.
+
+        Нужно для учёта 1:1 с биржей: цена тикера и нулевая комиссия завышают
+        результат. Один рыночный ордер может исполниться несколькими сделками
+        («You may have multiple executions in a single order»), поэтому цена
+        считается взвешенной по объёму, а комиссии суммируются.
+
+        Запрос по `orderLinkId` имеет приоритет над symbol, остальные параметры
+        при нём игнорируются. История исполнений через REST отстаёт от ответа на
+        ордер (офдок для real-time рекомендует websocket), поэтому запрос
+        повторяется несколько раз.
+        https://bybit-exchange.github.io/docs/v5/order/execution
+        """
+        for attempt in range(attempts):
+            try:
+                resp = self._session.get_executions(
+                    category=self._category, orderLinkId=order_link_id,
+                    limit=100)
+            except Exception:
+                log.exception("get_executions %s", order_link_id)
+                return None
+            rows = [r for r in ((resp.get("result") or {}).get("list") or [])
+                    if r.get("execType") in TRADE_EXEC_TYPES]
+            qty = sum(float(r.get("execQty") or 0) for r in rows)
+            if qty > 0:
+                value = sum(float(r.get("execQty") or 0)
+                            * float(r.get("execPrice") or 0) for r in rows)
+                fee = sum(float(r.get("execFee") or 0) for r in rows)
+                return Fill(qty=qty, price=value / qty, fee=fee)
+            if attempt + 1 < attempts:
+                time.sleep(delay_sec)
+        log.warning("исполнения по %s не найдены", order_link_id)
+        return None
 
     def set_leverage(self, symbol: str, leverage: int) -> None:
         try:
