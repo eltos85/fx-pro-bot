@@ -74,7 +74,8 @@ SNAPSHOT_FIELDS = [
     "hold_qty", "hold_entry", "hold_total", "delta_vs_hold",
     "core_gross", "tactic_gross", "forced_core_pnl", "forced_core_n",
     "core_time_share", "mixed_time_share", "reentry_cost", "reentry_n",
-    "drift_above_share", "cushion_pct", "book_aligned", "book_skipped",
+    "drift_above_share", "cushion_pct",
+    "book_aligned", "book_skipped", "book_gross_delta",
 ]
 
 
@@ -574,10 +575,15 @@ def _report_symbol(sess: HTTP, symbol: str, category: str,
                                     / len(drifts), 4) if drifts else ""),
         "cushion_pct": (round((mark / pos_avg - 1.0) * 100.0, 4)
                         if pos_size > 0 and pos_avg > 0 else ""),
-        # Невыровненная книга = декомпозиция ядро/тактика недостоверна.
-        # Без флага такие строки в накопителе не отличить от корректных.
+        # Два независимых признака достоверности строки. `book_aligned` —
+        # сошёлся ли ОСТАТОК с биржей, `book_gross_delta` — сошёлся ли
+        # реализованный gross с API. Второе ловит реализации от позиции,
+        # открытой до начала окна: остаток при этом может совпасть, а
+        # декомпозиция ядро/тактика — врать. Без обоих чисел строку в
+        # накопителе не проверить постфактум.
         "book_aligned": int(bool(book.get("aligned"))),
         "book_skipped": int(book.get("skipped") or 0),
+        "book_gross_delta": round(book_gross - api_gross, 4),
     }
 
 
