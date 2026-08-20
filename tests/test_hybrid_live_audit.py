@@ -22,10 +22,39 @@ _spec.loader.exec_module(audit)
 
 
 def _fill(ts: int, side: str, qty: float, px: float, fee: float = 0.0,
-          etype: str = "Trade") -> dict:
+          etype: str = "Trade", link: str = "hybrid_x",
+          order: str = "o1") -> dict:
     return {"execTime": str(ts), "side": side, "execQty": str(qty),
             "execPrice": str(px), "execFee": str(fee), "execType": etype,
-            "execValue": str(qty * px), "orderLinkId": "hybrid_x"}
+            "execValue": str(qty * px), "orderLinkId": link,
+            "orderId": order}
+
+
+# ─── свои ноги против чужих ──────────────────────────────────────────────
+
+def test_foreign_legs_are_separated_by_link_prefix():
+    """Счёт достался с историей предшественника — его сделки не наши."""
+    ours = _fill(3_000, "Buy", 0.08, 2293.0, link="hybrid_a", order="o_our")
+    alien = _fill(1_000, "Buy", 4.0, 1866.0, link="flowzone_ETH",
+                  order="o_alien")
+    noname = _fill(1_500, "Sell", 4.0, 1866.0, link="", order="o_none")
+    mine, foreign, closes, skipped = audit.split_ours(
+        [ours, alien, noname], [])
+    assert mine == [ours]
+    assert foreign == [alien, noname]
+    assert closes == [] and skipped == 0
+
+
+def test_only_closes_of_our_orders_are_counted():
+    ours = _fill(3_000, "Sell", 0.08, 2431.0, link="hybrid_a", order="o_our")
+    alien = _fill(1_000, "Sell", 4.0, 1866.0, link="flowzone_ETH",
+                  order="o_alien")
+    closes = [{"orderId": "o_our", "closedPnl": "9.4"},
+              {"orderId": "o_alien", "closedPnl": "-86.0"},
+              {"orderId": "o_unknown", "closedPnl": "12.0"}]
+    _, _, our_closes, skipped = audit.split_ours([ours, alien], closes)
+    assert [c["closedPnl"] for c in our_closes] == ["9.4"]
+    assert skipped == 2
 
 
 # ─── бенчмарк холда ──────────────────────────────────────────────────────
@@ -131,6 +160,38 @@ def test_reason_ignores_records_with_another_volume(tmp_path):
 def test_missing_database_is_not_an_error(tmp_path):
     assert audit.db_reasons(str(tmp_path / "nope.sqlite"), "ETHUSDT", 0.0) == []
     assert audit.db_reasons("", "ETHUSDT", 0.0) == []
+
+
+# ─── итог стратегии против холда ─────────────────────────────────────────
+
+def test_without_fixations_strategy_equals_hold():
+    """Пока фиксаций нет, стратегия и холд — одна и та же позиция: Δ = 0.
+
+    Ловит перекос: комиссия входа по открытой позиции не лежит ни в closedPnl,
+    ни в unrealized, а холд свою вычитает.
+    """
+    entry, mark, qty, fee = 2293.36, 2272.97, 0.08, 0.1009
+    hold = audit.hold_benchmark([_fill(1_000, "Buy", qty, entry, fee=fee)],
+                                [], mark=mark)
+    total = audit.strategy_total(realized_net=0.0,
+                                 unrealized=(mark - entry) * qty,
+                                 funding_paid=0.0, fees_legs=fee,
+                                 fees_in_closes=0.0)
+    assert total - hold["total"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_fees_already_inside_closed_pnl_are_not_charged_twice():
+    total = audit.strategy_total(realized_net=9.4, unrealized=0.0,
+                                 funding_paid=0.0, fees_legs=0.2,
+                                 fees_in_closes=0.2)
+    assert total == pytest.approx(9.4)
+
+
+def test_funding_is_subtracted_from_the_strategy():
+    total = audit.strategy_total(realized_net=10.0, unrealized=2.0,
+                                 funding_paid=0.5, fees_legs=0.0,
+                                 fees_in_closes=0.0)
+    assert total == pytest.approx(11.5)
 
 
 # ─── гейт выборки ────────────────────────────────────────────────────────

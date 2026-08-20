@@ -66,6 +66,11 @@ GATE_MIN_DAYS = 14
 # секундное, но берём с запасом на цикл бота (3 мин).
 MATCH_WINDOW_SEC = 300
 
+# Наши ордера помечены этим префиксом в orderLinkId. Счёт достался от
+# предшественника вместе с его историей торгов (он торговал там до 2026-08-20),
+# поэтому считать «всё, что было на счёте» нельзя — только свои ноги.
+OUR_PREFIX = "hybrid_"
+
 SNAPSHOT_FIELDS = [
     "ts_utc", "window_days", "symbol",
     "n_events", "n_fix", "n_trend_exit", "obs_days",
@@ -74,7 +79,7 @@ SNAPSHOT_FIELDS = [
     "hold_qty", "hold_entry", "hold_total", "delta_vs_hold",
     "fix_gross", "trend_exit_gross",
     "declared_threshold", "median_fix_dist", "median_slip",
-    "db_net", "db_delta", "foreign_legs",
+    "db_net", "db_delta", "foreign_legs", "skipped_closes",
 ]
 
 
@@ -159,6 +164,26 @@ def match_reason(close_ms: int, qty: float, rows: list[dict]) -> str:
     return best[1]["reason"] if best else "?"
 
 
+def split_ours(fills: list[dict], closes: list[dict], *,
+               prefix: str = OUR_PREFIX) -> tuple[list[dict], list[dict],
+                                                  list[dict], int]:
+    """Делит ноги и реализации на свои и чужие.
+
+    В `closed-pnl` нет `orderLinkId`, поэтому принадлежность реализации
+    определяется через `orderId` её ноги. Реализация без известной ноги (нога
+    осталась за границей окна) считается чужой: лучше недосчитать своё, чем
+    приписать себе чужой результат.
+    """
+    ours, foreign = [], []
+    for f in fills:
+        (ours if (f.get("orderLinkId") or "").startswith(prefix)
+         else foreign).append(f)
+    our_orders = {f.get("orderId") for f in ours if f.get("orderId")}
+    our_closes = [c for c in closes if c.get("orderId") in our_orders]
+    skipped = len(closes) - len(our_closes)
+    return ours, foreign, our_closes, skipped
+
+
 def hold_benchmark(fills: list[dict], fundings: list[dict],
                    mark: float) -> dict | None:
     """«Просто держать первый купленный лот» — та же комиссия и funding.
@@ -191,6 +216,21 @@ def hold_benchmark(fills: list[dict], fundings: list[dict],
             "funding": funding, "total": gross - fee - funding}
 
 
+def strategy_total(*, realized_net: float, unrealized: float,
+                   funding_paid: float, fees_legs: float,
+                   fees_in_closes: float) -> float:
+    """Итог стратегии, сопоставимый с холдом.
+
+    `closedPnl` уже содержит комиссии закрытых кругов, но комиссия входа по
+    ещё открытой позиции не лежит ни там, ни в unrealized. Холд свою входную
+    комиссию вычитает, поэтому её надо вычесть и здесь — иначе сравнение
+    завышало бы стратегию ровно на эту величину, и при нуле фиксаций (когда
+    стратегия и холд — одна и та же позиция) Δ был бы не нулевым.
+    """
+    fees_open = max(0.0, fees_legs - fees_in_closes)
+    return realized_net + unrealized - funding_paid - fees_open
+
+
 def gate_status(n_fix: int, obs_days: float) -> str:
     """Строка о прогрессе выборки. Порог — sample-size.mdc, не наш выбор."""
     parts = [f"фиксаций {n_fix}/{GATE_MIN_EVENTS}",
@@ -204,10 +244,15 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
                    end_ms: int, *, threshold: float, db_path: str) -> dict:
     raw = _paginate(sess.get_executions, start_ms=start_ms, end_ms=end_ms,
                     category=category, symbol=symbol)
-    fills = [f for f in raw if f.get("execType") in TRADE_EXEC_TYPES]
-    fundings = [f for f in raw if f.get("execType") in FUNDING_EXEC_TYPES]
-    closes = _paginate(sess.get_closed_pnl, start_ms=start_ms, end_ms=end_ms,
-                       category=category, symbol=symbol)
+    all_fills = [f for f in raw if f.get("execType") in TRADE_EXEC_TYPES]
+    all_fundings = [f for f in raw if f.get("execType") in FUNDING_EXEC_TYPES]
+    all_closes = _paginate(sess.get_closed_pnl, start_ms=start_ms,
+                           end_ms=end_ms, category=category, symbol=symbol)
+    fills, foreign, closes, skipped_closes = split_ours(all_fills, all_closes)
+    # Funding платит владелец позиции; пока на счёте была чужая позиция,
+    # начисления были не наши. Своими считаем те, что после первой нашей ноги.
+    our_since = min((int(f["execTime"]) for f in fills), default=end_ms)
+    fundings = [f for f in all_fundings if int(f["execTime"]) >= our_since]
     pos_resp = sess.get_positions(category=category, symbol=symbol)
     time.sleep(THROTTLE_SEC)
     tick_resp = sess.get_tickers(category=category, symbol=symbol)
@@ -225,15 +270,21 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
           f"{_ms_to_utc(start_ms):%Y-%m-%d %H:%M} → "
           f"{_ms_to_utc(end_ms):%Y-%m-%d %H:%M} UTC\n{'=' * 78}")
 
-    # ── Чужие ноги: счёт должен быть изолированным (§18.4) ────────────────
-    foreign = [f for f in fills
-               if not (f.get("orderLinkId") or "").startswith("hybrid_")]
+    # ── Чужие ноги: в расчёт не идут, но знать про них надо (§18.4) ───────
     if foreign:
         who = sorted({(f.get("orderLinkId") or "")[:12] or "(без id)"
                       for f in foreign})
-        print(f"\n  ⚠ на счёте есть НЕ наши ноги: {len(foreign)} шт "
-              f"({', '.join(who)}). Изоляция §18.4 нарушена, "
-              f"результат ниже смешан.")
+        f_ts = [int(f["execTime"]) for f in foreign]
+        print(f"\n  На счёте есть чужие ноги: {len(foreign)} шт "
+              f"({', '.join(who)}), последняя "
+              f"{_ms_to_utc(max(f_ts)):%m-%d %H:%M} UTC. В расчёт НЕ идут: "
+              f"считаются только ноги с префиксом {OUR_PREFIX!r}.")
+        if max(f_ts) > our_since:
+            print("  ⚠ чужие ноги ПОСЛЕ нашего первого входа — изоляция "
+                  "§18.4 нарушена сейчас, а не только в истории")
+    if skipped_closes:
+        print(f"  Реализаций без нашей ноги в окне: {skipped_closes} — "
+              f"отброшены (чужие или нога за границей окна)")
 
     # ── События: что именно закрывалось и на каком расстоянии ────────────
     reasons = db_reasons(db_path, symbol, start_ms / 1000.0)
@@ -292,11 +343,19 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
               f"${funding_paid:.4f} (>0 = списано с нас)")
 
     # ── Итог стратегии и бенчмарк ────────────────────────────────────────
+    # Комиссии входа по ЕЩЁ ОТКРЫТОЙ позиции не лежат ни в closedPnl, ни в
+    # unrealized, а бенчмарк холда свою входную комиссию вычитает. Без этой
+    # поправки сравнение было бы в пользу стратегии ровно на её величину.
+    fees_in_closes = sum(_fnum(c.get("openFee")) + _fnum(c.get("closeFee"))
+                         for c in closes)
+    fees_open = max(0.0, fees_legs - fees_in_closes)
+    total = strategy_total(realized_net=realized_net, unrealized=unreal,
+                           funding_paid=funding_paid, fees_legs=fees_legs,
+                           fees_in_closes=fees_in_closes)
     print(f"\n  Открытый остаток: {pos_size:.4f} @ {pos_avg:.2f}, "
           f"mark {mark:.2f}, unrealized ${unreal:.2f}")
-    strategy_total = realized_net + unreal - funding_paid
-    print(f"  СТРАТЕГИЯ ИТОГО (realized net + unrealized − funding): "
-          f"${strategy_total:.2f}")
+    print(f"  СТРАТЕГИЯ ИТОГО (realized net + unrealized − funding "
+          f"− комиссия открытого входа ${fees_open:.4f}): ${total:.2f}")
 
     hold = hold_benchmark(fills, fundings, mark)
     delta = None
@@ -305,8 +364,13 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
               f"{hold['entry']:.2f} от {_ms_to_utc(hold['ts']):%m-%d %H:%M}")
         print(f"    gross ${hold['gross']:.2f} − комиссия ${hold['fee']:.4f} "
               f"− funding ${hold['funding']:.4f} = ${hold['total']:.2f}")
-        delta = strategy_total - hold["total"]
-        verdict = "фиксация ВПЕРЕДИ" if delta > 0 else "фиксация ОТСТАЁТ"
+        delta = total - hold["total"]
+        # Пока фиксаций не было, стратегия и холд — буквально одна позиция, и
+        # Δ обязан быть нулём. Это self-check измерителя, а не результат.
+        if abs(delta) < 0.01:
+            verdict = "то же самое (фиксаций ещё не было)"
+        else:
+            verdict = "фиксация ВПЕРЕДИ" if delta > 0 else "фиксация ОТСТАЁТ"
         print(f"    Δ стратегия − холд = ${delta:.2f}  → {verdict}")
         print("    (у обоих остаток открыт, выходная комиссия не учтена)")
 
@@ -344,7 +408,7 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
         "pos_avg": pos_avg,
         "mark": mark,
         "unrealized": unreal,
-        "strategy_total": round(strategy_total, 4),
+        "strategy_total": round(total, 4),
         "hold_qty": hold["qty"] if hold else "",
         "hold_entry": hold["entry"] if hold else "",
         "hold_total": round(hold["total"], 4) if hold else "",
@@ -357,6 +421,7 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
         "db_net": round(db_net, 4) if reasons else "",
         "db_delta": round(db_delta, 4) if reasons else "",
         "foreign_legs": len(foreign),
+        "skipped_closes": skipped_closes,
     }
 
 
