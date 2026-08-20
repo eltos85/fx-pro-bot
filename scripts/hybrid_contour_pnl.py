@@ -116,34 +116,171 @@ def _paginate(method, *, start_ms: int, end_ms: int, **params) -> list[dict]:
     return rows
 
 
-def _replay_book(fills: list[dict]) -> tuple[float, float, float]:
-    """Проигрывает книгу one-way по avg-cost. -> (realized_gross, size, avg)."""
+def _replay_book(fills: list[dict]) -> dict:
+    """Проигрывает книгу one-way по avg-cost (как считает биржа) и попутно
+    разлагает лот на «ядро» и «тактику» по атрибуции ног.
+
+    Зачем: биржа держит ОДИН лот, поэтому вопрос «сколько из P&L — ход ядра, а
+    сколько геометрия тактики» напрямую из API не читается. Состав лота
+    восстанавливается по orderLinkId входов, а закрываемый объём делится
+    **pro-rata** доле ядра и тактики в лоте на момент закрытия. Pro-rata, а не
+    FIFO, потому что биржа использует avg-cost и порядок лотов не наблюдаем;
+    любая FIFO-модель добавила бы произвольное допущение.
+    """
     size = 0.0  # >0 long, <0 short
     avg = 0.0
-    realized = 0.0
+    core_qty = 0.0  # часть лота, пришедшая от horizon
+    tac_qty = 0.0  # часть лота от скальпа
+    realized = realized_core = realized_tac = 0.0
+    forced_core_pnl = forced_core_n = 0.0
+    volunt_core_pnl = volunt_core_n = 0.0
+    mixed_sec = core_sec = 0.0
+    prev_ts: int | None = None
+    core_entries: list[tuple[int, float, float]] = []
+    core_exits: list[tuple[int, float]] = []
+    reentries: list[dict] = []
+    last_core_flat: tuple[int, float] | None = None
+
     for f in sorted(fills, key=lambda r: int(r["execTime"])):
         qty = _fnum(f.get("execQty"))
         px = _fnum(f.get("execPrice"))
+        ts = int(f["execTime"])
         if qty <= 0 or px <= 0:
             continue
+        if prev_ts is not None:
+            dt = (ts - prev_ts) / 1000.0
+            if core_qty > 1e-12:
+                core_sec += dt
+                if tac_qty > 1e-12:
+                    mixed_sec += dt
+        prev_ts = ts
+
+        cls = _actor(f)[0]
+        is_core = cls == ACTOR_CORE
         signed = qty if f.get("side") == "Buy" else -qty
-        if size == 0.0:
-            size, avg = signed, px
-            continue
-        if (size > 0) == (signed > 0):
-            total = abs(size) + qty
-            avg = (avg * abs(size) + px * qty) / total
+        opening = size == 0.0 or (size > 0) == (signed > 0)
+
+        if opening:
+            if size == 0.0:
+                avg = px
+            else:
+                avg = (avg * abs(size) + px * qty) / (abs(size) + qty)
             size += signed
+            if is_core:
+                core_qty += qty
+                core_entries.append((ts, qty, px))
+                if last_core_flat is not None:
+                    exit_ts, exit_px = last_core_flat
+                    reentries.append({
+                        "gap_pct": (px / exit_px - 1.0) * 100.0,
+                        "gap_usd": (exit_px - px) * qty,
+                        "pause_min": (ts - exit_ts) / 60000.0,
+                    })
+                    last_core_flat = None
+            else:
+                tac_qty += qty
             continue
+
         closing = min(qty, abs(size))
-        realized += (px - avg) * closing * (1.0 if size > 0 else -1.0)
-        size += closing * (1.0 if signed > 0 else -1.0)
+        sign = 1.0 if size > 0 else -1.0
+        pnl = (px - avg) * closing * sign
+        total_qty = core_qty + tac_qty
+        core_part = closing * (core_qty / total_qty) if total_qty > 1e-12 else 0.0
+        pnl_core = (px - avg) * core_part * sign
+        realized += pnl
+        realized_core += pnl_core
+        realized_tac += pnl - pnl_core
+        if core_part > 1e-12:
+            if is_core:
+                volunt_core_pnl += pnl_core
+                volunt_core_n += 1
+            else:
+                forced_core_pnl += pnl_core
+                forced_core_n += 1
+        core_qty = max(0.0, core_qty - core_part)
+        tac_qty = max(0.0, tac_qty - (closing - core_part))
+        if core_qty <= 1e-9 and core_part > 1e-12:
+            core_exits.append((ts, px))
+            last_core_flat = (ts, px)
+        size -= closing * sign
         if qty > closing:  # флип через ноль
             size = (qty - closing) * (1.0 if signed > 0 else -1.0)
             avg = px
+            if is_core:
+                core_qty = qty - closing
+            else:
+                tac_qty = qty - closing
         elif abs(size) < 1e-12:
             size, avg = 0.0, 0.0
-    return realized, size, avg
+
+    # Знаменатель времени — от ПЕРВОГО входа ядра, а не от начала окна:
+    # иначе в «ядро вне рынка» попадает период, когда ядра ещё не существовало,
+    # и доля занижается на величину, зависящую от --days.
+    span = 0.0
+    if fills:
+        ts_all = [int(f["execTime"]) for f in fills]
+        base = core_entries[0][0] if core_entries else min(ts_all)
+        span = max(0.0, (max(ts_all) - base) / 1000.0)
+
+    return {
+        "realized": realized, "size": size, "avg": avg,
+        "realized_core": realized_core, "realized_tac": realized_tac,
+        "forced_core_pnl": forced_core_pnl, "forced_core_n": forced_core_n,
+        "volunt_core_pnl": volunt_core_pnl, "volunt_core_n": volunt_core_n,
+        "core_sec": core_sec, "mixed_sec": mixed_sec, "span_sec": span,
+        "core_entries": core_entries, "core_exits": core_exits,
+        "reentries": reentries, "core_qty": core_qty, "tac_qty": tac_qty,
+    }
+
+
+def _replay_aligned(fills: list[dict], signed_pos: float,
+                    pos_avg: float) -> dict:
+    """Реплей с выравниванием старта по фактической позиции на бирже.
+
+    Окно API плавающее, поэтому первой ногой легко оказывается ЗАКРЫТИЕ
+    позиции, открытой раньше начала окна. Тогда реплей с нуля открывает
+    фантомную позицию в обратную сторону и все производные метрики врут.
+    Ищем первую ногу, начиная с которой книга сходится с биржей по остатку и
+    средней цене; всё, что раньше, — хвост прошлой позиции.
+    """
+    ordered = sorted(fills, key=lambda r: int(r["execTime"]))
+    for i in range(len(ordered)):
+        book = _replay_book(ordered[i:])
+        size_ok = abs(book["size"] - signed_pos) <= max(1e-6,
+                                                        abs(signed_pos) * 1e-4)
+        avg_ok = pos_avg <= 0 or abs(book["avg"] - pos_avg) <= pos_avg * 5e-4
+        if size_ok and avg_ok:
+            book["skipped"] = i
+            book["aligned"] = True
+            return book
+    book = _replay_book(ordered)
+    book["skipped"] = 0
+    book["aligned"] = False
+    return book
+
+
+def _mae_mfe(sess: HTTP, symbol: str, category: str, since_ms: int,
+             anchor: float) -> tuple[float, float] | None:
+    """Худший и лучший ход от якоря с момента `since_ms` (15m свечи).
+
+    Закрывает слепую зону «как выглядел риск»: contour_total показывает только
+    итог, а не просадку, которую позиция прошла по пути.
+    https://bybit-exchange.github.io/docs/v5/market/kline (limit <= 1000)
+    """
+    if anchor <= 0:
+        return None
+    resp = sess.get_kline(category=category, symbol=symbol, interval="15",
+                          start=since_ms, limit=1000)
+    time.sleep(THROTTLE_SEC)
+    rows = ((resp.get("result") or {}).get("list") or [])
+    if not rows:
+        return None
+    highs = [_fnum(r[2]) for r in rows]
+    lows = [_fnum(r[3]) for r in rows if _fnum(r[3]) > 0]
+    if not highs or not lows:
+        return None
+    return ((min(lows) / anchor - 1.0) * 100.0,
+            (max(highs) / anchor - 1.0) * 100.0)
 
 
 def _report_symbol(sess: HTTP, symbol: str, category: str,
@@ -276,8 +413,97 @@ def _report_symbol(sess: HTTP, symbol: str, category: str,
         print(f"    (у обоих остаток открыт; выходная комиссия не учтена "
               f"ни там, ни тут)")
 
+    # ── Асимметрия по якорю: центральное утверждение гипотезы ────────────
+    drifts = [(_fnum(c.get("avgExitPrice")) / _fnum(c.get("avgEntryPrice")) - 1.0)
+              * 100.0
+              for c in closes if _fnum(c.get("avgEntryPrice")) > 0]
+    if drifts:
+        above = [d for d in drifts if d > 0]
+        pnl_above = sum(_fnum(c.get("closedPnl")) for c in closes
+                        if _fnum(c.get("avgEntryPrice")) > 0
+                        and _fnum(c.get("avgExitPrice"))
+                        > _fnum(c.get("avgEntryPrice")))
+        srt = sorted(drifts)
+        med = srt[len(srt) // 2]
+        print(f"\n  Асимметрия (лок−якорь): выше якоря {len(above)}/"
+              f"{len(drifts)} = {100.0 * len(above) / len(drifts):.0f}%, "
+              f"медиана {med:+.3f}%, разброс "
+              f"{min(drifts):+.3f}%…{max(drifts):+.3f}%")
+        if realized_net:
+            print(f"    P&L фиксаций выше якоря ${pnl_above:.2f} из "
+                  f"${realized_net:.2f} "
+                  f"({100.0 * pnl_above / realized_net:.0f}%)")
+
+    # ── Декомпозиция лота: ядро против тактики ───────────────────────────
+    signed_pos = pos_size if pos.get("side") != "Sell" else -pos_size
+    book = _replay_aligned(fills, signed_pos, pos_avg)
+    if not book["aligned"]:
+        print("\n  ⚠ книга не сошлась с биржей ни с одного старта: метрики "
+              "ниже недостоверны, расширь --days")
+    elif book["skipped"]:
+        print(f"\n  Старт книги выровнен: отброшено {book['skipped']} ног — "
+              f"хвост позиции, открытой до начала окна")
+    dec_total = book["realized_core"] + book["realized_tac"]
+    if abs(dec_total) > 1e-9:
+        share = 100.0 * book["realized_core"] / dec_total
+        print(f"\n  Декомпозиция реализованного gross (pro-rata по составу "
+              f"лота):")
+        print(f"    ядро    ${book['realized_core']:>10.2f}  ({share:.0f}%)")
+        print(f"    тактика ${book['realized_tac']:>10.2f}  "
+              f"({100.0 - share:.0f}%)")
+    if book["forced_core_n"] or book["volunt_core_n"]:
+        tot_n = book["forced_core_n"] + book["volunt_core_n"]
+        print(f"    из ядра закрыто ПРИНУДИТЕЛЬНО (не horizon): "
+              f"{book['forced_core_n']:.0f}/{tot_n:.0f} событий, "
+              f"${book['forced_core_pnl']:.2f}; "
+              f"своим решением {book['volunt_core_n']:.0f}, "
+              f"${book['volunt_core_pnl']:.2f}")
+    if book["span_sec"] > 0:
+        print(f"    с первого входа ядра ({book['span_sec'] / 3600:.1f}ч): "
+              f"ядро в рынке "
+              f"{100.0 * book['core_sec'] / book['span_sec']:.0f}%, "
+              f"лот смешан с тактикой "
+              f"{100.0 * book['mixed_sec'] / book['span_sec']:.0f}%")
+
+    # ── Стоимость перезаходов ────────────────────────────────────────────
+    if book["reentries"]:
+        gaps = [r["gap_pct"] for r in book["reentries"]]
+        cost = sum(r["gap_usd"] for r in book["reentries"])
+        gaps_str = " / ".join("%+.3f%%" % g for g in gaps)
+        pause_str = " / ".join("%.0fм" % r["pause_min"]
+                               for r in book["reentries"])
+        print(f"\n  Перезаходы ядра: {len(gaps)}, гэп лок→вход {gaps_str}")
+        print(f"    суммарно ${cost:+.2f} (>0 = перезашли дешевле, "
+              f"<0 = дороже), пауза {pause_str}")
+
+    # ── Sizing drag: лот ядра в тренде ───────────────────────────────────
+    if len(book["core_entries"]) >= 2:
+        q_first = book["core_entries"][0][1]
+        q_last = book["core_entries"][-1][1]
+        drag = (q_last / q_first - 1.0) * 100.0 if q_first else 0.0
+        lost = (mark - book["core_entries"][-1][2]) * (q_first - q_last)
+        print(f"\n  Sizing drag: первый вход ядра {q_first:.4f} → последний "
+              f"{q_last:.4f} ({drag:+.1f}%)")
+        print(f"    недобрано на текущем ходе ${lost:.2f} "
+              f"(15% equity делится на выросшую цену)")
+
+    # ── Риск открытого остатка: чего мы не видим в итоговом P&L ──────────
+    if pos_size > 0 and pos_avg > 0:
+        cushion = (mark / pos_avg - 1.0) * 100.0
+        print(f"\n  Риск остатка: подушка {cushion:+.2f}% "
+              f"(mark {mark:.2f} vs якорь {pos_avg:.2f}); "
+              f"полный лот {pos_size:.4f} = ${pos_size * mark:,.0f} нотионала")
+        if book["core_entries"]:
+            since = book["core_entries"][-1][0]
+            mm = _mae_mfe(sess, symbol, category, since, pos_avg)
+            if mm:
+                print(f"    от последнего входа ядра: худший ход "
+                      f"{mm[0]:+.2f}%, лучший {mm[1]:+.2f}% "
+                      f"(в $: {mm[0] / 100 * pos_avg * pos_size:+.0f} / "
+                      f"{mm[1] / 100 * pos_avg * pos_size:+.0f})")
+
     # ── Sanity: книга против API ─────────────────────────────────────────
-    book_gross, book_size, book_avg = _replay_book(fills)
+    book_gross, book_size, book_avg = book["realized"], book["size"], book["avg"]
     api_gross = realized_net + fees_in_closes
     print(f"\n  Сверка: книга по ногам gross ${book_gross:.2f} vs "
           f"API gross ${api_gross:.2f} "
@@ -320,6 +546,20 @@ def _report_symbol(sess: HTTP, symbol: str, category: str,
         "hold_total": round(hold_total, 4) if hold_total is not None else "",
         "delta_vs_hold": (round(contour_total - hold_total, 4)
                           if hold_total is not None else ""),
+        "core_gross": round(book["realized_core"], 4),
+        "tactic_gross": round(book["realized_tac"], 4),
+        "forced_core_pnl": round(book["forced_core_pnl"], 4),
+        "forced_core_n": int(book["forced_core_n"]),
+        "core_time_share": (round(book["core_sec"] / book["span_sec"], 4)
+                            if book["span_sec"] else ""),
+        "mixed_time_share": (round(book["mixed_sec"] / book["span_sec"], 4)
+                             if book["span_sec"] else ""),
+        "reentry_cost": round(sum(r["gap_usd"] for r in book["reentries"]), 4),
+        "reentry_n": len(book["reentries"]),
+        "drift_above_share": (round(sum(1 for d in drifts if d > 0)
+                                    / len(drifts), 4) if drifts else ""),
+        "cushion_pct": (round((mark / pos_avg - 1.0) * 100.0, 4)
+                        if pos_size > 0 and pos_avg > 0 else ""),
     }
 
 
