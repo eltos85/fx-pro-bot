@@ -313,7 +313,9 @@ def test_defaults_come_from_the_measurement():
     cfg = HybridSettings()
     assert cfg.symbol_list == ["ETHUSDT"]
     assert cfg.interval == "240"
-    assert cfg.fix_threshold_pct == pytest.approx(6.0)
+    # Порог — серединное расстояние наблюдённых закрытий (§17.3), а не оптимум
+    # по итогу (§17.6). Воспроизведение механизма, не подгонка под лучший P&L.
+    assert cfg.fix_threshold_pct == pytest.approx(1.0)
     assert cfg.virtual_capital == pytest.approx(1000.0)
     assert cfg.position_usd == pytest.approx(200.0)
     assert cfg.link_prefix == "hybrid_"
