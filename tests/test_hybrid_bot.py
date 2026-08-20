@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from hybrid_bot.app.main import plan
+from hybrid_bot.app.main import bet_size, plan
 from hybrid_bot.db import HybridDB
 from hybrid_bot.settings import HybridSettings
 from hybrid_bot.signals import (distance_pct, fix_price, should_fix,
@@ -126,6 +126,34 @@ def test_not_enough_bars_stops_the_symbol():
     assert act["action"] == "no_data"
 
 
+# ─── размер ставки и капитал ─────────────────────────────────────────────
+
+def test_bet_is_limited_by_the_maximum():
+    assert bet_size(position_usd=200.0, virtual_capital=1000.0,
+                    open_notional=0.0) == pytest.approx(200.0)
+
+
+def test_bet_is_limited_by_the_capital_left():
+    assert bet_size(position_usd=200.0, virtual_capital=1000.0,
+                    open_notional=900.0) == pytest.approx(100.0)
+
+
+def test_no_bet_when_capital_is_spent():
+    assert bet_size(position_usd=200.0, virtual_capital=1000.0,
+                    open_notional=1000.0) == 0.0
+    assert bet_size(position_usd=200.0, virtual_capital=1000.0,
+                    open_notional=1500.0) == 0.0
+
+
+def test_open_notional_counts_own_positions(tmp_path):
+    db = HybridDB(str(tmp_path / "h.sqlite"))
+    db.open_pos("ETHUSDT", "Buy", 0.1, 2000.0, "hybrid_a")
+    db.open_pos("BTCUSDT", "Buy", 0.003, 60000.0, "hybrid_b")
+    assert db.open_notional() == pytest.approx(200.0 + 180.0)
+    # При входе по символу его прошлый объём не должен считаться дважды.
+    assert db.open_notional(exclude="ETHUSDT") == pytest.approx(180.0)
+
+
 # ─── БД: своя позиция и деньги ───────────────────────────────────────────
 
 def test_money_is_counted_from_average_entry(tmp_path):
@@ -190,5 +218,6 @@ def test_defaults_come_from_the_measurement():
     assert cfg.symbol_list == ["ETHUSDT"]
     assert cfg.interval == "240"
     assert cfg.fix_threshold_pct == pytest.approx(6.0)
-    assert cfg.position_usd == pytest.approx(7000.0)
+    assert cfg.virtual_capital == pytest.approx(1000.0)
+    assert cfg.position_usd == pytest.approx(200.0)
     assert cfg.link_prefix == "hybrid_"

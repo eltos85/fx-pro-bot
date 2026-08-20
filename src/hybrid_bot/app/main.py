@@ -65,6 +65,17 @@ def plan(*, want: int | None, owned: dict | None, last_price: float,
             "distance_pct": distance_pct(last_price, owned["avg_entry"])}
 
 
+def bet_size(*, position_usd: float, virtual_capital: float,
+             open_notional: float) -> float:
+    """Размер ставки: не больше максимума и не больше остатка капитала.
+
+    Бот работает так, будто на счёте ровно ``virtual_capital``, сколько бы там
+    ни лежало на самом деле.
+    """
+    left = virtual_capital - open_notional
+    return max(0.0, min(position_usd, left))
+
+
 def _money(pos: dict, exit_px: float) -> float:
     sign = 1.0 if pos["side"] == "Buy" else -1.0
     return sign * (exit_px - pos["avg_entry"]) * pos["qty"]
@@ -73,11 +84,13 @@ def _money(pos: dict, exit_px: float) -> float:
 def _open(cfg: HybridSettings, client: HybridClient, db: HybridDB,
           tg: TelegramNotifier, symbol: str, price: float, *,
           fixations: int = 0, note: str = "") -> bool:
-    """Вход на весь нотионал. Возвращает True, если позиция открыта."""
-    notional = cfg.position_usd
+    """Вход на размер ставки. Возвращает True, если позиция открыта."""
+    notional = bet_size(position_usd=cfg.position_usd,
+                        virtual_capital=cfg.virtual_capital,
+                        open_notional=db.open_notional(exclude=symbol))
     if notional < cfg.min_notional_usd:
-        log.info("%s нотионал $%.2f меньше минимума — пропуск", symbol,
-                 notional)
+        log.info("%s ставка $%.2f меньше минимума (капитал $%.0f уже занят) — "
+                 "пропуск", symbol, notional, cfg.virtual_capital)
         return False
     qty = float(client.fmt_qty(symbol, notional / price))
     info = client.instrument(symbol)
@@ -206,10 +219,10 @@ def run() -> None:
     logging.basicConfig(
         level=cfg.log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    log.info("старт hybrid_bot: символы=%s порог=+%.2f%% объём=$%.0f "
-             "торговля=%s demo=%s", ",".join(cfg.symbol_list),
-             cfg.fix_threshold_pct, cfg.position_usd, cfg.trading_enabled,
-             cfg.bybit_demo)
+    log.info("старт hybrid_bot: символы=%s порог=+%.2f%% ставка=$%.0f "
+             "капитал=$%.0f торговля=%s demo=%s", ",".join(cfg.symbol_list),
+             cfg.fix_threshold_pct, cfg.position_usd, cfg.virtual_capital,
+             cfg.trading_enabled, cfg.bybit_demo)
     if cfg.trading_enabled and not (cfg.bybit_api_key and cfg.bybit_api_secret):
         log.error("торговля включена, но нет ключей API — выходим")
         return

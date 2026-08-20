@@ -75,6 +75,20 @@ class HybridDB:
         self._db.execute("DELETE FROM positions WHERE symbol=?", (symbol,))
         self._db.commit()
 
+    def open_notional(self, exclude: str | None = None) -> float:
+        """Сколько денег бота уже стоит в позициях (по цене входа).
+
+        Нужно, чтобы суммарный объём не вышел за пределы капитала, которым бот
+        считает себя ограниченным.
+        """
+        q = "SELECT COALESCE(SUM(qty * avg_entry), 0) FROM positions"
+        args: tuple = ()
+        if exclude:
+            q += " WHERE symbol<>?"
+            args = (exclude,)
+        row = self._db.execute(q, args).fetchone()
+        return float(row[0] or 0.0)
+
     # ─── сделки ──────────────────────────────────────────────────────────
 
     def record_closed(self, pos: dict, *, exit_px: float, reason: str,

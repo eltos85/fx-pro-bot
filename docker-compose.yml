@@ -713,10 +713,13 @@ services:
       # Наблюдение сначала: бот считает и пишет сделки с mode=paper, ордера не
       # отправляет. Включать только после согласования порога (§17.6).
       HYBRID_TRADING_ENABLED: ${HYBRID_TRADING_ENABLED:-false}
-      # Расстояние фиксации и объём позиции — значения из замера §17.6
-      # (1460 дней эфира). Меняются только через .env, не в коде.
+      # Расстояние фиксации — из замера §17.6 (1460 дней эфира).
       HYBRID_FIX_THRESHOLD_PCT: ${HYBRID_FIX_THRESHOLD_PCT:-6.0}
-      HYBRID_POSITION_USD: ${HYBRID_POSITION_USD:-7000}
+      # Капитал и максимальная ставка. На демо-счёте лежит больше, но бот
+      # работает так, будто у него $1000: суммарный объём его позиций эту
+      # величину не превышает. Меняются только через .env, не в коде.
+      HYBRID_VIRTUAL_CAPITAL: ${HYBRID_VIRTUAL_CAPITAL:-1000}
+      HYBRID_POSITION_USD: ${HYBRID_POSITION_USD:-200}
       HYBRID_MIN_NOTIONAL_USD: ${HYBRID_MIN_NOTIONAL_USD:-10}
       HYBRID_LEVERAGE: ${HYBRID_LEVERAGE:-1}
       # Telegram — тот же канал, что был у предшественника, префикс [hybrid].
