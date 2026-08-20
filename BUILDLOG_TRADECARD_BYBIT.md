@@ -1,7 +1,7 @@
 # BUILDLOG — tradecard-bybit
 
 Журнал сборки advisory-ревьюера `tradecard-bybit` над детерминированными
-Bybit-ботами `scalp_bot` и `flowzone_bot`. Канон — `STRATEGY_TRADECARD_BYBIT.md`
+Bybit-ботами `scalp_bot` и `hybrid_bot`. Канон — `STRATEGY_TRADECARD_BYBIT.md`
 (SMB Momentum Model, адаптированный под rule-based системы), тех-задание —
 `TASKSPEC_TRADECARD_BYBIT.md`.
 
@@ -12,6 +12,30 @@ report card, грейдит сделки по `score`, гоняет 5 Why (DeepS
 
 Формат: записи группируются по дням (новые сверху). Для багов: симптом →
 причина → решение. Для фич: что добавлено и на что влияет.
+
+---
+
+## 2026-08-20
+
+### chore(bots): вторая ветка ревьюера переведена с удалённого бота на hybrid_bot
+
+Второй покрываемый бот (order-flow) удалён из проекта как нерабочий, его место
+занял `hybrid_bot` (`STRATEGY_HYBRID.md` §18). Ревьюер переименован под новое
+имя: поля настроек `hybrid_*`, env `TRADECARD_BYBIT_HYBRID_*`, префикс Telegram
+`[tradecard-hybrid]`, монтирование БД `/bots/hybrid` (том `hybrid_data`),
+`--bot scalp|hybrid`.
+
+Логика анализа не менялась: схема `trades` у нового бота совпадает со схемой
+scalp_bot, поэтому загрузчик, метрики и грейдинг остались как были. Отличия
+нового бота, отражённые в канон-текстах: `score` не используется (у стратегии
+нет набора факторов входа), а `reasons` содержит одну причину закрытия
+(`fix_threshold` / `trend_flat` / `broker_flat`).
+
+**Файлы:** `src/tradecard_bybit/config/settings.py`, `data/bot_db.py`,
+`data/reasons.py`, `llm/five_why.py`, `app/main.py`, `analysis/trade.py`,
+`report/{digest,weekly}.py`, `__init__.py`, `tests/test_tradecard_bybit.py`,
+`docker-compose.yml`, `.env.example`, `TASKSPEC_TRADECARD_BYBIT.md`,
+`STRATEGY_TRADECARD_BYBIT.md`
 
 ---
 

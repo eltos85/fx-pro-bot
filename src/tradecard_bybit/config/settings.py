@@ -20,11 +20,11 @@ class TradecardBybitSettings(BaseSettings):
     # ─── Инфраструктура ──────────────────────────────────────────────────
     # Свой volume tradecard (своя SQLite + markdown report card).
     data_dir: str = Field(default="/data")
-    # БД ботов лежат в РАЗДЕЛЬНЫХ volume'ах (scalp_bot_data / flowzone_data),
+    # БД ботов лежат в РАЗДЕЛЬНЫХ volume'ах (scalp_bot_data / hybrid_data),
     # каждый бот монтирует свой как /data. tradecard монтирует их read-only по
-    # отдельным путям (см. docker-compose): /bots/scalp и /bots/flowzone.
+    # отдельным путям (см. docker-compose): /bots/scalp и /bots/hybrid.
     scalp_db_dir: str = Field(default="/bots/scalp")
-    flowzone_db_dir: str = Field(default="/bots/flowzone")
+    hybrid_db_dir: str = Field(default="/bots/hybrid")
     # Своя SQLite tradecard (темы/гипотезы/победы) — отдельный volume.
     db_filename: str = Field(default="tradecard_bybit.sqlite")
     log_level: str = Field(default="INFO")
@@ -44,8 +44,8 @@ class TradecardBybitSettings(BaseSettings):
     # Свои ключи на каждый бот; дефолты на ключи ботов задаются в compose.
     scalp_bybit_api_key: str = Field(default="")
     scalp_bybit_api_secret: str = Field(default="")
-    flowzone_bybit_api_key: str = Field(default="")
-    flowzone_bybit_api_secret: str = Field(default="")
+    hybrid_bybit_api_key: str = Field(default="")
+    hybrid_bybit_api_secret: str = Field(default="")
     bybit_demo: bool = Field(default=True)
     bybit_category: str = Field(default="linear")
     # Сверять net по Bybit closedPnl (full pagination). False — отчёт по
@@ -58,26 +58,26 @@ class TradecardBybitSettings(BaseSettings):
     scalp_telegram_enabled: bool = Field(default=False)
     scalp_telegram_bot_token: str = Field(default="")
     scalp_telegram_chat_id: str = Field(default="")
-    flowzone_telegram_enabled: bool = Field(default=False)
-    flowzone_telegram_bot_token: str = Field(default="")
-    flowzone_telegram_chat_id: str = Field(default="")
+    hybrid_telegram_enabled: bool = Field(default=False)
+    hybrid_telegram_bot_token: str = Field(default="")
+    hybrid_telegram_chat_id: str = Field(default="")
 
     # ─── Baseline анализа (точка отсчёта = последняя правка логики) ───────
     # Сделки ДО baseline не анализируются: до правки логики это «другая
     # стратегия», смешивать через границу нельзя (no-data-fitting + sample-size).
     # Пусто = без нижней границы. Дата обоснована артефактом (дата выката
-    # коммита, сменившего логику — BUILDLOG_SCALP/FLOWZONE), а не подбором.
+    # коммита, сменившего логику — BUILDLOG_SCALP/HYBRID), а не подбором.
     #
     # Bot-wide точка отсчёта (UTC) — fallback для стратегий без своей даты.
     # Формат: "YYYY-MM-DD" (полночь) ИЛИ "YYYY-MM-DD HH:MM" (если логика выкатилась
     # в середине дня — отсекаем сделки ДО выката того же дня):
     scalp_baseline_date: str = Field(default="")
-    flowzone_baseline_date: str = Field(default="")
+    hybrid_baseline_date: str = Field(default="")
     # Per-strategy даты (у страт scalp разные даты правок логики). Формат:
     # "strategy=YYYY-MM-DD,strategy2=YYYY-MM-DD" (напр.
     # "sweep_fade=2026-06-17,density_break=2026-06-15"). Приоритетнее bot-wide.
     scalp_baseline_dates: str = Field(default="")
-    flowzone_baseline_dates: str = Field(default="")
+    hybrid_baseline_dates: str = Field(default="")
 
     # ─── Пороги наблюдения (НЕ торговые; нейтральные/относительные) ───────
     # sample-size.mdc: «тема»/«победа» только при выборке ≥ этих порогов.
@@ -134,7 +134,7 @@ class TradecardBybitSettings(BaseSettings):
         import os
         if bot == "scalp":
             return os.path.join(self.scalp_db_dir, "scalp_bot.sqlite")
-        return os.path.join(self.flowzone_db_dir, "flowzone_bot.sqlite")
+        return os.path.join(self.hybrid_db_dir, "hybrid_bot.sqlite")
 
     @staticmethod
     def _parse_date(raw: str) -> float | None:
@@ -154,7 +154,7 @@ class TradecardBybitSettings(BaseSettings):
 
     def _baseline_map(self, bot: str) -> dict[str, float]:
         """Per-strategy baseline-даты бота: {strategy: epoch}."""
-        raw = self.scalp_baseline_dates if bot == "scalp" else self.flowzone_baseline_dates
+        raw = self.scalp_baseline_dates if bot == "scalp" else self.hybrid_baseline_dates
         out: dict[str, float] = {}
         for part in (raw or "").split(","):
             part = part.strip()
@@ -175,14 +175,14 @@ class TradecardBybitSettings(BaseSettings):
             if ps is not None:
                 return ps
         bot_wide = (self.scalp_baseline_date if bot == "scalp"
-                    else self.flowzone_baseline_date)
+                    else self.hybrid_baseline_date)
         return self._parse_date(bot_wide)
 
     def min_baseline_ts(self, bot: str) -> float | None:
         """Наименьшая из всех baseline-дат бота (для нижней границы загрузки)."""
         candidates = list(self._baseline_map(bot).values())
         bw = self._parse_date(self.scalp_baseline_date if bot == "scalp"
-                              else self.flowzone_baseline_date)
+                              else self.hybrid_baseline_date)
         if bw is not None:
             candidates.append(bw)
         return min(candidates) if candidates else None
@@ -190,15 +190,15 @@ class TradecardBybitSettings(BaseSettings):
     def bybit_keys(self, bot: str) -> tuple[str, str]:
         if bot == "scalp":
             return self.scalp_bybit_api_key, self.scalp_bybit_api_secret
-        return self.flowzone_bybit_api_key, self.flowzone_bybit_api_secret
+        return self.hybrid_bybit_api_key, self.hybrid_bybit_api_secret
 
     def telegram_for(self, bot: str) -> tuple[bool, str, str, str]:
         """(enabled, token, chat_id, prefix) для бота."""
         if bot == "scalp":
             return (self.scalp_telegram_enabled, self.scalp_telegram_bot_token,
                     self.scalp_telegram_chat_id, "[tradecard-scalp]")
-        return (self.flowzone_telegram_enabled, self.flowzone_telegram_bot_token,
-                self.flowzone_telegram_chat_id, "[tradecard-flowzone]")
+        return (self.hybrid_telegram_enabled, self.hybrid_telegram_bot_token,
+                self.hybrid_telegram_chat_id, "[tradecard-hybrid]")
 
 
 def load_settings() -> TradecardBybitSettings:

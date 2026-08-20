@@ -1,21 +1,21 @@
-"""Лёгкий Telegram-нотификатор flowzone_bot.
+"""Telegram-нотификатор hybrid_bot.
 
-Только исходящие сообщения (sendMessage), без поллинга/команд — чтобы не
-конфликтовать с другими ботами на том же токене. No-op если выключен или нет
-token/chat_id. Ошибки сети глушатся (нотификации не должны ронять торговлю).
+Только исходящие сообщения (sendMessage), без поллинга команд — чтобы не
+конфликтовать с другими ботами на том же токене. No-op, если выключен или нет
+token/chat_id. Ошибки сети глушатся: нотификации не должны ронять торговлю.
 
-Репорты идут в чат ai_trader (TASKSPEC §3), помечаются префиксом ``[flowzone]``
-(настраивается через FLOWZONE_TELEGRAM_PREFIX), чтобы отделить от ai_trader.
+Сообщения помечаются префиксом ``[hybrid]`` (HYBRID_TELEGRAM_PREFIX).
 
 Telegram Bot API: https://core.telegram.org/bots/api#sendmessage
 """
+
 from __future__ import annotations
 
 import logging
 
 import requests
 
-log = logging.getLogger("flowzone_bot.tg")
+log = logging.getLogger("hybrid_bot.tg")
 
 
 class TelegramNotifier:
@@ -27,7 +27,7 @@ class TelegramNotifier:
         self._prefix = prefix
         self._timeout = timeout
         if enabled and not (token and chat_id):
-            log.warning("Telegram включён, но нет token/chat_id — нотификации выкл")
+            log.warning("Telegram включён, но нет token/chat_id — выключаю")
 
     @property
     def active(self) -> bool:

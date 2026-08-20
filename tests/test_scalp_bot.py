@@ -1177,7 +1177,7 @@ def test_closed_pnl_detail_no_entry_match_returns_none():
     assert cl.closed_pnl_detail("SOLUSDT", qty=10.0, entry_price=66.0) is None
 
 
-# ─── partial-sum closed_pnl_position + универсальный true-up (port flowzone) ─
+# ─── partial-sum closed_pnl_position + универсальный true-up ────────────────
 def _rec_x(entry, size, pnl, exit_px, exec_type="Trade"):
     r = _rec(entry, size, pnl, exit_px)
     r["execType"] = exec_type

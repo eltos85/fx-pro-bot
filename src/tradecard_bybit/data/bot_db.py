@@ -1,4 +1,4 @@
-"""Read-only доступ к БД ботов ``scalp_bot`` / ``flowzone_bot`` (TASKSPEC §3.1).
+"""Read-only доступ к БД ботов ``scalp_bot`` / ``hybrid_bot`` (TASKSPEC §3.1).
 
 Открываем строго read-only через SQLite URI ``mode=ro`` — запись физически
 невозможна (read-only инвариант §11). tradecard НИЧЕГО не пишет в БД ботов.
@@ -16,7 +16,7 @@ class BotDBReadOnly:
     """Тонкая read-only обёртка над ``trades`` одной БД бота."""
 
     def __init__(self, db_path: str, bot: str) -> None:
-        if bot not in ("scalp", "flowzone"):
+        if bot not in ("scalp", "hybrid"):
             raise ValueError(f"unknown bot: {bot!r}")
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"bot db not found (read-only): {db_path}")

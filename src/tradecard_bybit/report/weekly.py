@@ -1,6 +1,6 @@
 """Недельный report card (markdown, TASKSPEC §8.2).
 
-Файл ``data/tradecard/{scalp|flowzone}_YYYY-WW.md``: темы, 5 Why, гипотеза-
+Файл ``data/tradecard/{scalp|hybrid}_YYYY-WW.md``: темы, 5 Why, гипотеза-
 решение, small-wins/momentum, грейд-аналитика (score→перформанс), факторный
 аудит (reasons), per-strategy разрез, baseline-vs-A+ (big-game-hunting).
 

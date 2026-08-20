@@ -13,7 +13,7 @@ COPY src ./src
 
 RUN pip install --no-cache-dir .
 
-ENV FLOWZONE_DATA_DIR=/data
+ENV HYBRID_DATA_DIR=/data
 VOLUME ["/data"]
 
-CMD ["python", "-m", "flowzone_bot.app.main"]
+CMD ["python", "-m", "hybrid_bot.app.main"]

@@ -2,7 +2,7 @@
 
 Краткая сводка за день: net P&L (paper/live раздельно), топ-3 паттерна,
 грейд-распределение по score, 1 actionable-наблюдение. Префикс ботов
-(``[tradecard-scalp]`` / ``[tradecard-flowzone]``) ставит TelegramNotifier.
+(``[tradecard-scalp]`` / ``[tradecard-hybrid]``) ставит TelegramNotifier.
 """
 from __future__ import annotations
 

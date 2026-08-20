@@ -750,7 +750,7 @@ class Executor:
         # (verified=0), включая WS-финализированные. Канон: REST closedPnl —
         # единственный источник правды (офдок close-pnl: closedPnl уже net).
         # Ловит дрейф недосчитанных комиссий на WS-complete сделках, который
-        # provisional-цикл выше не трогает (BUILDLOG flowzone 2026-06-17).
+        # provisional-цикл выше не трогает (разбор дрейфа комиссий 2026-06-17).
         for tr in self._db.unverified_closed_live_since(now - rest_horizon):
             if tr.pnl_provisional:
                 continue  # provisional обрабатывает цикл выше

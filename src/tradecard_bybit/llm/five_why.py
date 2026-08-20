@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from tradecard_bybit.analysis.trade import Trade
 from tradecard_bybit.llm.client import DeepSeekClient
 
-# Краткий канон страт (источник правды — STRATEGY_*/STRATEGY_FLOWZONE.md). Даём
+# Краткий канон страт (источник правды — STRATEGY_*/STRATEGY_HYBRID.md). Даём
 # LLM понять, что правило задумано как research-based, а не «баг» (TASKSPEC §6).
 _STRATEGY_CANON = {
     "sweep_fade": "CAP order-flow: свип ликвидности + CVD-дивергенция + reclaim "
@@ -29,9 +29,12 @@ _STRATEGY_CANON = {
                      "уровнем + CVD follow-through (анти-grab), taker; не фейд.",
     "density_bounce": "Фейд от resting-плотности (стена выстояла 20–30+ мин, "
                       "Bookmap absorption); вход maker.",
-    "flowzone": "Auction/Volume-Profile continuation (Steidlmayer/Dalton): "
-                "acceptance за value area → зона confluence ≥2 VP-факторов → "
-                "absorption контр-стороны → вход по тренду аукциона.",
+    "hybrid_fix_from_avg": "Регулярная фиксация тренда от своей средней цены "
+                           "входа (STRATEGY_HYBRID.md §17.4): покупка по "
+                           "SMA20/50 4h, закрытие своего объёма целиком на "
+                           "заданном расстоянии от средней, сразу обратный "
+                           "вход. Стопа нет — знак результата задаёт средняя "
+                           "цена, а не выбор момента.",
 }
 
 _PATTERN_HINT = {

@@ -1,9 +1,14 @@
-# TASKSPEC — tradecard (Bybit / scalp_bot + flowzone_bot) — тех-задание
+# TASKSPEC — tradecard (Bybit / scalp_bot + hybrid_bot) — тех-задание
+
+> 2026-08-20: второй покрываемый бот заменён. Вместо удалённого order-flow бота
+> ревьюер читает `hybrid_bot` (регулярная фиксация тренда от средней цены входа,
+> STRATEGY_HYBRID.md §17.4). Схема `trades` та же, поэтому загрузчик и метрики
+> не изменились; исторические абзацы ниже переписаны на новое имя.
 
 Это **тех-задание и промпты для агента** на реализацию аналитического ревьюера
 `tradecard` над данными **детерминированных Bybit-ботов** — **`scalp_bot`**
-(orderflow sweep/density, Bybit demo) и **`flowzone_bot`** (auction / volume-
-profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы контекст прошлых правок не
+(orderflow sweep/density, Bybit demo) и **`hybrid_bot`** (фиксация тренда от
+средней цены входа, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы контекст прошлых правок не
 протёк). Канон процесс-фреймворка для этих ботов —
 `STRATEGY_TRADECARD_BYBIT.md` (deterministic-чтение ролика
 <https://youtu.be/WDdvnd9vLbM>). Универсальный канон — `STRATEGY_TRADECARD.md`.
@@ -13,7 +18,7 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 > STRATEGY_TRADECARD_BYBIT.md).
 
 > ⚠️ `tradecard` — **advisory-ревьюер**, НЕ торговый бот и НЕ источник сигналов и
-> НЕ автотюнер конфига. Он читает БД `scalp_bot` / `flowzone_bot` **read-only**,
+> НЕ автотюнер конфига. Он читает БД `scalp_bot` / `hybrid_bot` **read-only**,
 > считает report card, грейдит сделки по `score`, гоняет 5 Why через LLM и отдаёт
 > **рекомендации человеку**. Он **НЕ меняет** пороги/правила/конфиг ботов
 > (`no-data-fitting.mdc`, `sample-size.mdc`, `strategy-guard.mdc`).
@@ -30,7 +35,7 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 ## 1. Цель и принципы
 
 - Реализовать `tradecard` (сборка под Bybit) — инструмент, который **превращает
-  сделки `scalp_bot` / `flowzone_bot` в SMB-style report card**: фиксирует
+  сделки `scalp_bot` / `hybrid_bot` в SMB-style report card**: фиксирует
   повторяющиеся убыточные паттерны → выделяет главный → диагностирует его 5 Why
   (LLM, read-only) → формулирует **гипотезу-решение/playbook-кандидат** → трекает
   «маленькие победы» (OOS-подтверждённое снижение паттерна) и momentum.
@@ -60,8 +65,8 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
   - **`scalp_bot`** — Bybit demo, orderflow HF-скальп; мультистратегийный
     (`sweep_fade`, `sweep_fade_canon`, `density_break`, `density_bounce`),
     `score` = число факторов сетапа; держание ~секунды-минуты.
-  - **`flowzone_bot`** — Bybit demo, auction/volume-profile (continuation),
-    страта `flowzone`, `score` = confluence-score зоны; фаза observe
+  - **`hybrid_bot`** — Bybit demo, фиксация тренда от средней цены входа,
+    страта `hybrid_fix_from_avg`, `score` не используется; фаза observe
     (`trading_enabled=False` по умолчанию).
   «Трейдер» из канона = **связка конфиг-стратегии + человек-оператор** (бот без
   дискреции, см. STRATEGY_TRADECARD_BYBIT §2).
@@ -78,10 +83,10 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 ### 3.1 БД ботов (read-only)
 
 Открывать **строго read-only**. Обе БД имеют **идентичную** схему `trades` (см.
-`src/scalp_bot/state/db.py`, `src/flowzone_bot/state/db.py`):
+`src/scalp_bot/state/db.py`, `src/hybrid_bot/db.py`):
 
 - SQLite `scalp_bot.sqlite` (volume `scalp_bot_data`, bind `/data`).
-- SQLite `flowzone_bot.sqlite` (volume `flowzone_data`, bind `/data`).
+- SQLite `hybrid_bot.sqlite` (volume `hybrid_data`, bind `/data`).
 
 Таблица **`trades`** (поля-источники для детекторов):
 
@@ -96,7 +101,8 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 > Нет таблиц `decisions`/`lessons`/`daily_pnl` (в отличие от fx_ai_trader). Вся
 > «причина входа» — в `score` + `reasons` + `strategy`. Это и есть детерминированный
 > аналог «llm_reason». `reasons` парсить как список токенов (scalp:
-> `sweep,cvd_div,reclaim,mom,ob_imb,key_*`; flowzone: `ctx=…,zone=…+…,tp=…,absorb*`).
+> `sweep,cvd_div,reclaim,mom,ob_imb,key_*`; hybrid: причина закрытия одним
+> токеном — `fix_threshold` / `trend_flat` / `broker_flat`).
 
 > Исключать **не-торговые** закрытия из метрик WR/EXP (как делает сам бот):
 > `close_reason IN ('restart_flat','entry_Cancelled','entry_Rejected',
@@ -177,7 +183,7 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 - Вход в промпт: код паттерна, агрегаты (частота, net-эффект, разрезы symbol/
   session/score/strategy), 3-5 репрезентативных сделок с
   `reasons / score / close_reason / mode / net`, и контекст канона стратегии
-  (из `STRATEGY_*` / `STRATEGY_FLOWZONE.md` — чтобы 5 Why знал, что правило
+  (из `STRATEGY_*` / `STRATEGY_HYBRID.md` — чтобы 5 Why знал, что правило
   задумано как research-based, а не «баг»).
 - Выход: цепочка 5 «почему» + **гипотеза-решение** (≤200 симв.): фильтр режима /
   session-гейт / перекалибровка score / удаление factor-noise / новый playbook —
@@ -215,10 +221,10 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 ## 8. Выход (отчёты)
 
 1. **Дневной digest** в Telegram (настройки Telegram соответствующего бота),
-   префиксы **`[tradecard-scalp]`** / **`[tradecard-flowzone]`** (у ботов
+   префиксы **`[tradecard-scalp]`** / **`[tradecard-hybrid]`** (у ботов
    раздельные telegram-конфиги): net P&L (Bybit closedPnl) за день paper/live,
    топ-3 паттерна, грейд-распределение по `score`, 1 actionable-наблюдение.
-2. **Недельный report card** — markdown в `data/tradecard/{scalp|flowzone}_
+2. **Недельный report card** — markdown в `data/tradecard/{scalp|hybrid}_
    YYYY-WW.md`: темы, 5 Why, гипотеза-решение, small-wins/momentum, грейд-
    аналитика (`score`→перформанс), факторный аудит (`reasons`), per-strategy
    разрез, baseline-vs-A+ (big-game-hunting детектор).
@@ -233,11 +239,11 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 
 - **Модуль:** **самостоятельный пакет** `src/tradecard_bybit/` (НЕ связан с
   `src/tradecard_fx/` — нет общего кода/импортов между ними) с адаптерами источников
-  `tradecard_bybit/data/scalp_*` и `tradecard_bybit/data/flowzone_*`. Подпакеты:
+  `tradecard_bybit/data/scalp_*` и `tradecard_bybit/data/hybrid_*`. Подпакеты:
   `data/ analysis/ llm/ report/ state/ app/`. 5 Why / грейдинг / small-wins движок
   живёт внутри этого пакета (если позже захочется общего ядра — выносить в
   нейтральный `src/shared_*`, но не в FX-пакет).
-- **CLI:** `tradecard-bybit daily --bot scalp|flowzone` /
+- **CLI:** `tradecard-bybit daily --bot scalp|hybrid` /
   `tradecard-bybit weekly --bot …` (+ `--since/--dry-run/--paper|--live`).
 - **Запуск:** scheduler-контейнер/cron; сервис(ы) `tradecard-bybit` в
   `docker-compose.yml`; **read-only** mount `./data` (обе БД ботов) + свой volume
@@ -255,14 +261,14 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 `/root/fx-pro-bot/.env` на VPS (`204.168.149.140`).
 
 - **DeepSeek:** `DEEPSEEK_API_KEY` (общий), модель/base_url по дефолту.
-- **Bybit (demo):** ключи ботов — `SCALP_BYBIT_*` / `FLOWZONE_BYBIT_*` (см.
-  `src/scalp_bot/config/settings.py`, `src/flowzone_bot/config/settings.py`;
-  flowzone имеет fallback на общий Bybit-ключ в compose). Только **read** scope
+- **Bybit (demo):** ключи ботов — `SCALP_BYBIT_*` / `HYBRID_BYBIT_*` (см.
+  `src/scalp_bot/config/settings.py`, `src/hybrid_bot/settings.py`;
+  hybrid имеет fallback на общий Bybit-ключ в compose). Только **read** scope
   (closedPnl/klines).
 - **БД ботов:** SQLite в bind `./data` (read-only mount): `scalp_bot.sqlite`,
-  `flowzone_bot.sqlite`.
+  `hybrid_bot.sqlite`.
 - **Telegram:** настройки соответствующего бота (`SCALP_TELEGRAM_*` /
-  `FLOWZONE_TELEGRAM_*`), префиксы `[tradecard-scalp]` / `[tradecard-flowzone]`.
+  `HYBRID_TELEGRAM_*`), префиксы `[tradecard-scalp]` / `[tradecard-hybrid]`.
 - Для tradecard завести свои `TRADECARD_BYBIT_*` с дефолтами на ключи ботов в
   compose, чтобы аудит был раздельным.
 
@@ -282,7 +288,7 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
   парсинг гипотезы.
 - **Small wins §7:** in-sample улучшение НЕ засчитывается как победа; только
   forward после «внедрения» + порог значимости (sample-size).
-- **Read-only инвариант:** запись в БД `scalp_bot`/`flowzone_bot` невозможна.
+- **Read-only инвариант:** запись в БД `scalp_bot`/`hybrid_bot` невозможна.
 
 ---
 
@@ -305,7 +311,7 @@ profile, Bybit demo) — в **ОТДЕЛЬНОМ чате** (чтобы конт
 
 ## 13. Фазы реализации (milestones)
 
-1. **Каркас:** Bybit-адаптеры в `src/tradecard_bybit/` (scalp + flowzone), конфиг
+1. **Каркас:** Bybit-адаптеры в `src/tradecard_bybit/` (scalp + hybrid), конфиг
    (env `TRADECARD_BYBIT_*`), read-only доступ к обеим БД, своя SQLite, Telegram.
    CLI `daily --bot` печатает базовую сводку (net из БД, paper/live), без анализа.
 2. **Ground truth P&L:** Bybit closedPnl (full pagination) + сверка с
@@ -332,13 +338,13 @@ win не объявлен по in-sample.
 > Скопировать в новый чат как первое сообщение.
 
 ```
-Реализуем advisory-ревьюер tradecard (Bybit / scalp_bot + flowzone_bot) по
+Реализуем advisory-ревьюер tradecard (Bybit / scalp_bot + hybrid_bot) по
 тех-заданию TASKSPEC_TRADECARD_BYBIT.md и канону STRATEGY_TRADECARD_BYBIT.md
 (deterministic-чтение ролика https://youtu.be/WDdvnd9vLbM — SMB Momentum Model).
 
 Контекст:
 - tradecard = АНАЛИТИКА, не торговый бот и не автотюнер. Читает БД scalp_bot и
-  flowzone_bot read-only, считает report card, грейдит по score, гоняет 5 Why
+  hybrid_bot read-only, считает report card, грейдит по score, гоняет 5 Why
   через DeepSeek, отдаёт рекомендации человеку. НЕ меняет пороги/правила/конфиг
   ботов и НЕ пишет в их БД.
 - Боты ДЕТЕРМИНИРОВАННЫЕ (нет LLM/decisions/lessons). «Решение входа» = поля
@@ -347,9 +353,9 @@ win не объявлен по in-sample.
 - P&L ground truth = Bybit closedPnl net (pnl_verified=1 / full pagination
   scripts/collect_bybit_3bots_stats.py), не БД-оценка; paper/live раздельно (mode).
 - LLM = DeepSeek (DEEPSEEK_API_KEY), инлайн-клиент внутри src/tradecard_bybit/llm/.
-- Креды: SCALP_* / FLOWZONE_* (см. config/settings.py обоих ботов); для tradecard
+- Креды: SCALP_* / HYBRID_* (см. настройки обоих ботов); для tradecard
   свои TRADECARD_BYBIT_* с дефолтами на них.
-- Telegram: настройки каждого бота, префиксы [tradecard-scalp] / [tradecard-flowzone].
+- Telegram: настройки каждого бота, префиксы [tradecard-scalp] / [tradecard-hybrid].
 - Изоляция: ОТДЕЛЬНЫЙ пакет src/tradecard_bybit/ (без импортов из src/tradecard_fx/),
   своя SQLite (volume tradecard_bybit_data), свой сервис, свой
   BUILDLOG_TRADECARD_BYBIT.md.
@@ -357,8 +363,8 @@ win не объявлен по in-sample.
 Прежде чем писать код:
 1. Прочитай STRATEGY_TRADECARD_BYBIT.md и TASKSPEC_TRADECARD_BYBIT.md целиком.
 2. Сверься со схемой trades обоих ботов (src/scalp_bot/state/db.py,
-   src/flowzone_bot/state/db.py) — поля §3; распарси reasons-токены (signals.py /
-   strategy.py).
+   src/hybrid_bot/db.py) — поля §3; распарси reasons-токены (signals.py /
+   app/main.py).
 3. Работай по фазам §13. После каждой — сверка с каноном.
 4. Соблюдай правила: no-data-fitting (ЦЕНТРАЛЬНОЕ — запрет подгонки конфига),
    sample-size, strategy-guard (advisory-only), stats-collection, api-docs,
@@ -374,7 +380,7 @@ win не объявлен по in-sample.
 
 **Зафиксировано:**
 - Имя = `tradecard` (сборка `tradecard-bybit`), покрывает оба бота (scalp +
-  flowzone) одним модулем с двумя адаптерами.
+  hybrid) одним модулем с двумя адаптерами.
 - Режим = периодический (daily + weekly), advisory-only.
 - P&L = Bybit closedPnl net (pnl_verified / full pagination), paper/live
   раздельно, §3.2.

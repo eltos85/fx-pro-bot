@@ -1,7 +1,8 @@
 """tradecard_bybit — advisory-ревьюер над данными детерминированных Bybit-ботов.
 
-Покрывает ``scalp_bot`` (orderflow sweep/density) и ``flowzone_bot`` (auction /
-volume-profile). Читает БД ботов **строго read-only**, считает SMB-style report
+Покрывает ``scalp_bot`` (orderflow sweep/density) и ``hybrid_bot`` (регулярная
+фиксация тренда от средней цены входа, STRATEGY_HYBRID.md §17.4). Читает БД
+ботов **строго read-only**, считает SMB-style report
 card, грейдит сделки по полю ``score``, гоняет 5 Why через DeepSeek и отдаёт
 рекомендации человеку. Он **НЕ** меняет пороги/правила/конфиг ботов и **НИЧЕГО**
 не пишет в их БД (см. TASKSPEC_TRADECARD_BYBIT.md, STRATEGY_TRADECARD_BYBIT.md;

@@ -6,6 +6,19 @@
 
 ## 2026-08-20
 
+### chore(compose): удалён order-flow бот, на его место встал `hybrid_bot`
+
+Кросс-cutting правка `docker-compose.yml` и `pyproject.toml`: сервис
+предшественника удалён вместе с кодом и доками, вместо него сервис `hybrid-bot`
+(том `hybrid_data`, Dockerfile.hybrid-bot). Ключи и Telegram новый бот
+наследует через цепочку дефолтов, чтобы `.env` на VPS не переписывать.
+
+Advisor и cTrader-часть не затронуты: правок в `src/fx_pro_bot/` нет. Запись
+здесь — только потому, что менялся общий compose-файл. Подробности —
+`BUILDLOG_HYBRID.md`, стратегия — `STRATEGY_HYBRID.md` §17-18.
+
+**Файлы:** `docker-compose.yml`, `pyproject.toml`, `.env.example`
+
 ### incident(ctrader-tokens): `data/ctrader_tokens.json` под git — `reset --hard` откатывает живой токен
 
 `инцидент на VPS, код не менялся`

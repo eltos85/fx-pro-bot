@@ -1,4 +1,4 @@
-"""Юнит-тесты tradecard_bybit (advisory-ревьюер scalp_bot / flowzone_bot).
+"""Юнит-тесты tradecard_bybit (advisory-ревьюер scalp_bot / hybrid_bot).
 
 Все цели — чистая детерминированная логика (без сети/биржи). Фикстуры честные:
 поля trades задаются явно для проверки ЛОГИКИ детекторов/грейдинга, без рисовки
@@ -61,8 +61,8 @@ def test_parse_reasons_scalp_flat():
     assert parse_reasons(None) == []
 
 
-def test_factor_tokens_flowzone_structural():
-    # flowzone: structural ctx=/zone=/tp= раскладываются на атомы
+def test_factor_tokens_structural():
+    # structural ctx=/zone=/tp= раскладываются на атомы
     toks = factor_tokens("ctx=down,zone=val+poc,tp=swing,absorb_seller")
     assert "ctx:down" in toks
     assert "zone:val" in toks and "zone:poc" in toks
@@ -108,22 +108,22 @@ def test_baseline_ts_botwide_and_per_strategy():
     assert cfg.min_baseline_ts("scalp") == d("2026-06-10")
     # некорректная дата игнорируется
     assert TradecardBybitSettings(scalp_baseline_date="bad").baseline_ts("scalp") is None
-    assert cfg.baseline_ts("flowzone") is None
+    assert cfg.baseline_ts("hybrid") is None
 
 
 def test_baseline_ts_accepts_time():
     from datetime import UTC, datetime
     # дата+время (логика выкатилась в середине дня) — отсекаем по моменту выката
-    cfg = TradecardBybitSettings(flowzone_baseline_date="2026-06-22 13:55")
+    cfg = TradecardBybitSettings(hybrid_baseline_date="2026-06-22 13:55")
     want = datetime(2026, 6, 22, 13, 55, tzinfo=UTC).timestamp()
-    assert cfg.baseline_ts("flowzone") == want
+    assert cfg.baseline_ts("hybrid") == want
     # ISO-форма с T тоже принимается
-    cfg2 = TradecardBybitSettings(flowzone_baseline_date="2026-06-22T13:55:00")
-    assert cfg2.baseline_ts("flowzone") == want
+    cfg2 = TradecardBybitSettings(hybrid_baseline_date="2026-06-22T13:55:00")
+    assert cfg2.baseline_ts("hybrid") == want
     # чистая дата = полночь UTC
     midnight = datetime(2026, 6, 22, tzinfo=UTC).timestamp()
     assert TradecardBybitSettings(
-        flowzone_baseline_date="2026-06-22").baseline_ts("flowzone") == midnight
+        hybrid_baseline_date="2026-06-22").baseline_ts("hybrid") == midnight
 
 
 def test_filter_baseline_per_strategy():

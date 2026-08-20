@@ -1,8 +1,8 @@
-"""CLI tradecard-bybit (advisory-ревьюер scalp_bot / flowzone_bot).
+"""CLI tradecard-bybit (advisory-ревьюер scalp_bot / hybrid_bot).
 
 Команды:
-  tradecard-bybit daily  --bot scalp|flowzone [--since YYYY-MM-DD] [--dry-run]
-  tradecard-bybit weekly --bot scalp|flowzone [--since YYYY-MM-DD] [--dry-run]
+  tradecard-bybit daily  --bot scalp|hybrid [--since YYYY-MM-DD] [--dry-run]
+  tradecard-bybit weekly --bot scalp|hybrid [--since YYYY-MM-DD] [--dry-run]
 
 Периодический режим (cron/scheduler), НЕ realtime. Читает БД ботов read-only,
 считает report card, грейдит по score, гоняет 5 Why (weekly), отдаёт отчёт
@@ -329,11 +329,11 @@ def run() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     ap = argparse.ArgumentParser(prog="tradecard-bybit",
-                                 description="advisory-ревьюер scalp/flowzone")
+                                 description="advisory-ревьюер scalp/hybrid")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("daily", "weekly"):
         p = sub.add_parser(name)
-        p.add_argument("--bot", required=True, choices=["scalp", "flowzone"])
+        p.add_argument("--bot", required=True, choices=["scalp", "hybrid"])
         p.add_argument("--since", default=None, help="YYYY-MM-DD (UTC)")
         p.add_argument("--dry-run", action="store_true",
                        help="не слать Telegram, не писать гипотезы")

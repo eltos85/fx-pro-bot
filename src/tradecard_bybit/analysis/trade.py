@@ -1,4 +1,4 @@
-"""Нормализованная модель сделки tradecard (общая для scalp / flowzone).
+"""Нормализованная модель сделки tradecard (общая для scalp / hybrid).
 
 Обе БД ботов имеют идентичную схему ``trades`` (TASKSPEC §3.1) → единая модель.
 Здесь же — производные метрики, нужные детекторам и грейдингу: R-multiple,
@@ -23,7 +23,7 @@ NON_TRADE_REASONS = frozenset({
 @dataclass
 class Trade:
     id: int
-    bot: str              # "scalp" | "flowzone"
+    bot: str              # "scalp" | "hybrid"
     ts_open: float
     symbol: str
     side: str             # "long" | "short"
