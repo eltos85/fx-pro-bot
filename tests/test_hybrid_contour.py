@@ -138,3 +138,81 @@ def test_funding_rows_are_not_trades():
     """
     assert "Funding" in mod.FUNDING_EXEC_TYPES
     assert "Funding" not in mod.TRADE_EXEC_TYPES
+
+
+def _snap_row(symbol="ETHUSDT"):
+    row = {f: 0 for f in mod.SNAPSHOT_FIELDS
+           if f not in ("ts_utc", "window_days")}
+    row["symbol"] = symbol
+    return row
+
+
+def test_snapshot_writes_header_once_and_appends(tmp_path):
+    path = str(tmp_path / "snap.csv")
+    for i in range(2):
+        assert mod._append_snapshot(path, [_snap_row()],
+                                    ts_utc="2026-08-20T1%d:00:00Z" % i,
+                                    window_days=7.0) is None
+    lines = open(path).read().strip().splitlines()
+    assert lines[0].split(",") == mod.SNAPSHOT_FIELDS
+    assert len(lines) == 3
+    assert all(len(ln.split(",")) == len(mod.SNAPSHOT_FIELDS) for ln in lines)
+
+
+def test_snapshot_rotates_file_when_schema_changed(tmp_path):
+    """Накопитель со старым (коротким) заголовком нельзя дописывать.
+
+    Реальный случай: файл на VPS был создан до добавления метрик
+    декомпозиции, dict стал шире заголовка — dict-writer сдвинул бы колонки.
+    """
+    path = str(tmp_path / "snap.csv")
+    with open(path, "w") as fh:
+        fh.write("ts_utc,window_days,symbol,realized_net\n")
+        fh.write("2026-08-19T10:00:00Z,3.0,ETHUSDT,12.5\n")
+
+    rotated = mod._append_snapshot(path, [_snap_row()],
+                                   ts_utc="2026-08-20T10:00:00Z",
+                                   window_days=7.0)
+    assert rotated is not None
+    assert open(rotated).read().count("2026-08-19") == 1
+
+    lines = open(path).read().strip().splitlines()
+    assert lines[0].split(",") == mod.SNAPSHOT_FIELDS
+    assert len(lines) == 2
+    assert len(lines[1].split(",")) == len(mod.SNAPSHOT_FIELDS)
+
+
+def test_snapshot_raises_on_field_outside_schema(tmp_path):
+    """Новая метрика без правки схемы должна падать, а не теряться молча."""
+    path = str(tmp_path / "snap.csv")
+    row = _snap_row()
+    row["brand_new_metric"] = 1
+    with pytest.raises(ValueError):
+        mod._append_snapshot(path, [row], ts_utc="2026-08-20T10:00:00Z",
+                             window_days=7.0)
+
+
+def test_snapshot_schema_matches_report_keys():
+    """Схема CSV должна совпадать с тем, что возвращает `_report_symbol`.
+
+    Расхождение уронило бы cron-прогон (extrasaction="raise") или оставило
+    пустую колонку — оба варианта обнаруживаются только через сутки.
+    """
+    import ast
+
+    tree = ast.parse(open(_PATH).read())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_report_symbol")
+    ret = next(n for n in ast.walk(fn)
+               if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict))
+    keys = [k.value for k in ret.value.keys if isinstance(k, ast.Constant)]
+    assert keys == [f for f in mod.SNAPSHOT_FIELDS
+                    if f not in ("ts_utc", "window_days")]
+
+
+def test_snapshot_noop_on_empty_rows(tmp_path):
+    """Пустой прогон (нет данных по символам) не должен создавать файл."""
+    path = str(tmp_path / "snap.csv")
+    assert mod._append_snapshot(path, [], ts_utc="2026-08-20T10:00:00Z",
+                                window_days=7.0) is None
+    assert not os.path.exists(path)

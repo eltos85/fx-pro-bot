@@ -63,6 +63,20 @@ ACTOR_TACTIC = "tactic"
 ACTOR_BRACKET = "bracket"
 ACTOR_UNKNOWN = "unknown"
 
+# Схема CSV-накопителя фиксирована явно, а не выводится из порядка ключей dict:
+# `csv.DictWriter` пишет значения в порядке `fieldnames` и не проверяет, какой
+# заголовок уже стоит в файле. Любая правка набора метрик иначе тихо сдвинула бы
+# колонки в уже накопленном ряду.
+SNAPSHOT_FIELDS = [
+    "ts_utc", "window_days", "symbol",
+    "realized_net", "fees_legs", "funding_paid", "n_legs", "n_closes",
+    "pos_size", "pos_avg", "mark", "unrealized", "contour_total",
+    "hold_qty", "hold_entry", "hold_total", "delta_vs_hold",
+    "core_gross", "tactic_gross", "forced_core_pnl", "forced_core_n",
+    "core_time_share", "mixed_time_share", "reentry_cost", "reentry_n",
+    "drift_above_share", "cushion_pct", "book_aligned", "book_skipped",
+]
+
 
 def _ms_to_utc(ms: int | str) -> datetime:
     return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
@@ -560,7 +574,44 @@ def _report_symbol(sess: HTTP, symbol: str, category: str,
                                     / len(drifts), 4) if drifts else ""),
         "cushion_pct": (round((mark / pos_avg - 1.0) * 100.0, 4)
                         if pos_size > 0 and pos_avg > 0 else ""),
+        # Невыровненная книга = декомпозиция ядро/тактика недостоверна.
+        # Без флага такие строки в накопителе не отличить от корректных.
+        "book_aligned": int(bool(book.get("aligned"))),
+        "book_skipped": int(book.get("skipped") or 0),
     }
+
+
+def _append_snapshot(path: str, rows: list[dict], *,
+                     ts_utc: str, window_days: float) -> str | None:
+    """Дописывает снапшот в CSV, не ломая уже накопленный ряд.
+
+    Если заголовок в файле не совпадает со `SNAPSHOT_FIELDS` (набор метрик
+    расширили), старый файл отложить в сторону и начать новый — сдвинутые
+    колонки хуже разрыва в истории. Возвращает путь отложенного файла.
+    """
+    if not rows:
+        return None
+
+    rotated: str | None = None
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        with open(path, newline="") as fh:
+            header = (fh.readline() or "").strip().split(",")
+        if header != SNAPSHOT_FIELDS:
+            stamp = ts_utc.replace("-", "").replace(":", "")
+            rotated = f"{path}.{stamp}.bak"
+            os.replace(path, rotated)
+
+    fresh = not (os.path.exists(path) and os.path.getsize(path) > 0)
+    with open(path, "a", newline="") as fh:
+        # extrasaction="raise": новая метрика без правки схемы должна падать
+        # громко, а не терять колонку молча.
+        w = csv.DictWriter(fh, fieldnames=SNAPSHOT_FIELDS,
+                           restval="", extrasaction="raise")
+        if fresh:
+            w.writeheader()
+        for r in rows:
+            w.writerow({"ts_utc": ts_utc, "window_days": window_days, **r})
+    return rotated
 
 
 def main() -> None:
@@ -599,15 +650,12 @@ def main() -> None:
           f"{'=' * 78}")
 
     if args.snapshot:
-        fields = ["ts_utc", "window_days"] + list(rows[0].keys())
-        exists = os.path.exists(args.snapshot)
-        with open(args.snapshot, "a", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=fields)
-            if not exists:
-                w.writeheader()
-            for r in rows:
-                w.writerow({"ts_utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "window_days": args.days, **r})
+        rotated = _append_snapshot(
+            args.snapshot, rows,
+            ts_utc=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            window_days=args.days)
+        if rotated:
+            print(f"схема снапшота изменилась, старый файл отложен: {rotated}")
         print(f"снапшот дописан: {args.snapshot}")
 
 
