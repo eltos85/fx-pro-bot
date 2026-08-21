@@ -50,6 +50,9 @@ class ImpulseSettings(BaseSettings):
 
     # В журналах 20× руками. Автомат: риск 1.5% депо, плечо кап 10.
     risk_frac: float = Field(default=0.015)
+    # Решение пользователя 2026-08-21: риск считаем от виртуальных $1000,
+    # сколько бы ни лежало на общем демо. 0 = от живого счёта (старое поведение).
+    virtual_capital: float = Field(default=1000.0)
     leverage: int = Field(default=10)
     min_notional_usd: float = Field(default=10.0)
 

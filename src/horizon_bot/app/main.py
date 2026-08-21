@@ -23,6 +23,19 @@ def _link(prefix: str) -> str:
     return f"{prefix}{uuid.uuid4().hex[:16]}"
 
 
+def working_capital(equity: float, virtual_capital: float) -> float:
+    """Капитал для ставки: не больше виртуального лимита.
+
+    На общем демо лежит десятки тысяч, но бот считает, что у него ровно
+    ``virtual_capital``. Если живой счёт меньше лимита — берём живой, чтобы
+    не ставить больше, чем есть. ``virtual_capital<=0`` — старое поведение
+    (весь живой счёт).
+    """
+    if virtual_capital <= 0:
+        return max(0.0, equity)
+    return max(0.0, min(equity, virtual_capital))
+
+
 def _cycle(cfg, client: HorizonClient, db: HorizonDB) -> None:
     fn = STRATEGIES.get(cfg.strategy)
     if fn is None:
@@ -54,7 +67,8 @@ def _cycle(cfg, client: HorizonClient, db: HorizonDB) -> None:
 
         if want == 1 and ours is None:
             px = client.last_price(sym) or closes[-1]
-            notional = equity * cfg.position_frac
+            capital = working_capital(equity, cfg.virtual_capital)
+            notional = capital * cfg.position_frac
             if notional < cfg.min_notional_usd:
                 log.info("%s нотионал $%.2f < min — skip", sym, notional)
                 continue

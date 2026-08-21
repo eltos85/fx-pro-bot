@@ -2,6 +2,18 @@
 
 Изолирован от `scalp_bot` / `horizon_bot` / `flowzone`. Bybit linear, демо.
 
+## 2026-08-21
+
+### change(impulse): риск от виртуальных $1000, не от живого демо
+
+Решение пользователя. Риск 1.5% считался от живого счёта (~$47 600 → $714,
+лот до $280k, биржа обрезала по maxMktOrderQty). Теперь капитал —
+`min(живой, VIRTUAL_CAPITAL)`, по умолчанию $1000 → риск $15. Сигнал и
+SL/TP не менялись. Открытых позиций не было.
+
+**Файлы:** `src/impulse_bot/settings.py`, `src/impulse_bot/app/main.py`,
+`tests/test_impulse_bot.py`, `docker-compose.yml`, `.env.example`
+
 ## 2026-08-19
 
 ### fix(impulse): обрезать Market qty до maxMktOrderQty

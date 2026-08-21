@@ -1,6 +1,23 @@
 """Сигналы horizon_bot: канон без подгонки, закрытые бары."""
 
+import pytest
+
+from horizon_bot.app.main import working_capital
 from horizon_bot.signals import sma, sma20_50_4h, sma200_daily
+
+
+def test_working_capital_caps_the_fat_demo_account():
+    """На общем демо $47k, ставка считается от тысячи."""
+    assert working_capital(47600.0, 1000.0) == pytest.approx(1000.0)
+    assert working_capital(47600.0, 1000.0) * 0.15 == pytest.approx(150.0)
+
+
+def test_working_capital_does_not_invent_money_if_wallet_is_smaller():
+    assert working_capital(400.0, 1000.0) == pytest.approx(400.0)
+
+
+def test_working_capital_zero_limit_means_use_the_live_wallet():
+    assert working_capital(47600.0, 0.0) == pytest.approx(47600.0)
 
 
 def test_sma_window():

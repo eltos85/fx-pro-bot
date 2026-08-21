@@ -33,9 +33,12 @@ class HorizonSettings(BaseSettings):
 
     symbols: str = Field(default="BTCUSDT,ETHUSDT")
     poll_sec: int = Field(default=300)
-    # Доля equity на один символ. Без плеча. Tharp: лучше недобрать, чем
+    # Доля капитала на один символ. Без плеча. Tharp: лучше недобрать, чем
     # рисковать ликвидацией на демо-счёте, общем со скальпом.
     position_frac: float = Field(default=0.15)
+    # Решение пользователя 2026-08-21: считаем ставку от виртуальных $1000,
+    # сколько бы ни лежало на общем демо. 0 = от живого счёта (старое поведение).
+    virtual_capital: float = Field(default=1000.0)
     leverage: int = Field(default=1)
     min_notional_usd: float = Field(default=10.0)
 

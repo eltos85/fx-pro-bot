@@ -1,5 +1,8 @@
 """Фильтры impulse-bot: правила из постов, не подгонка OHLC под вход."""
 
+import pytest
+
+from impulse_bot.app.main import working_capital
 from impulse_bot.signals import (
     Burst,
     Cluster,
@@ -82,3 +85,17 @@ def test_london_session():
     assert in_session(10, 7, 16)
     assert not in_session(6, 7, 16)
     assert not in_session(16, 7, 16)
+
+
+def test_working_capital_caps_the_fat_demo_account():
+    """Риск 1.5% считается от тысячи, не от $47k."""
+    assert working_capital(47600.0, 1000.0) == pytest.approx(1000.0)
+    assert working_capital(47600.0, 1000.0) * 0.015 == pytest.approx(15.0)
+
+
+def test_working_capital_does_not_invent_money_if_wallet_is_smaller():
+    assert working_capital(400.0, 1000.0) == pytest.approx(400.0)
+
+
+def test_working_capital_zero_limit_means_use_the_live_wallet():
+    assert working_capital(47600.0, 0.0) == pytest.approx(47600.0)

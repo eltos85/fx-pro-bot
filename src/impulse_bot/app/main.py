@@ -31,6 +31,18 @@ def _link() -> str:
     return f"impulse_{uuid.uuid4().hex[:16]}"
 
 
+def working_capital(equity: float, virtual_capital: float) -> float:
+    """Капитал для риска: не больше виртуального лимита.
+
+    На общем демо лежит десятки тысяч, но бот считает, что у него ровно
+    ``virtual_capital``. Если живой счёт меньше лимита — берём живой.
+    ``virtual_capital<=0`` — старое поведение (весь живой счёт).
+    """
+    if virtual_capital <= 0:
+        return max(0.0, equity)
+    return max(0.0, min(equity, virtual_capital))
+
+
 def _day() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -79,7 +91,7 @@ def _enter(cfg, client: ImpulseClient, db: ImpulseDB, symbol: str,
         sl, tp = px * (1 - sl_frac), px * (1 + tp_frac)
     else:
         sl, tp = px * (1 + sl_frac), px * (1 - tp_frac)
-    risk = equity * cfg.risk_frac
+    risk = working_capital(equity, cfg.virtual_capital) * cfg.risk_frac
     dist = abs(px - sl)
     if dist <= 0:
         return

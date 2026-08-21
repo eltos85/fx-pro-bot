@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-21
+
+### change(compose): виртуальный капитал $1000 у swing / daytrend / impulse
+
+Решение пользователя: эти боты ставили от живого демо (~$47k). В compose
+добавлен `*_VIRTUAL_CAPITAL=1000`. Подробности — `BUILDLOG_HORIZON.md`,
+`BUILDLOG_IMPULSE.md`. Hybrid и scalp не трогали.
+
+**Файлы:** `docker-compose.yml`, `.env.example`
+
 ## 2026-08-20
 
 ### chore(compose): удалён order-flow бот, на его место встал `hybrid_bot`
