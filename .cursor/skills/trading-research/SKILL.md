@@ -1,0 +1,36 @@
+---
+name: trading-research
+description: >-
+  Routes trading work in this repo through trader → mathematician → user
+  (if strategy) → programmer. Use for strategy improvement, finding losses,
+  PnL review, market analysis, or any change to a forex or crypto bot.
+  Triggers: стратегия, убытки, рынок, PnL, win rate, улучшить бота,
+  почему минус, анализ сделок, forex, crypto, Bybit, cTrader.
+---
+
+# Торговый пайплайн
+
+Не пиши код стратегии в первом ответе. Сначала разбери, потом посчитай,
+потом спроси, потом правь.
+
+## Порядок
+
+1. **Выбери трейдера**
+   - Крипта / Bybit / Solana / scalp / hybrid / impulse / horizon → прочитай [crypto-trader](../crypto-trader/SKILL.md)
+   - Форекс / gold / cTrader / advisor / fx_pro_bot / fx_ai_trader → прочитай [forex-trader](../forex-trader/SKILL.md)
+   - Неясно какой бот — спроси одним вопросом. Не анализируй оба сразу.
+2. **Трейдер выдаёт гипотезу.** Код на этом шаге не пишется.
+3. **Прочитай [quant-math](../quant-math/SKILL.md)** и проверь гипотезу цифрами.
+4. **Стой, если это правка стратегии** (пороги, SL/TP, фильтры, отключение инструмента): спроси пользователя. Без ответа не кодируй.
+5. **Баг** (неверная формула, SL > TP, inverted side) — можно чинить сразу через [trading-engineer](../trading-engineer/SKILL.md).
+6. **Код** — только через trading-engineer, после шагов выше.
+
+Карта ботов: [bots.md](bots.md).
+
+## Что сказать пользователю
+
+Коротко, без жаргона:
+
+- что нашёл трейдер (1–3 пункта)
+- что сказал математик: мало данных / это баг / эффект похож на настоящий
+- что предлагаешь делать и нужен ли его «да»
