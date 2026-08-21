@@ -84,22 +84,26 @@ def _money(pos: dict, exit_px: float, exit_fee: float = 0.0) -> float:
 
 
 def _executed(cfg: HybridSettings, client: HybridClient, link_id: str,
-              symbol: str, qty: float, price: float) -> tuple[float, float,
-                                                              float]:
+              symbol: str, qty: float, price: float, *,
+              order_id: str = "") -> tuple[float, float, float]:
     """Чем сделка обошлась на самом деле: (объём, цена, комиссия).
 
     В торговле — из истории исполнений: цена тикера и нулевая комиссия завышают
     результат, а канон требует сходимости учёта с биржей 1:1 (§8.4). В режиме
     наблюдения фактических данных нет, поэтому комиссия оценивается по ставке
     taker — иначе бумажные цифры были бы лучше живых.
+
+    Если история ещё не успела (REST отстаёт от ордера), комиссию всё равно
+    оцениваем по taker: ноль на этой ноге — это ложь в плюс.
     """
     if not cfg.trading_enabled:
         return qty, price, qty * price * cfg.taker_fee
-    fill = client.fill_of(link_id)
+    fill = client.fill_of(link_id, order_id=order_id)
     if fill is None:
+        fee = qty * price * cfg.taker_fee
         log.warning("%s исполнение по %s не прочитано — считаем по цене %.4f "
-                    "без комиссии", symbol, link_id, price)
-        return qty, price, 0.0
+                    "с оценкой комиссии $%.4f", symbol, link_id, price, fee)
+        return qty, price, fee
     return fill.qty, fill.price, fill.fee
 
 
@@ -120,6 +124,7 @@ def _open(cfg: HybridSettings, client: HybridClient, db: HybridDB,
         log.info("%s объём %.6f меньше минимального — пропуск", symbol, qty)
         return False
     lid = _link(cfg.link_prefix)
+    order_id = ""
     if cfg.trading_enabled:
         client.set_leverage(symbol, cfg.leverage)
         res = client.market(symbol=symbol, side="Buy", qty=qty,
@@ -127,7 +132,13 @@ def _open(cfg: HybridSettings, client: HybridClient, db: HybridDB,
         if not res.get("ok"):
             log.warning("%s вход отклонён: %s", symbol, res.get("error"))
             return False
-    qty, fill_px, fee = _executed(cfg, client, lid, symbol, qty, price)
+        order_id = res.get("order_id") or ""
+    qty, fill_px, fee = _executed(cfg, client, lid, symbol, qty, price,
+                                  order_id=order_id)
+    if cfg.trading_enabled:
+        broker = client.get_position(symbol)
+        if broker and broker.size > 0 and broker.entry_price > 0:
+            fill_px = broker.entry_price
     db.open_pos(symbol, "Buy", qty, fill_px, lid, fixations=fixations,
                 entry_fee=fee)
     log.info("%s вход %.6f по %.4f на $%.0f, комиссия $%.4f%s", symbol, qty,
@@ -146,13 +157,16 @@ def _close(cfg: HybridSettings, client: HybridClient, db: HybridDB,
     Возвращает (цена исполнения, чистые деньги) или None, если биржа отказала.
     """
     lid = _link(cfg.link_prefix)
+    order_id = ""
     if cfg.trading_enabled:
         res = client.market(symbol=symbol, side="Sell", qty=pos["qty"],
                             order_link_id=lid, reduce_only=True)
         if not res.get("ok"):
             log.warning("%s выход отклонён: %s", symbol, res.get("error"))
             return None
-    _, fill_px, fee = _executed(cfg, client, lid, symbol, pos["qty"], price)
+        order_id = res.get("order_id") or ""
+    _, fill_px, fee = _executed(cfg, client, lid, symbol, pos["qty"], price,
+                                order_id=order_id)
     db.record_closed(pos, exit_px=fill_px, reason=reason,
                      mode=cfg.trade_mode, strategy=STRATEGY, exit_fee=fee)
     db.drop_pos(symbol)

@@ -135,8 +135,8 @@ class HybridClient:
             )
         return Position(symbol=symbol, side="", size=0.0, entry_price=0.0)
 
-    def fill_of(self, order_link_id: str, *, attempts: int = 3,
-                delay_sec: float = 1.0) -> Fill | None:
+    def fill_of(self, order_link_id: str, *, order_id: str = "",
+                attempts: int = 8, delay_sec: float = 1.5) -> Fill | None:
         """Чем на самом деле исполнился наш ордер.
 
         Нужно для учёта 1:1 с биржей: цена тикера и нулевая комиссия завышают
@@ -144,20 +144,40 @@ class HybridClient:
         («You may have multiple executions in a single order»), поэтому цена
         считается взвешенной по объёму, а комиссии суммируются.
 
-        Запрос по `orderLinkId` имеет приоритет над symbol, остальные параметры
-        при нём игнорируются. История исполнений через REST отстаёт от ответа на
-        ордер (офдок для real-time рекомендует websocket), поэтому запрос
-        повторяется несколько раз.
+        `orderId` старше `orderLinkId` старше symbol: если переданы оба, биржа
+        берёт номер ордера. Ответ на создание ордера асинхронный, история
+        исполнений через REST отстаёт (офдок для real-time рекомендует
+        websocket) — поэтому запрос повторяется с паузой. На живом боте трёх
+        попыток по 1 с не хватило: закрытие успевало, обратный вход через
+        3 секунды — нет.
         https://bybit-exchange.github.io/docs/v5/order/execution
+        https://bybit-exchange.github.io/docs/v5/order/create-order
         """
         for attempt in range(attempts):
+            fill = self._lookup_fill(order_id=order_id,
+                                     order_link_id=order_link_id)
+            if fill is not None:
+                return fill
+            if attempt + 1 < attempts:
+                time.sleep(delay_sec)
+        log.warning("исполнения по %s не найдены",
+                    order_id or order_link_id)
+        return None
+
+    def _lookup_fill(self, *, order_id: str, order_link_id: str) -> Fill | None:
+        """Один заход в историю исполнений. Сначала номер ордера, потом наша метка."""
+        keys: list[dict] = []
+        if order_id:
+            keys.append({"orderId": order_id})
+        if order_link_id:
+            keys.append({"orderLinkId": order_link_id})
+        for extra in keys:
             try:
                 resp = self._session.get_executions(
-                    category=self._category, orderLinkId=order_link_id,
-                    limit=100)
+                    category=self._category, limit=100, **extra)
             except Exception:
-                log.exception("get_executions %s", order_link_id)
-                return None
+                log.exception("get_executions %s", extra)
+                continue
             rows = [r for r in ((resp.get("result") or {}).get("list") or [])
                     if r.get("execType") in TRADE_EXEC_TYPES]
             qty = sum(float(r.get("execQty") or 0) for r in rows)
@@ -166,9 +186,6 @@ class HybridClient:
                             * float(r.get("execPrice") or 0) for r in rows)
                 fee = sum(float(r.get("execFee") or 0) for r in rows)
                 return Fill(qty=qty, price=value / qty, fee=fee)
-            if attempt + 1 < attempts:
-                time.sleep(delay_sec)
-        log.warning("исполнения по %s не найдены", order_link_id)
         return None
 
     def set_leverage(self, symbol: str, leverage: int) -> None:
@@ -208,4 +225,6 @@ class HybridClient:
             return {"ok": False, "error": str(e)}
         if resp.get("retCode") not in (0, None):
             return {"ok": False, "error": resp.get("retMsg", "")}
-        return {"ok": True, "result": resp.get("result")}
+        result = resp.get("result") or {}
+        return {"ok": True, "result": result,
+                "order_id": result.get("orderId") or ""}

@@ -229,7 +229,7 @@ class _FakeClient:
         self._fill = fill
         self.asked: list[str] = []
 
-    def fill_of(self, link_id: str) -> Fill | None:
+    def fill_of(self, link_id: str, **_kwargs) -> Fill | None:
         self.asked.append(link_id)
         return self._fill
 
@@ -251,11 +251,12 @@ def test_observation_mode_estimates_the_taker_fee():
 
 
 def test_unreadable_execution_falls_back_to_the_requested_price():
-    """Биржа не отдала исполнение — считаем по цене заявки, но не врём в плюс."""
+    """Биржа не отдала исполнение — цена заявки, комиссия по taker, не ноль."""
     cfg = HybridSettings(trading_enabled=True)
     qty, px, fee = _executed(cfg, _FakeClient(None), "hybrid_a", "ETHUSDT",
                              0.08, 2293.37)
-    assert (qty, px, fee) == (0.08, 2293.37, 0.0)
+    assert (qty, px) == (0.08, 2293.37)
+    assert fee == pytest.approx(0.08 * 2293.37 * cfg.taker_fee)
 
 
 def test_fill_is_volume_weighted_and_skips_funding():
@@ -279,6 +280,50 @@ def test_fill_is_volume_weighted_and_skips_funding():
     assert fill.qty == pytest.approx(0.08)
     assert fill.price == pytest.approx((0.05 * 2000 + 0.03 * 2100) / 0.08)
     assert fill.fee == pytest.approx(0.09)
+
+
+def test_fill_of_asks_order_id_first_then_link_id():
+    """Номер ордера старше нашей метки — так сказано в доке execution/list."""
+    seen: list[dict] = []
+
+    def get_executions(**kw):
+        seen.append({k: kw[k] for k in ("orderId", "orderLinkId") if k in kw})
+        if "orderId" in kw:
+            return {"result": {"list": []}}
+        return {"result": {"list": [
+            {"execType": "Trade", "execQty": "0.08", "execPrice": "2300",
+             "execFee": "0.1"},
+        ]}}
+
+    client = HybridClient.__new__(HybridClient)
+    client._category = "linear"
+    client._session = type("S", (), {"get_executions": staticmethod(get_executions)})()
+    fill = client.fill_of("hybrid_a", order_id="oid-1", attempts=1)
+    assert fill is not None and fill.price == pytest.approx(2300.0)
+    assert seen[0] == {"orderId": "oid-1"}
+    assert seen[1] == {"orderLinkId": "hybrid_a"}
+
+
+def test_fill_of_retries_until_the_history_catches_up(monkeypatch):
+    """REST отстаёт от ордера — несколько пустых ответов, потом сделка."""
+    calls = {"n": 0}
+    monkeypatch.setattr("hybrid_bot.client.time.sleep", lambda _s: None)
+
+    def get_executions(**_kw):
+        calls["n"] += 1
+        if calls["n"] < 4:
+            return {"result": {"list": []}}
+        return {"result": {"list": [
+            {"execType": "Trade", "execQty": "0.08", "execPrice": "2310",
+             "execFee": "0.1"},
+        ]}}
+
+    client = HybridClient.__new__(HybridClient)
+    client._category = "linear"
+    client._session = type("S", (), {"get_executions": staticmethod(get_executions)})()
+    fill = client.fill_of("hybrid_a", attempts=8, delay_sec=0.0)
+    assert fill is not None and fill.price == pytest.approx(2310.0)
+    assert calls["n"] == 4
 
 
 def test_trades_table_matches_tradecard_reader(tmp_path):
