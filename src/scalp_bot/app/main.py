@@ -978,8 +978,8 @@ def _select_universe(client, cfg) -> list[str]:
         tickers = [t for t in tickers
                    if (t.get("symbol") or "") not in non_crypto]
         if before != len(tickers):
-            log.info("отсев не-крипто перпов (stock/commodity) из вселенной: "
-                     "%d → %d тикеров", before, len(tickers))
+            log.info("отсев не-крипто перпов (stock/ETF/commodity) из "
+                     "вселенной: %d → %d тикеров", before, len(tickers))
     if cfg.universe_method.strip().lower() == "momentum":
         picked = select_momentum_universe(
             tickers,
