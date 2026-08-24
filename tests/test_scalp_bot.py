@@ -3041,8 +3041,10 @@ def test_non_crypto_type_symbols_pagination_and_filter():
     страницу и символы после 500 будут пропущены, правило stats-collection.mdc).
     Крипто- и innovation-перпы в множество НЕ попадают."""
     pages = [
+        # symbolType SOXLUSDT — 'ETF', сверено с боевым API 2026-08-24
+        # (раньше фикстура ошибочно ставила ему 'stock' и прятала утечку).
         [_instr("BTCUSDT", ""), _instr("SKHYNIXUSDT", "stock"),
-         _instr("SOXLUSDT", "stock"), _instr("NEARUSDT", "")],
+         _instr("SOXLUSDT", "ETF"), _instr("NEARUSDT", "")],
         [_instr("SOLUSDT", ""), _instr("NVDLUSDT", "stock"),
          _instr("HYPEUSDT", "innovation")],
     ]
@@ -3050,6 +3052,20 @@ def test_non_crypto_type_symbols_pagination_and_filter():
     stock = cl.non_crypto_type_symbols()
     assert stock == {"SKHYNIXUSDT", "SOXLUSDT", "NVDLUSDT"}
     assert cl._session.calls == 2  # прошли обе страницы, остановились на пустом cursor
+
+
+def test_non_crypto_type_symbols_include_etf_perps():
+    """2026-08-24: Bybit отдаёт перпы на биржевые фонды ОТДЕЛЬНЫМ symbolType
+    'ETF', а не как 'stock'. Фильтр знал только stock/commodity, поэтому
+    43 инструмента протекали во вселенную: SOXLUSDT набрал 343 entry_Rejected
+    и 19 исполненных сделок в статистике страт. Сверено с боевым API:
+    SOXLUSDT symbolType='ETF', SKHYNIXUSDT='stock', CLUSDT='commodity'."""
+    pages = [[_instr("SOXLUSDT", "ETF"), _instr("TQQQUSDT", "ETF"),
+              _instr("SKHYNIXUSDT", "stock"), _instr("CLUSDT", "commodity"),
+              _instr("ENAUSDT", "innovation"), _instr("BTCUSDT", "")]]
+    cl = _mk_instr_client(pages)
+    assert cl.non_crypto_type_symbols() == {
+        "SOXLUSDT", "TQQQUSDT", "SKHYNIXUSDT", "CLUSDT"}
 
 
 def test_non_crypto_type_symbols_include_commodity_perps():

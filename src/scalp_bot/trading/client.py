@@ -153,14 +153,21 @@ class ScalpBybitClient:
 
     _STOCK_TYPE_TTL_SEC = 3600.0
 
-    # symbolType, недоступные скальпу. По обоим Bybit требует отдельного
+    # symbolType, недоступные скальпу. По всем Bybit требует отдельного
     # Trading Terms (ErrCode 110126), которого demo-API принять не даёт:
-    #   stock     — перпы на акции/ETF (SKHYNIXUSDT, SOXLUSDT, AAPLUSDT, ...)
-    #   commodity — перпы на сырьё (CLUSDT, BZUSDT, XAUUSDT, XAGUSDT)
-    # Плюс оба класса торгуются по сессиям реальных бирж (KRX/NYSE/NYMEX),
+    #   stock     — перпы на акции (SKHYNIXUSDT, AAPLUSDT, ...), 164 шт.
+    #   ETF       — перпы на биржевые фонды (SOXLUSDT, ...), 43 шт.
+    #   commodity — перпы на сырьё (CLUSDT, BZUSDT, XAUUSDT, XAGUSDT), 4 шт.
+    # Плюс все три класса торгуются по сессиям реальных бирж (KRX/NYSE/NYMEX),
     # а не 24/7 крипто-флоу — это ломает скальп-логику (свипы/CVD/плотности).
-    # Крипто-перпы приходят с symbolType=None либо "innovation" — их не трогаем.
-    _NON_CRYPTO_SYMBOL_TYPES = frozenset({"stock", "commodity"})
+    # Крипто-перпы приходят с symbolType="" либо "innovation" — их не трогаем.
+    #
+    # ETF добавлен 2026-08-24: Bybit отдаёт его ОТДЕЛЬНЫМ значением, а не как
+    # "stock", поэтому 43 инструмента протекали во вселенную. SOXLUSDT успел
+    # набрать 343 entry_Rejected (пустые вызовы против risk-control лимита из
+    # офдока create-order) и 19 исполненных сделок в статистике страт.
+    # Поле symbolType: https://bybit-exchange.github.io/docs/v5/market/instrument
+    _NON_CRYPTO_SYMBOL_TYPES = frozenset({"stock", "etf", "commodity"})
 
     def non_crypto_type_symbols(self) -> set[str]:
         """Множество linear-символов, неторгуемых на demo (см.
