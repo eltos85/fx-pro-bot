@@ -242,3 +242,15 @@ def test_median_of_even_and_odd_samples():
     assert audit._median([]) == 0.0
     assert audit._median([1.0, 3.0, 2.0]) == pytest.approx(2.0)
     assert audit._median([1.0, 2.0, 3.0, 4.0]) == pytest.approx(2.5)
+
+
+def test_vol_forward_matches_bot_formula():
+    from hybrid_bot.signals import realized_vol_annual, vol_notional
+
+    up = [100.0 * (1.01 ** i) for i in range(181)]
+    down = [up[-1] * (0.99 ** i) for i in range(1, 181)]
+    closes = up + down
+    vol, stake = audit.vol_forward(closes, 200.0, "240")
+    assert vol == pytest.approx(realized_vol_annual(closes, interval="240"))
+    assert stake == pytest.approx(vol_notional(200.0, closes, interval="240"))
+    assert audit.vol_forward([100.0] * 10, 200.0) == (None, None)

@@ -17,7 +17,9 @@ Read-only. Отличие от `hybrid_contour_pnl.py`: тот мерил *не�
     было, там заявка исполнялась по максимуму свечи);
   * бенчмарк «просто держать первый лот» с той же комиссией и funding;
   * расхождение учёта бота с биржей (гейт §8.4);
-  * прогресс по выборке против порогов `sample-size.mdc` (гейт §8.1).
+  * прогресс по выборке против порогов `sample-size.mdc` (гейт §8.1);
+  * форвард §16.2: текущая вола и ставка следующего входа (не размер
+    уже открытого лота — тот не пересчитывается).
 
 Запуск (контейнер бота — там ключи HYBRID_BYBIT_* и pybit):
     ssh root@204.168.149.140 \
@@ -80,6 +82,7 @@ SNAPSHOT_FIELDS = [
     "fix_gross", "trend_exit_gross",
     "declared_threshold", "median_fix_dist", "median_slip",
     "db_net", "db_delta", "foreign_legs", "skipped_closes",
+    "vol_annual", "next_stake",
 ]
 
 
@@ -231,6 +234,14 @@ def strategy_total(*, realized_net: float, unrealized: float,
     return realized_net + unrealized - funding_paid - fees_open
 
 
+def vol_forward(closes: list[float], base_usd: float,
+                interval: str = "240") -> tuple[float | None, float | None]:
+    """Вола и следующая ставка §16.2. None если мало баров."""
+    from hybrid_bot.signals import realized_vol_annual, vol_notional
+    return (realized_vol_annual(closes, interval=interval),
+            vol_notional(base_usd, closes, interval=interval))
+
+
 def gate_status(n_fix: int, obs_days: float) -> str:
     """Строка о прогрессе выборки. Порог — sample-size.mdc, не наш выбор."""
     parts = [f"фиксаций {n_fix}/{GATE_MIN_EVENTS}",
@@ -354,6 +365,24 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
                            fees_in_closes=fees_in_closes)
     print(f"\n  Открытый остаток: {pos_size:.4f} @ {pos_avg:.2f}, "
           f"mark {mark:.2f}, unrealized ${unreal:.2f}")
+    interval = os.environ.get("HYBRID_INTERVAL", "240")
+    base_usd = _fnum(os.environ.get("HYBRID_POSITION_USD"), 200.0)
+    vol = None
+    stake = None
+    try:
+        kl = sess.get_kline(category=category, symbol=symbol,
+                            interval=interval, limit=400)
+        time.sleep(THROTTLE_SEC)
+        raw_kl = (kl.get("result") or {}).get("list") or []
+        series = sorted((int(r[0]), float(r[4])) for r in raw_kl)
+        if len(series) >= 3:
+            series = series[:-1]
+        vol, stake = vol_forward([c for _, c in series], base_usd, interval)
+        if vol is not None and stake is not None:
+            print(f"  Форвард §16.2: вола {vol * 100:.1f}% год., "
+                  f"следующая ставка ${stake:.0f} (база ${base_usd:.0f})")
+    except Exception as exc:
+        print(f"  Форвард §16.2: не посчитался ({exc})")
     print(f"  СТРАТЕГИЯ ИТОГО (realized net + unrealized − funding "
           f"− комиссия открытого входа ${fees_open:.4f}): ${total:.2f}")
 
@@ -422,6 +451,8 @@ def _report_symbol(sess: HTTP, symbol: str, category: str, start_ms: int,
         "db_delta": round(db_delta, 4) if reasons else "",
         "foreign_legs": len(foreign),
         "skipped_closes": skipped_closes,
+        "vol_annual": round(vol, 6) if vol is not None else "",
+        "next_stake": round(stake, 2) if stake is not None else "",
     }
 
 
