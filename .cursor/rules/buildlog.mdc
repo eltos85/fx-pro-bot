@@ -12,9 +12,6 @@ alwaysApply: true
 |---|---|---|
 | `fx_pro_bot` / advisor (cTrader) | `BUILDLOG.md` | правки в `src/fx_pro_bot/`, FxPro-стратегии, advisor-деплой |
 | `fx_ai_trader` (DeepSeek + cTrader) | `BUILDLOG_AI_FX_TRADER.md` | правки в `src/fx_ai_trader/`, fx_ai_trader-тесты/скрипты |
-| `fx_pro_bot` / advisor (cTrader) | `BUILDLOG.md` | правки в `src/fx_pro_bot/`, FxPro-стратегии, advisor-деплой |
-| `fx_ai_trader` (DeepSeek + cTrader) | `BUILDLOG_AI_FX_TRADER.md` | правки в `src/fx_ai_trader/`, fx_ai_trader-тесты/скрипты |
-| `flowzone_bot` (Bybit, Auction Market Theory) | `BUILDLOG_FLOWZONE.md` | правки в `src/flowzone_bot/`, канон `STRATEGY_FLOWZONE.md` |
 | `hybrid_bot` (Bybit, фиксация от средней) | `BUILDLOG_HYBRID.md` | правки в `src/hybrid_bot/`, канон `STRATEGY_HYBRID.md` |
 
 Если коммит затрагивает **несколько** ботов (кросс-cutting, например правка

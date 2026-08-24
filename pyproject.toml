@@ -40,7 +40,6 @@ swing-bot = "horizon_bot.app.main:run"
 impulse-bot = "impulse_bot.app.main:run"
 solana-bot = "solana_bot.app.main:run"
 hybrid-bot = "hybrid_bot.app.main:run"
-flowzone-bot = "flowzone_bot.app.main:run"
 tradecard-bybit = "tradecard_bybit.app.main:run"
 tradecard-momentum = "tradecard_momentum.app.main:run"
 fx-momentum-bot = "fx_momentum_bot.app.main:run"
@@ -58,7 +57,6 @@ packages = [
   "src/impulse_bot",
   "src/solana_bot",
   "src/hybrid_bot",
-  "src/flowzone_bot",
   "src/tradecard_bybit",
   "src/tradecard_momentum",
   "src/fx_momentum_bot",

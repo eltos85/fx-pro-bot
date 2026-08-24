@@ -677,84 +677,6 @@ services:
     volumes:
       - solana_bot_data:/data
 
-  # ─── flowzone-bot: order-flow бот Bybit (Auction Market Theory, без LLM) ──
-  # Полностью изолирован. Стратегия — STRATEGY_FLOWZONE.md (Volume Profile +
-  # Order Flow, continuation-вход из зон высокой вероятности; канон-ролик
-  # https://youtu.be/06R-ebyOhDI). Живёт РЯДОМ с hybrid-bot, не вместо него:
-  # свой образ, свой том flowzone_data, свой префикс Telegram.
-  flowzone-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile.flowzone-bot
-    image: flowzone-bot:local
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
-    env_file:
-      - .env
-    environment:
-      FLOWZONE_DATA_DIR: /data
-      FLOWZONE_LOG_LEVEL: ${FLOWZONE_LOG_LEVEL:-INFO}
-      # Fallback-список (используется только при сбое авто-селектора).
-      FLOWZONE_SYMBOLS: ${FLOWZONE_SYMBOLS:-BTCUSDT,ETHUSDT,SOLUSDT}
-      # Bybit demo: свои FLOWZONE_BYBIT_* с дефолтом на ключи ai_trader, чтобы
-      # аудит ключей был раздельным (TASKSPEC §3).
-      FLOWZONE_BYBIT_API_KEY: ${FLOWZONE_BYBIT_API_KEY:-${AI_TRADER_BYBIT_API_KEY:-}}
-      FLOWZONE_BYBIT_API_SECRET: ${FLOWZONE_BYBIT_API_SECRET:-${AI_TRADER_BYBIT_API_SECRET:-}}
-      FLOWZONE_BYBIT_DEMO: ${FLOWZONE_BYBIT_DEMO:-true}
-      FLOWZONE_BYBIT_CATEGORY: ${FLOWZONE_BYBIT_CATEGORY:-linear}
-      # Фаза 1: observe. trading_enabled включать только после проверки циклов
-      # (TASKSPEC §1 «Демо сначала»).
-      FLOWZONE_TRADING_ENABLED: ${FLOWZONE_TRADING_ENABLED:-false}
-      # Канон STRATEGY §6.1/§6.3: footprint/absorption читаемы ТОЛЬКО на ликвидности
-      # (канон = NQ). По умолчанию авто-ротация ВЫКЛЮЧЕНА — торгуем глубочайшие
-      # перпы из FLOWZONE_SYMBOLS (BTC/ETH/SOL) как аналог NQ-глубины. Ротация
-      # памп-альтов — только опциональный форвард-эксперимент (=true).
-      FLOWZONE_AUTO_UNIVERSE_ENABLED: ${FLOWZONE_AUTO_UNIVERSE_ENABLED:-false}
-      FLOWZONE_UNIVERSE_METHOD: ${FLOWZONE_UNIVERSE_METHOD:-rvol}
-      FLOWZONE_MOMENTUM_MIN_TURNOVER_USD: ${FLOWZONE_MOMENTUM_MIN_TURNOVER_USD:-50000000}
-      FLOWZONE_MOMENTUM_MIN_CHANGE_PCT: ${FLOWZONE_MOMENTUM_MIN_CHANGE_PCT:-0}
-      FLOWZONE_MOMENTUM_MAX_SPREAD_BPS: ${FLOWZONE_MOMENTUM_MAX_SPREAD_BPS:-0}
-      FLOWZONE_MOMENTUM_DIRECTION: ${FLOWZONE_MOMENTUM_DIRECTION:-both}
-      FLOWZONE_UNIVERSE_TOP_N: ${FLOWZONE_UNIVERSE_TOP_N:-15}
-      FLOWZONE_UNIVERSE_REFRESH_SEC: ${FLOWZONE_UNIVERSE_REFRESH_SEC:-300}
-      FLOWZONE_UNIVERSE_MIN_TURNOVER_USD: ${FLOWZONE_UNIVERSE_MIN_TURNOVER_USD:-100000000}
-      FLOWZONE_UNIVERSE_PIN_SYMBOLS: ${FLOWZONE_UNIVERSE_PIN_SYMBOLS:-}
-      FLOWZONE_UNIVERSE_MIN_RANGE_PCT: ${FLOWZONE_UNIVERSE_MIN_RANGE_PCT:-6}
-      FLOWZONE_UNIVERSE_MAX_RANGE_PCT: ${FLOWZONE_UNIVERSE_MAX_RANGE_PCT:-20}
-      FLOWZONE_UNIVERSE_MAX_SPREAD_BPS: ${FLOWZONE_UNIVERSE_MAX_SPREAD_BPS:-5}
-      FLOWZONE_UNIVERSE_MIN_RVOL: ${FLOWZONE_UNIVERSE_MIN_RVOL:-1.0}
-      FLOWZONE_UNIVERSE_MIN_SYMBOLS: ${FLOWZONE_UNIVERSE_MIN_SYMBOLS:-3}
-      FLOWZONE_VIRTUAL_CAPITAL: ${FLOWZONE_VIRTUAL_CAPITAL:-1000}
-      FLOWZONE_RISK_PER_TRADE_USD: ${FLOWZONE_RISK_PER_TRADE_USD:-10.0}
-      FLOWZONE_MIN_POSITION_USD: ${FLOWZONE_MIN_POSITION_USD:-10}
-      FLOWZONE_MAX_LEVERAGE: ${FLOWZONE_MAX_LEVERAGE:-5}
-      FLOWZONE_MAX_OPEN_POSITIONS: ${FLOWZONE_MAX_OPEN_POSITIONS:-2}
-      FLOWZONE_MAX_TRADES_PER_HOUR: ${FLOWZONE_MAX_TRADES_PER_HOUR:-5}
-      FLOWZONE_MAX_DAILY_LOSS_USD: ${FLOWZONE_MAX_DAILY_LOSS_USD:-0}
-      FLOWZONE_MAX_TOTAL_LOSS_USD: ${FLOWZONE_MAX_TOTAL_LOSS_USD:-0}
-      # Session gate (§6.1). 2026-08-17 изоляция ядра: London+NY 07-21, как до C4.
-      FLOWZONE_SESSION_GATE_ENABLED: ${FLOWZONE_SESSION_GATE_ENABLED:-true}
-      FLOWZONE_SESSION_WINDOWS_UTC: ${FLOWZONE_SESSION_WINDOWS_UTC:-07:00-16:00,12:00-21:00}
-      FLOWZONE_PROFILE_MERGE_ENABLED: ${FLOWZONE_PROFILE_MERGE_ENABLED:-true}
-      FLOWZONE_PROFILE_MERGE_LOOKBACK: ${FLOWZONE_PROFILE_MERGE_LOOKBACK:-3}
-      FLOWZONE_PROFILE_SHAPE_ENABLED: ${FLOWZONE_PROFILE_SHAPE_ENABLED:-true}
-      FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED: ${FLOWZONE_INITIATIVE_EXHAUSTION_ENABLED:-false}
-      FLOWZONE_HOOK_ENABLED: ${FLOWZONE_HOOK_ENABLED:-false}
-      FLOWZONE_HOOK_LOOKBACK_SEC: ${FLOWZONE_HOOK_LOOKBACK_SEC:-3600}
-      FLOWZONE_PARTIAL_FRACTION: ${FLOWZONE_PARTIAL_FRACTION:-0.5}
-      FLOWZONE_RELOAD_COOLDOWN_SEC: ${FLOWZONE_RELOAD_COOLDOWN_SEC:-10}
-      FLOWZONE_SIGNAL_COOLDOWN_SEC: ${FLOWZONE_SIGNAL_COOLDOWN_SEC:-60}
-      FLOWZONE_TELEGRAM_ENABLED: ${FLOWZONE_TELEGRAM_ENABLED:-false}
-      FLOWZONE_TELEGRAM_BOT_TOKEN: ${FLOWZONE_TELEGRAM_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-}}
-      FLOWZONE_TELEGRAM_CHAT_ID: ${FLOWZONE_TELEGRAM_CHAT_ID:-${TELEGRAM_CHAT_ID:-}}
-      FLOWZONE_TELEGRAM_PREFIX: ${FLOWZONE_TELEGRAM_PREFIX:-[flowzone]}
-    volumes:
-      - flowzone_data:/data
-
   # ─── hybrid-bot: регулярная фиксация тренда от своей средней цены ────────
   # Полностью изолирован. Стратегия — STRATEGY_HYBRID.md §17.4, порог — §17.6:
   # покупка по SMA20/50 4h, закрытие СВОЕГО объёма целиком на заданном
@@ -764,8 +686,7 @@ services:
   # закрывает весь лот на счёте, включая объём других ботов — именно из разбора
   # этой путаницы и выросла стратегия (§17.1).
   #
-  # Работает одновременно с flowzone-bot. Том hybrid_data свой. Ключи/Telegram
-  # могут наследовать FLOWZONE_* как fallback, чтобы .env не дублировать.
+  # Занял место flowzone-bot и наследует его ключи, том и Telegram-канал.
   hybrid-bot:
     build:
       context: .
@@ -1037,7 +958,6 @@ volumes:
   impulse_bot_data:
   solana_bot_data:
   hybrid_data:
-  flowzone_data:
   momentum_bot_data:
   tradecard_bybit_data:
   tradecard_momentum_data:
