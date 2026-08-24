@@ -4152,13 +4152,19 @@ def test_strategy_filter_applicability_v0181():
 
 class _FakeLiveClient:
     """Минимальный LIVE-клиент для on_signal. Фиксирует, существовала ли строка
-    в БД на момент place_entry — это и есть доказательство write-ahead."""
+    в БД на момент place_entry — это и есть доказательство write-ahead.
 
-    def __init__(self, db, *, ok=True):
+    ``position`` — лот, который брокер показывает по символу (чужой бот на
+    общем one-way счёте). None = позиции нет.
+    """
+
+    def __init__(self, db, *, ok=True, position=None):
         self._db = db
         self._ok = ok
+        self._position = position
         self.row_existed_at_place = None
         self.placed = []
+        self.tpsl_modes = []
 
     def instrument(self, symbol):
         return SimpleNamespace(qty_step=0.001, min_order_qty=0.001)
@@ -4169,10 +4175,14 @@ class _FakeLiveClient:
     def round_price(self, symbol, price):
         return round(price, 4)
 
+    def get_position(self, symbol):
+        return self._position
+
     def place_entry(self, *, symbol, side, qty, order_link_id, order_type,
-                    limit_price, sl_price, tp_price):
+                    limit_price, sl_price, tp_price, tpsl_mode=None):
         self.row_existed_at_place = bool(self._db.open_trades())
         self.placed.append(order_link_id)
+        self.tpsl_modes.append(tpsl_mode)
         return {"ok": self._ok, "error": None if self._ok else "rejected"}
 
 
@@ -4220,6 +4230,172 @@ def test_on_signal_rejected_marks_entry_rejected(tmp_path):
     ).fetchone()
     assert row[0] == "closed" and row[1] == "entry_Rejected"
     assert ex._link2trade == {} and ex._fills == {}  # трекинг снят (_forget_trade)
+
+
+# ─── общий one-way счёт: изоляция от чужого лота (H-SL-CONTAM) ─────────────
+#
+# BUILDLOG_SCALP 2026-08-19: на общем счёте Bybit linear one-way держит ОДИН
+# лот на символ. До фикса: наш Full-стоп закрывал чужую позицию, close_market
+# слал pos.size, вход против чужой стороны не открывал позицию, а чужой филл
+# целиком записывался нам в P&L (#4266: +$618 при геометрии −$10).
+
+def _broker_pos(side, size, *, mark=0.0):
+    return SimpleNamespace(symbol="SUIUSDT", side=side, size=size,
+                           entry_price=0.0, unrealised_pnl=0.0,
+                           mark_price=mark)
+
+
+def test_entry_blocked_when_foreign_lot_is_opposite(tmp_path):
+    """Вход против чужой стороны на one-way не создаёт позицию, а режет чужую
+    (событие D, #4218: «short 1.73» оказался срезом чужого лонга)."""
+    db = ScalpDB(str(tmp_path))
+    cl = _FakeLiveClient(db, position=_broker_pos("Sell", 100.0))
+    ex = Executor(db, _live_cfg(), client=cl)
+    assert ex.on_signal(_live_sig()) is None      # сигнал long, у брокера Sell
+    assert cl.placed == []                        # ордер вообще не ушёл
+    assert db.open_trades() == []                 # и строки-призрака нет
+    db.close()
+
+
+def test_entry_over_same_side_foreign_lot_uses_partial_brackets(tmp_path):
+    """Сонаправленный чужой лот: торговать можно, но брекеты обязаны быть
+    Partial — иначе наш SL закроет и чужую позицию."""
+    db = ScalpDB(str(tmp_path))
+    cl = _FakeLiveClient(db, position=_broker_pos("Buy", 100.0))
+    ex = Executor(db, _live_cfg(), client=cl)
+    tid = ex.on_signal(_live_sig())
+    assert tid is not None
+    assert cl.tpsl_modes == ["Partial"]
+    assert tid in ex._partial_bracket
+    db.close()
+
+
+def test_entry_alone_keeps_full_brackets(tmp_path):
+    """Когда на символе мы одни, поведение прежнее: Full-брекеты на весь лот
+    (он и есть наш), rebracket остаётся доступен."""
+    db = ScalpDB(str(tmp_path))
+    cl = _FakeLiveClient(db, position=_broker_pos("", 0.0))
+    ex = Executor(db, _live_cfg(), client=cl)
+    tid = ex.on_signal(_live_sig())
+    assert tid is not None
+    assert cl.tpsl_modes == [None]
+    assert ex._partial_bracket == set()
+    db.close()
+
+
+def test_foreign_lot_excludes_our_own_open_qty(tmp_path):
+    """Наш собственный лот не должен считаться чужим: иначе бот запретил бы
+    себе сопровождать уже открытую позицию."""
+    db = ScalpDB(str(tmp_path))
+    db.insert_open(symbol="SUIUSDT", side="long", qty=100.0, entry=0.70,
+                   sl=0.69, tp=0.72, score=5, reasons="x", mode="live",
+                   strategy="density_break", ts_open=0.0)
+    cl = _FakeLiveClient(db, position=_broker_pos("Buy", 100.0))
+    ex = Executor(db, _live_cfg(), client=cl)
+    assert ex._foreign_lot("SUIUSDT") == ("", 0.0)
+    db.close()
+
+
+def test_foreign_mixed_close_uses_our_geometry_not_exchange_pnl():
+    """#4266: биржа закрыла 5.14 ETH (наши 1.58 + чужие 3.56) и прислала
+    execPnl +626.58 — это ход ЧУЖОГО лота. В стату страты обязан попасть наш
+    результат по нашей геометрии: (2097.02 − 2103.36) × 1.58 минус наша доля
+    комиссии, то есть около −$12, а не +$618."""
+    class _DB:
+        def open_trades(self):
+            return [SimpleNamespace(id=7, symbol="ETHUSDT", side="long",
+                                    qty=1.58, entry=2103.36, mode="live")]
+
+    ex = Executor(db=_DB(), settings=SimpleNamespace(),
+                  client=SimpleNamespace())
+    ex._fills[7] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0}
+    # биржевой стоп: пустой orderLinkId, объём ВСЕГО лота символа
+    ex.ingest_executions([_exec("ETHUSDT", "", fee=5.9283, pnl=626.58,
+                                price=2097.02, qty=5.14, closed=5.14)])
+    tr = SimpleNamespace(id=7, symbol="ETHUSDT", side="long", entry=2103.36,
+                         qty=1.58, ts_open=0.0)
+    net, exitp, complete = ex._realized_from_fills(tr)
+    assert complete is True
+    assert exitp == pytest.approx(2097.02)
+    share = 1.58 / 5.14
+    geometry = (2097.02 - 2103.36) * 1.58
+    assert net == pytest.approx(geometry - 5.9283 * share, abs=1e-6)
+    assert net < 0                     # чужой плюс к нам не попал
+
+
+class _ManageClient:
+    """Клиент для _manage_live: отдаёт позицию и записывает закрытия."""
+
+    def __init__(self, position):
+        self._position = position
+        self.closes = []
+
+    def get_position(self, symbol):
+        return self._position
+
+    def close_market(self, symbol, side, qty, order_link_id):
+        self.closes.append((symbol, side, qty, order_link_id))
+        return {"ok": True}
+
+
+class _ExitStrat:
+    name = "density_break"
+
+    def should_exit(self, tr, snap, now):
+        return ("flow_exit", 0.70)
+
+
+def test_close_market_sends_our_qty_not_whole_lot(tmp_path):
+    """Событие C (#4220): дискреционный выход слал pos.size и ликвидировал
+    чужую позицию заодно. Закрывать надо ровно свой объём."""
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="SUIUSDT", side="long", qty=100.0, entry=0.70,
+                         sl=0.69, tp=0.72, score=5, reasons="x", mode="live",
+                         strategy="density_break", ts_open=0.0)
+    cl = _ManageClient(_broker_pos("Buy", 350.0, mark=0.705))
+    ex = Executor(db, _live_cfg(), client=cl, strategies=[_ExitStrat()],
+                  now=lambda: 10.0)
+    ex._manage_live(db.open_trades()[0], 0.705, _snap(_long_samples()))
+    assert [c[2] for c in cl.closes] == [100.0]   # свой лот, не 350
+    assert db.open_trades() == []
+    db.close()
+
+
+def test_manage_live_marks_netted_out_when_lot_flipped(tmp_path):
+    """Лот развёрнут в чужую сторону — нашей позиции на бирже нет. Раньше бот
+    сопровождал фантом и слал reduceOnly, который отвергался."""
+    db = ScalpDB(str(tmp_path))
+    db.insert_open(symbol="SUIUSDT", side="short", qty=100.0, entry=0.70,
+                   sl=0.71, tp=0.68, score=5, reasons="x", mode="live",
+                   strategy="density_break", ts_open=0.0)
+    cl = _ManageClient(_broker_pos("Buy", 250.0, mark=0.705))
+    ex = Executor(db, _live_cfg(), client=cl, strategies=[_ExitStrat()],
+                  now=lambda: 10.0)
+    ex._manage_live(db.open_trades()[0], 0.705, None)
+    assert cl.closes == []                        # reduceOnly не шлём
+    assert db.open_trades() == []
+    row = db._conn.execute(
+        "SELECT close_reason FROM trades ORDER BY id DESC LIMIT 1").fetchone()
+    assert row[0] == "netted_out"
+    db.close()
+
+
+def test_own_link_fill_is_never_scaled_down():
+    """Филл по НАШЕМУ orderLinkId — целиком наш, доля не применяется даже
+    если объём больше qty строки (частичные доливки)."""
+    class _DB:
+        def open_trades(self):
+            return [SimpleNamespace(id=8, symbol="ZECUSDT", side="long",
+                                    qty=0.19, entry=518.14, mode="live")]
+
+    ex = Executor(db=_DB(), settings=SimpleNamespace(),
+                  client=SimpleNamespace())
+    ex._link2trade["close"] = 8
+    ex._fills[8] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0}
+    ex.ingest_executions([_exec("ZECUSDT", "close", fee=0.0542, pnl=0.1482,
+                                price=518.92, qty=0.19, closed=0.19)])
+    assert ex._fills[8]["pnl"] == pytest.approx(0.1482)
+    assert ex._fills[8]["fee"] == pytest.approx(0.0542)
 
 
 # ─── sweep_fade_canon (v0.18.20): значимые уровни + full reclaim + скоуп ────

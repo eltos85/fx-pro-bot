@@ -221,6 +221,10 @@ class Executor:
         # счётчик неудачных REST-сверок true-up'а (неоднозначные сделки того же
         # символа+entry не делимы по closedSize — не зацикливаем бюджет).
         self._verify_fail: dict[int, int] = {}
+        # Сделки, открытые поверх ЧУЖОГО лота на том же символе (общий one-way
+        # счёт с другим ботом): у них брекеты стоят в режиме Partial, поэтому
+        # их нельзя двигать через set_trading_stop (см. _rebracket).
+        self._partial_bracket: set[int] = set()
 
     def _notify(self, text: str) -> None:
         if self._notifier is not None:
@@ -307,6 +311,21 @@ class Executor:
         # LIVE (demo)
         cl = self._client
         side = "Buy" if sig.side == "long" else "Sell"
+        foreign_side, foreign_qty = self._foreign_lot(sig.symbol)
+        if foreign_side and foreign_side != side:
+            # Bybit linear one-way держит ОДИН лот на символ: ордер против
+            # чужой стороны не открывает нашу позицию, а режет чужую. До этой
+            # проверки бот считал, что вошёл (БД: short 1.73), тогда как на
+            # бирже оставался чужой long — и «P&L шорта» оказывался ходом
+            # чужого лота (BUILDLOG_SCALP 2026-08-19, событие D, #4218).
+            # https://bybit-exchange.github.io/docs/v5/position/position-mode
+            log.warning("LIVE entry %s %s отменён: на символе чужой лот "
+                        "%s %.6f — one-way не даст встречную позицию",
+                        sig.symbol, side, foreign_side, foreign_qty)
+            play.info("🚫 [%s] не вхожу %s: на счёте чужая позиция %s %.6f "
+                      "(one-way — наш ордер просто срезал бы её)",
+                      sig.symbol, sig.side.upper(), foreign_side, foreign_qty)
+            return None
         cl.set_leverage(sig.symbol, cfg.max_leverage)
         link = f"scalp_{sig.symbol}_{int(self._now() * 1000)}"
         limit_price = cl.round_price(sig.symbol, sig.entry_ref)
@@ -333,6 +352,8 @@ class Executor:
         self._link2trade[link] = tid
         self._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
                             "close_qty": 0.0, "open_val": 0.0, "open_qty": 0.0}
+        if foreign_side:
+            self._partial_bracket.add(tid)
         # v0.18.16: пер-стратегийный тип входа (density_break=taker). sig несёт
         # выбранный стратегией order_type; None → глобальный cfg.entry_order_type.
         otype = sig.entry_order_type or cfg.entry_order_type
@@ -340,7 +361,8 @@ class Executor:
             symbol=sig.symbol, side=side, qty=qty, order_link_id=link,
             order_type=otype, limit_price=limit_price,
             sl_price=cl.round_price(sig.symbol, sig.sl_level),
-            tp_price=cl.round_price(sig.symbol, sig.tp_level))
+            tp_price=cl.round_price(sig.symbol, sig.tp_level),
+            tpsl_mode="Partial" if foreign_side else None)
         if not res.get("ok"):
             # ордер отклонён биржей → позиции нет; закрываем write-ahead строку
             # (entry_Rejected исключён из торговой статы, db.recent_closed).
@@ -535,6 +557,7 @@ class Executor:
             # Ставку учим ДО атрибуции: тариф — свойство контракта, он не зависит
             # от того, к какой нашей сделке относится филл (и относится ли вообще).
             self._learn_fee_rate(r)
+            our_link = r.get("orderLinkId", "") in self._link2trade
             tid = self._link2trade.get(r.get("orderLinkId", ""))
             if tid is None:
                 tid = self._open_trade_for_symbol(r.get("symbol", ""))
@@ -543,12 +566,25 @@ class Executor:
             acc = self._fills.setdefault(
                 tid, {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0,
                       "open_val": 0.0, "open_qty": 0.0})
-            acc["fee"] += r.get("execFee", 0.0)
-            acc["pnl"] += r.get("execPnl", 0.0)
+            exec_qty = float(r.get("execQty", 0.0) or 0.0)
+            share = 1.0
+            if not our_link:
+                # Филл без нашего orderLinkId (биржевой TP/SL) мы привязали к
+                # сделке ПО СИМВОЛУ. На общем счёте он может закрывать лот
+                # целиком — вместе с чужой позицией. Тогда ни execPnl, ни
+                # execFee не наши: доля считается по нашему объёму, а сам P&L
+                # позже берётся из геометрии (см. _realized_from_fills).
+                # Без этого одна такая строка приносила в стату +$618 чужого
+                # хода (BUILDLOG_SCALP 2026-08-19, событие A, #4266).
+                share = self._our_share(tid, exec_qty)
+                if share < 1.0:
+                    acc["foreign_mixed"] = True
+            acc["fee"] += r.get("execFee", 0.0) * share
+            acc["pnl"] += r.get("execPnl", 0.0) * share
             # закрывающий филл: closedSize>0 или есть realized P&L
             if r.get("closedSize", 0.0) > 0 or r.get("execPnl", 0.0) != 0.0:
-                acc["close_val"] += r.get("execPrice", 0.0) * r.get("execQty", 0.0)
-                acc["close_qty"] += r.get("execQty", 0.0)
+                acc["close_val"] += r.get("execPrice", 0.0) * exec_qty * share
+                acc["close_qty"] += exec_qty * share
             else:
                 # входной филл → копим VWAP реальной цены входа
                 acc["open_val"] = acc.get("open_val", 0.0) \
@@ -586,8 +622,20 @@ class Executor:
         −$12.69 при расчётном риске $9.99 (n=34, +27% drag). Сдвигаем SL и TP
         на (avg_entry − entry_ref), сохраняя ДИСТАНЦИИ → реальный $-риск =
         qty×dist = расчётному. Maker-вход филлится по своей лимитке (delta=0)
-        → no-op. Геометрия сделки (R:R, fee-guard) не меняется."""
+        → no-op. Геометрия сделки (R:R, fee-guard) не меняется.
+
+        Сделки с Partial-брекетами (открытые поверх чужого лота) пропускаем:
+        офдок trading-stop прямо ограничивает этот эндпоинт — «Partial position
+        TP/SL orders: This API can only add partial position TP/SL orders»
+        (https://bybit-exchange.github.io/docs/v5/position/trading-stop), то
+        есть вызов не сдвинул бы брекет, а добавил второй. Цена пропуска —
+        остаточная ошибка $-риска на величину слиппеджа; цена ошибки —
+        двойной стоп на позиции, что хуже."""
         if self._client is None or avg_entry <= 0:
+            return
+        if tid in self._partial_bracket:
+            log.info("rebracket #%d пропущен: Partial-брекет поверх чужого "
+                     "лота, trading-stop умеет только добавлять", tid)
             return
         tr = next((t for t in self._db.open_trades() if t.id == tid), None)
         if tr is None or tr.mode != "live" or tr.entry <= 0:
@@ -618,17 +666,84 @@ class Executor:
                 return tr.id
         return None
 
+    # Допуск на округление лота: сравниваем биржевой size с суммой наших qty.
+    _FOREIGN_EPS = 1e-9
+
+    def _foreign_lot(self, symbol: str) -> tuple[str, float]:
+        """Чужая часть позиции символа: ``(сторона, размер)`` или ``("", 0)``.
+
+        На общем счёте (несколько ботов, Bybit linear one-way) биржевой лот —
+        это сумма наших и чужих объёмов. Чужое = size − Σ наших открытых live
+        qty по символу. Знание нужно в двух местах: вход против чужой стороны
+        физически невозможен, а брекеты поверх чужого лота обязаны быть
+        Partial, иначе наш стоп закроет чужую позицию (BUILDLOG_SCALP
+        2026-08-19, H-SL-CONTAM).
+
+        Fail-open: если брокер не ответил, возвращаем «чужого нет» — иначе
+        недоступность REST останавливала бы торговлю целиком.
+        """
+        if self._client is None or not symbol:
+            return ("", 0.0)
+        try:
+            pos = self._client.get_position(symbol)
+        except Exception:
+            log.exception("_foreign_lot: get_position %s failed", symbol)
+            return ("", 0.0)
+        if pos is None or pos.size <= 0:
+            return ("", 0.0)
+        ours = 0.0
+        try:
+            for tr in self._db.open_trades():
+                if tr.symbol == symbol and tr.mode == "live":
+                    ours += float(tr.qty or 0.0)
+        except Exception:
+            log.exception("_foreign_lot: open_trades failed")
+            return ("", 0.0)
+        foreign = pos.size - ours
+        if foreign <= self._FOREIGN_EPS:
+            return ("", 0.0)
+        return (pos.side, foreign)
+
+    def _our_share(self, tid: int, exec_qty: float) -> float:
+        """Какая доля чужого по происхождению филла приходится на наш объём.
+
+        Возвращает 1.0, когда филл не больше нашей позиции (обычный случай:
+        мы на символе одни). Меньше 1.0 — филл закрыл лот, в который входила
+        и чужая позиция.
+        """
+        if exec_qty <= 0:
+            return 1.0
+        try:
+            tr = next((t for t in self._db.open_trades() if t.id == tid), None)
+        except Exception:
+            log.exception("_our_share: open_trades failed")
+            return 1.0
+        our_qty = float(getattr(tr, "qty", 0.0) or 0.0) if tr else 0.0
+        if our_qty <= 0 or exec_qty <= our_qty * 1.02:
+            return 1.0
+        return our_qty / exec_qty
+
     def _realized_from_fills(self, tr) -> tuple[float, float | None, bool]:
         """net по WS-филлам → (net, exit_px, complete). complete=True когда
         закрывающий объём ≈ qty сделки (все филлы выхода пришли по WS).
-        net = ΣexecPnl − ΣexecFee (включая комиссию входа) = Bybit closedPnl."""
+        net = ΣexecPnl − ΣexecFee (включая комиссию входа) = Bybit closedPnl.
+
+        Если закрывающий филл смешан с чужой позицией (``foreign_mixed``),
+        ``execPnl`` считается от СРЕДНЕЙ цены входа всего лота, а не от нашей,
+        поэтому доля от него нашей не является. В этом случае P&L берётся из
+        геометрии нашей сделки: (выход − наш вход) × наш qty − наша доля
+        комиссии. Комиссия остаётся долевой — она пропорциональна объёму.
+        """
         acc = self._fills.get(tr.id)
         if not acc or acc["close_qty"] <= 0:
             return (0.0, None, False)
-        net = acc["pnl"] - acc["fee"]
         exit_px = acc["close_val"] / acc["close_qty"]
         complete = acc["close_qty"] >= tr.qty * 0.98
-        return (net, exit_px, complete)
+        if acc.get("foreign_mixed"):
+            sign = 1.0 if tr.side == "long" else -1.0
+            gross = sign * (exit_px - tr.entry) * float(tr.qty or 0.0)
+            return (gross - acc["fee"], exit_px, complete)
+        return (acc["pnl"] - acc["fee"], exit_px, complete)
 
     def _fees_from_fills(self, tr) -> float | None:
         """ΣexecFee сделки по WS-филлам (вход + выход) или None, если филлов
@@ -663,6 +778,7 @@ class Executor:
         """Снять трекинг закрытой сделки (после финализации реальным net)."""
         self._fills.pop(tid, None)
         self._close_pending.pop(tid, None)
+        self._partial_bracket.discard(tid)
         for link in [k for k, v in self._link2trade.items() if v == tid]:
             self._link2trade.pop(link, None)
 
@@ -962,13 +1078,39 @@ class Executor:
                      pnl or 0.0, reason)
             self._on_close(tr, pnl, reason, _CLOSE_RU.get(reason, reason), is_real)
             return
+        our_side = "Buy" if tr.side == "long" else "Sell"
+        if pos.side and pos.side != our_side:
+            # На one-way счёте лот развёрнут в чужую сторону: нашей позиции на
+            # бирже нет — её срезал встречный ордер соседнего бота (или наш
+            # вход был неттингом до появления проверки в open_trade). Раньше
+            # бот продолжал «сопровождать» несуществующую позицию, а reduceOnly
+            # закрытие потом отваливалось (BUILDLOG_SCALP 2026-08-19, #4218).
+            pnl, exitp, is_real = self._realized_or_estimate(
+                tr, pos.mark_price or tr.entry)
+            self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,
+                                 fees_usd=self._fees_from_fills(tr) or 0.0,
+                                 close_reason="netted_out",
+                                 ts_close=self._now(), provisional=not is_real)
+            self._pending.pop(tr.id, None)
+            self._hold_log.pop(tr.id, None)
+            self._partial_bracket.discard(tr.id)
+            log.warning("LIVE #%d %s: биржевой лот %s %.6f против нашей %s — "
+                        "позиции нет, закрываю строку как netted_out",
+                        tr.id, tr.symbol, pos.side, pos.size, our_side)
+            self._on_close(tr, pnl, "netted_out", "срезана чужим ботом",
+                           is_real)
+            return
         strat_exit = self._strategy_exit(tr, snap)
         if strat_exit is not None:  # v0.9.5: только дискреционный выход; TP/SL — биржа
             close_reason = strat_exit[0]
-            side = "Buy" if tr.side == "long" else "Sell"
+            side = our_side
             close_link = f"scalp_{close_reason}_{tr.id}"
             self._link2trade[close_link] = tr.id  # филлы выхода → эта сделка
-            cl.close_market(tr.symbol, side, pos.size, close_link)
+            # Закрываем СВОЙ объём, не весь лот символа: на общем счёте
+            # pos.size включает чужую позицию, и close_market(pos.size) её
+            # ликвидировал (BUILDLOG_SCALP 2026-08-19, событие C, #4220).
+            close_qty = min(float(tr.qty or 0.0), pos.size)
+            cl.close_market(tr.symbol, side, close_qty, close_link)
             pnl, exitp, is_real = self._realized_or_estimate(
                 tr, pos.mark_price or tr.entry)
             self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,

@@ -293,8 +293,19 @@ class ScalpBybitClient:
                     order_link_id: str, order_type: str,
                     limit_price: float | None = None,
                     sl_price: float | None = None,
-                    tp_price: float | None = None) -> dict:
-        """Вход. order_type: 'post_only_limit' | 'market'."""
+                    tp_price: float | None = None,
+                    tpsl_mode: str | None = None) -> dict:
+        """Вход. order_type: 'post_only_limit' | 'market'.
+
+        ``tpsl_mode='Partial'`` нужен, когда на символе уже висит ЧУЖОЙ лот
+        (общий one-way счёт с другим ботом). Офдок place-order:
+        https://bybit-exchange.github.io/docs/v5/order/create-order —
+        «Partial: partial position tp/sl (as there is no size option, so it
+        will create tp/sl orders with the qty you actually fill)». То есть
+        брекеты привязываются к НАШЕМУ филлу, а не ко всей позиции символа.
+        По умолчанию (None) Bybit создаёт Full-брекеты на весь лот — это
+        корректно только когда мы на символе одни.
+        """
         params: dict = {
             "category": self._category,
             "symbol": symbol,
@@ -314,6 +325,9 @@ class ScalpBybitClient:
             params["stopLoss"] = str(sl_price)
         if tp_price is not None:
             params["takeProfit"] = str(tp_price)
+        if tpsl_mode is not None and (sl_price is not None
+                                      or tp_price is not None):
+            params["tpslMode"] = tpsl_mode
         return self._submit(params)
 
     def cancel_order(self, symbol: str, order_link_id: str) -> dict:
