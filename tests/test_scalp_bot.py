@@ -3134,11 +3134,20 @@ def test_density_break_pin_list_parses():
     """v0.18.35: density_break_pin_symbols — per-strategy пины (canon-like
     extra_syms), торгуются ТОЛЬКО density_break. Парсинг CSV → upper."""
     from scalp_bot.config.settings import ScalpSettings
-    s = ScalpSettings()
-    assert s.density_break_pin_list == ["NEARUSDT", "HYPEUSDT", "WLDUSDT", "ENAUSDT"]
     s2 = ScalpSettings(density_break_pin_symbols="  nearusdt , HYPEUSDT  ")
     assert s2.density_break_pin_list == ["NEARUSDT", "HYPEUSDT"]
     assert ScalpSettings(density_break_pin_symbols="").density_break_pin_list == []
+
+
+def test_density_break_disabled_leaves_no_orphan_pins():
+    """v0.18.67: страта отключена — пины обязаны быть пустыми. Гейт в main
+    отдаёт закреплённые символы ТОЛЬКО density_break, поэтому непустой список
+    при выключенной страте держал бы подписки на монеты, которые не торгует
+    никто, и прятал бы их от sweep_fade/density_bounce."""
+    from scalp_bot.config.settings import ScalpSettings
+    s = ScalpSettings()
+    assert "density_break" not in s.strategy_list
+    assert s.density_break_pin_list == []
 
 
 def test_density_break_pins_do_not_pollute_auto_universe():
