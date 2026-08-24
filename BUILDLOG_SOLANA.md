@@ -2,6 +2,15 @@
 
 Изолирован от Bybit-ботов. Скан щитков Solana; свап выключен по умолчанию.
 
+## 2026-08-24
+
+### change(solana): бот выключен
+
+Решение пользователя: не сканит, не пишет в TG. `SOLANA_ENABLED=false`
+по умолчанию, телеграм тоже выкл. Контейнер можно остановить.
+
+**Файлы:** `src/solana_bot/settings.py`, `app/main.py`, `docker-compose.yml`
+
 ## 2026-08-18
 
 ### feat(solana): Telegram кандидат/вход/выход на SCALP_TELEGRAM_*

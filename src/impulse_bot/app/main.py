@@ -21,7 +21,7 @@ from impulse_bot.signals import (
     in_universe,
     should_enter,
 )
-from impulse_bot.telegram import TelegramNotifier, fmt_enter, fmt_exit, fmt_start
+from impulse_bot.telegram import TelegramNotifier, fmt_enter, fmt_exit
 
 log = logging.getLogger("impulse_bot")
 
@@ -199,9 +199,7 @@ def run() -> None:
                            demo=cfg.bybit_demo, category=cfg.bybit_category)
     tg = TelegramNotifier(cfg.telegram_bot_token, cfg.telegram_chat_id,
                           enabled=cfg.telegram_enabled)
-    log.info("telegram %s", "on" if tg.active else "off")
-    tg.send(fmt_start(demo=cfg.bybit_demo,
-                      session=f"{cfg.session_start_utc:02d}-{cfg.session_end_utc:02d}"))
+    log.info("telegram %s (только вход/выход)", "on" if tg.active else "off")
     cache: dict[str, tuple[float, float]] = {}
     while True:
         try:

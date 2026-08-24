@@ -5,7 +5,7 @@
 1. держим покупку, пока SMA20 > SMA50 на 4h;
 2. ведём среднюю цену входа своей позиции;
 3. закрываем СВОЙ объём целиком, когда цена ушла от средней на порог;
-4. сразу заходим обратно тем же нотионалом, если тренд ещё вверх;
+4. сразу заходим обратно, если тренд ещё вверх (размер — от волы, §16.2);
 5. повторяем.
 
 Чужую позицию на общем счёте не трогаем: если на символе есть лот, а в нашей
@@ -26,7 +26,15 @@ import uuid
 from hybrid_bot.client import HybridClient
 from hybrid_bot.db import HybridDB
 from hybrid_bot.settings import HybridSettings, load_settings
-from hybrid_bot.signals import distance_pct, fix_price, should_fix, trend_long
+from hybrid_bot.signals import (
+    VOL_LOOKBACK_D,
+    bars_per_day,
+    distance_pct,
+    fix_price,
+    should_fix,
+    trend_long,
+    vol_notional,
+)
 from hybrid_bot.telegram import TelegramNotifier
 
 log = logging.getLogger("hybrid_bot")
@@ -107,11 +115,27 @@ def _executed(cfg: HybridSettings, client: HybridClient, link_id: str,
     return fill.qty, fill.price, fill.fee
 
 
+def _kline_limit(interval: str) -> int:
+    """Окно волы 60 дней + запас на тренд SMA50 и формирующийся бар."""
+    need = int(VOL_LOOKBACK_D * bars_per_day(interval)) + 20
+    return max(250, min(1000, need))
+
+
+def _stake_usd(cfg: HybridSettings, closes: list[float]) -> float:
+    """База $position_usd при воле 40%; меньше в шуме, не больше 3×."""
+    sized = vol_notional(cfg.position_usd, closes, interval=cfg.interval)
+    if sized is None:
+        log.info("волы нет (мало баров) — ставка $%.0f как база",
+                 cfg.position_usd)
+        return cfg.position_usd
+    return sized
+
+
 def _open(cfg: HybridSettings, client: HybridClient, db: HybridDB,
           tg: TelegramNotifier, symbol: str, price: float, *,
-          fixations: int = 0, note: str = "") -> bool:
+          closes: list[float], fixations: int = 0, note: str = "") -> bool:
     """Вход на размер ставки. Возвращает True, если позиция открыта."""
-    notional = bet_size(position_usd=cfg.position_usd,
+    notional = bet_size(position_usd=_stake_usd(cfg, closes),
                         virtual_capital=cfg.virtual_capital,
                         open_notional=db.open_notional(exclude=symbol))
     if notional < cfg.min_notional_usd:
@@ -180,7 +204,8 @@ def _paper(cfg: HybridSettings) -> str:
 def _cycle(cfg: HybridSettings, client: HybridClient, db: HybridDB,
            tg: TelegramNotifier) -> None:
     for symbol in cfg.symbol_list:
-        bars = client.closed_klines(symbol, cfg.interval, limit=250)
+        bars = client.closed_klines(symbol, cfg.interval,
+                                    limit=_kline_limit(cfg.interval))
         closes = [c for _, c in bars]
         want = trend_long(closes)
         price = client.last_price(symbol) or (closes[-1] if closes else 0.0)
@@ -218,7 +243,7 @@ def _cycle(cfg: HybridSettings, client: HybridClient, db: HybridDB,
         elif name == "stay_out":
             log.info("%s тренд вниз, вне рынка", symbol)
         elif name == "open":
-            _open(cfg, client, db, tg, symbol, price)
+            _open(cfg, client, db, tg, symbol, price, closes=closes)
         elif name == "exit":
             done = _close(cfg, client, db, symbol, owned, price, "trend_flat")
             if done:
@@ -244,7 +269,8 @@ def _cycle(cfg: HybridSettings, client: HybridClient, db: HybridDB,
                      dist, avg_was, money)
             back = ""
             if want == 1 and _open(cfg, client, db, tg, symbol, exit_px,
-                                   fixations=fixations, note="обратный вход"):
+                                   closes=closes, fixations=fixations,
+                                   note="обратный вход"):
                 new = db.owned(symbol)
                 if new:
                     back = (f", сразу зашли обратно {new['qty']:.4f} "

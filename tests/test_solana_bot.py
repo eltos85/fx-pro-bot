@@ -61,6 +61,14 @@ def test_telegram_candidate_and_cooldown():
     assert not TelegramNotifier("", "", enabled=True).active
 
 
+def test_bot_is_off_by_default():
+    from solana_bot.settings import SolanaSettings
+
+    cfg = SolanaSettings()
+    assert cfg.enabled is False
+    assert cfg.telegram_enabled is False
+
+
 def test_exits_tp_cap_sl():
     assert exit_reason(1.0, 1.07, tp_pct=7, cap_pct=30, sl_pct=12) == "tp"
     assert exit_reason(1.0, 1.35, tp_pct=7, cap_pct=30, sl_pct=12) == "cap"

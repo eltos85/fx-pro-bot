@@ -652,6 +652,7 @@ services:
   # ─── solana-bot: щитки Solana (скан; свап выкл. без ключа) ─────────────
   # Отдельный пакет. solders только в этом образе. STRATEGY_RATIONALE_SOLANA.md
   solana-bot:
+    profiles: ["solana"]
     build:
       context: .
       dockerfile: Dockerfile.solana-bot
@@ -667,11 +668,12 @@ services:
     environment:
       SOLANA_DATA_DIR: /data
       SOLANA_LOG_LEVEL: ${SOLANA_LOG_LEVEL:-INFO}
+      SOLANA_ENABLED: ${SOLANA_ENABLED:-false}
       SOLANA_TRADING_ENABLED: ${SOLANA_TRADING_ENABLED:-false}
       SOLANA_PRIVATE_KEY: ${SOLANA_PRIVATE_KEY:-}
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       SOLANA_JUPITER_API_KEY: ${SOLANA_JUPITER_API_KEY:-}
-      SOLANA_TELEGRAM_ENABLED: ${SOLANA_TELEGRAM_ENABLED:-true}
+      SOLANA_TELEGRAM_ENABLED: ${SOLANA_TELEGRAM_ENABLED:-false}
       SOLANA_TELEGRAM_BOT_TOKEN: ${SOLANA_TELEGRAM_BOT_TOKEN:-${SCALP_TELEGRAM_BOT_TOKEN:-}}
       SOLANA_TELEGRAM_CHAT_ID: ${SOLANA_TELEGRAM_CHAT_ID:-${SCALP_TELEGRAM_CHAT_ID:-}}
     volumes:

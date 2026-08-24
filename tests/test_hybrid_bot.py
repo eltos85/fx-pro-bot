@@ -12,8 +12,10 @@ from hybrid_bot.app.main import _executed, bet_size, plan
 from hybrid_bot.client import Fill, HybridClient
 from hybrid_bot.db import HybridDB
 from hybrid_bot.settings import HybridSettings
-from hybrid_bot.signals import (distance_pct, fix_price, should_fix,
-                                trend_long)
+from hybrid_bot.signals import (VOL_MAX_MULT, VOL_TARGET_ANNUAL, bars_per_day,
+                                distance_pct, fix_price, realized_vol_annual,
+                                should_fix, trend_long, vol_notional,
+                                vol_scale)
 
 
 # ─── правило тренда ──────────────────────────────────────────────────────
@@ -125,6 +127,38 @@ def test_not_enough_bars_stops_the_symbol():
     act = plan(want=None, owned=None, last_price=2000.0, broker_size=0.0,
                threshold_pct=6.0)
     assert act["action"] == "no_data"
+
+
+# ─── сайзинг от волы (MOP 2012, §16.2) ───────────────────────────────────
+
+def test_bars_per_day_from_interval():
+    assert bars_per_day("240") == pytest.approx(6.0)
+    assert bars_per_day("60") == pytest.approx(24.0)
+
+
+def test_vol_scale_is_target_over_vol_capped_at_three():
+    assert vol_scale(VOL_TARGET_ANNUAL) == pytest.approx(1.0)
+    assert vol_scale(0.80) == pytest.approx(0.5)
+    assert vol_scale(0.10) == pytest.approx(VOL_MAX_MULT)
+    assert vol_scale(0.0) == 0.0
+
+
+def test_vol_notional_scales_the_base_stake():
+    # 361 закрытий 4h = 60 дней + 1. Постоянный шаг даёт нулевую волу —
+    # чередуем, чтобы stdev был ненулевой, и проверяем масштаб, не «вход».
+    up = [100.0 * (1.01 ** i) for i in range(181)]
+    down = [up[-1] * (0.99 ** i) for i in range(1, 181)]
+    closes = up + down
+    assert len(closes) >= 361
+    vol = realized_vol_annual(closes, interval="240")
+    assert vol is not None and vol > 0
+    stake = vol_notional(200.0, closes, interval="240")
+    assert stake == pytest.approx(200.0 * vol_scale(vol))
+    assert stake <= 200.0 * VOL_MAX_MULT
+
+
+def test_vol_notional_needs_sixty_days():
+    assert vol_notional(200.0, [100.0] * 50, interval="240") is None
 
 
 # ─── размер ставки и капитал ─────────────────────────────────────────────

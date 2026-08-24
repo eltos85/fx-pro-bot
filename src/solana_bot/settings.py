@@ -14,6 +14,8 @@ class SolanaSettings(BaseSettings):
     data_dir: str = Field(default="/data")
     log_level: str = Field(default="INFO")
 
+    # Выключен по решению 2026-08-24: не сканит и не пишет в TG.
+    enabled: bool = Field(default=False)
     # На VPS ключа может не быть — скан крутится без свапов.
     trading_enabled: bool = Field(default=False)
     private_key: str = Field(default="")
@@ -41,7 +43,7 @@ class SolanaSettings(BaseSettings):
 
     skip_mints: str = Field(default="")
 
-    telegram_enabled: bool = Field(default=True)
+    telegram_enabled: bool = Field(default=False)
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
     telegram_cooldown_sec: int = Field(default=1800)

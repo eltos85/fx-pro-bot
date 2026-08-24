@@ -140,6 +140,10 @@ def run() -> None:
         level=os.environ.get("SOLANA_LOG_LEVEL") or "INFO",
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     cfg = load_settings()
+    if not cfg.enabled:
+        log.info("solana выключен (SOLANA_ENABLED=false) — не сканируем")
+        while True:
+            time.sleep(3600)
     log.info("старт solana trading=%s vol5>=$%.0f tp=%.1f%% cap=%.1f%% sl=%.1f%%",
              cfg.trading_enabled, cfg.volume_m5_usd, cfg.tp_pct, cfg.cap_pct,
              cfg.sl_pct)
