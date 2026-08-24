@@ -15,6 +15,7 @@
 | Бот | Код | Канон | Лог |
 |---|---|---|---|
 | scalp_bot | `src/scalp_bot/` | `STRATEGY_RATIONALE_SCALP.md` | `BUILDLOG_SCALP.md` |
+| flowzone_bot | `src/flowzone_bot/` | `STRATEGY_FLOWZONE.md` | `BUILDLOG_FLOWZONE.md` |
 | hybrid_bot | `src/hybrid_bot/` | `STRATEGY_HYBRID.md` | `BUILDLOG_HYBRID.md` |
 | impulse_bot | `src/impulse_bot/` | `STRATEGY_RATIONALE_IMPULSE.md` | `BUILDLOG_IMPULSE.md` |
 | horizon_bot | `src/horizon_bot/` | `STRATEGY_RATIONALE_HORIZON.md` | `BUILDLOG_HORIZON.md` |
