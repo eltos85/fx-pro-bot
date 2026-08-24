@@ -12,7 +12,7 @@ Volume Profile + Order Flow). Канон стратегии — `STRATEGY_FLOWZO
 ## 2026-08-24
 
 ### restore(flowzone): вернуть сервис рядом с hybrid, не вместо него
-`a9c69c7`
+`pending`
 
 20.08 hybrid заменили flowzone в compose и удалили код, хотя оба бота должны
 жить одновременно. Код, Dockerfile, тесты и канон восстановлены из git
