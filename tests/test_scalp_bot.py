@@ -4423,6 +4423,99 @@ def test_own_link_fill_is_never_scaled_down():
     assert ex._fills[8]["fee"] == pytest.approx(0.0542)
 
 
+# ─── смешанный лот: биржевой P&L считается от ЧУЖОЙ средней входа ──────────
+#
+# #4501 (25.08): наш reduce-only выход по ETH пришёл с execPnl +$157.35, тогда
+# как своя геометрия давала +$11.37. Разница — ход чужой ноги (1.45 @ 2298.24)
+# в том же one-way лоте: Bybit считает execPnl/closedPnl от средней цены входа
+# ВСЕЙ позиции. Детект по принадлежности филла (#4266) этот случай пропускал:
+# метка ордера была наша, а искажена не принадлежность, а база расчёта.
+
+def test_own_exit_fill_on_mixed_lot_uses_geometry_not_exchange_pnl():
+    """Наш собственный выход на смешанном лоте: в стату идёт геометрия."""
+    class _DB:
+        def open_trades(self):
+            return [SimpleNamespace(id=11, symbol="ETHUSDT", side="long",
+                                    qty=1.34, entry=2473.5, mode="live")]
+
+    ex = Executor(db=_DB(), settings=SimpleNamespace(),
+                  client=SimpleNamespace())
+    ex._mark_mixed_lot(11, 1.45)          # чужая нога известна ещё со входа
+    ex._link2trade["scalp_flow_exit_11"] = 11
+    ex._fills[11] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0}
+    ex.ingest_executions([_exec("ETHUSDT", "scalp_flow_exit_11", fee=1.8305,
+                                pnl=157.3495, price=2484.71, qty=1.34,
+                                closed=1.34)])
+    tr = SimpleNamespace(id=11, symbol="ETHUSDT", side="long", entry=2473.5,
+                         qty=1.34, ts_open=0.0)
+    net, exitp, complete = ex._realized_from_fills(tr)
+    assert complete is True
+    assert exitp == pytest.approx(2484.71)
+    assert net == pytest.approx((2484.71 - 2473.5) * 1.34 - 1.8305, abs=1e-6)
+    assert net < 20.0                     # чужой ход в стату страты не попал
+
+
+def test_manage_live_marks_mixed_lot_when_foreign_leg_appears_after_entry(
+        tmp_path):
+    """Чужая нога может долиться в лот уже ПОСЛЕ нашего входа — биржа
+    пересчитает среднюю цену входа позиции, и её P&L перестанет быть нашим.
+    Сопровождение обязано это заметить (pos уже в руках, REST не нужен)."""
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="SUIUSDT", side="long", qty=100.0, entry=0.70,
+                         sl=0.69, tp=0.72, score=5, reasons="x", mode="live",
+                         strategy="density_break", ts_open=0.0)
+    cl = _ManageClient(_broker_pos("Buy", 350.0, mark=0.705))
+    ex = Executor(db, _live_cfg(), client=cl, strategies=[_ExitStrat()],
+                  now=lambda: 10.0)
+    ex._manage_live(db.open_trades()[0], 0.705, _snap(_long_samples()))
+    assert tid in ex._mixed_lot
+    db.close()
+
+
+def test_manage_live_keeps_lot_ours_when_size_matches(tmp_path):
+    """Когда на символе мы одни, лот смешанным не считается — иначе бот
+    отказался бы от биржевых цифр там, где они верны."""
+    db = ScalpDB(str(tmp_path))
+    db.insert_open(symbol="SUIUSDT", side="long", qty=100.0, entry=0.70,
+                   sl=0.69, tp=0.72, score=5, reasons="x", mode="live",
+                   strategy="density_break", ts_open=0.0)
+    cl = _ManageClient(_broker_pos("Buy", 100.0, mark=0.705))
+    ex = Executor(db, _live_cfg(), client=cl, strategies=[_ExitStrat()],
+                  now=lambda: 10.0)
+    ex._manage_live(db.open_trades()[0], 0.705, _snap(_long_samples()))
+    assert ex._mixed_lot == set()
+    db.close()
+
+
+def test_mixed_lot_net_marked_verified_so_trueup_cannot_override(tmp_path):
+    """Биржевой closedPnl смешанного лота посчитан от чужой средней входа, то
+    есть true-up не имеет права переписать им нашу геометрию. Такая сделка
+    помечается verified сразу — reconcile её больше не трогает."""
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="ETHUSDT", side="long", qty=1.34, entry=2473.5,
+                         sl=2466.3786, tp=2499.7749, score=6, reasons="x",
+                         mode="live", strategy="sweep_fade_canon", ts_open=0.0)
+    db.mark_closed(tid, exit_price=2473.5, pnl_usd=10.0949, fees_usd=0.0,
+                   close_reason="flow_exit", ts_close=1.0, provisional=True)
+    ex = Executor(db, _live_cfg(), client=None, now=lambda: 2.0)
+    ex._mark_mixed_lot(tid, 1.45)
+    ex._link2trade["scalp_flow_exit_1"] = tid
+    ex._fills[tid] = {"fee": 0.0, "pnl": 0.0, "close_val": 0.0,
+                      "close_qty": 0.0}
+    ex.ingest_executions([_exec("ETHUSDT", "scalp_flow_exit_1", fee=1.8305,
+                                pnl=157.3495, price=2484.71, qty=1.34,
+                                closed=1.34)])
+    ex.reconcile()
+    row = db._conn.execute(
+        "SELECT pnl_usd, pnl_provisional, pnl_verified FROM trades WHERE id=?",
+        (tid,)).fetchone()
+    assert row[1] == 0 and row[2] == 1              # provisional снят, verified
+    assert row[0] == pytest.approx((2484.71 - 2473.5) * 1.34 - 1.8305,
+                                   abs=1e-6)
+    assert db.unverified_closed_live_since(0.0) == []
+    db.close()
+
+
 # ─── sweep_fade_canon (v0.18.20): значимые уровни + full reclaim + скоуп ────
 
 def _kline_row(ts_sec: float, hi: float, lo: float):

@@ -225,6 +225,11 @@ class Executor:
         # счёт с другим ботом): у них брекеты стоят в режиме Partial, поэтому
         # их нельзя двигать через set_trading_stop (см. _rebracket).
         self._partial_bracket: set[int] = set()
+        # Сделки на СМЕШАННОМ лоте: биржевой лот символа содержит чужой объём,
+        # поэтому avgEntryPrice позиции — не наша цена входа. Ни execPnl, ни
+        # closedPnl такой позиции нашими не являются (оба считаются от средней
+        # всего лота) — P&L берём из своей геометрии, см. _realized_from_fills.
+        self._mixed_lot: set[int] = set()
 
     def _notify(self, text: str) -> None:
         if self._notifier is not None:
@@ -354,6 +359,7 @@ class Executor:
                             "close_qty": 0.0, "open_val": 0.0, "open_qty": 0.0}
         if foreign_side:
             self._partial_bracket.add(tid)
+            self._mark_mixed_lot(tid, foreign_qty)
         # v0.18.16: пер-стратегийный тип входа (density_break=taker). sig несёт
         # выбранный стратегией order_type; None → глобальный cfg.entry_order_type.
         otype = sig.entry_order_type or cfg.entry_order_type
@@ -567,6 +573,9 @@ class Executor:
                 tid, {"fee": 0.0, "pnl": 0.0, "close_val": 0.0, "close_qty": 0.0,
                       "open_val": 0.0, "open_qty": 0.0})
             exec_qty = float(r.get("execQty", 0.0) or 0.0)
+            # Филл по НАШЕЙ метке целиком наш по объёму (доля не нужна), но его
+            # execPnl всё равно может быть посчитан от чужой средней входа —
+            # это ловит _mixed_lot, см. _realized_from_fills.
             share = 1.0
             if not our_link:
                 # Филл без нашего orderLinkId (биржевой TP/SL) мы привязали к
@@ -579,6 +588,7 @@ class Executor:
                 share = self._our_share(tid, exec_qty)
                 if share < 1.0:
                     acc["foreign_mixed"] = True
+                    self._mark_mixed_lot(tid, exec_qty)
             acc["fee"] += r.get("execFee", 0.0) * share
             acc["pnl"] += r.get("execPnl", 0.0) * share
             # закрывающий филл: closedSize>0 или есть realized P&L
@@ -691,18 +701,61 @@ class Executor:
             return ("", 0.0)
         if pos is None or pos.size <= 0:
             return ("", 0.0)
-        ours = 0.0
-        try:
-            for tr in self._db.open_trades():
-                if tr.symbol == symbol and tr.mode == "live":
-                    ours += float(tr.qty or 0.0)
-        except Exception:
-            log.exception("_foreign_lot: open_trades failed")
+        ours = self._our_open_qty(symbol)
+        if ours is None:
             return ("", 0.0)
         foreign = pos.size - ours
         if foreign <= self._FOREIGN_EPS:
             return ("", 0.0)
         return (pos.side, foreign)
+
+    def _our_open_qty(self, symbol: str) -> float | None:
+        """Суммарный наш открытый live-объём по символу. None — БД не ответила
+        (вызывающий обязан выбрать fail-open, а не считать объём нулевым)."""
+        try:
+            return sum(float(tr.qty or 0.0) for tr in self._db.open_trades()
+                       if tr.symbol == symbol and tr.mode == "live")
+        except Exception:
+            log.exception("_our_open_qty: open_trades failed")
+            return None
+
+    # Допуск на округление лота при сравнении биржевого size с суммой наших
+    # qty: шаг лота может дать превышение на доли процента без всякой чужой
+    # ноги. Тот же допуск, что у _our_share — блиндспот (чужая нога меньше 2%
+    # нашего объёма) там уже принят, и его цена мала: вес такой ноги в средней
+    # цене входа тоже ≤2%. Ложное срабатывание дороже: оно уводит сделку с
+    # биржевого net на геометрию и отменяет true-up дрейфа комиссий.
+    _MIXED_LOT_TOL = 1.02
+
+    def _mark_mixed_lot(self, tid: int, foreign_qty: float) -> None:
+        """Запомнить, что лот символа смешан с чужим объёмом.
+
+        С этого момента биржевые цифры P&L по позиции нашими не являются:
+        Bybit считает и ``execPnl``, и ``closedPnl`` от средней цены входа
+        ВСЕГО лота. #4501 (25.08): наш выход дал по геометрии +$11.37, а WS
+        принёс execPnl +$153.69 — разница есть ход чужой ноги, вошедшей на
+        4.7% ниже. Прежний детект опирался на принадлежность филла (чужой
+        orderLinkId), но искажена не принадлежность филла, а база расчёта,
+        поэтому свой собственный reduce-only выход искажён ровно так же.
+        """
+        if tid in self._mixed_lot:
+            return
+        self._mixed_lot.add(tid)
+        log.warning("#%d: лот символа смешан с чужим объёмом %.6f — средняя "
+                    "цена входа позиции не наша, P&L считаю из своей "
+                    "геометрии", tid, foreign_qty)
+
+    def _mark_verified_if_mixed(self, tid: int, pnl: float) -> None:
+        """Для сделки на смешанном лоте геометрия — окончательный ответ.
+
+        Помечаем verified, иначе универсальный true-up (reconcile, шаг 4)
+        имел бы право переписать её биржевым ``closedPnl``, который для
+        смешанного лота посчитан от чужой средней входа."""
+        if tid not in self._mixed_lot:
+            return
+        self._db.verify_pnl(tid, pnl_usd=pnl)
+        log.info("#%d: net из геометрии помечен verified — биржевой closedPnl "
+                 "смешанного лота не наш", tid)
 
     def _our_share(self, tid: int, exec_qty: float) -> float:
         """Какая доля чужого по происхождению филла приходится на наш объём.
@@ -728,18 +781,20 @@ class Executor:
         закрывающий объём ≈ qty сделки (все филлы выхода пришли по WS).
         net = ΣexecPnl − ΣexecFee (включая комиссию входа) = Bybit closedPnl.
 
-        Если закрывающий филл смешан с чужой позицией (``foreign_mixed``),
-        ``execPnl`` считается от СРЕДНЕЙ цены входа всего лота, а не от нашей,
-        поэтому доля от него нашей не является. В этом случае P&L берётся из
-        геометрии нашей сделки: (выход − наш вход) × наш qty − наша доля
-        комиссии. Комиссия остаётся долевой — она пропорциональна объёму.
+        Если лот символа смешан с чужим объёмом, ``execPnl`` считается от
+        СРЕДНЕЙ цены входа всего лота, а не от нашей, поэтому нашим он не
+        является — ни у чужого филла (``foreign_mixed``), ни у нашего
+        собственного reduce-only выхода (``_mixed_lot``). В этом случае P&L
+        берётся из геометрии нашей сделки: (выход − наш вход) × наш qty −
+        наша доля комиссии. Комиссия остаётся долевой — она пропорциональна
+        объёму, а не цене входа.
         """
         acc = self._fills.get(tr.id)
         if not acc or acc["close_qty"] <= 0:
             return (0.0, None, False)
         exit_px = acc["close_val"] / acc["close_qty"]
         complete = acc["close_qty"] >= tr.qty * 0.98
-        if acc.get("foreign_mixed"):
+        if acc.get("foreign_mixed") or tr.id in self._mixed_lot:
             sign = 1.0 if tr.side == "long" else -1.0
             gross = sign * (exit_px - tr.entry) * float(tr.qty or 0.0)
             return (gross - acc["fee"], exit_px, complete)
@@ -779,6 +834,7 @@ class Executor:
         self._fills.pop(tid, None)
         self._close_pending.pop(tid, None)
         self._partial_bracket.discard(tid)
+        self._mixed_lot.discard(tid)
         for link in [k for k, v in self._link2trade.items() if v == tid]:
             self._link2trade.pop(link, None)
 
@@ -837,6 +893,7 @@ class Executor:
                     log.info("reconcile #%d %s: оценка→реальный net %.4f→%.4f (WS)"
                              "%s", tr.id, tr.symbol, tr.pnl_usd or 0.0, net,
                              f" reason→{reason}" if reason else "")
+                    self._mark_verified_if_mixed(tr.id, net)
                     pend = self._close_pending.pop(tr.id, None)
                     if pend is not None:
                         self._send_close_msg(tr.id, pend["symbol"], net,
@@ -1071,6 +1128,7 @@ class Executor:
                                  close_reason=reason,
                                  ts_close=self._now(), provisional=not is_real)
             if is_real:
+                self._mark_verified_if_mixed(tr.id, pnl)
                 self._forget_trade(tr.id)
             self._pending.pop(tr.id, None)
             self._hold_log.pop(tr.id, None)
@@ -1079,6 +1137,13 @@ class Executor:
             self._on_close(tr, pnl, reason, _CLOSE_RU.get(reason, reason), is_real)
             return
         our_side = "Buy" if tr.side == "long" else "Sell"
+        # Чужой объём мог появиться в лоте ПОСЛЕ нашего входа: соседний бот
+        # долил свой, и биржа пересчитала среднюю цену входа всей позиции.
+        # Проверяем каждый цикл сопровождения — pos уже в руках, лишний
+        # REST-вызов не нужен.
+        ours = self._our_open_qty(tr.symbol)
+        if ours is not None and pos.size > ours * self._MIXED_LOT_TOL:
+            self._mark_mixed_lot(tr.id, pos.size - ours)
         if pos.side and pos.side != our_side:
             # На one-way счёте лот развёрнут в чужую сторону: нашей позиции на
             # бирже нет — её срезал встречный ордер соседнего бота (или наш
@@ -1091,6 +1156,8 @@ class Executor:
                                  fees_usd=self._fees_from_fills(tr) or 0.0,
                                  close_reason="netted_out",
                                  ts_close=self._now(), provisional=not is_real)
+            if is_real:
+                self._mark_verified_if_mixed(tr.id, pnl)
             self._pending.pop(tr.id, None)
             self._hold_log.pop(tr.id, None)
             self._partial_bracket.discard(tr.id)
@@ -1118,6 +1185,7 @@ class Executor:
                                  close_reason=close_reason,
                                  ts_close=self._now(), provisional=not is_real)
             if is_real:
+                self._mark_verified_if_mixed(tr.id, pnl)
                 self._forget_trade(tr.id)
             self._pending.pop(tr.id, None)
             self._hold_log.pop(tr.id, None)
