@@ -4351,15 +4351,24 @@ def test_foreign_mixed_close_uses_our_geometry_not_exchange_pnl():
 class _ManageClient:
     """Клиент для _manage_live: отдаёт позицию и записывает закрытия."""
 
-    def __init__(self, position):
+    def __init__(self, position, stop_orders=None):
         self._position = position
+        self._stop_orders = stop_orders or []
         self.closes = []
+        self.cancelled = []
 
     def get_position(self, symbol):
         return self._position
 
     def close_market(self, symbol, side, qty, order_link_id):
         self.closes.append((symbol, side, qty, order_link_id))
+        return {"ok": True}
+
+    def open_stop_orders(self, symbol):
+        return list(self._stop_orders)
+
+    def cancel_order_by_id(self, symbol, order_id):
+        self.cancelled.append(order_id)
         return {"ok": True}
 
 
@@ -4484,6 +4493,51 @@ def test_manage_live_keeps_lot_ours_when_size_matches(tmp_path):
                   now=lambda: 10.0)
     ex._manage_live(db.open_trades()[0], 0.705, _snap(_long_samples()))
     assert ex._mixed_lot == set()
+    db.close()
+
+
+def test_exit_on_mixed_lot_cancels_only_our_own_brackets(tmp_path):
+    """#4501 (25.08): наш выход не закрыл позицию символа (осталась чужая нога),
+    и наш Partial-тейк через 6 минут закрыл 1.34 ETH соседа на +$171.60. Биржа
+    снимает брекеты только когда позиция закрыта целиком, поэтому на общем лоте
+    снимаем их сами — и строго свои, по метке родительского ордера."""
+    db = ScalpDB(str(tmp_path))
+    tid = db.insert_open(symbol="SUIUSDT", side="long", qty=100.0, entry=0.70,
+                         sl=0.69, tp=0.72, score=5, reasons="x", mode="live",
+                         strategy="density_break", ts_open=0.0,
+                         entry_order_id="scalp_SUIUSDT_1")
+    stops = [
+        {"orderId": "our-tp", "parentOrderLinkId": "scalp_SUIUSDT_1",
+         "stopOrderType": "PartialTakeProfit", "triggerPrice": "0.72"},
+        {"orderId": "our-sl", "parentOrderLinkId": "scalp_SUIUSDT_1",
+         "stopOrderType": "PartialStopLoss", "triggerPrice": "0.69"},
+        {"orderId": "neighbour", "parentOrderLinkId": "swing_SUIUSDT_9",
+         "stopOrderType": "PartialStopLoss", "triggerPrice": "0.65"},
+    ]
+    cl = _ManageClient(_broker_pos("Buy", 350.0, mark=0.705), stop_orders=stops)
+    ex = Executor(db, _live_cfg(), client=cl, strategies=[_ExitStrat()],
+                  now=lambda: 10.0)
+    ex._manage_live(db.open_trades()[0], 0.705, _snap(_long_samples()))
+    assert tid in ex._mixed_lot
+    assert cl.cancelled == ["our-tp", "our-sl"]   # чужой стоп не тронут
+    db.close()
+
+
+def test_exit_when_alone_leaves_stop_orders_to_the_exchange(tmp_path):
+    """Когда лот наш целиком, позиция закрывается полностью и брекеты снимает
+    сама биржа (офдок trading-stop). Лишний REST-вызов не делаем."""
+    db = ScalpDB(str(tmp_path))
+    db.insert_open(symbol="SUIUSDT", side="long", qty=100.0, entry=0.70,
+                   sl=0.69, tp=0.72, score=5, reasons="x", mode="live",
+                   strategy="density_break", ts_open=0.0,
+                   entry_order_id="scalp_SUIUSDT_2")
+    stops = [{"orderId": "our-tp", "parentOrderLinkId": "scalp_SUIUSDT_2",
+              "stopOrderType": "PartialTakeProfit", "triggerPrice": "0.72"}]
+    cl = _ManageClient(_broker_pos("Buy", 100.0, mark=0.705), stop_orders=stops)
+    ex = Executor(db, _live_cfg(), client=cl, strategies=[_ExitStrat()],
+                  now=lambda: 10.0)
+    ex._manage_live(db.open_trades()[0], 0.705, _snap(_long_samples()))
+    assert cl.cancelled == []
     db.close()
 
 

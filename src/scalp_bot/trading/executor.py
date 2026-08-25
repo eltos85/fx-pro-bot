@@ -745,6 +745,39 @@ class Executor:
                     "цена входа позиции не наша, P&L считаю из своей "
                     "геометрии", tid, foreign_qty)
 
+    def _cancel_own_brackets(self, tr) -> None:
+        """Снять свои биржевые TP/SL после нашего выхода на общем лоте.
+
+        Офдок trading-stop: «The system will cancel these orders if the position
+        is closed» (https://bybit-exchange.github.io/docs/v5/position/trading-stop).
+        На общем one-way лоте наш выход позицию НЕ закрывает — остаётся чужая
+        нога, поэтому наш Partial-брекет живёт дальше и срабатывает по ЧУЖОМУ
+        объёму. Замер: #4501 (25.08) — через 6 минут после нашего `flow_exit`
+        наш тейк закрыл 1.34 ETH соседа по 2499.79 на +$171.60.
+
+        Свои ордера опознаём по ``parentOrderLinkId`` = метка нашего входа
+        (офдок open-order), а не по цене и объёму: на общем счёте совпадение
+        уровней — обычное дело, и по отпечатку легко снять чужой стоп.
+        """
+        cl = self._client
+        link = getattr(tr, "entry_order_id", None)
+        if cl is None or not link:
+            return
+        try:
+            orders = cl.open_stop_orders(tr.symbol)
+        except Exception:
+            log.exception("_cancel_own_brackets #%d: open_stop_orders failed",
+                          tr.id)
+            return
+        for o in orders:
+            if o.get("parentOrderLinkId") != link or not o.get("orderId"):
+                continue
+            res = cl.cancel_order_by_id(tr.symbol, o["orderId"])
+            log.info("#%d: снимаю свой брекет %s @%s (общий лот, биржа сама не "
+                     "снимет) — %s", tr.id, o.get("stopOrderType") or "?",
+                     o.get("triggerPrice") or "?",
+                     "снят" if res.get("ok") else res.get("error"))
+
     def _mark_verified_if_mixed(self, tid: int, pnl: float) -> None:
         """Для сделки на смешанном лоте геометрия — окончательный ответ.
 
@@ -1178,6 +1211,8 @@ class Executor:
             # ликвидировал (BUILDLOG_SCALP 2026-08-19, событие C, #4220).
             close_qty = min(float(tr.qty or 0.0), pos.size)
             cl.close_market(tr.symbol, side, close_qty, close_link)
+            if tr.id in self._mixed_lot:
+                self._cancel_own_brackets(tr)
             pnl, exitp, is_real = self._realized_or_estimate(
                 tr, pos.mark_price or tr.entry)
             self._db.mark_closed(tr.id, exit_price=exitp, pnl_usd=pnl,

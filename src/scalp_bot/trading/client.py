@@ -346,6 +346,42 @@ class ScalpBybitClient:
             return {"ok": False, "error": str(e)}
         return {"ok": resp.get("retCode") in (0, None), "raw": resp}
 
+    def cancel_order_by_id(self, symbol: str, order_id: str) -> dict:
+        """Отмена по биржевому ``orderId``.
+
+        Нужна для прикреплённых TP/SL: их создаёт биржа, нашей метки на них
+        нет. Офдок trading-stop прямо описывает такую отмену — «when calling
+        the cancel API through the tp/sl order ID, it will only cancel the
+        corresponding one-sided take profit or stop loss order ID»
+        (https://bybit-exchange.github.io/docs/v5/position/trading-stop).
+        """
+        try:
+            resp = self._session.cancel_order(
+                category=self._category, symbol=symbol, orderId=order_id)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": resp.get("retCode") in (0, None), "raw": resp}
+
+    def open_stop_orders(self, symbol: str) -> list[dict]:
+        """Живые условные ордера символа (в т.ч. прикреплённые TP/SL позиции).
+
+        ``orderFilter='StopOrder'`` — «conditional order for Futures and Spot»
+        (https://bybit-exchange.github.io/docs/v5/order/open-order). В ответе
+        есть ``parentOrderLinkId`` — «linked parent order for attached
+        take-profit and stop-loss orders»; для futures он не меняется при
+        правке TP/SL. Это единственный надёжный способ отличить СВОЙ брекет от
+        чужого на общем счёте: цена и объём могут совпасть случайно, метка
+        родительского ордера — нет.
+        """
+        try:
+            resp = self._session.get_open_orders(
+                category=self._category, symbol=symbol,
+                orderFilter="StopOrder")
+        except Exception:
+            log.exception("open_stop_orders %s failed", symbol)
+            return []
+        return resp.get("result", {}).get("list", []) or []
+
     def order_status(self, symbol: str, order_link_id: str) -> str | None:
         """orderStatus: New/PartiallyFilled/Filled/Cancelled/Rejected/..."""
         try:
