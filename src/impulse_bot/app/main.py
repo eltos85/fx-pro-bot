@@ -12,9 +12,12 @@ import uuid
 from datetime import datetime, timezone
 
 from impulse_bot.client import ImpulseClient, Ticker
-from impulse_bot.db import ImpulseDB
+from impulse_bot.db import ImpulseDB, SignalSnapshot
 from impulse_bot.settings import load_settings
 from impulse_bot.signals import (
+    Burst,
+    Cluster,
+    Tape,
     clamp_mkt_qty,
     detect_burst,
     in_session,
@@ -47,6 +50,23 @@ def _day() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _snapshot(burst: Burst, tape: Tape, cluster: Cluster,
+              turnover24h: float) -> SignalSnapshot:
+    """Что бот видел в момент входа — пишем в БД для последующего разбора.
+
+    На входные решения не влияет: снимок собирается уже после того, как
+    `should_enter` вернул True.
+    """
+    return SignalSnapshot(
+        burst_usd=burst.burst_usd,
+        move_pct=burst.move_pct,
+        tape_buy=tape.buy_usd,
+        tape_sell=tape.sell_usd,
+        cluster_frac=cluster.dir_frac,
+        turnover24h=turnover24h,
+    )
+
+
 def _pnl(pos: dict, exit_px: float) -> float:
     sign = 1 if pos["side"] == "Buy" else -1
     return sign * (exit_px - pos["entry"]) * pos["qty"]
@@ -58,6 +78,28 @@ def _notify_exit(tg: TelegramNotifier, pos: dict, px: float, reason: str) -> Non
                      reason=reason))
 
 
+def _record_exit(client: ImpulseClient, db: ImpulseDB, tg: TelegramNotifier,
+                 pos: dict, reason: str) -> None:
+    """Закрывает позицию в БД, подставляя фактические цены с биржи.
+
+    `last_price` — это цена на момент, когда цикл заметил закрытие, то есть
+    с задержкой до одного поллинга. Для учёта берём avgExitPrice и net PnL
+    из closed_pnl, а тикер оставляем как запасной вариант.
+    """
+    closed = client.last_closed_trade(pos["symbol"], not_before_ts=pos["ts_open"])
+    px = client.last_price(pos["symbol"]) or pos["entry"]
+    if closed is None:
+        log.info("%s нет closed_pnl — учёт по тикеру", pos["symbol"])
+        db.close_pos(pos["symbol"], px, reason)
+        _notify_exit(tg, pos, px, reason)
+        return
+    db.close_pos(pos["symbol"], px, reason,
+                 exit_real=closed.exit_price, pnl_net=closed.pnl)
+    tg.send(fmt_exit(symbol=pos["symbol"], side=pos["side"], qty=pos["qty"],
+                     entry=closed.entry_price, exit_px=closed.exit_price,
+                     pnl_usd=closed.pnl, reason=reason))
+
+
 def _manage(cfg, client: ImpulseClient, db: ImpulseDB,
             tg: TelegramNotifier) -> None:
     now = time.time()
@@ -66,9 +108,7 @@ def _manage(cfg, client: ImpulseClient, db: ImpulseDB,
         if broker is None:
             continue
         if broker.size == 0:
-            px = client.last_price(pos["symbol"]) or pos["entry"]
-            db.close_pos(pos["symbol"], px, "broker_flat")
-            _notify_exit(tg, pos, px, "broker_flat")
+            _record_exit(client, db, tg, pos, "broker_flat")
             continue
         if now - pos["ts_open"] >= cfg.scratch_sec:
             lid = _link()
@@ -77,14 +117,13 @@ def _manage(cfg, client: ImpulseClient, db: ImpulseDB,
                                 qty=pos["qty"], order_link_id=lid,
                                 reduce_only=True)
             if res.get("ok"):
-                px = client.last_price(pos["symbol"]) or pos["entry"]
-                db.close_pos(pos["symbol"], px, "time_scratch")
                 log.info("%s scratch %ds", pos["symbol"], cfg.scratch_sec)
-                _notify_exit(tg, pos, px, "time_scratch")
+                _record_exit(client, db, tg, pos, "time_scratch")
 
 
 def _enter(cfg, client: ImpulseClient, db: ImpulseDB, symbol: str,
-           side: str, px: float, equity: float, tg: TelegramNotifier) -> None:
+           side: str, px: float, equity: float, tg: TelegramNotifier,
+           signal: SignalSnapshot | None = None) -> None:
     sl_frac = cfg.sl_pct / 100.0
     tp_frac = cfg.tp_pct / 100.0
     if side == "Buy":
@@ -122,10 +161,18 @@ def _enter(cfg, client: ImpulseClient, db: ImpulseDB, symbol: str,
     if not res.get("ok"):
         log.warning("%s вход отклонён: %s", symbol, res.get("error"))
         return
-    db.open_pos(symbol, side, qty, px, sl, tp, lid)
+    db.open_pos(symbol, side, qty, px, sl, tp, lid, signal=signal)
     db.bump_session(_day())
-    log.info("%s %s qty=%.6f px=%.6f sl=%.6f tp=%.6f",
-             symbol, side, qty, px, sl, tp)
+    # Цена филла Market отличается от цены тикера, по которой принято решение.
+    broker = client.get_position(symbol)
+    if broker is not None and broker.entry_price > 0:
+        db.set_entry_real(symbol, broker.entry_price)
+    log.info("%s %s qty=%.6f px=%.6f sl=%.6f tp=%.6f", symbol, side, qty, px, sl, tp)
+    if signal is not None:
+        log.info("%s сигнал: удар $%.0f ход %.2f%% лента %.0f/%.0f кластер %.2f "
+                 "оборот $%.0f", symbol, signal.burst_usd, signal.move_pct,
+                 signal.tape_buy, signal.tape_sell, signal.cluster_frac,
+                 signal.turnover24h)
     tg.send(fmt_enter(symbol=symbol, side=side, qty=qty, px=px, sl=sl, tp=tp))
 
 
@@ -178,7 +225,8 @@ def _cycle(cfg, client: ImpulseClient, db: ImpulseDB,
             log.info("%s удар есть, лента/кластер нет buy=%.0f sell=%.0f cl=%.2f",
                      t.symbol, tape.buy_usd, tape.sell_usd, cluster.dir_frac)
             continue
-        _enter(cfg, client, db, t.symbol, burst.side, t.last, equity, tg)
+        _enter(cfg, client, db, t.symbol, burst.side, t.last, equity, tg,
+               signal=_snapshot(burst, tape, cluster, t.turnover24h))
         return
 
 

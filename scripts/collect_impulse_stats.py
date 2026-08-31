@@ -141,6 +141,36 @@ def t_test_vs_zero(xs: list[float]) -> tuple[float, float]:
     return t, math.erfc(abs(t) / math.sqrt(2))
 
 
+# ─── Разбор записи закрытия ──────────────────────────────────────────────
+
+def _f(row: dict, key: str) -> float:
+    try:
+        return float(row.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def pos_side(row: dict) -> str:
+    """Сторона ПОЗИЦИИ. В closed-pnl `side` — сторона закрывающего ордера,
+    то есть противоположная. Long закрывается Sell-ордером."""
+    return "Buy" if (row.get("side") or "").strip() == "Sell" else "Sell"
+
+
+def price_move_pct(row: dict) -> float | None:
+    """Ход цены от входа к выходу в сторону позиции, %. По ценам биржи."""
+    entry = _f(row, "avgEntryPrice")
+    exit_ = _f(row, "avgExitPrice")
+    if entry <= 0 or exit_ <= 0:
+        return None
+    sign = 1.0 if pos_side(row) == "Buy" else -1.0
+    return sign * (exit_ / entry - 1.0) * 100.0
+
+
+def fees_of(row: dict) -> float:
+    """Комиссия круга из самой записи закрытия (openFee + closeFee)."""
+    return _f(row, "openFee") + _f(row, "closeFee")
+
+
 # ─── Локальная БД ────────────────────────────────────────────────────────
 
 def load_db_trades(db_path: str, since_ts: int) -> tuple[list[dict], int]:
@@ -150,18 +180,59 @@ def load_db_trades(db_path: str, since_ts: int) -> tuple[list[dict], int]:
         return [], 0
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
     try:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(trades)")}
+        base = ["ts_open", "ts_close", "symbol", "side", "qty", "entry",
+                "exit", "pnl_usd", "reason"]
+        extra = [c for c in ("entry_real", "exit_real", "pnl_net", "burst_usd",
+                             "move_pct", "tape_buy", "tape_sell",
+                             "cluster_frac", "turnover24h") if c in have]
+        cols = base + extra
         trades = [
-            {"ts_open": r[0], "ts_close": r[1], "symbol": r[2], "side": r[3],
-             "qty": r[4], "entry": r[5], "exit": r[6], "pnl": r[7], "reason": r[8]}
-            for r in conn.execute(
-                "SELECT ts_open, ts_close, symbol, side, qty, entry, exit, "
-                "pnl_usd, reason FROM trades WHERE ts_close >= ? ORDER BY ts_close",
-                (since_ts,))
+            dict(zip(["ts_open", "ts_close", "symbol", "side", "qty", "entry",
+                      "exit", "pnl", "reason"] + extra, row))
+            for row in conn.execute(
+                f"SELECT {', '.join(cols)} FROM trades "
+                f"WHERE ts_close >= ? ORDER BY ts_close", (since_ts,))
         ]
         n_open = int(conn.execute("SELECT COUNT(*) FROM positions").fetchone()[0])
         return trades, n_open
     finally:
         conn.close()
+
+
+def signal_breakdown(trades: list[dict]) -> list[str]:
+    """Исход сделки против силы сигнала на входе.
+
+    Поля появились 2026-08-31; у более старых сделок они NULL, такие строки
+    пропускаются. Пока накопленных сделок мало, разбивка показывается как
+    наблюдение — решения по ней принимать нельзя (sample-size.mdc).
+    """
+    out: list[str] = []
+    fields = (("burst_usd", "сила удара, $"),
+              ("move_pct", "ход на входе, %"),
+              ("cluster_frac", "кластер"),
+              ("turnover24h", "оборот инструмента, $"))
+    for field, label in fields:
+        rows = [t for t in trades
+                if t.get(field) is not None and t.get("exit_real")
+                and t.get("entry_real")]
+        if len(rows) < 8:
+            continue
+        rows.sort(key=lambda t: t[field])
+        half = len(rows) // 2
+        out.append(f"  {label}")
+        for name, grp in (("нижняя половина", rows[:half]),
+                          ("верхняя половина", rows[half:])):
+            wins = sum(1 for t in grp if (t.get("pnl_net") or 0) > 0)
+            pnl = sum(t.get("pnl_net") or 0 for t in grp)
+            lo = min(t[field] for t in grp)
+            hi = max(t[field] for t in grp)
+            out.append(f"    {name:<18} n={len(grp):3d}  побед {wins:3d} "
+                       f"({wins/len(grp)*100:3.0f}%)  PnL ${pnl:+.2f}  "
+                       f"диапазон {lo:.4g}…{hi:.4g}")
+    if not out:
+        return ["  Пока нет сделок со снимком сигнала — поля пишутся с 2026-08-31."]
+    return out
 
 
 # ─── Основная логика ─────────────────────────────────────────────────────
@@ -214,7 +285,9 @@ def main() -> int:
     scratch_rows: list[dict] = []
     stop_rows: list[dict] = []
     foreign_rows: list[dict] = []
+    nontrade_rows: list[dict] = []
     stop_kinds: Counter[str] = Counter()
+    nontrade_kinds: Counter[str] = Counter()
 
     for row in cpnl:
         oid = (row.get("orderId") or "").strip()
@@ -227,12 +300,28 @@ def main() -> int:
             upd = 0
 
         if lid.startswith(PREFIX):
-            scratch_rows.append(row)
+            kind = "scratch"
         elif any(abs(upd - ts) <= MATCH_TOL_SEC for ts in close_ts.get(sym, [])):
-            stop_rows.append(row)
-            stop_kinds[(o.get("stopOrderType") or "?").strip() or "?"] += 1
+            kind = "stop"
         else:
             foreign_rows.append(row)
+            continue
+
+        # execType: обычная сделка — только `Trade`. Ликвидации (BustTrade),
+        # расчёты (Settle, SessionSettlePnL) и переносы (MovePosition) в
+        # статистику стратегии мешать нельзя.
+        # https://bybit-exchange.github.io/docs/v5/position/close-pnl
+        etype = (row.get("execType") or "Trade").strip()
+        if etype != "Trade":
+            nontrade_rows.append(row)
+            nontrade_kinds[etype] += 1
+            continue
+
+        if kind == "scratch":
+            scratch_rows.append(row)
+        else:
+            stop_rows.append(row)
+            stop_kinds[(o.get("stopOrderType") or "?").strip() or "?"] += 1
 
     impulse_rows = scratch_rows + stop_rows
 
@@ -287,36 +376,101 @@ def main() -> int:
                f"{datetime.now(tz=UTC).strftime('%Y-%m-%d %H:%M UTC')}")
     out.append("=" * 70)
 
+    fee_cpnl = sum(fees_of(r) for r in impulse_rows)
+    fill_count = sum(int(_f(r, "fillCount")) for r in impulse_rows)
+
     out.append("")
     out.append("ПРОВЕРКА ЧИСТОТЫ ВЫБОРКИ")
     out.append(f"  Сделок по API      : {n_all}")
     out.append(f"  Сделок в локальной БД: {len(db_trades)}")
     out.append(f"  Филлов вход/выход  : {n_entry} / {n_exit}")
+    out.append(f"  fillCount по API   : {fill_count}")
     consistent = (n_all == len(db_trades) == n_entry == n_exit)
     out.append(f"  Согласовано        : {'да' if consistent else 'НЕТ — выводам не верить'}")
+    if nontrade_rows:
+        _, _, nt_pnl = agg(nontrade_rows)
+        kinds = ", ".join(f"{k}={v}" for k, v in nontrade_kinds.most_common())
+        out.append(f"  Отброшено не-Trade : {len(nontrade_rows)} ({kinds}) "
+                   f"на ${nt_pnl:+.2f} — не результат стратегии")
+    else:
+        out.append("  Отброшено не-Trade : 0 — ликвидаций и расчётов нет")
+    if fee_cpnl > 0:
+        drift = abs(fee_cpnl - fee_total) / fee_cpnl * 100
+        out.append(f"  Комиссия: closed-pnl ${fee_cpnl:,.2f} vs execFee "
+                   f"${fee_total:,.2f}  расхождение {drift:.1f}% "
+                   f"{'OK' if drift < 2 else '— разобраться'}")
+
+    # WR по деньгам и по цене — разные числа: комиссия переводит часть
+    # сделок из плюса в минус.
+    moves_api = [(r, price_move_pct(r)) for r in impulse_rows]
+    moves_ok = [(r, m) for r, m in moves_api if m is not None]
+    w_price = sum(1 for _, m in moves_ok if m > 0)
+    sign_mismatch = sum(1 for r, m in moves_ok
+                        if (m > 0) != (_f(r, "closedPnl") + fees_of(r) > 0))
 
     out.append("")
     out.append("РЕЗУЛЬТАТ (API net, с комиссиями и фандингом)")
     out.append(f"  Сделок             : {n_all}")
-    out.append(f"  Побед / WR         : {w_all} / {wr(w_all, n_all)}")
+    out.append(f"  Побед по деньгам   : {w_all} / {wr(w_all, n_all)}")
+    if moves_ok:
+        out.append(f"  Побед по цене      : {w_price} / {wr(w_price, len(moves_ok))}"
+                   f"   (цена ушла в нашу сторону)")
+        out.append(f"  Комиссия убила     : {w_price - w_all} сделок "
+                   f"из плюса по цене в минус по деньгам")
+        if sign_mismatch:
+            out.append(f"  WARN: знак хода и знак gross расходятся в "
+                       f"{sign_mismatch} записях — проверить сторону позиции")
     out.append(f"  Net PnL            : ${pnl_all:+.2f}")
     if n_all:
         out.append(f"  На сделку          : ${pnl_all / n_all:+.2f}")
 
     out.append("")
-    out.append("ИЗДЕРЖКИ (execFee — факт, не оценка)")
+    out.append("ИЗДЕРЖКИ (факт из API, не оценка)")
     out.append(f"  Оборот             : ${turnover:,.0f}")
-    out.append(f"  Комиссия всего     : ${fee_total:,.2f}")
+    out.append(f"  Комиссия всего     : ${fee_cpnl:,.2f}")
     if turnover > 0:
-        rate = fee_total / turnover * 100
+        rate = fee_cpnl / turnover * 100
         out.append(f"  Ставка на сторону  : {rate:.4f}%   круг: {rate * 2:.4f}%")
     if n_all:
-        out.append(f"  Комиссия на сделку : ${fee_total / n_all:.2f}")
+        out.append(f"  Комиссия на сделку : ${fee_cpnl / n_all:.2f}")
         out.append(f"  Средний нотионал   : ${turnover / n_all / 2:,.0f}")
-    gross = pnl_all + fee_total
+    gross = pnl_all + fee_cpnl
     out.append(f"  PnL без комиссий   : ${gross:+.2f}")
     if pnl_all < 0:
-        out.append(f"  Доля комиссии в убытке: {fee_total / abs(pnl_all) * 100:.0f}%")
+        out.append(f"  Доля комиссии в убытке: {fee_cpnl / abs(pnl_all) * 100:.0f}%")
+
+    # Long и short разделяем: смешанная статистика прячет одностороннюю поломку.
+    out.append("")
+    out.append("ПО СТОРОНЕ ПОЗИЦИИ")
+    for side_label, side_key in (("long (Buy)", "Buy"), ("short (Sell)", "Sell")):
+        rows = [r for r in impulse_rows if pos_side(r) == side_key]
+        n, w, p = agg(rows)
+        if not n:
+            continue
+        mv = [m for r, m in moves_ok if pos_side(r) == side_key]
+        mv_txt = f"  средний ход {statistics.fmean(mv):+.4f}%" if mv else ""
+        out.append(f"  {side_label:<13} n={n:3d}  W={w:3d} ({wr(w, n):>6s})  "
+                   f"${p:+.2f}{mv_txt}")
+
+    # Стабильность по дням: один плохой день не должен решать за всю выборку.
+    by_day: dict[str, list[float]] = defaultdict(list)
+    for r in impulse_rows:
+        try:
+            day = datetime.fromtimestamp(
+                int(r.get("updatedTime") or 0) / 1000, tz=UTC).strftime("%m-%d")
+        except (TypeError, ValueError, OSError):
+            continue
+        by_day[day].append(_f(r, "closedPnl"))
+    if by_day:
+        pos_days = sum(1 for v in by_day.values() if sum(v) > 0)
+        out.append("")
+        out.append(f"ПО ДНЯМ (прибыльных дней {pos_days} из {len(by_day)})")
+        for day in sorted(by_day):
+            v = by_day[day]
+            w = sum(1 for x in v if x > 0)
+            bar = "+" if sum(v) > 0 else "-"
+            out.append(f"  {day}  n={len(v):3d}  W={w:3d} ({wr(w, len(v)):>6s})  "
+                       f"${sum(v):+8.2f} {bar}")
 
     out.append("")
     out.append("АТРИБУЦИЯ ЗАКРЫТИЙ")
@@ -343,33 +497,37 @@ def main() -> int:
             out.append(f"  {reason:<16} n={d['n']:3d}  W={d['w']:3d} "
                        f"({wr(d['w'], d['n']):>6s})  медиана удержания {med:.0f}с")
 
-        # Ход цены относительно целей канона
-        moves: list[float] = []
-        reached_tp = reached_sl = middle = 0
-        for t in db_trades:
-            if not t["entry"]:
-                continue
-            sign = 1 if t["side"] == "Buy" else -1
-            mv = sign * (t["exit"] / t["entry"] - 1.0) * 100.0
-            moves.append(mv)
-            if mv >= TP_PCT * 0.95:
-                reached_tp += 1
-            elif mv <= -SL_PCT * 0.95:
-                reached_sl += 1
-            else:
-                middle += 1
-        if moves:
+    # Ход цены — по ценам исполнения биржи (avgEntry/avgExitPrice), не по
+    # локальным: в БД до 2026-08-31 писалась цена момента обнаружения.
+    moves = [m for _, m in moves_ok]
+    if moves:
+        reached_tp = sum(1 for m in moves if m >= TP_PCT * 0.95)
+        reached_sl = sum(1 for m in moves if m <= -SL_PCT * 0.95)
+        middle = len(moves) - reached_tp - reached_sl
+        tot = len(moves)
+        out.append("")
+        out.append(f"ХОД ЦЕНЫ ОТ ВХОДА (канон TP {TP_PCT}% / SL {SL_PCT}%, цены биржи)")
+        out.append(f"  Дошли до TP        : {reached_tp:3d} ({reached_tp/tot*100:.0f}%)")
+        out.append(f"  Дошли до SL        : {reached_sl:3d} ({reached_sl/tot*100:.0f}%)")
+        out.append(f"  Обрезаны между     : {middle:3d} ({middle/tot*100:.0f}%)")
+        out.append(f"  Средний ход        : {statistics.fmean(moves):+.4f}%")
+        out.append(f"  Медиана хода       : {statistics.median(moves):+.4f}%")
+        if turnover > 0:
+            need = fee_cpnl / turnover * 200
+            out.append(f"  Нужно для нуля     : {need:+.4f}%  "
+                       f"(разрыв {statistics.fmean(moves) - need:+.4f} п.п.)")
+
+    if db_trades:
+        out.append("")
+        out.append("ИСХОД ПРОТИВ СИЛЫ СИГНАЛА (наблюдение, не основание для фильтра)")
+        out.extend(signal_breakdown(db_trades))
+
+        n_real = sum(1 for t in db_trades if t.get("pnl_net") is not None)
+        if n_real:
+            real = [t["pnl_net"] for t in db_trades if t.get("pnl_net") is not None]
             out.append("")
-            out.append(f"ХОД ЦЕНЫ ОТ ВХОДА (канон TP {TP_PCT}% / SL {SL_PCT}%)")
-            tot = len(moves)
-            out.append(f"  Дошли до TP        : {reached_tp:3d} ({reached_tp/tot*100:.0f}%)")
-            out.append(f"  Дошли до SL        : {reached_sl:3d} ({reached_sl/tot*100:.0f}%)")
-            out.append(f"  Обрезаны между     : {middle:3d} ({middle/tot*100:.0f}%)")
-            out.append(f"  Средний ход        : {statistics.fmean(moves):+.4f}%")
-            if turnover > 0:
-                need = fee_total / turnover * 200
-                out.append(f"  Нужно для нуля     : {need:+.4f}%  "
-                           f"(разрыв {statistics.fmean(moves) - need:+.4f} п.п.)")
+            out.append(f"NET PnL ИЗ БД (фактический, пишется с 2026-08-31): "
+                       f"n={n_real}  сумма ${sum(real):+.2f}")
 
     # ─── Стат-проверка ───────────────────────────────────────────────
     pnls: list[float] = []
@@ -398,6 +556,25 @@ def main() -> int:
             al = abs(statistics.fmean(loss_l))
             out.append(f"  Средний win : ${aw:.2f}   средний loss: ${al:.2f}   R:R {aw/al:.2f}")
             out.append(f"  Break-even WR: {al/(aw+al)*100:.1f}%   факт {wr(w, n)}")
+
+        # Тот же расчёт без издержек: показывает, сколько из требуемого
+        # винрейта создаёт комиссия, а сколько — сама форма сделки.
+        gr = [_f(r, "closedPnl") + fees_of(r) for r in impulse_rows]
+        gw = [x for x in gr if x > 0]
+        gl = [abs(x) for x in gr if x < 0]
+        if gw and gl:
+            agw = statistics.fmean(gw)
+            agl = statistics.fmean(gl)
+            be_gross = agl / (agw + agl) * 100
+            out.append(f"  Без комиссии : win ${agw:.2f} / loss ${agl:.2f}  "
+                       f"R:R {agw/agl:.2f}  break-even WR {be_gross:.1f}%  "
+                       f"факт {wr(len(gw), len(gr))}")
+            tg, ptg = t_test_vs_zero(gr)
+            out.append(f"  t (gross≠0) : t={tg:+.2f} p={ptg:.4f}   "
+                       f"{'значимо' if ptg < 0.05 else 'НЕ значимо — сигнал неотличим от нуля'}")
+            out.append(f"    сумма gross ${sum(gr):+.2f} = "
+                       f"{len(gw)} плюс / {sum(1 for x in gr if x < 0)} минус / "
+                       f"{sum(1 for x in gr if x == 0)} в ноль")
 
     out.append("")
     out.append(f"Открытых позиций impulse: {db_open}")

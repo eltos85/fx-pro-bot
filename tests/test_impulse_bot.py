@@ -99,3 +99,107 @@ def test_working_capital_does_not_invent_money_if_wallet_is_smaller():
 
 def test_working_capital_zero_limit_means_use_the_live_wallet():
     assert working_capital(47600.0, 0.0) == pytest.approx(47600.0)
+
+
+# ─── Учёт: снимок сигнала и фактические цены ──────────────────────────
+# Проверяем только хранение. Торговые решения от этих полей не зависят.
+
+
+def test_signal_snapshot_survives_close(tmp_path):
+    """Снимок сигнала переезжает из positions в trades при закрытии."""
+    from impulse_bot.db import ImpulseDB, SignalSnapshot
+
+    db = ImpulseDB(str(tmp_path / "t.sqlite"))
+    snap = SignalSnapshot(burst_usd=45_000, move_pct=0.31, tape_buy=12_000,
+                          tape_sell=5_000, cluster_frac=0.42,
+                          turnover24h=2_500_000)
+    db.open_pos("AAAUSDT", "Buy", 10.0, 1.0, 0.9975, 1.0045, "impulse_x",
+                signal=snap)
+    held = db.owned("AAAUSDT")
+    assert held is not None
+    assert held["burst_usd"] == pytest.approx(45_000)
+    assert held["cluster_frac"] == pytest.approx(0.42)
+
+    db.close_pos("AAAUSDT", 1.004, "time_scratch",
+                 exit_real=1.0041, pnl_net=-0.37)
+    row = db._db.execute(
+        "SELECT burst_usd, move_pct, tape_buy, tape_sell, cluster_frac, "
+        "turnover24h, exit_real, pnl_net FROM trades").fetchone()
+    assert row[0] == pytest.approx(45_000)
+    assert row[1] == pytest.approx(0.31)
+    assert row[4] == pytest.approx(0.42)
+    assert row[5] == pytest.approx(2_500_000)
+    assert row[6] == pytest.approx(1.0041)
+    assert row[7] == pytest.approx(-0.37)
+
+
+def test_real_prices_kept_separately_from_ticker_prices(tmp_path):
+    """Цена решения и цена филла хранятся раздельно, одна не затирает другую."""
+    from impulse_bot.db import ImpulseDB
+
+    db = ImpulseDB(str(tmp_path / "t.sqlite"))
+    db.open_pos("BBBUSDT", "Sell", 5.0, 2.0, 2.005, 1.991, "impulse_y")
+    assert db.owned("BBBUSDT")["entry_real"] is None
+    db.set_entry_real("BBBUSDT", 1.9987)
+    assert db.owned("BBBUSDT")["entry_real"] == pytest.approx(1.9987)
+
+    db.close_pos("BBBUSDT", 1.995, "broker_flat",
+                 exit_real=1.9942, pnl_net=0.21)
+    entry, entry_real, exit_px, exit_real, pnl_usd, pnl_net = db._db.execute(
+        "SELECT entry, entry_real, exit, exit_real, pnl_usd, pnl_net "
+        "FROM trades").fetchone()
+    assert entry == pytest.approx(2.0)
+    assert entry_real == pytest.approx(1.9987)
+    assert exit_px == pytest.approx(1.995)
+    assert exit_real == pytest.approx(1.9942)
+    # pnl_usd остаётся расчётным по ценам тикера, pnl_net — фактический
+    assert pnl_usd == pytest.approx((2.0 - 1.995) * 5.0)
+    assert pnl_net == pytest.approx(0.21)
+
+
+def test_close_without_exchange_data_still_records(tmp_path):
+    """Если closed_pnl недоступен, сделка всё равно попадает в trades."""
+    from impulse_bot.db import ImpulseDB
+
+    db = ImpulseDB(str(tmp_path / "t.sqlite"))
+    db.open_pos("CCCUSDT", "Buy", 1.0, 10.0, 9.975, 10.045, "impulse_z")
+    db.close_pos("CCCUSDT", 10.02, "broker_flat")
+    row = db._db.execute(
+        "SELECT exit, exit_real, pnl_net FROM trades").fetchone()
+    assert row[0] == pytest.approx(10.02)
+    assert row[1] is None and row[2] is None
+    assert db.open_count() == 0
+
+
+def test_schema_migration_keeps_old_rows(tmp_path):
+    """Открытие старой БД добавляет колонки, не теряя записи."""
+    import sqlite3
+
+    from impulse_bot.db import ImpulseDB
+
+    path = str(tmp_path / "old.sqlite")
+    old = sqlite3.connect(path)
+    old.execute(
+        """CREATE TABLE positions (
+             symbol TEXT PRIMARY KEY, side TEXT NOT NULL, qty REAL NOT NULL,
+             entry REAL NOT NULL, sl REAL NOT NULL, tp REAL NOT NULL,
+             ts_open INTEGER NOT NULL, link_id TEXT NOT NULL)""")
+    old.execute(
+        """CREATE TABLE trades (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             ts_open INTEGER, ts_close INTEGER, symbol TEXT, side TEXT,
+             qty REAL, entry REAL, exit REAL, pnl_usd REAL, reason TEXT)""")
+    old.execute("INSERT INTO trades (symbol, side, pnl_usd, reason) "
+                "VALUES ('OLDUSDT', 'Buy', -1.25, 'broker_flat')")
+    old.commit()
+    old.close()
+
+    db = ImpulseDB(path)
+    symbol, pnl, burst = db._db.execute(
+        "SELECT symbol, pnl_usd, burst_usd FROM trades").fetchone()
+    assert symbol == "OLDUSDT"
+    assert pnl == pytest.approx(-1.25)
+    assert burst is None
+    # новая запись рядом со старой работает
+    db.open_pos("NEWUSDT", "Buy", 1.0, 1.0, 0.99, 1.01, "impulse_n")
+    assert db.open_count() == 1

@@ -47,6 +47,16 @@ class Position:
 
 
 @dataclass
+class ClosedTrade:
+    """Факт закрытия с биржи: средние цены исполнения и net PnL."""
+
+    entry_price: float
+    exit_price: float
+    pnl: float
+    updated_ts: int
+
+
+@dataclass
 class Ticker:
     symbol: str
     last: float
@@ -170,6 +180,45 @@ class ImpulseClient:
                 entry_price=float(p.get("avgPrice") or 0),
             )
         return Position(symbol=symbol, side="", size=0.0, entry_price=0.0)
+
+    def last_closed_trade(self, symbol: str, *,
+                          not_before_ts: int = 0) -> ClosedTrade | None:
+        """Последняя закрытая сделка по символу с фактическими ценами.
+
+        `closedPnl` у Bybit уже net — с комиссиями и фандингом, поэтому это
+        источник правды по результату, в отличие от расчёта (exit-entry)*qty.
+        https://bybit-exchange.github.io/docs/v5/position/close-pnl
+
+        `not_before_ts` отсекает чужую или устаревшую запись: на общем демо
+        по тому же символу мог торговать другой бот, и его закрытие нам
+        приписывать нельзя.
+        """
+        try:
+            resp = self._session.get_closed_pnl(
+                category=self._category, symbol=symbol, limit=1)
+        except Exception:
+            log.exception("get_closed_pnl %s", symbol)
+            return None
+        if resp.get("retCode") not in (0, None):
+            return None
+        items = (resp.get("result", {}) or {}).get("list") or []
+        if not items:
+            return None
+        row = items[0]
+        try:
+            updated = int(row.get("updatedTime") or 0) // 1000
+            entry = float(row.get("avgEntryPrice") or 0)
+            exit_px = float(row.get("avgExitPrice") or 0)
+            pnl = float(row.get("closedPnl") or 0)
+        except (TypeError, ValueError):
+            return None
+        if entry <= 0 or exit_px <= 0:
+            return None
+        if not_before_ts and updated < not_before_ts:
+            log.info("%s closed_pnl старше входа — не наша запись", symbol)
+            return None
+        return ClosedTrade(entry_price=entry, exit_price=exit_px, pnl=pnl,
+                           updated_ts=updated)
 
     def set_leverage(self, symbol: str, leverage: int) -> None:
         try:
