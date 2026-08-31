@@ -241,6 +241,15 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
     # малой долей риска (research: издержки 50-80% профита при тугом стопе; стоп
     # = структура + буфер). Если структурный R меньше пола — отодвигаем SL ЗА
     # уровень (canon «beyond swing + ATR buffer»), TP пересчитываем от итог. R.
+    #
+    # Ставка здесь ОДНА для обоих типов входа, хотя market-вход платит вдвое
+    # больше maker (замер 31.08: у рыночных страт 0.349–0.368R против 0.227R у
+    # лимитных). Развести их — значит расширить стоп рыночным с 0.30% до 0.44%
+    # цены, а это измеренная ветка между `x1.5` и `x2` эксперимента `sl_widen`:
+    # ΔnetR −0.007 [−0.211; +0.197] и +0.081 [−0.139; +0.301] (BUILDLOG
+    # 2026-08-03). Комиссия в R падает, но валовой результат ухудшается ровно
+    # настолько же — расширение стопа меняет единицу измерения, а не деньги.
+    # Замок на это решение: `test_learned_fee_rate_does_not_change_signal_geometry`.
     min_risk = getattr(cfg, "min_risk_fee_mult", 0.0) * cfg.round_trip_fee_frac * entry
     if min_risk > 0 and risk < min_risk:
         risk = min_risk
@@ -263,6 +272,9 @@ def build_signal(snap: SymbolSnapshot, side: str, swept: float, cfg,
     tpr = cfg.take_profit_r if tp_r is None else tp_r
     tp = entry + tpr * base_risk if side == "long" else entry - tpr * base_risk
     # Fee-guard: ход до TP ≥ min_target_fee_mult × round-trip издержек (на base_risk).
+    # Замер 31.08: гейт не срабатывает ни разу (0 из 47 172 сигналов) и не
+    # может при take_profit_r ≥ 3/4 — пол выше делает цель заведомо дальше
+    # планки. Оставлен как страховка для конфигураций с малой целью.
     tp_move_frac = (tpr * base_risk) / entry
     if tp_move_frac < cfg.min_target_fee_mult * cfg.round_trip_fee_frac:
         return None
