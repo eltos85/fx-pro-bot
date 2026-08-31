@@ -37,7 +37,8 @@ class ImpulseSettings(BaseSettings):
     tape_ratio: float = Field(default=1.2)
 
     # ForexFactory 1014708: цель больше издержки, не «крысиные 3 пункта».
-    # VIP 0 RT 0.110% → тейк 0.45% (~4×), стоп 0.25%.
+    # Круг по факту 0.128% (замер execFee, scripts/collect_impulse_stats.py),
+    # не 0.110% как считалось → тейк 0.45% это 3.5× комиссии, стоп 0.25%.
     tp_pct: float = Field(default=0.45)
     sl_pct: float = Field(default=0.25)
     scratch_sec: int = Field(default=90)
