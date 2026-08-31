@@ -20,6 +20,7 @@ description: >-
 1. Какой бот: advisor (`src/fx_pro_bot/`), `fx_ai_trader`, или `fx_momentum_bot`. Карта: [bots.md](../trading-research/bots.md).
 2. Канон advisor — `STRATEGIES.md`. Не тащи пороги из Bybit-ботов.
 3. Цифры: выписка пользователя важнее API; API важнее SQLite.
+4. Разбор сделок сам не делай — его отдаёт [trade-forensics](../trade-forensics/SKILL.md): сверенные цены, издержки отдельно от сигнала. Ты интерпретируешь готовое разложение.
 
 ## На что смотреть
 
