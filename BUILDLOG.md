@@ -4,6 +4,53 @@
 
 ---
 
+## 2026-09-01
+
+### fix(ctrader-client): утечка ClientService — 81 TCP-сессия и 6 суток слепоты
+`будет заполнено хешем коммита`
+
+**Симптом.** `fx-momentum-bot` с 26.08 01:00 UTC каждый цикл писал
+«cTrader: позиции неизвестны — брокерские действия цикла пропущены
+(management/exits/entries)». Открытая GBPUSD short #153928295 (вход 1.35985,
+0.05 лота, открыта 26.08 14:04 UTC) шесть суток висела без сопровождения:
+безубыток на +1R, частичная фиксация на +1.5R и ATR-трейлинг не отработали,
+хотя позиция дошла до +2.9R. Новые входы тоже не открывались
+(`skip:no_connection` в `momentum_decisions`). В логах — `reconnect #500` и
+`Connection was closed cleanly` через доли секунды после каждого connect.
+
+**Причина.** В контейнере насчитано **81 ESTABLISHED + 3 SYN_SENT**
+соединений к `demo.ctraderapi.com:5035` при рекомендованных двух
+([help.ctrader.com/open-api/connection/](https://help.ctrader.com/open-api/connection/),
+Best practices: «At most, you should create two connections: one for demo
+accounts and one for live accounts»). Сервер закрывал каждое новое соединение
+сразу после handshake. Течь — в guard-е библиотеки:
+
+```python
+def stopService(self):                      # ctrader_open_api.Client
+    if self.running and self.isConnected:
+        ClientService.stopService(self)
+```
+
+`_cleanup_client()` вызывается ровно тогда, когда соединения нет, поэтому
+остановка была no-op. Незакрытый `ClientService` оставался `running` и
+переподключался собственным retryPolicy (~30s) параллельно нашему backoff:
+каждая попытка reconnect оставляла ещё один живой сокет, а throttle на
+client_id не успевал сняться. Спираль самоподдерживающаяся.
+
+**Решение.** `_force_stop_service()` зовёт базовый
+`ClientService.stopService` напрямую, в обход guard-а (в twisted 24.3 он
+снимает `running` через `Service.stopService` и гасит retry-loop через
+`_machine.stop()`). Вызывается из `_cleanup_client`, `stop` и дополнительно
+из `_on_disconnected` — чтобы `RECONNECT_DELAYS_SEC` остался единственным
+источником истины по темпу переподключений.
+
+Торговая логика не менялась. Регрессионные тесты — на обход guard-а,
+no-op для уже остановленного сервиса и на вызовы из `_on_disconnected` /
+`_cleanup_client`.
+
+**Файлы:** `src/fx_pro_bot/trading/client.py`,
+`tests/test_ctrader_client_reconnect.py`
+
 ## 2026-08-21
 
 ### change(compose): виртуальный капитал $1000 у swing / daytrend / impulse

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -122,6 +123,79 @@ def test_cleanup_resets_last_successful_connect_ts():
     c._cleanup_client()
 
     assert c._last_successful_connect_ts == 0.0
+
+
+# -- утечка ClientService (bug 26.08-01.09.2026) -------------------------------
+#
+# `Client.stopService()` в ctrader-open-api останавливает сервис только при
+# `self.running and self.isConnected`, а зовём мы её именно когда соединения
+# нет. Невыключенный ClientService продолжал переподключаться своим
+# retryPolicy параллельно нашему backoff → 81 живая TCP-сессия к
+# demo.ctraderapi.com при рекомендованных двух
+# (help.ctrader.com/open-api/connection/, Best practices) → сервер закрывал
+# каждое новое соединение, бот не мог авторизоваться 6 суток.
+
+
+class _FakeClientService:
+    """Двойник twisted ClientService: фиксирует вызовы базового stopService."""
+
+    calls: list = []
+
+    @staticmethod
+    def stopService(client):
+        _FakeClientService.calls.append(client)
+
+
+def _run_force_stop(client) -> list:
+    _FakeClientService.calls = []
+    with patch("twisted.application.internet.ClientService", _FakeClientService), \
+         patch("twisted.internet.reactor.callFromThread", lambda fn, *a: fn(*a)):
+        CTraderClient._force_stop_service(client)
+    return _FakeClientService.calls
+
+
+def test_force_stop_service_bypasses_library_guard():
+    """Базовый stopService зовётся даже когда isConnected=False.
+
+    Это и есть суть бага: библиотечный guard делал остановку no-op ровно в
+    том состоянии, в котором мы её и вызываем.
+    """
+    client = SimpleNamespace(running=True, isConnected=False)
+
+    assert _run_force_stop(client) == [client]
+
+
+def test_force_stop_service_noop_for_already_stopped_service():
+    """Остановленный сервис не трогаем — повторный stop не нужен."""
+    client = SimpleNamespace(running=False, isConnected=False)
+
+    assert _run_force_stop(client) == []
+
+
+def test_on_disconnected_stops_client_service():
+    """Разрыв гасит ClientService, чтобы его retryPolicy не шёл параллельно backoff."""
+    c = _make_client()
+    c._running = True
+    c._reconnecting = True  # не поднимать reconnect-поток в тесте
+    fake_client = object()
+    c._client = fake_client
+
+    with patch.object(CTraderClient, "_force_stop_service") as mock_stop:
+        c._on_disconnected(client=fake_client, reason="test")
+
+    mock_stop.assert_called_once_with(fake_client)
+
+
+def test_cleanup_client_stops_client_service():
+    """_cleanup_client тоже гасит сервис, а не полагается на библиотечный guard."""
+    c = _make_client()
+    fake_client = object()
+    c._client = fake_client
+
+    with patch.object(CTraderClient, "_force_stop_service") as mock_stop:
+        c._cleanup_client()
+
+    mock_stop.assert_called_once_with(fake_client)
 
 
 # -- timeout на GetAccountList: БЕЗ proactive refresh (регрессия каскада) -----

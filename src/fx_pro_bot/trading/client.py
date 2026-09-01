@@ -46,6 +46,11 @@ HEARTBEAT_INTERVAL_SEC = 8
 #   но `ProtoOAGetAccountListByAccessTokenReq` → 30s timeout без ответа,
 #   сервер закрывает TCP cleanly. См. community.ctrader.com/forum/.../45954.
 #   Требовался proactive refresh token + smart-reset фикс.
+# - 26.08-01.09.2026: fx-momentum-bot ослеп на 6 суток (500 reconnects,
+#   «позиции неизвестны» каждый цикл, открытая GBPUSD-позиция без
+#   сопровождения). В контейнере — 81 живая TCP-сессия к
+#   demo.ctraderapi.com при рекомендованных двух. Причина: утечка
+#   ClientService, см. _force_stop_service.
 #
 # Решение:
 # 1. Расширенный exponential backoff до 15 минут max.
@@ -55,6 +60,9 @@ HEARTBEAT_INTERVAL_SEC = 8
 #    server-side reject, продолжаем backoff.
 # 3. При TimeoutError на GetAccountListByAccessTokenRes (type=2150) —
 #    proactive token refresh, не уход в reconnect-loop.
+# 4. _force_stop_service на каждом разрыве: backoff ниже — единственный
+#    источник истины по темпу переподключений, библиотечный retryPolicy
+#    не работает параллельно ему.
 RECONNECT_DELAYS_SEC: tuple[int, ...] = (5, 10, 30, 60, 120, 300, 900)
 STABLE_UPTIME_SEC = 300
 
@@ -281,11 +289,39 @@ class CTraderClient:
                 ev.set()
             self._waiters.clear()
         if self._client:
-            try:
-                from twisted.internet import reactor
-                reactor.callFromThread(self._client.stopService)
-            except Exception:
-                pass
+            self._force_stop_service(self._client)
+
+    @staticmethod
+    def _force_stop_service(client: Any) -> None:
+        """Остановить ClientService в обход guard-а ctrader-open-api.
+
+        `Client.stopService()` в ctrader-open-api останавливает сервис только
+        при `self.running and self.isConnected`, то есть НЕ останавливает его,
+        когда соединения уже нет — а зовём мы её именно в этом состоянии.
+        Недоведённый до стопа `ClientService` остаётся running и продолжает
+        переподключаться собственным retryPolicy параллельно нашему backoff:
+        каждая попытка reconnect оставляла ещё один живой сокет.
+
+        26.08–01.09.2026 контейнер fx-momentum-bot накопил так 81 TCP-сессию
+        к demo.ctraderapi.com при рекомендованных двух
+        (help.ctrader.com/open-api/connection/, Best practices: «At most, you
+        should create two connections: one for demo accounts and one for live
+        accounts»). Сервер закрывал каждое новое соединение сразу после
+        handshake, и бот не мог авторизоваться шесть суток.
+
+        `ClientService.stopService` (twisted 24.3) снимает `running` через
+        `Service.stopService` и гасит retry-loop через `_machine.stop()`,
+        поэтому зовём базовую реализацию напрямую.
+        """
+        from twisted.application.internet import ClientService
+        from twisted.internet import reactor
+
+        if not getattr(client, "running", False):
+            return
+        try:
+            reactor.callFromThread(ClientService.stopService, client)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("cTrader: stopService failed: %s", exc)
 
     def _do_auth(self, timeout: float = 30) -> None:
         """Авторизация приложения и аккаунта (вызывается из start и reconnect).
@@ -407,8 +443,7 @@ class CTraderClient:
         self._running = False
         self._stop_heartbeat()
         if self._client:
-            from twisted.internet import reactor
-            reactor.callFromThread(self._client.stopService)
+            self._force_stop_service(self._client)
         self._connected.clear()
         self._account_auth_done.clear()
         log.info("cTrader: отключено")
@@ -896,6 +931,16 @@ class CTraderClient:
                     uptime,
                 )
             self._reconnect_attempt = 0
+
+        # Гасим ClientService сразу на разрыве, не дожидаясь очередного
+        # _cleanup_client в reconnect-потоке. Иначе его собственный retryPolicy
+        # переподключается каждые ~30s всё время, пока наш backoff спит до 15
+        # минут, — и серверный throttle на client_id не успевает сняться
+        # (01.09.2026: «отключено (uptime 0s)» каждые 32s между reconnect #499
+        # и #500). Единственный источник истины по темпу переподключений —
+        # RECONNECT_DELAYS_SEC.
+        if self._client:
+            self._force_stop_service(self._client)
 
         if self._running and not self._reconnecting:
             self._schedule_reconnect()
