@@ -1112,7 +1112,7 @@ runtime, свои `MOMENTUM_BOT_*` env, своя SQLite. Не входит в ad
 | NY-open block | блок входов 14–16h UTC (liquidity trap) | TheTradersLegacy; Andersen 2003 |
 | ADX-фильтр | блок входа при ADX(14) < 20 (рейндж) | Wilder 1978; Chan/AQR |
 | Event-guard | блок входов ±60 мин вокруг HIGH-impact релизов | Andersen et al. 2003 |
-| Friday-flat | закрытие позиций перед выходными + блок входов в Пт | Dalton 2007; Lyons 2001 |
+| Friday-flat | закрытие позиций в Пт 20:00–20:45 UTC + блок входов всю пятницу (`friday_entry_block_start` 00:00) | Dalton 2007; Lyons 2001; бэктест 3y (BUILDLOG 2026-09-25) |
 | Gap-защита | закрытие открытых позиций за 5 мин до HIGH-релиза | Andersen 2003; FX Foundations |
 | Per-symbol гард | одна позиция на символ (анти-дубль) | бэктест-инвариант |
 | Spread-guard | спред < max_fraction от SL-дистанции | Harris 2003 |
@@ -1131,6 +1131,13 @@ runtime, свои `MOMENTUM_BOT_*` env, своя SQLite. Не входит в ad
   data-driven из 34 сделок (WR 0-20%, net −$109). МАЛАЯ ВЫБОРКА — переоценить
   на ≥100 сделках (no-data-fitting.mdc). Research: TheTradersLegacy
   (first 90 min NY = liquidity trap); Andersen 2003.
+- **Блок входов всю пятницу** (`friday_entry_block_start`, default "00:00";
+  "20:00" = прежнее поведение): входы в Пт отрицательны в обеих половинах
+  3-летнего бэктеста (−0.081 / −0.101R net, n=599, p=0.004;
+  `scripts/_momentum_forensics_3y.py`), на current-config 2y
+  −0.065 → −0.049R/сделку. Стратегию в плюс не выводит — уменьшает убыток.
+  Порог Бонферрони для 26 групп (p<0.0019) не пройден; решение пользователя
+  2026-09-25. Research: Dalton 2007 (выходные — «другой рынок»).
 - **ADX-фильтр, adx_min=20** (`adx_filter_enabled`): блок входа в рейндже.
   ctx.adx — observability → блокирующий (инвариант «never blocks» снят для ADX,
   сохранён для ema_dist/with_htf). ctx=None → НЕ блокировать (холодный старт).

@@ -80,9 +80,19 @@ def friday_entry_blocked(
     *,
     enabled: bool,
     flat_start: str,
+    block_start: str | None = None,
     now_utc: datetime | None = None,
 ) -> bool:
-    """True, если новые входы запрещены: пятница UTC от flat_start до полуночи.
+    """True, если новые входы запрещены: пятница UTC от начала блока до полуночи.
+
+    Начало блока = min(block_start, flat_start): block_start не может
+    открыть входы позже окна flat. block_start=None → от flat_start.
+
+    Блок с 00:00 (BUILDLOG 2026-09-25): входы в пятницу отрицательны в обеих
+    половинах 3-летнего бэктеста (−0.081 / −0.101R net, n=599, p=0.004,
+    scripts/_momentum_forensics_3y.py); вход не успевает дозреть до
+    сопровождения до friday-flat. Current-config 2y: −0.065 → −0.049R/сделку
+    (scripts/_momentum_current_config_validation.py, fri_noentry).
 
     Дыра, закрытая этой функцией (BUILDLOG 2026-07-02): окно flat
     [20:00, 20:45) запрещало входы только внутри себя — после 20:45 и до
@@ -102,7 +112,14 @@ def friday_entry_blocked(
         start_h, start_m = _parse_hhmm(flat_start)
     except Exception:
         return False
+    start_minutes = start_h * 60 + start_m
+    if block_start is not None:
+        try:
+            bh, bm = _parse_hhmm(block_start)
+            start_minutes = min(start_minutes, bh * 60 + bm)
+        except Exception:
+            pass
     now = now_utc or datetime.now(timezone.utc)
     if now.weekday() != 4:  # Friday
         return False
-    return now.hour * 60 + now.minute >= start_h * 60 + start_m
+    return now.hour * 60 + now.minute >= start_minutes

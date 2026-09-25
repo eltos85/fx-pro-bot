@@ -217,6 +217,13 @@ class MomentumBotSettings(BaseSettings):
     friday_flat_end: str = Field(
         default="20:45", validation_alias="MOMENTUM_BOT_FRIDAY_FLAT_END"
     )
+    # Начало запрета новых входов в пятницу UTC (не позже friday_flat_start).
+    # 00:00 — вся пятница: входы в Пт отрицательны в обеих половинах
+    # 3-летнего бэктеста (n=599, p=0.004, BUILDLOG 2026-09-25).
+    # "20:00" = прежнее поведение (блок только от окна flat).
+    friday_entry_block_start: str = Field(
+        default="00:00", validation_alias="MOMENTUM_BOT_FRIDAY_ENTRY_BLOCK_START"
+    )
 
     # Position management (trader-backed):
     # - Van Tharp: R-multiple discipline + break-even transfer.

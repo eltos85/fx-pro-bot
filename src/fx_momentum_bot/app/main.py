@@ -825,13 +825,14 @@ def run() -> None:
                     "FRIDAY-FLAT: окно закрытия перед выходными (%s–%s UTC)",
                     settings.friday_flat_start, settings.friday_flat_end,
                 )
-            # Блок новых входов — ШИРЕ окна закрытия: от flat_start до конца
-            # пятницы UTC. Иначе вход в 20:45–21:00 (после окна flat, до FX
-            # weekly close) немедленно уезжает в выходные — дыра, замеченная
-            # 2026-06-26 (MARKET_CLOSED-спам 21:03–21:59, BUILDLOG 2026-07-02).
+            # Блок новых входов — ШИРЕ окна закрытия: от friday_entry_block_start
+            # (по умолчанию 00:00, вся пятница — BUILDLOG 2026-09-25) до конца
+            # пятницы UTC, но никогда не позже flat_start. Иначе вход в
+            # 20:45–21:00 уезжает в выходные (BUILDLOG 2026-07-02).
             friday_entry_block = executor is not None and friday_entry_blocked(
                 enabled=settings.friday_flat_enabled,
                 flat_start=settings.friday_flat_start,
+                block_start=settings.friday_entry_block_start,
             )
 
             if broker_ready and settings.position_management_enabled:

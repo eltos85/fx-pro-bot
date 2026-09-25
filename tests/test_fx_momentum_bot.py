@@ -607,6 +607,35 @@ def test_friday_entry_blocked_only_friday() -> None:
     ) is False
 
 
+def test_friday_entry_blocked_whole_friday_with_block_start() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked
+    for h, m in [(0, 0), (8, 2), (13, 31), (18, 4), (20, 50)]:
+        assert friday_entry_blocked(
+            enabled=True, flat_start="20:00", block_start="00:00", now_utc=_fri(h, m),
+        ) is True, f"{h}:{m} пятницы при block_start=00:00 должен блокировать"
+    assert friday_entry_blocked(
+        enabled=True, flat_start="20:00", block_start="00:00", now_utc=_other_day(8, 0),
+    ) is False
+
+
+def test_friday_entry_block_start_never_later_than_flat_start() -> None:
+    from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked
+    assert friday_entry_blocked(
+        enabled=True, flat_start="20:00", block_start="22:00", now_utc=_fri(20, 50),
+    ) is True
+    assert friday_entry_blocked(
+        enabled=True, flat_start="20:00", block_start="bad", now_utc=_fri(20, 50),
+    ) is True
+    assert friday_entry_blocked(
+        enabled=True, flat_start="20:00", block_start="bad", now_utc=_fri(12, 0),
+    ) is False
+
+
+def test_friday_entry_block_start_default_whole_day() -> None:
+    from fx_momentum_bot.config.settings import MomentumBotSettings
+    assert MomentumBotSettings().friday_entry_block_start == "00:00"
+
+
 def test_friday_entry_blocked_disabled_or_bad_config() -> None:
     from fx_momentum_bot.strategy.friday_flat import friday_entry_blocked
     assert friday_entry_blocked(
